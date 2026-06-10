@@ -1,8 +1,0 @@
-COMMAND: uv run python scripts/ordivon_verify.py all 2>&1 | grep Status
-EXIT: 0
-
-STDOUT:
-Status:  READY
-
-
-STDERR:

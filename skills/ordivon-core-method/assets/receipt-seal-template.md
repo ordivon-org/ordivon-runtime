@@ -1,6 +1,7 @@
-# Receipt Draft Template
+# Receipt Draft
 
-Use this template to generate a structured closure receipt after task completion.
+Use this after non-trivial work. It records claims and evidence; it does not
+prove resolution by itself.
 
 ## Receipt Metadata
 
@@ -10,19 +11,29 @@ Use this template to generate a structured closure receipt after task completion
 
 ## Scope
 
-What was intended?
+What was actually attempted?
 
 ## Actions Taken
 
-What was done? List specific actions with references to evidence.
+What was done? Keep this factual.
 
 ## Evidence
 
-| Source | Type (trace/diff/output/log) | Reference |
-|--------|------------------------------|-----------|
-|        |                              |           |
+| ID | Type (diff/output/log/source/trace) | Reference | Supports Claim |
+|----|------------------------------------|-----------|----------------|
+| E1 |                                    |           |                |
 
-## Verification Result
+## Claims
+
+| ID | Claim | Evidence | Status |
+|----|-------|----------|--------|
+| C1 |       |          | supported / degraded / blocked |
+
+## Not Claimed
+
+What this receipt does not prove.
+
+## Verification
 
 What passed? What did not pass?
 
@@ -35,6 +46,9 @@ What passed? What did not pass?
 ## Status
 
 PASS / DEGRADED / BLOCKED
+
+Use only one of these exact values. Do not write VERIFIED, DELIVERED, DONE,
+PARTIAL, or SUCCESS.
 
 ## Notes
 

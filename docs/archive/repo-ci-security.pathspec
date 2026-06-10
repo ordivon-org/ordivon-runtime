@@ -1,5 +1,0 @@
-.github/workflows/**
-.gitleaks.toml
-deny.toml
-scripts/security/**
-docs/audits/certification/**

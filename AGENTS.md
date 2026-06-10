@@ -40,15 +40,15 @@ Key directories:
 |-------|-----------|--------|
 | Source | `src/`, `crates/`, `schemas/`, `state/` | Active |
 | Agent Constitution | `AGENTS.md`, `docs/ai/` | Active |
-| Skill/Method | `skills/` (ordivon-core-method pending) | Created, empty |
-| Prompt/Template | `prompts/` | Created, empty |
+| Skill/Method | `skills/` (ordivon-core-method) | Active |
+| Prompt/Template | `prompts/` | Active |
 | Tool/Script | `scripts/` (→ `tools/` in future) | Active |
-| MCP/Connector | `mcp/` | Created, empty |
-| Eval/Test | `tests/`, `evals/` | Active + created |
-| Trace/Receipt | `traces/`, `receipts/` | Created, receipts migrated |
+| MCP/Connector | `mcp/` | Active |
+| Eval/Test | `tests/`, `evals/` | Active |
+| Trace/Receipt | `traces/`, `receipts/` | Active |
 | Policy | `policies/` (incl. openfga) | Active |
 | Registry/Ledger | `docs/governance/*.jsonl` (→ `registries/` in future) | Active |
-| Checker | `checkers/` | Created, empty |
+| Checker | `checkers/` | Active |
 
 Migration status: `receipts/` and `policies/openfga/` migrated. `scripts/` and `docs/governance/` retained
 due to 70+ hardcoded path references; `tools/` and `registries/` are target directories with README mappings.

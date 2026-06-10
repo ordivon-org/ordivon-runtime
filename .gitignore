@@ -31,3 +31,4 @@ wiki/reports/
 repomix-lite.txt
 .direnv/
 .ordivon/
+data/*.sqlite

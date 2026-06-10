@@ -1,8 +1,0 @@
-{
-  "stage_id": "GOS-PM-1-00",
-  "stage_name": "Freeze Reality",
-  "allowed_claims": ["Baseline state captured"],
-  "not_claimed": ["Full closure", "External governance"],
-  "required_evidence": ["EV-GOS-PM-1-00-001", "EV-GOS-PM-1-00-002"],
-  "status_terms_allowed": ["READY", "VERIFIED", "NOT CLAIMED"]
-}

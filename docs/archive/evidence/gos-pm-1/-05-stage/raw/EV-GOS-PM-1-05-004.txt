@@ -1,8 +1,0 @@
-COMMAND: wc -l docs/governance/schemas/governed-exclusions.json
-EXIT: 0
-
-STDOUT:
-59 docs/governance/schemas/governed-exclusions.json
-
-
-STDERR:

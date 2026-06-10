@@ -1,6 +1,6 @@
-# Claim Audit Template
+# Claim Audit Draft
 
-Use this template when extracting and evaluating claims from any input text.
+Use this when text may be stronger than its evidence.
 
 ## Input
 
@@ -10,22 +10,23 @@ Use this template when extracting and evaluating claims from any input text.
 
 ## Claims Extracted
 
-| ID | Claim Text | Evidence Present | Evidence Missing | Overclaim? | Confidence |
-|----|-----------|-----------------|------------------|------------|------------|
-| C1 |           |                  |                   |            |            |
-| C2 |           |                  |                   |            |            |
+| ID | Claim | Evidence Found | Evidence Missing | Risk | Verdict |
+|----|-------|----------------|------------------|------|---------|
+| C1 |       |                |                  | low/med/high | supported / degraded / blocked |
+| C2 |       |                |                  | low/med/high | supported / degraded / blocked |
 
 ## Summary
 
-- Total claims extracted: ___
-- Claims with evidence: ___
-- Claims with overclaim flag: ___
-- Overall confidence: low / medium / high
+- Total claims:
+- Supported:
+- Degraded:
+- Blocked:
 
-## Boundary
+## Not Evaluated
 
-What is NOT being evaluated:
+State what this audit did not inspect.
 
-## Verdict
+## Draft Verdict
 
-Narrative assessment. Does NOT declare claims verified or the text approved.
+This verdict is a draft. It does not approve the text, authorize action, or
+upgrade project state.

@@ -1,9 +1,0 @@
-COMMAND: sha256sum docs/governance/generated/path-map.json docs/governance/generated/_path-map.md
-EXIT: 0
-
-STDOUT:
-5559305f7f7bb1f60e0deec3a33bba0ee79b1aaf3e11f00a7692e0d081e8ca01  docs/governance/generated/path-map.json
-608dcb62c536e11119bcb1c4b0c905e8dcaf729d9758a06de60ef520bf44050c  docs/governance/generated/_path-map.md
-
-
-STDERR:

@@ -1,9 +1,0 @@
-COMMAND: python scripts/verify-path-map.py
-EXIT: 0
-
-STDOUT:
-✓ Path map consistent with repo reality
-  2046 files → 802 governed, 0 blocked
-
-
-STDERR:
