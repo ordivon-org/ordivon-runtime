@@ -15,3 +15,11 @@ Current benchmark:
 
 - `m2_differential.mjs`: Legacy Desktop Commander versus Ordivon M1 journey.
 - `check_m2_evidence.py`: independent recomputation of M2 evidence and gates.
+
+## M3 benchmarks
+
+The M3A and M3B differential scripts measure compact local Ordivon journeys
+against real Desktop Commander MCP paths. The M3 evidence checker recomputes
+medians, semantic equivalence, recovery claims, and performance gates.
+
+These are development evidence tools and do not change production routing.

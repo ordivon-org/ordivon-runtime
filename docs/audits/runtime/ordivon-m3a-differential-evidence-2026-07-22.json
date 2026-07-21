@@ -1,0 +1,774 @@
+{
+  "schemaVersion": 1,
+  "phase": "ORDIVON-MIGRATION-M3A-2026-07-22",
+  "evidenceClass": "LOCAL_M3A_DIFFERENTIAL_BENCHMARK",
+  "generatedAt": "2026-07-21T17:12:11.796Z",
+  "sourceRevision": "e1a40df3878881e47a56fd428ec6eb316301799b",
+  "taskJourney": "M3A_FULL_READ_COMPACT_TASK_JOURNEY",
+  "metricSemantics": {
+    "elapsedMs": "Median task journey wall time; adapter bootstrap and cleanup excluded.",
+    "toolCalls": "Logical model-facing adapter calls.",
+    "remoteRoundTrips": "Transport-normalized logical calls for both backends.",
+    "contextBytes": "Serialized tool or CLI responses returned to the model-facing caller.",
+    "outputBytes": "Task stdout and stderr bytes deliberately consumed by the caller.",
+    "legacyTransport": "Actual HTTP metrics are supplementary.",
+    "ordivonTransport": "M3 is local CLI; no MCP transport result is fabricated."
+  },
+  "runtimeIdentity": {
+    "branch": "agent/m3-compact-agent-interface",
+    "gitHeadAtRun": "e1a40df3878881e47a56fd428ec6eb316301799b",
+    "desktopCommander": {
+      "name": "desktop-commander",
+      "version": "0.2.46"
+    },
+    "mcpSdkVersion": "1.29.0",
+    "nodeVersion": "v26.4.0",
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "systemd": "systemd 261 (261.1-1-arch)",
+    "m1Cli": {
+      "path": "/root/projects/ordivon-structured-exec-v0/target/debug/ordivon-m1-cli",
+      "digest": "sha256:135b2f46a3e06861e4cca7c000d29c3db6620e36626c93a56c80a744606d972d"
+    },
+    "m1Runner": {
+      "path": "/root/projects/ordivon-structured-exec-v0/target/debug/ordivon-task-runner",
+      "digest": "sha256:f4faa7715c2a7fd7402a35aaca678843110bf453ce6ef6c0dbf074598de24925"
+    }
+  },
+  "configuration": {
+    "iterations": 5,
+    "warmups": 1,
+    "alternatingOrder": true,
+    "scriptSleepSeconds": 0.35,
+    "mcpUrl": "http://127.0.0.1:8811/mcp",
+    "sdkRootProvidedExternally": true
+  },
+  "rawSamples": {
+    "legacy": [
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "581548-1784653908466-1",
+        "succeeded": true,
+        "elapsedMs": 904,
+        "toolCalls": 7,
+        "remoteRoundTrips": 7,
+        "contextBytes": 6447,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:8bc05356f8258f0e0ce458bc4b3a3d65d88f48c0af9cc4e3e215208e2dffeb9a",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 243
+          },
+          {
+            "name": "read_file",
+            "responseBytes": 4822
+          },
+          {
+            "name": "write_file",
+            "responseBytes": 328
+          },
+          {
+            "name": "write_file",
+            "responseBytes": 142
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 178
+          },
+          {
+            "name": "read_file",
+            "responseBytes": 112
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 622
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 243,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 7042,
+            "responseBytes": 0,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 7285,
+            "responseBytes": 0,
+            "httpRequests": 11,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "581548-1784653912188-2",
+        "succeeded": true,
+        "elapsedMs": 921,
+        "toolCalls": 7,
+        "remoteRoundTrips": 7,
+        "contextBytes": 6447,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:712a76e265ecb720b1b8e57e81db253ecd415d7ede8023dfe2931bc99c5d317b",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 243
+          },
+          {
+            "name": "read_file",
+            "responseBytes": 4822
+          },
+          {
+            "name": "write_file",
+            "responseBytes": 328
+          },
+          {
+            "name": "write_file",
+            "responseBytes": 142
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 178
+          },
+          {
+            "name": "read_file",
+            "responseBytes": 112
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 622
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 243,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 7042,
+            "responseBytes": 0,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 7285,
+            "responseBytes": 0,
+            "httpRequests": 11,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "581548-1784653916571-3",
+        "succeeded": true,
+        "elapsedMs": 926,
+        "toolCalls": 7,
+        "remoteRoundTrips": 7,
+        "contextBytes": 6447,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:2db756057ee389ca7c847b2383321d4e9bdbaabb89f24fa9acdd1e117df6ed13",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 243
+          },
+          {
+            "name": "read_file",
+            "responseBytes": 4822
+          },
+          {
+            "name": "write_file",
+            "responseBytes": 328
+          },
+          {
+            "name": "write_file",
+            "responseBytes": 142
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 178
+          },
+          {
+            "name": "read_file",
+            "responseBytes": 112
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 622
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 243,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 7042,
+            "responseBytes": 0,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 7285,
+            "responseBytes": 0,
+            "httpRequests": 11,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "581548-1784653920109-4",
+        "succeeded": true,
+        "elapsedMs": 947,
+        "toolCalls": 7,
+        "remoteRoundTrips": 7,
+        "contextBytes": 6447,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:9e5e6527e47e057e5ecb39659c70236e225b8fe690c080f0d79cb502721fa1d4",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 243
+          },
+          {
+            "name": "read_file",
+            "responseBytes": 4822
+          },
+          {
+            "name": "write_file",
+            "responseBytes": 328
+          },
+          {
+            "name": "write_file",
+            "responseBytes": 142
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 178
+          },
+          {
+            "name": "read_file",
+            "responseBytes": 112
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 622
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 243,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 7042,
+            "responseBytes": 0,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 7285,
+            "responseBytes": 0,
+            "httpRequests": 11,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "581548-1784653923661-5",
+        "succeeded": true,
+        "elapsedMs": 928,
+        "toolCalls": 7,
+        "remoteRoundTrips": 7,
+        "contextBytes": 6447,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:f4cccc3b9909a666c7ebcd87216ff6735c2b625a515739e54fcb020fb7f9b899",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 243
+          },
+          {
+            "name": "read_file",
+            "responseBytes": 4822
+          },
+          {
+            "name": "write_file",
+            "responseBytes": 328
+          },
+          {
+            "name": "write_file",
+            "responseBytes": 142
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 178
+          },
+          {
+            "name": "read_file",
+            "responseBytes": 112
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 622
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 243,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 7042,
+            "responseBytes": 0,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 7285,
+            "responseBytes": 0,
+            "httpRequests": 11,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      }
+    ],
+    "ordivon": [
+      {
+        "backend": "ORDIVON",
+        "pairId": "581548-1784653908466-1",
+        "succeeded": true,
+        "elapsedMs": 709,
+        "toolCalls": 6,
+        "remoteRoundTrips": 6,
+        "contextBytes": 6205,
+        "outputBytes": 47,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:8bc05356f8258f0e0ce458bc4b3a3d65d88f48c0af9cc4e3e215208e2dffeb9a",
+        "callBreakdown": [
+          {
+            "name": "workspace-open",
+            "responseBytes": 136
+          },
+          {
+            "name": "workspace-read-compact",
+            "responseBytes": 4840
+          },
+          {
+            "name": "workspace-mutate",
+            "responseBytes": 327
+          },
+          {
+            "name": "task-run",
+            "responseBytes": 207
+          },
+          {
+            "name": "workspace-read-slice-compact",
+            "responseBytes": 165
+          },
+          {
+            "name": "workspace-diff-compact",
+            "responseBytes": 530
+          }
+        ],
+        "transport": {
+          "mode": "LOCAL_CLI",
+          "actualHttpRequests": null
+        }
+      },
+      {
+        "backend": "ORDIVON",
+        "pairId": "581548-1784653912188-2",
+        "succeeded": true,
+        "elapsedMs": 706,
+        "toolCalls": 6,
+        "remoteRoundTrips": 6,
+        "contextBytes": 6205,
+        "outputBytes": 47,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:712a76e265ecb720b1b8e57e81db253ecd415d7ede8023dfe2931bc99c5d317b",
+        "callBreakdown": [
+          {
+            "name": "workspace-open",
+            "responseBytes": 136
+          },
+          {
+            "name": "workspace-read-compact",
+            "responseBytes": 4840
+          },
+          {
+            "name": "workspace-mutate",
+            "responseBytes": 327
+          },
+          {
+            "name": "task-run",
+            "responseBytes": 207
+          },
+          {
+            "name": "workspace-read-slice-compact",
+            "responseBytes": 165
+          },
+          {
+            "name": "workspace-diff-compact",
+            "responseBytes": 530
+          }
+        ],
+        "transport": {
+          "mode": "LOCAL_CLI",
+          "actualHttpRequests": null
+        }
+      },
+      {
+        "backend": "ORDIVON",
+        "pairId": "581548-1784653916571-3",
+        "succeeded": true,
+        "elapsedMs": 699,
+        "toolCalls": 6,
+        "remoteRoundTrips": 6,
+        "contextBytes": 6205,
+        "outputBytes": 47,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:2db756057ee389ca7c847b2383321d4e9bdbaabb89f24fa9acdd1e117df6ed13",
+        "callBreakdown": [
+          {
+            "name": "workspace-open",
+            "responseBytes": 136
+          },
+          {
+            "name": "workspace-read-compact",
+            "responseBytes": 4840
+          },
+          {
+            "name": "workspace-mutate",
+            "responseBytes": 327
+          },
+          {
+            "name": "task-run",
+            "responseBytes": 207
+          },
+          {
+            "name": "workspace-read-slice-compact",
+            "responseBytes": 165
+          },
+          {
+            "name": "workspace-diff-compact",
+            "responseBytes": 530
+          }
+        ],
+        "transport": {
+          "mode": "LOCAL_CLI",
+          "actualHttpRequests": null
+        }
+      },
+      {
+        "backend": "ORDIVON",
+        "pairId": "581548-1784653920109-4",
+        "succeeded": true,
+        "elapsedMs": 717,
+        "toolCalls": 6,
+        "remoteRoundTrips": 6,
+        "contextBytes": 6205,
+        "outputBytes": 47,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:9e5e6527e47e057e5ecb39659c70236e225b8fe690c080f0d79cb502721fa1d4",
+        "callBreakdown": [
+          {
+            "name": "workspace-open",
+            "responseBytes": 136
+          },
+          {
+            "name": "workspace-read-compact",
+            "responseBytes": 4840
+          },
+          {
+            "name": "workspace-mutate",
+            "responseBytes": 327
+          },
+          {
+            "name": "task-run",
+            "responseBytes": 207
+          },
+          {
+            "name": "workspace-read-slice-compact",
+            "responseBytes": 165
+          },
+          {
+            "name": "workspace-diff-compact",
+            "responseBytes": 530
+          }
+        ],
+        "transport": {
+          "mode": "LOCAL_CLI",
+          "actualHttpRequests": null
+        }
+      },
+      {
+        "backend": "ORDIVON",
+        "pairId": "581548-1784653923661-5",
+        "succeeded": true,
+        "elapsedMs": 707,
+        "toolCalls": 6,
+        "remoteRoundTrips": 6,
+        "contextBytes": 6205,
+        "outputBytes": 47,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:f4cccc3b9909a666c7ebcd87216ff6735c2b625a515739e54fcb020fb7f9b899",
+        "callBreakdown": [
+          {
+            "name": "workspace-open",
+            "responseBytes": 136
+          },
+          {
+            "name": "workspace-read-compact",
+            "responseBytes": 4840
+          },
+          {
+            "name": "workspace-mutate",
+            "responseBytes": 327
+          },
+          {
+            "name": "task-run",
+            "responseBytes": 207
+          },
+          {
+            "name": "workspace-read-slice-compact",
+            "responseBytes": 165
+          },
+          {
+            "name": "workspace-diff-compact",
+            "responseBytes": 530
+          }
+        ],
+        "transport": {
+          "mode": "LOCAL_CLI",
+          "actualHttpRequests": null
+        }
+      }
+    ]
+  },
+  "summaries": {
+    "legacy": {
+      "elapsedMs": 926,
+      "toolCalls": 7,
+      "remoteRoundTrips": 7,
+      "contextBytes": 6447,
+      "outputBytes": 45,
+      "succeeded": true,
+      "recoveredAfterDisconnect": false,
+      "fallbackCount": 0,
+      "semanticDigests": [
+        "sha256:2db756057ee389ca7c847b2383321d4e9bdbaabb89f24fa9acdd1e117df6ed13",
+        "sha256:712a76e265ecb720b1b8e57e81db253ecd415d7ede8023dfe2931bc99c5d317b",
+        "sha256:8bc05356f8258f0e0ce458bc4b3a3d65d88f48c0af9cc4e3e215208e2dffeb9a",
+        "sha256:9e5e6527e47e057e5ecb39659c70236e225b8fe690c080f0d79cb502721fa1d4",
+        "sha256:f4cccc3b9909a666c7ebcd87216ff6735c2b625a515739e54fcb020fb7f9b899"
+      ],
+      "callBreakdown": [
+        {
+          "sequence": 1,
+          "name": "start_process",
+          "medianResponseBytes": 243
+        },
+        {
+          "sequence": 2,
+          "name": "read_file",
+          "medianResponseBytes": 4822
+        },
+        {
+          "sequence": 3,
+          "name": "write_file",
+          "medianResponseBytes": 328
+        },
+        {
+          "sequence": 4,
+          "name": "write_file",
+          "medianResponseBytes": 142
+        },
+        {
+          "sequence": 5,
+          "name": "start_process",
+          "medianResponseBytes": 178
+        },
+        {
+          "sequence": 6,
+          "name": "read_file",
+          "medianResponseBytes": 112
+        },
+        {
+          "sequence": 7,
+          "name": "start_process",
+          "medianResponseBytes": 622
+        }
+      ]
+    },
+    "ordivon": {
+      "elapsedMs": 707,
+      "toolCalls": 6,
+      "remoteRoundTrips": 6,
+      "contextBytes": 6205,
+      "outputBytes": 47,
+      "succeeded": true,
+      "recoveredAfterDisconnect": true,
+      "fallbackCount": 0,
+      "semanticDigests": [
+        "sha256:2db756057ee389ca7c847b2383321d4e9bdbaabb89f24fa9acdd1e117df6ed13",
+        "sha256:712a76e265ecb720b1b8e57e81db253ecd415d7ede8023dfe2931bc99c5d317b",
+        "sha256:8bc05356f8258f0e0ce458bc4b3a3d65d88f48c0af9cc4e3e215208e2dffeb9a",
+        "sha256:9e5e6527e47e057e5ecb39659c70236e225b8fe690c080f0d79cb502721fa1d4",
+        "sha256:f4cccc3b9909a666c7ebcd87216ff6735c2b625a515739e54fcb020fb7f9b899"
+      ],
+      "callBreakdown": [
+        {
+          "sequence": 1,
+          "name": "workspace-open",
+          "medianResponseBytes": 136
+        },
+        {
+          "sequence": 2,
+          "name": "workspace-read-compact",
+          "medianResponseBytes": 4840
+        },
+        {
+          "sequence": 3,
+          "name": "workspace-mutate",
+          "medianResponseBytes": 327
+        },
+        {
+          "sequence": 4,
+          "name": "task-run",
+          "medianResponseBytes": 207
+        },
+        {
+          "sequence": 5,
+          "name": "workspace-read-slice-compact",
+          "medianResponseBytes": 165
+        },
+        {
+          "sequence": 6,
+          "name": "workspace-diff-compact",
+          "medianResponseBytes": 530
+        }
+      ]
+    }
+  },
+  "contractSamples": {
+    "legacy": {
+      "schemaVersion": 1,
+      "sampleId": "m2-legacy-median",
+      "capability": "WORKSPACE_EXEC",
+      "backend": "LEGACY_DESKTOP_COMMANDER",
+      "succeeded": true,
+      "elapsedMs": 926,
+      "toolCalls": 7,
+      "remoteRoundTrips": 7,
+      "contextBytes": 6447,
+      "outputBytes": 45,
+      "recoveredAfterDisconnect": false,
+      "fallbackCount": 0
+    },
+    "ordivon": {
+      "schemaVersion": 1,
+      "sampleId": "m2-ordivon-median",
+      "capability": "WORKSPACE_EXEC",
+      "backend": "ORDIVON",
+      "succeeded": true,
+      "elapsedMs": 707,
+      "toolCalls": 6,
+      "remoteRoundTrips": 6,
+      "contextBytes": 6205,
+      "outputBytes": 47,
+      "recoveredAfterDisconnect": true,
+      "fallbackCount": 0
+    }
+  },
+  "performanceDelta": {
+    "elapsedMs": -219,
+    "toolCalls": -1,
+    "remoteRoundTrips": -1,
+    "contextBytes": -242,
+    "outputBytes": 2,
+    "disconnectRecoveryImproved": true
+  },
+  "disconnectProbe": {
+    "backend": "LEGACY_DESKTOP_COMMANDER",
+    "recovered": false,
+    "observation": "Error: read_process_output returned an MCP tool error: No session found for PID 583645",
+    "logicalCalls": 2,
+    "httpRequests": 10
+  },
+  "cutover": {
+    "eligible": true,
+    "gates": {
+      "completionNotWorse": true,
+      "toolCallsAtMostSix": true,
+      "contextNotWorse": true,
+      "elapsedWithin10Percent": true,
+      "disconnectRecovery": true,
+      "noFallback": true,
+      "semanticEquivalence": true
+    },
+    "reductions": {
+      "toolCallsPercent": 14.285714285714285,
+      "contextBytesPercent": 3.7536838839770437,
+      "outputBytesPercent": -4.444444444444445
+    },
+    "elapsedRatio": 0.7634989200863931
+  },
+  "claimsNotMade": [
+    "Ordivon M3 has no MCP transport, so no Ordivon HTTP byte claim is made.",
+    "This benchmark covers one local Python task journey, not all coding work.",
+    "The result does not authorize a production route switch."
+  ]
+}

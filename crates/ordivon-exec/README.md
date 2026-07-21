@@ -93,3 +93,18 @@ not the future transactional registry. See
 
 M1 is a feature-gated local execution slice. Performance claims against the
 legacy Desktop Commander route still require the M2 comparative benchmark.
+
+## Compact Agent interface M3
+
+M3 adds compact workspace projections, bounded slice reads, batch mutation,
+and durable task-run and task-await operations. Small terminal output can be
+returned inline while complete stdout, stderr, and result Artifacts remain
+available for diagnostics.
+
+The full-read differential journey now completes in six calls with less context
+than Legacy. The targeted-read journey completes in five calls and about 1.4 KB
+of returned context while preserving caller-disconnect recovery.
+
+M3 remains behind the universal-executor-m1 feature and is not advertised by
+the production MCP server. See
+`docs/architecture/ordivon-m3-compact-agent-interface.md`.

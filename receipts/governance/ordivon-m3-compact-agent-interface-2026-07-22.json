@@ -1,0 +1,165 @@
+{
+  "stage_id": "ORDIVON-M3-COMPACT-AGENT-INTERFACE-2026-07-22",
+  "receipt_type": "R2",
+  "risk_class": "R2",
+  "draft": true,
+  "status": "DEGRADED_LOCAL_GATES_PASS_NO_MCP_CUTOVER",
+  "task_type": "compact_agent_interface",
+  "timestamp": "2026-07-22T00:00:00Z",
+  "branch": "agent/m3-compact-agent-interface",
+  "base_commit": "3893ae4e462b02eb60e37e188269a75bd238c2bc",
+  "files_changed": [
+    "crates/ordivon-exec/README.md",
+    "crates/ordivon-exec/src/bin/ordivon-m1-cli.rs",
+    "crates/ordivon-exec/src/lib.rs",
+    "crates/ordivon-exec/src/universal/config.rs",
+    "crates/ordivon-exec/src/universal/error.rs",
+    "crates/ordivon-exec/src/universal/mod.rs",
+    "crates/ordivon-exec/src/universal/mutation.rs",
+    "crates/ordivon-exec/src/universal/projection.rs",
+    "crates/ordivon-exec/src/universal/task/compact.rs",
+    "crates/ordivon-exec/src/universal/task/mod.rs",
+    "crates/ordivon-exec/src/universal/tests.rs",
+    "crates/ordivon-exec/src/universal/types.rs",
+    "crates/ordivon-exec/src/universal/workspace.rs",
+    "crates/ordivon-exec/tests/universal_executor_m3.rs",
+    "docs/architecture/ordivon-m3-compact-agent-interface.md",
+    "docs/audits/runtime/ordivon-m3a-differential-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m3b-differential-evidence-2026-07-22.json",
+    "docs/governance/document-registry.jsonl",
+    "receipts/governance/ordivon-m3-compact-agent-interface-2026-07-22.json",
+    "scripts/README.md",
+    "scripts/benchmarks/check_m3_evidence.py",
+    "scripts/benchmarks/m3a_differential.mjs",
+    "scripts/benchmarks/m3b_differential.mjs"
+  ],
+  "implemented_contracts": [
+    "durable task-run with bounded wait and compact terminal observation",
+    "task-await recovery from a later independent caller",
+    "bounded stdout and stderr tail inlining with complete Artifacts retained",
+    "bounded batch workspace mutation with preflight and rollback evidence",
+    "bounded UTF-8 workspace slice reads with whole-file digest",
+    "compact workspace open read slice and diff projections",
+    "M3A full-read and M3B targeted-read differential evaluation",
+    "independent evidence recomputation and tamper rejection"
+  ],
+  "evidence": "Fresh local evidence contains five alternating measured pairs for both M3A and M3B after one warm-up. M3A records Legacy at 926 ms, 7 calls, and 6447 context bytes versus Ordivon at 707 ms, 6 calls, and 6205 context bytes. M3B records optimized Legacy at 1015 ms, 5 calls, and 1491 context bytes versus Ordivon at 694 ms, 5 calls, and 1409 context bytes. Every paired semantic digest matches; Ordivon recovers after caller disconnect while Legacy reports No session found.",
+  "verification_result": "M3 closes the local Agent-facing call and context regression for the two bounded benchmark journeys. Both local performance gate sets pass, but no production route switch is authorized because Ordivon still lacks a real MCP transport and production control plane.",
+  "degraded_reasons": [
+    "Ordivon M3 is measured through a local feature-gated CLI while Legacy is measured through the active MCP endpoint.",
+    "No complete Ordivon MCP transport or wire-byte comparison exists yet.",
+    "The filesystem Task registry remains non-transactional.",
+    "Production Job and Attempt separation is not implemented in the M3 runtime.",
+    "The worker does not yet use a dedicated non-privileged identity.",
+    "The evidence covers two local Python journeys and debug binaries.",
+    "Repository document governance retains three exact-base violations."
+  ],
+  "remaining_debt": [
+    "Build an independent experimental Ordivon MCP adapter without changing the production route.",
+    "Repeat full MCP-to-MCP latency call context recovery and residual-state comparisons.",
+    "Replace the filesystem Task registry with a transactional Job and Attempt control plane before concurrency.",
+    "Add Task listing retention garbage collection and complete reconciliation.",
+    "Move execution to a dedicated non-privileged worker identity before high-risk capabilities.",
+    "Expand evaluation to Rust builds failures long logs cancellation reboot and concurrent requests."
+  ],
+  "authorization": {
+    "status": "not_requested",
+    "rationale": "M3 changes only feature-gated local execution code and evidence; it does not expose a production MCP tool or route traffic."
+  },
+  "next_bounded_action": "Implement M4 as an independent experimental MCP adapter and rerun MCP-to-MCP differential evaluation.",
+  "canonical_sources": [
+    "docs/architecture/ordivon-migration-contract-v0.md",
+    "docs/architecture/ordivon-universal-executor-m1.md",
+    "docs/architecture/ordivon-m2-differential-evaluation.md",
+    "docs/architecture/ordivon-m3-compact-agent-interface.md",
+    "docs/audits/runtime/ordivon-m3a-differential-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m3b-differential-evidence-2026-07-22.json"
+  ],
+  "verification_results": [
+    {
+      "id": "m3a-formal-benchmark",
+      "command": "run M3A with five measured pairs after one warm-up",
+      "passed": true,
+      "summary": "Ordivon median 707 ms, 6 calls, and 6205 context bytes; local gates pass."
+    },
+    {
+      "id": "m3b-formal-benchmark",
+      "command": "run M3B with five measured pairs after one warm-up",
+      "passed": true,
+      "summary": "Ordivon median 694 ms, 5 calls, and 1409 context bytes; local gates pass."
+    },
+    {
+      "id": "m3-independent-checker",
+      "command": "check both M3 evidence files independently",
+      "passed": true,
+      "summary": "M3_EVIDENCE_PASS"
+    },
+    {
+      "id": "m3-tamper-negative",
+      "command": "alter M3A eligibility and rerun checker",
+      "passed": true,
+      "summary": "Checker rejected modified evidence with exit 1."
+    },
+    {
+      "id": "workspace-tests",
+      "command": "cargo test --workspace",
+      "passed": true,
+      "summary": "95 default tests passed; Universal execution remains excluded by default."
+    },
+    {
+      "id": "m3-feature-tests",
+      "command": "cargo test for the feature-gated executor library",
+      "passed": true,
+      "summary": "82 feature-gated library tests passed."
+    },
+    {
+      "id": "m3-real-systemd",
+      "command": "run the ignored M3 systemd integration test with explicit opt-in",
+      "passed": true,
+      "summary": "Six-call primary journey and later-caller Task recovery passed."
+    },
+    {
+      "id": "strict-clippy",
+      "command": "run workspace and feature-gated Clippy with warnings denied",
+      "passed": true,
+      "summary": "No warnings."
+    },
+    {
+      "id": "python-static",
+      "command": "M3 final governance verification",
+      "passed": true,
+      "summary": "Python compilation and Ruff checks passed."
+    },
+    {
+      "id": "benchmark-syntax",
+      "command": "M3 final governance verification",
+      "passed": true,
+      "summary": "Both Node scripts parsed successfully."
+    },
+    {
+      "id": "document-governance-delta",
+      "command": "M3 final governance verification",
+      "passed": true,
+      "summary": "Current and exact base report the same three pre-existing registry violations; M3 adds none."
+    },
+    {
+      "id": "receipt-integrity",
+      "command": "M3 final governance verification",
+      "passed": true,
+      "summary": "All receipt integrity checks passed."
+    },
+    {
+      "id": "registry-jsonl",
+      "command": "M3 final governance verification",
+      "passed": true,
+      "summary": "Registry JSONL is valid and all M3 records are present."
+    },
+    {
+      "id": "cleanup",
+      "command": "M3 final governance verification",
+      "passed": true,
+      "summary": "No M3 runtime unit process store or escape-file residue was found."
+    }
+  ],
+  "measured_implementation_commit": "e1a40df3878881e47a56fd428ec6eb316301799b"
+}
