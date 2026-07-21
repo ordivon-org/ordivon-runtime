@@ -76,6 +76,13 @@ impl EnvironmentRule {
                 "environmentRules",
             ));
         }
+        let unique: BTreeSet<_> = self.allowed_values.iter().collect();
+        if unique.len() != self.allowed_values.len() {
+            return Err(policy_invalid(
+                "environment allowed values must be unique",
+                "environmentRules",
+            ));
+        }
         Ok(())
     }
 }
@@ -91,6 +98,8 @@ pub struct ExecutionProfile {
     pub fixed_args: Vec<String>,
     pub allowed_argument_vectors: Vec<Vec<String>>,
     pub allowed_cwd_roots: Vec<String>,
+    #[serde(default)]
+    pub base_environment: BTreeMap<String, String>,
     #[serde(default)]
     pub environment_rules: Vec<EnvironmentRule>,
     pub max_runtime_ms: u64,
@@ -119,9 +128,16 @@ impl ExecutionProfile {
                 "allowedArgumentVectors",
             ));
         }
+        let mut argument_vectors = BTreeSet::new();
         for args in &self.allowed_argument_vectors {
             validate_argument_vector(args, "allowedArgumentVectors")
                 .map_err(|error| policy_error(error, "profiles"))?;
+            if !argument_vectors.insert(args) {
+                return Err(policy_invalid(
+                    "allowed argument vectors must be unique",
+                    "allowedArgumentVectors",
+                ));
+            }
         }
         if self.allowed_cwd_roots.is_empty() {
             return Err(policy_invalid(
@@ -133,9 +149,17 @@ impl ExecutionProfile {
             validate_absolute_path(root, "allowedCwdRoots", JobContractErrorCode::PolicyInvalid)?;
         }
         ensure_unique(&self.allowed_cwd_roots, "allowedCwdRoots")?;
+        validate_environment(&self.base_environment)
+            .map_err(|error| policy_error(error, "baseEnvironment"))?;
         let mut environment_names = BTreeSet::new();
         for rule in &self.environment_rules {
             rule.validate_shape()?;
+            if self.base_environment.contains_key(&rule.name) {
+                return Err(policy_invalid(
+                    "client environment rules cannot override base environment keys",
+                    "environmentRules",
+                ));
+            }
             if !environment_names.insert(rule.name.as_str()) {
                 return Err(policy_invalid(
                     "environment rule names must be unique",

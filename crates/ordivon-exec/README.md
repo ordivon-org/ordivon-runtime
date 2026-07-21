@@ -41,6 +41,18 @@ The fixture and real systemd tests require the explicit `supervisor-spike`
 feature and are not part of the normal release target. See
 `docs/architecture/ordivon-job-supervisor-spike-v0.md`.
 
+## Verified capability evaluator
+
+P3 loads a bounded deny-by-default policy, rejects duplicate JSON keys and
+unsafe file permissions, canonicalizes roots and CWD, verifies a non-symlink
+executable and SHA-256, enforces exact argv/environment/runtime/output and
+concurrency limits, and emits a closed `ExecutionPlan`. It never starts the
+plan. See `docs/architecture/ordivon-capability-scope-v0.md`.
+
+The tracked local Cargo policy is machine-bound supporting configuration. Its
+presence does not activate execution, and toolchain or workspace drift makes
+it fail closed.
+
 ## Explicitly not implemented
 
 - patch or write operations;

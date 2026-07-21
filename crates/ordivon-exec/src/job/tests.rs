@@ -36,6 +36,7 @@ fn profile() -> ExecutionProfile {
             "ordivon-mcp".to_string(),
         ]],
         allowed_cwd_roots: vec!["/root/projects/ordivon-structured-exec-v0".to_string()],
+        base_environment: BTreeMap::new(),
         environment_rules: Vec::new(),
         max_runtime_ms: 900_000,
         max_stdout_bytes: 16 * 1024 * 1024,

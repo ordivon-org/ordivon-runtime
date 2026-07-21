@@ -2,6 +2,7 @@ mod error;
 mod io;
 mod policy;
 mod receipt;
+mod resolver;
 mod state;
 mod supervisor;
 mod validation;
@@ -15,6 +16,12 @@ pub use policy::{
     CapabilityPolicy, EnvironmentRule, ExecutionPlan, ExecutionProfile, JobStartRequest,
 };
 pub use receipt::{OperationalEventOrigin, OperationalReceiptEvent, OperationalReceiptEventType};
+pub use resolver::{
+    evaluate_job_start, load_capability_policy_bytes, load_capability_policy_file,
+    CapabilityEvaluationContext, ConcurrencySnapshot, ResolvedCapabilityPolicy,
+    MAX_ALLOWED_ARGUMENT_VECTORS, MAX_CAPABILITY_POLICY_BYTES, MAX_CAPABILITY_PROFILES,
+    MAX_CAPABILITY_ROOTS, MAX_EXECUTION_CONCURRENCY, MAX_EXECUTION_RUNTIME_MS,
+};
 pub use state::{
     JobInternalState, JobOutputMetadata, JobPublicState, JobRecord, JobStateTransition,
 };
