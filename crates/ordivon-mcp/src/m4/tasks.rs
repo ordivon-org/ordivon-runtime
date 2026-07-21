@@ -148,7 +148,7 @@ impl ServerHandler for M4Server {
             ok,
             result: Some(observation),
             error,
-            trace,
+            trace: None,
         };
         let tool_result = outcome.into_call_tool_result()?;
         let value = serde_json::to_value(tool_result).map_err(|error| {

@@ -118,7 +118,8 @@ pub struct M4Outcome<T> {
     pub result: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<M4Error>,
-    pub trace: M4TraceSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<M4TraceSummary>,
 }
 
 impl<T> IntoCallToolResult for M4Outcome<T>
@@ -177,13 +178,13 @@ impl M4Server {
                 ok: true,
                 result: Some(value),
                 error: None,
-                trace,
+                trace: None,
             },
             Err(error) => M4Outcome {
                 ok: false,
                 result: None,
                 error: Some(error),
-                trace,
+                trace: None,
             },
         }
     }

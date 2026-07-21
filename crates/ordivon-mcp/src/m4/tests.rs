@@ -78,11 +78,7 @@ fn structured_failure_is_a_tool_error_not_protocol_failure() {
         ok: false,
         result: None,
         error: Some(M4Error::invalid("digest mismatch", "expectedDigest")),
-        trace: M4TraceSummary {
-            trace_id: "trace-1".to_string(),
-            core_ms: 2,
-            total_ms: 3,
-        },
+        trace: None,
     };
     let result = outcome.into_call_tool_result().unwrap();
     assert_eq!(result.is_error, Some(true));
