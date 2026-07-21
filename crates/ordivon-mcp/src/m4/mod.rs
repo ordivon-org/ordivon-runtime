@@ -130,11 +130,23 @@ where
         let value = serde_json::to_value(self).map_err(|error| {
             McpError::internal_error(format!("cannot serialize M4 result: {error}"), None)
         })?;
-        Ok(if ok {
-            CallToolResult::structured(value)
+        let compatibility_text = if ok {
+            "ok".to_string()
         } else {
-            CallToolResult::structured_error(value)
-        })
+            value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool error")
+                .to_string()
+        };
+        let mut result = if ok {
+            CallToolResult::success(vec![ContentBlock::text(compatibility_text)])
+        } else {
+            CallToolResult::error(vec![ContentBlock::text(compatibility_text)])
+        };
+        result.structured_content = Some(value);
+        Ok(result)
     }
 }
 impl M4Server {
