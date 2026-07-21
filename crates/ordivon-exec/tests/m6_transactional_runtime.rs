@@ -622,3 +622,29 @@ fn m6_corrupt_runner_result_is_orphaned_and_quarantined() {
         ordivon_exec::ReservationState::HeldOrphaned
     );
 }
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn m6_fast_failures_never_race_into_lost() {
+    if std::env::var("ORDIVON_RUN_M6_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("fast-failure-race");
+    context.write(
+        "m6_fast_fail.py",
+        "import sys\nprint('M6_FAST_FAILURE', flush=True)\nsys.exit(7)\n",
+    );
+    let runtime = context.runtime(2000);
+    for index in 0..10 {
+        let mut request = context.request("m6_fast_fail.py", 10_000);
+        request.client_request_id = format!("request:fast-failure:{index}:{}", Uuid::now_v7());
+        let observation = runtime.run_task(&request).unwrap();
+        assert_eq!(
+            observation.status, "failed",
+            "fast failure {index} was misclassified as {}",
+            observation.status
+        );
+        assert!(observation.stdout_tail.contains("M6_FAST_FAILURE"));
+    }
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
