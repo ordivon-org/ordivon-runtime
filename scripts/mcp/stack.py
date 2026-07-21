@@ -219,6 +219,9 @@ def start_stack(state_root: Path, port: int | None) -> dict[str, Any]:
     stop_stack(state_root, tolerate_missing=True)
     sdk_root = discover_sdk_root()
     server, runner = build_binaries()
+    cargo_path = Path(run(["rustup", "which", "cargo"]).stdout.strip()).resolve()
+    rustc_path = Path(run(["rustup", "which", "rustc"]).stdout.strip()).resolve()
+    toolchain_root = cargo_path.parent
     selected_port = port or allocate_port()
     run_id = f"{os.getpid()}-{int(time.time() * 1000)}"
     unit = f"ordivon-m5-http-{run_id}.service"
@@ -234,7 +237,7 @@ def start_stack(state_root: Path, port: int | None) -> dict[str, Any]:
                 f"ORDIVON_M4_STORE_ROOT={store_root}",
                 f"ORDIVON_M4_BEARER_TOKEN={token}",
                 f"ORDIVON_M4_RUNNER_PATH={runner}",
-                "ORDIVON_M4_ALLOWED_EXECUTABLE_ROOTS=/usr/bin",
+                f"ORDIVON_M4_ALLOWED_EXECUTABLE_ROOTS=/usr/bin:{toolchain_root}",
                 f"ORDIVON_M4_TRACE_PATH={trace_path}",
                 f"ORDIVON_M5_ALLOWED_SOURCE_REPOS={REPO_ROOT.resolve()}",
                 f"ORDIVON_M5_ALLOWED_SOURCE_REVISIONS={git_head()}",
@@ -273,6 +276,10 @@ def start_stack(state_root: Path, port: int | None) -> dict[str, Any]:
         "serverBinaryDigest": sha256_file(server),
         "runnerBinary": str(runner),
         "runnerBinaryDigest": sha256_file(runner),
+        "cargoBinary": str(cargo_path),
+        "cargoBinaryDigest": sha256_file(cargo_path),
+        "rustcBinary": str(rustc_path),
+        "rustcBinaryDigest": sha256_file(rustc_path),
         "tracePath": str(trace_path),
         "httpTracePath": str(Path(str(trace_path) + ".http.jsonl")),
         "temporaryFiles": [str(environment_file)],
@@ -294,6 +301,8 @@ def child_environment(manifest: dict[str, Any]) -> dict[str, str]:
             "ORDIVON_M5_SOURCE_REVISION": manifest["sourceRevision"],
             "ORDIVON_M5_TRACE_PATH": manifest["tracePath"],
             "ORDIVON_M5_HTTP_TRACE_PATH": manifest["httpTracePath"],
+            "ORDIVON_M5_CARGO_BINARY": manifest["cargoBinary"],
+            "ORDIVON_M5_RUSTC_BINARY": manifest["rustcBinary"],
         }
     )
     return environment

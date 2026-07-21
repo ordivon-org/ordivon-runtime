@@ -27,8 +27,10 @@ export function sha256File(path) {
 }
 
 export function byteLength(value) {
+  if (value === undefined || value === null) return 0;
   return Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value));
 }
+
 
 export function requiredEnvironment(name) {
   const value = process.env[name];
