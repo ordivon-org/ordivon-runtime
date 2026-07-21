@@ -153,7 +153,7 @@ where
             }
         };
         let mut result = if ok {
-            CallToolResult::success(vec![ContentBlock::text(compatibility_text)])
+            CallToolResult::success(Vec::new())
         } else {
             CallToolResult::error(vec![ContentBlock::text(compatibility_text)])
         };
