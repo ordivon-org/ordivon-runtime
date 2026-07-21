@@ -6,11 +6,17 @@ pub enum ExecErrorCode {
     InvalidRequest,
     PathNotFound,
     PathNotFile,
+    PathNotDirectory,
     IoError,
     UnsupportedEncoding,
     StartLineOutOfRange,
     LineExceedsByteBudget,
     BatchBudgetExhausted,
+    ToolUnavailable,
+    ToolFailed,
+    InvalidToolOutput,
+    OutputLimitExceeded,
+    RepositoryNotFound,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

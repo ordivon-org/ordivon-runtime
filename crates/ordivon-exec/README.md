@@ -3,23 +3,27 @@
 Deterministic local execution primitives for AI agents.
 
 This crate is not an agent harness and does not call a model. It converts typed
-requests into bounded local operations. Protocol adapters such as MCP must
-remain outside the core contract.
+requests into bounded local operations. Protocol adapters such as MCP remain
+outside the core contract.
 
-## V0 bootstrap scope
+## Implemented read-only scope
 
-Implemented:
-
-- `read_text`: 1-based line ranges, byte budget, SHA-256 revision digest,
-  continuation metadata, UTF-8-only fail-closed behavior.
+- `read_text`: 1-based ranges, byte budget, full-file SHA-256 revision,
+  continuation metadata, and UTF-8-only fail-closed behavior.
 - `read_many`: bounded batch reads with one total byte budget and independent
   item failures.
+- `search_text`: bounded structured search over ripgrep JSON output, fixed or
+  regex patterns, explicit globs, deterministic path order, and no shell.
+- `repo_snapshot`: one Git porcelain-v2 call returning branch, exact HEAD,
+  upstream distance, and staged/unstaged/untracked/conflict counts.
 
-Not implemented yet:
+## Explicitly not implemented
 
-- text search;
-- repository snapshot;
-- patch/write operations;
+- patch or write operations;
 - short commands or durable jobs;
-- MCP or Hermes adapters;
-- authorization, receipts, or runtime observation emission.
+- MCP, HTTP, Cloudflare, or Hermes adapters;
+- search continuation cursors or hard execution timeout;
+- authorization, sealed receipts, or runtime observation emission.
+
+The current crate is a local read-only core slice. Performance claims require a
+separate benchmark against the legacy Desktop Commander route.
