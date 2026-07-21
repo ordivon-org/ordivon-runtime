@@ -8,6 +8,7 @@ license.workspace = true
 default = []
 supervisor-spike = ["dep:libc"]
 universal-executor-m1 = ["dep:libc"]
+transactional-registry-m6 = ["universal-executor-m1", "dep:rusqlite", "dep:uuid"]
 
 [[bin]]
 name = "ordivon-job-fixture"
@@ -27,7 +28,9 @@ required-features = ["universal-executor-m1"]
 [dependencies]
 hex.workspace = true
 libc = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
 sha2.workspace = true
+uuid = { workspace = true, optional = true }

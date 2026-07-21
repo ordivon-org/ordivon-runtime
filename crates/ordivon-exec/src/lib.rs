@@ -1,6 +1,8 @@
 mod error;
 mod file;
 mod job;
+#[cfg(feature = "transactional-registry-m6")]
+mod m6;
 mod migration;
 mod repo;
 mod search;
@@ -61,4 +63,14 @@ pub use universal::{
     MAX_UNIVERSAL_ARG_BYTES, MAX_UNIVERSAL_ENV_VALUE_BYTES, MAX_UNIVERSAL_ENV_VARS,
     MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS, MAX_WORKSPACE_IO_BYTES,
     MAX_WORKSPACE_MUTATIONS, UNIVERSAL_EXEC_SCHEMA_VERSION,
+};
+
+#[cfg(feature = "transactional-registry-m6")]
+pub use m6::{
+    AdmissionOutcomeM6, ArtifactRecordM6, ArtifactRegistrationM6, AttemptRecordM6, AttemptState,
+    ConditionUpdateM6, CreatedAdmissionM6, JobDesiredState, JobListCursorM6, JobListRequestM6,
+    JobListResultM6, JobProjectionM6, JobRecordM6, JobResolution, M6Error, M6ErrorCode,
+    M6ExecutionPlan, M6Registry, M6RegistryConfig, M6Result, M6SubmitRequest, M6TerminationIntent,
+    PlanKind, ReservationRecordM6, ReservationState, RunnerIdentityM6, TerminalCommitM6,
+    M6_MIGRATION_CHECKSUM, M6_SCHEMA_VERSION, MAX_M6_LIST_LIMIT,
 };
