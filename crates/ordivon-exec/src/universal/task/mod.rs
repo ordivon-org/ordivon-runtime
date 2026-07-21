@@ -1,8 +1,10 @@
 mod artifact;
+mod compact;
 mod start;
 mod status;
 
 pub use artifact::read_task_artifact;
+pub use compact::{await_universal_task_compact, run_universal_task_compact};
 pub use start::start_universal_task;
 pub use status::{cancel_universal_task, get_universal_task};
 

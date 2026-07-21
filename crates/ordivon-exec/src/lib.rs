@@ -44,14 +44,18 @@ pub use search::{
 
 #[cfg(feature = "universal-executor-m1")]
 pub use universal::{
-    cancel_universal_task, create_git_workspace, get_universal_task, load_workspace_record,
-    read_task_artifact, read_workspace_text, remove_git_workspace, run_task_runner,
+    await_universal_task_compact, cancel_universal_task, create_git_workspace, get_universal_task,
+    load_workspace_record, mutate_workspace, read_task_artifact, read_workspace_slice,
+    read_workspace_text, remove_git_workspace, run_task_runner, run_universal_task_compact,
     start_universal_task, workspace_diff, write_workspace_text, ArtifactReadRequest,
-    ArtifactReadResult, GitWorkspaceCreateRequest, TaskCancelRequest, TaskGetRequest,
-    UniversalExecError, UniversalExecErrorCode, UniversalExecRequest, UniversalExecutorConfig,
-    WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceReadRequest, WorkspaceReadResult,
-    WorkspaceRecord, WorkspaceWriteRequest, WorkspaceWriteResult, MAX_ARTIFACT_READ_BYTES,
-    MAX_TASK_WAIT_MS, MAX_UNIVERSAL_ARGS, MAX_UNIVERSAL_ARG_BYTES, MAX_UNIVERSAL_ENV_VALUE_BYTES,
-    MAX_UNIVERSAL_ENV_VARS, MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS,
-    MAX_WORKSPACE_IO_BYTES, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    ArtifactReadResult, CompactTaskObservation, GitWorkspaceCreateRequest, TaskAwaitRequest,
+    TaskCancelRequest, TaskGetRequest, TaskRunRequest, UniversalExecError, UniversalExecErrorCode,
+    UniversalExecRequest, UniversalExecutorConfig, WorkspaceDiffRequest, WorkspaceDiffResult,
+    WorkspaceMutateRequest, WorkspaceMutateResult, WorkspaceMutation, WorkspaceMutationMode,
+    WorkspaceMutationResult, WorkspaceReadRequest, WorkspaceReadResult, WorkspaceReadSliceRequest,
+    WorkspaceReadSliceResult, WorkspaceRecord, WorkspaceWriteRequest, WorkspaceWriteResult,
+    MAX_ARTIFACT_READ_BYTES, MAX_COMPACT_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_UNIVERSAL_ARGS,
+    MAX_UNIVERSAL_ARG_BYTES, MAX_UNIVERSAL_ENV_VALUE_BYTES, MAX_UNIVERSAL_ENV_VARS,
+    MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS, MAX_WORKSPACE_IO_BYTES,
+    MAX_WORKSPACE_MUTATIONS, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };

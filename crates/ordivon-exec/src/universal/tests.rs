@@ -336,6 +336,218 @@ fn terminal_result_rebuilds_task_and_artifact_handles_without_systemd() {
     assert!(!artifact.eof);
 }
 
+#[test]
+fn compact_requests_bound_wait_and_tails() {
+    let request = TaskAwaitRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        task_id: "task-compact".to_string(),
+        wait_ms: MAX_TASK_WAIT_MS + 1,
+        stdout_tail_bytes: 1,
+        stderr_tail_bytes: 1,
+    };
+    assert_eq!(
+        request.validate_shape().unwrap_err().code,
+        UniversalExecErrorCode::InvalidRequest
+    );
+    let oversized = TaskAwaitRequest {
+        wait_ms: 0,
+        stdout_tail_bytes: MAX_COMPACT_TAIL_BYTES + 1,
+        ..request
+    };
+    assert_eq!(
+        oversized.validate_shape().unwrap_err().code,
+        UniversalExecErrorCode::InvalidRequest
+    );
+}
+
+#[test]
+fn workspace_batch_mutation_preflights_before_writing() {
+    let sandbox = Sandbox::new("batch");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-batch".to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let read = read_workspace_text(
+        &config,
+        &WorkspaceReadRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-batch".to_string(),
+            relative_path: "README.md".to_string(),
+            max_bytes: 1024,
+        },
+    )
+    .unwrap();
+    let bad = WorkspaceMutateRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        workspace_id: "workspace-batch".to_string(),
+        mutations: vec![
+            WorkspaceMutation {
+                relative_path: "README.md".to_string(),
+                mode: WorkspaceMutationMode::Append,
+                content: "first\n".to_string(),
+                expected_digest: Some(read.digest.clone()),
+                expected_text: None,
+            },
+            WorkspaceMutation {
+                relative_path: "missing.txt".to_string(),
+                mode: WorkspaceMutationMode::ReplaceExact,
+                content: "replacement".to_string(),
+                expected_digest: None,
+                expected_text: Some("missing".to_string()),
+            },
+        ],
+    };
+    assert_eq!(
+        mutate_workspace(&config, &bad).unwrap_err().code,
+        UniversalExecErrorCode::WorkspaceNotFound
+    );
+    assert_eq!(
+        fs::read_to_string(config.workspace_path("workspace-batch").join("README.md")).unwrap(),
+        "baseline\n"
+    );
+
+    let result = mutate_workspace(
+        &config,
+        &WorkspaceMutateRequest {
+            mutations: vec![
+                WorkspaceMutation {
+                    relative_path: "README.md".to_string(),
+                    mode: WorkspaceMutationMode::Append,
+                    content: "marker\n".to_string(),
+                    expected_digest: Some(read.digest),
+                    expected_text: None,
+                },
+                WorkspaceMutation {
+                    relative_path: "tool.py".to_string(),
+                    mode: WorkspaceMutationMode::Write,
+                    content: "print('ok')\n".to_string(),
+                    expected_digest: None,
+                    expected_text: None,
+                },
+            ],
+            ..bad
+        },
+    )
+    .unwrap();
+    assert_eq!(result.mutations.len(), 2);
+    assert!(
+        fs::read_to_string(config.workspace_path("workspace-batch").join("README.md"))
+            .unwrap()
+            .ends_with("marker\n")
+    );
+    assert_eq!(
+        fs::read_to_string(config.workspace_path("workspace-batch").join("tool.py")).unwrap(),
+        "print('ok')\n"
+    );
+}
+
+#[test]
+fn workspace_slice_returns_full_digest_and_utf8_safe_range() {
+    let sandbox = Sandbox::new("slice");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-slice".to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let slice = read_workspace_slice(
+        &config,
+        &WorkspaceReadSliceRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-slice".to_string(),
+            relative_path: "README.md".to_string(),
+            offset: 0,
+            max_bytes: 4,
+        },
+    )
+    .unwrap();
+    assert_eq!(slice.content, "base");
+    assert!(!slice.eof);
+    assert_eq!(slice.file_byte_length, 9);
+    assert!(slice.file_digest.starts_with("sha256:"));
+}
+
+#[test]
+fn compact_terminal_observation_inlines_bounded_tails() {
+    let sandbox = Sandbox::new("compact-result");
+    let config = sandbox.config();
+    config.ensure_store().unwrap();
+    let task_id = "task-compact-result";
+    let task_dir = config.task_path(task_id);
+    fs::create_dir(&task_dir).unwrap();
+    let metadata = TaskMetadata {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        task_id: task_id.to_string(),
+        workspace_id: "workspace-compact".to_string(),
+        unit_name: format!("ordivon-m1-{task_id}.service"),
+        request_digest: format!("sha256:{}", "1".repeat(64)),
+        boot_id: "boot".to_string(),
+        created_unix_ms: 1,
+    };
+    fs::write(task_dir.join("stdout.log"), "0123456789").unwrap();
+    fs::write(task_dir.join("stderr.log"), "error").unwrap();
+    let result = RunnerTaskResult {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        task_id: task_id.to_string(),
+        status: TaskTerminalStatus::Completed,
+        exit_code: Some(0),
+        timed_out: false,
+        infrastructure_error: None,
+        started_unix_ms: 1,
+        finished_unix_ms: 2,
+        stdout: CapturedOutput {
+            artifact_id: format!("{task_id}.stdout"),
+            file_name: "stdout.log".to_string(),
+            digest: sha256_file(&task_dir.join("stdout.log")).unwrap(),
+            retained_bytes: 10,
+            dropped_bytes: 0,
+            truncated: false,
+        },
+        stderr: CapturedOutput {
+            artifact_id: format!("{task_id}.stderr"),
+            file_name: "stderr.log".to_string(),
+            digest: sha256_file(&task_dir.join("stderr.log")).unwrap(),
+            retained_bytes: 5,
+            dropped_bytes: 0,
+            truncated: false,
+        },
+    };
+    write_json_atomic(&task_dir.join("metadata.json"), &metadata).unwrap();
+    write_json_atomic(&task_dir.join("result.json"), &result).unwrap();
+    let compact = await_universal_task_compact(
+        &config,
+        &TaskAwaitRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            task_id: task_id.to_string(),
+            wait_ms: 0,
+            stdout_tail_bytes: 4,
+            stderr_tail_bytes: 16,
+        },
+    )
+    .unwrap();
+    assert_eq!(compact.status, MigrationTaskStatus::Completed);
+    assert_eq!(compact.stdout_tail, "6789");
+    assert!(compact.stdout_truncated);
+    assert_eq!(compact.stderr_tail, "error");
+    assert!(compact.artifacts_available);
+}
+
 fn init_git_repo(path: &Path) {
     fs::create_dir_all(path).unwrap();
     run_git(path, ["init", "-q"]);

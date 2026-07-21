@@ -307,7 +307,7 @@ pub fn remove_git_workspace(
     Ok(())
 }
 
-fn resolve_existing_workspace_path(
+pub(crate) fn resolve_existing_workspace_path(
     record: &WorkspaceRecord,
     relative: &str,
     allow_directory: bool,
@@ -352,6 +352,60 @@ pub(crate) fn resolve_workspace_cwd(
             Ok(path)
         }
     })
+}
+
+pub(crate) fn preflight_workspace_write_path(
+    record: &WorkspaceRecord,
+    relative: &str,
+) -> Result<PathBuf, UniversalExecError> {
+    let relative = validate_relative_path(relative, "relativePath")?;
+    let root = canonical_directory(Path::new(&record.workspace_path), "workspacePath")?;
+    let mut current = root.clone();
+    if let Some(parent) = relative.parent() {
+        for component in parent.components() {
+            let std::path::Component::Normal(name) = component else {
+                continue;
+            };
+            current.push(name);
+            if current.exists() {
+                let metadata = fs::symlink_metadata(&current)
+                    .map_err(|error| io_error(&current, "inspect", error))?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(UniversalExecError::new(
+                        UniversalExecErrorCode::WorkspacePathDenied,
+                        "workspace parent must remain a non-symlink directory",
+                        Some("relativePath"),
+                        false,
+                    ));
+                }
+            }
+        }
+    }
+    let target = root.join(relative);
+    if target.exists() {
+        let metadata =
+            fs::symlink_metadata(&target).map_err(|error| io_error(&target, "inspect", error))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::WorkspacePathDenied,
+                "write target must be a non-symlink regular file",
+                Some("relativePath"),
+                false,
+            ));
+        }
+    }
+    Ok(target)
+}
+
+pub(crate) fn remove_workspace_file(
+    record: &WorkspaceRecord,
+    relative: &str,
+) -> Result<(), UniversalExecError> {
+    let path = preflight_workspace_write_path(record, relative)?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|error| io_error(&path, "remove", error))?;
+    }
+    Ok(())
 }
 
 fn resolve_workspace_write_path(

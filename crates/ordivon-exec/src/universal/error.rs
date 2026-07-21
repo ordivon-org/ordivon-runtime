@@ -10,6 +10,7 @@ pub enum UniversalExecErrorCode {
     WorkspacePathDenied,
     RevisionNotFound,
     RevisionMismatch,
+    WorkspaceMutationIncomplete,
     TaskExists,
     TaskNotFound,
     TaskStartFailed,

@@ -1,9 +1,11 @@
 use ordivon_exec::{
-    cancel_universal_task, create_git_workspace, get_universal_task, read_task_artifact,
-    read_workspace_text, start_universal_task, workspace_diff, write_workspace_text,
-    ArtifactReadRequest, GitWorkspaceCreateRequest, TaskCancelRequest, TaskGetRequest,
-    UniversalExecError, UniversalExecRequest, UniversalExecutorConfig, WorkspaceDiffRequest,
-    WorkspaceReadRequest, WorkspaceWriteRequest,
+    await_universal_task_compact, cancel_universal_task, create_git_workspace, get_universal_task,
+    mutate_workspace, read_task_artifact, read_workspace_slice, read_workspace_text,
+    run_universal_task_compact, start_universal_task, workspace_diff, write_workspace_text,
+    ArtifactReadRequest, GitWorkspaceCreateRequest, TaskAwaitRequest, TaskCancelRequest,
+    TaskGetRequest, TaskRunRequest, UniversalExecError, UniversalExecRequest,
+    UniversalExecutorConfig, WorkspaceDiffRequest, WorkspaceMutateRequest, WorkspaceReadRequest,
+    WorkspaceReadSliceRequest, WorkspaceWriteRequest,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -40,6 +42,12 @@ fn main() -> ExitCode {
         "workspace-write" => dispatch::<WorkspaceWriteRequest, _>(&body, |request| {
             write_workspace_text(&config, request)
         }),
+        "workspace-mutate" => dispatch::<WorkspaceMutateRequest, _>(&body, |request| {
+            mutate_workspace(&config, request)
+        }),
+        "workspace-read-slice" => dispatch::<WorkspaceReadSliceRequest, _>(&body, |request| {
+            read_workspace_slice(&config, request)
+        }),
         "workspace-diff" => {
             dispatch::<WorkspaceDiffRequest, _>(&body, |request| workspace_diff(&config, request))
         }
@@ -49,6 +57,12 @@ fn main() -> ExitCode {
         "task-get" => {
             dispatch::<TaskGetRequest, _>(&body, |request| get_universal_task(&config, request))
         }
+        "task-await" => dispatch::<TaskAwaitRequest, _>(&body, |request| {
+            await_universal_task_compact(&config, request)
+        }),
+        "task-run" => dispatch::<TaskRunRequest, _>(&body, |request| {
+            run_universal_task_compact(&config, request)
+        }),
         "task-cancel" => dispatch::<TaskCancelRequest, _>(&body, |request| {
             cancel_universal_task(&config, request)
         }),
@@ -63,7 +77,7 @@ fn main() -> ExitCode {
         Ok(value) => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&json!({"ok": true, "result": value})).unwrap()
+                serde_json::to_string(&json!({"ok": true, "result": value})).unwrap()
             );
             ExitCode::SUCCESS
         }
@@ -116,7 +130,7 @@ fn required_env(name: &str) -> Result<String, UniversalExecError> {
 fn emit_error(error: UniversalExecError) -> ExitCode {
     println!(
         "{}",
-        serde_json::to_string_pretty(&json!({"ok": false, "error": error})).unwrap()
+        serde_json::to_string(&json!({"ok": false, "error": error})).unwrap()
     );
     ExitCode::from(2)
 }
