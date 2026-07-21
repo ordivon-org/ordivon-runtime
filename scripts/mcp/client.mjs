@@ -50,6 +50,19 @@ export function m5Config() {
   };
 }
 
+
+export async function connectEndpoint(name, endpoint, options = {}) {
+  const client = new Client({ name, version: '1.0.0' });
+  const transport = new StreamableHTTPClientTransport(new URL(endpoint), options);
+  await client.connect(transport);
+  return { client, transport };
+}
+
+export async function connectLegacy(name, measuredFetch = fetch) {
+  const endpoint = process.env.ORDIVON_LEGACY_MCP_URL ?? 'http://127.0.0.1:8811/mcp';
+  return connectEndpoint(name, endpoint, { fetch: measuredFetch });
+}
+
 export async function connectM5(name, measuredFetch = fetch) {
   const config = m5Config();
   const client = new Client({ name, version: '1.0.0' });
