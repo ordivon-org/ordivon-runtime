@@ -1,0 +1,95 @@
+{
+  "stage_id": "ORDIVON-JOB-SUPERVISOR-SPIKE-V0-2026-07-21",
+  "receipt_type": "R2",
+  "risk_class": "R2",
+  "draft": true,
+  "status": "DEGRADED_SUPERVISOR_PROVEN_ONLY",
+  "authority_impact": "local_test_fixture_and_nonexecuting_recovery_contract_only",
+  "task_type": "systemd_cgroup_job_supervisor_spike",
+  "timestamp": "2026-07-21T00:00:00Z",
+  "branch": "agent/job-supervisor-spike",
+  "base_commit": "91cdeebb5fde5bc5435e54046db76f909d852dd3",
+  "evidence": "A dedicated Rust fixture and explicit opt-in systemd integration test demonstrated that a transient service survives launcher and MCP caller exit, retains a three-process tree including a setsid child in one cgroup, and kills the entire SIGTERM-resistant tree after TimeoutStopSec. A later cross-call probe matched InvocationID, ControlGroup, MainPID, process start ticks, and cgroup membership. Natural exit tests showed successful transient units may be garbage-collected while failed units retain exit evidence. The final persisted test log records 2 passed, 0 failed in 2.61 seconds with no residual units or fixture processes.",
+  "verification_result": "The systemd/cgroup process-ownership model is locally proven for the current WSL boot. Recovery identity, lost/orphaned classification, boot-ID handling, and termination-intent interpretation are contract-tested. No production runner, persistent result, registry, capability evaluator, MCP Job tool, or deployment was implemented.",
+  "verification_results": [
+    {
+      "id": "systemd-spike-integration",
+      "command": "ORDIVON_RUN_SYSTEMD_SPIKE=1 cargo test -p ordivon-exec --features supervisor-spike --test systemd_supervisor_spike -- --ignored --nocapture --test-threads=1",
+      "passed": true,
+      "summary": "2 passed; 0 failed; 2.61 seconds; no residual units or fixture processes"
+    },
+    {
+      "id": "workspace-tests",
+      "command": "cargo test --workspace",
+      "passed": true,
+      "summary": "63 passed: exec 39, kernel 17, ledger 6, MCP 1"
+    },
+    {
+      "id": "recovery-contract-tests",
+      "command": "cargo test -p ordivon-exec",
+      "passed": true,
+      "summary": "39 tests passed, including 12 supervisor and recovery tests"
+    },
+    {
+      "id": "spike-clippy",
+      "command": "cargo clippy -p ordivon-exec --all-targets --features supervisor-spike -- -D warnings",
+      "passed": true,
+      "summary": "No warnings"
+    },
+    {
+      "id": "trace",
+      "command": "review docs/audits/runtime/ordivon-job-supervisor-spike-v0-evidence-2026-07-21.json",
+      "passed": true,
+      "summary": "Trace separates observed evidence from receipt claims and records limitations"
+    },
+    {
+      "id": "document-governance-delta",
+      "command": "scripts/check_document_registry.py on branch and exact base 91cdeeb",
+      "passed": true,
+      "summary": "Both report the same 3 pre-existing violations; P2 adds no new violation"
+    }
+  ],
+  "proven": [
+    "systemd transient service survives launcher and MCP caller exit",
+    "setsid child and grandchild remain in the service cgroup",
+    "control-group stop removes the full resistant process tree",
+    "running identity binds boot ID, unit, InvocationID, cgroup, PID, and starttime",
+    "successful transient units may disappear before later recovery",
+    "runner-owned durable terminal result is required",
+    "systemd timeout result requires persisted stop or deadline intent"
+  ],
+  "degraded_reasons": [
+    "No real WSL reboot was performed",
+    "The fixture is a feature-gated test binary, not a production runner",
+    "Recovery classification consumes observations but no production observer exists",
+    "The repository-wide document governance checker has exact-base pre-existing violations from P1"
+  ],
+  "remaining_debt": [
+    "P3 must implement Capability Policy loading and resolved execution-plan enforcement",
+    "P4 must implement a production runner and atomic request, state, result, and output artifacts",
+    "P4 must persist boot ID, supervisor identity, termination intent, and idempotency state",
+    "P4 must turn systemd and proc readings into trusted operational observations",
+    "No Job API or MCP Job tool exists",
+    "No production service or route has been changed"
+  ],
+  "authorization": {
+    "status": "not_requested",
+    "rationale": "This spike authorizes no general process execution, production systemd unit, persistent Job directory, MCP write surface, or deployment."
+  },
+  "next_bounded_action": "Implement Capability Scope v0 and resolve one exact cargo.build request into a digest-bound ExecutionPlan before implementing the production runner.",
+  "files_changed": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/ordivon-exec/Cargo.toml",
+    "crates/ordivon-exec/README.md",
+    "crates/ordivon-exec/src/bin/ordivon-job-fixture.rs",
+    "crates/ordivon-exec/src/job/mod.rs",
+    "crates/ordivon-exec/src/job/supervisor.rs",
+    "crates/ordivon-exec/src/lib.rs",
+    "crates/ordivon-exec/tests/systemd_supervisor_spike.rs",
+    "docs/architecture/ordivon-job-supervisor-spike-v0.md",
+    "docs/audits/runtime/ordivon-job-supervisor-spike-v0-evidence-2026-07-21.json",
+    "docs/governance/document-registry.jsonl",
+    "receipts/governance/ordivon-job-supervisor-spike-v0-2026-07-21.json"
+  ]
+}

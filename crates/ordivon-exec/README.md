@@ -28,6 +28,19 @@ not expose a shell command or executable in `JobStartRequest`.
 See `docs/architecture/ordivon-durable-job-contract-v0.md`. Contract presence
 does not authorize or implement process execution.
 
+## Verified supervisor spike
+
+P2 proves locally that systemd transient services and cgroup v2 can own a Job
+process tree after the launcher exits and can terminate a SIGTERM-resistant
+root/child/grandchild tree. Recovery identity includes kernel boot ID, unit,
+InvocationID, cgroup, PID, and process starttime. Successful units can be
+systemd-garbage-collected, so a production runner must atomically persist its
+terminal result before exit.
+
+The fixture and real systemd tests require the explicit `supervisor-spike`
+feature and are not part of the normal release target. See
+`docs/architecture/ordivon-job-supervisor-spike-v0.md`.
+
 ## Explicitly not implemented
 
 - patch or write operations;

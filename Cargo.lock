@@ -903,6 +903,7 @@ name = "ordivon-exec"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "libc",
  "schemars",
  "serde",
  "serde_json",

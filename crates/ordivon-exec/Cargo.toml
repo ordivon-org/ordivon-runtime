@@ -4,8 +4,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+supervisor-spike = ["dep:libc"]
+
+[[bin]]
+name = "ordivon-job-fixture"
+path = "src/bin/ordivon-job-fixture.rs"
+required-features = ["supervisor-spike"]
+
 [dependencies]
 hex.workspace = true
+libc = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true

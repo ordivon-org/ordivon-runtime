@@ -3,6 +3,7 @@ mod io;
 mod policy;
 mod receipt;
 mod state;
+mod supervisor;
 mod validation;
 
 pub use error::{JobContractError, JobContractErrorCode};
@@ -16,6 +17,11 @@ pub use policy::{
 pub use receipt::{OperationalEventOrigin, OperationalReceiptEvent, OperationalReceiptEventType};
 pub use state::{
     JobInternalState, JobOutputMetadata, JobPublicState, JobRecord, JobStateTransition,
+};
+pub use supervisor::{
+    classify_supervisor_recovery, classify_terminal_state, RecoveryEvidenceSource,
+    RunnerResultObservation, SupervisorIdentity, SupervisorObservation,
+    SupervisorRecoveryDisposition, SupervisorUnitState, TerminationIntent,
 };
 
 pub const JOB_CONTRACT_SCHEMA_VERSION: u32 = 1;

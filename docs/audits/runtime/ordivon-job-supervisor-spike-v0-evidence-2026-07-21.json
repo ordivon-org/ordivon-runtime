@@ -1,0 +1,80 @@
+{
+  "trace_id": "ORDIVON-JOB-SUPERVISOR-SPIKE-V0-2026-07-21",
+  "artifact_origin": "AI_WRITTEN_EVIDENCE_SUMMARY",
+  "trace_not_receipt": true,
+  "branch": "agent/job-supervisor-spike",
+  "base_commit": "91cdeebb5fde5bc5435e54046db76f909d852dd3",
+  "environment": {
+    "systemd": "261 (261.1-1-arch)",
+    "pid1": "systemd",
+    "cgroup_filesystem": "cgroup2fs",
+    "boot_id": "f51d3f64-44b8-4756-bb93-23fb5d52da82",
+    "effective_user": "root"
+  },
+  "cross_call_lifecycle": {
+    "unit_name": "ordivon-spike-p2-1784628181.service",
+    "invocation_id": "e3fe63dbbf914678b72b6bd3ad059bff",
+    "control_group": "/system.slice/ordivon-spike-p2-1784628181.service",
+    "main_pid": 212561,
+    "main_start_ticks": 1770059,
+    "launcher_shell_exited": true,
+    "recovery_identity_matched": true,
+    "cgroup_pids": [
+      212561,
+      212562,
+      212563
+    ],
+    "child_called_setsid": true,
+    "all_three_ignored_sigterm": true
+  },
+  "cgroup_stop": {
+    "elapsed_ms": 2082,
+    "systemd_result": "timeout",
+    "exec_main_code": 2,
+    "exec_main_status": 9,
+    "sigkill_pids": [
+      212561,
+      212562,
+      212563
+    ],
+    "all_pids_absent": true,
+    "cgroup_removed": true
+  },
+  "terminal_observations": {
+    "success": {
+      "exit_code": 0,
+      "later_load_state": "not-found",
+      "invocation_id_available": false
+    },
+    "failure": {
+      "exit_code": 7,
+      "load_state": "loaded",
+      "active_state": "failed",
+      "result": "exit-code",
+      "exec_main_code": 1,
+      "exec_main_status": 7
+    }
+  },
+  "reproducible_test": {
+    "command": "ORDIVON_RUN_SYSTEMD_SPIKE=1 cargo test -p ordivon-exec --features supervisor-spike --test systemd_supervisor_spike -- --ignored --nocapture --test-threads=1",
+    "result": "2 passed; 0 failed; 0 ignored",
+    "duration_seconds": 2.61,
+    "runner_unit": "ordivon-spike-test-clean-1784628694.service",
+    "runner_result": "success",
+    "log_sha256": "sha256:a2e1604af2708db87d7fb3a8fca3b60aeb0222fc48a97d7471ea5bea82886022",
+    "residual_units": 0,
+    "residual_fixture_processes": 0
+  },
+  "proven": [
+    "transient service survives launcher and MCP caller exit",
+    "setsid does not escape the service cgroup",
+    "control-group stop removes a SIGTERM-resistant process tree",
+    "running identity binds boot ID, unit, InvocationID, cgroup, PID, and starttime",
+    "successful transient units may be garbage-collected",
+    "runner-owned terminal result and persisted termination intent are required"
+  ],
+  "not_proven": [
+    "no WSL reboot was performed",
+    "no production runner, registry, output log, policy evaluator, MCP Job tool, release build, route, or service was implemented"
+  ]
+}
