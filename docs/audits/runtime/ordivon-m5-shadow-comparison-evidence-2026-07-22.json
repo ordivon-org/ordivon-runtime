@@ -1,0 +1,497 @@
+{
+  "schemaVersion": 1,
+  "phase": "ORDIVON-MIGRATION-M5-SHADOW-COMPARISON-2026-07-22",
+  "generatedAt": "2026-07-21T20:38:46.323Z",
+  "sourceRevision": "ff57d258c0697dba1335bf8a86ccb32ca85e9128",
+  "iterationsPerJourney": 3,
+  "alternatingOrder": true,
+  "journeyKinds": [
+    "readonly-audit",
+    "single-file-edit",
+    "multi-file-test",
+    "failure-repair-loop"
+  ],
+  "rawSamples": {
+    "legacy": [
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "kind": "readonly-audit",
+        "pairId": "readonly-audit-0-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 465,
+        "toolCalls": 4,
+        "contextBytes": 1738,
+        "outputBytes": 153,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:6ab6c57c38e6a95eb0a847f14a66073bccab202b6a42af5a3abdb629dd9caa95"
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "kind": "readonly-audit",
+        "pairId": "readonly-audit-1-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 451,
+        "toolCalls": 4,
+        "contextBytes": 1738,
+        "outputBytes": 153,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:237908f6f00b67d0707ffef626e924679fffa04ebab68567bf408ae1cd3353bb"
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "kind": "readonly-audit",
+        "pairId": "readonly-audit-2-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 488,
+        "toolCalls": 4,
+        "contextBytes": 1738,
+        "outputBytes": 153,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:6973393674a200c97400fbe35c0489fb1f0e44f76bf22d6c8b41057f2052f357"
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "kind": "single-file-edit",
+        "pairId": "single-file-edit-0-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 539,
+        "toolCalls": 5,
+        "contextBytes": 3333,
+        "outputBytes": 0,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:5ed66cd76acdc38cb055e8d534a35ab5fdd6c8b940070665a51d9cfc15cf5eeb"
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "kind": "single-file-edit",
+        "pairId": "single-file-edit-1-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 522,
+        "toolCalls": 5,
+        "contextBytes": 3333,
+        "outputBytes": 0,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:df56c01830b9fea59ab0fa4b32e11219122803ebbae0aa7a89aa0be926ceb272"
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "kind": "single-file-edit",
+        "pairId": "single-file-edit-2-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 566,
+        "toolCalls": 5,
+        "contextBytes": 3333,
+        "outputBytes": 0,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:df845ef6866d27f80d1db452b921ab7c09569e6f23c75c3135281c1c5d5a74d4"
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "kind": "multi-file-test",
+        "pairId": "multi-file-test-0-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 665,
+        "toolCalls": 4,
+        "contextBytes": 776,
+        "outputBytes": 233,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:f8407e7cb9e599eacfc39f4fd4f98e51d5790646f5d78f15db3c0b77527faa39"
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "kind": "multi-file-test",
+        "pairId": "multi-file-test-1-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 672,
+        "toolCalls": 4,
+        "contextBytes": 776,
+        "outputBytes": 233,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:6b717f63fac3c38ab0b0bd6205410c92fc6e5054fbc6bf058d589bd41f60a680"
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "kind": "multi-file-test",
+        "pairId": "multi-file-test-2-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 639,
+        "toolCalls": 4,
+        "contextBytes": 776,
+        "outputBytes": 233,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:4dce7e76e52df65c41a1cbf1308e97b690366ab829a69897f2d81df69bb990ce"
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "kind": "failure-repair-loop",
+        "pairId": "failure-repair-loop-0-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 716,
+        "toolCalls": 6,
+        "contextBytes": 1706,
+        "outputBytes": 926,
+        "httpRequests": 6,
+        "repairRounds": 1,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:8a06abb203fd531fc1e296e938e1e37590b4d3be48ef14183e21cb104ff90811"
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "kind": "failure-repair-loop",
+        "pairId": "failure-repair-loop-1-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 686,
+        "toolCalls": 6,
+        "contextBytes": 1706,
+        "outputBytes": 926,
+        "httpRequests": 6,
+        "repairRounds": 1,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:0b442def088595abcd1a16fa887a33c29c83754f303a8c335c8bce57dabaa119"
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "kind": "failure-repair-loop",
+        "pairId": "failure-repair-loop-2-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 711,
+        "toolCalls": 6,
+        "contextBytes": 1706,
+        "outputBytes": 926,
+        "httpRequests": 6,
+        "repairRounds": 1,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:a3f8eb999dd93fa7a31eb44cf4e7f649c0f454f0eb004b041d8902579c26cf1f"
+      }
+    ],
+    "ordivon": [
+      {
+        "backend": "ORDIVON_M5",
+        "kind": "readonly-audit",
+        "pairId": "readonly-audit-0-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 536,
+        "toolCalls": 4,
+        "contextBytes": 1280,
+        "outputBytes": 75,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:6ab6c57c38e6a95eb0a847f14a66073bccab202b6a42af5a3abdb629dd9caa95"
+      },
+      {
+        "backend": "ORDIVON_M5",
+        "kind": "readonly-audit",
+        "pairId": "readonly-audit-1-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 520,
+        "toolCalls": 4,
+        "contextBytes": 1280,
+        "outputBytes": 75,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:237908f6f00b67d0707ffef626e924679fffa04ebab68567bf408ae1cd3353bb"
+      },
+      {
+        "backend": "ORDIVON_M5",
+        "kind": "readonly-audit",
+        "pairId": "readonly-audit-2-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 552,
+        "toolCalls": 4,
+        "contextBytes": 1280,
+        "outputBytes": 75,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:6973393674a200c97400fbe35c0489fb1f0e44f76bf22d6c8b41057f2052f357"
+      },
+      {
+        "backend": "ORDIVON_M5",
+        "kind": "single-file-edit",
+        "pairId": "single-file-edit-0-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 354,
+        "toolCalls": 5,
+        "contextBytes": 3376,
+        "outputBytes": 0,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:5ed66cd76acdc38cb055e8d534a35ab5fdd6c8b940070665a51d9cfc15cf5eeb"
+      },
+      {
+        "backend": "ORDIVON_M5",
+        "kind": "single-file-edit",
+        "pairId": "single-file-edit-1-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 344,
+        "toolCalls": 5,
+        "contextBytes": 3376,
+        "outputBytes": 0,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:df56c01830b9fea59ab0fa4b32e11219122803ebbae0aa7a89aa0be926ceb272"
+      },
+      {
+        "backend": "ORDIVON_M5",
+        "kind": "single-file-edit",
+        "pairId": "single-file-edit-2-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 340,
+        "toolCalls": 5,
+        "contextBytes": 3376,
+        "outputBytes": 0,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:df845ef6866d27f80d1db452b921ab7c09569e6f23c75c3135281c1c5d5a74d4"
+      },
+      {
+        "backend": "ORDIVON_M5",
+        "kind": "multi-file-test",
+        "pairId": "multi-file-test-0-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 402,
+        "toolCalls": 4,
+        "contextBytes": 976,
+        "outputBytes": 155,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:f8407e7cb9e599eacfc39f4fd4f98e51d5790646f5d78f15db3c0b77527faa39"
+      },
+      {
+        "backend": "ORDIVON_M5",
+        "kind": "multi-file-test",
+        "pairId": "multi-file-test-1-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 398,
+        "toolCalls": 4,
+        "contextBytes": 976,
+        "outputBytes": 155,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:6b717f63fac3c38ab0b0bd6205410c92fc6e5054fbc6bf058d589bd41f60a680"
+      },
+      {
+        "backend": "ORDIVON_M5",
+        "kind": "multi-file-test",
+        "pairId": "multi-file-test-2-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 433,
+        "toolCalls": 4,
+        "contextBytes": 976,
+        "outputBytes": 155,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:4dce7e76e52df65c41a1cbf1308e97b690366ab829a69897f2d81df69bb990ce"
+      },
+      {
+        "backend": "ORDIVON_M5",
+        "kind": "failure-repair-loop",
+        "pairId": "failure-repair-loop-0-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 572,
+        "toolCalls": 6,
+        "contextBytes": 2162,
+        "outputBytes": 786,
+        "httpRequests": 6,
+        "repairRounds": 1,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:8a06abb203fd531fc1e296e938e1e37590b4d3be48ef14183e21cb104ff90811"
+      },
+      {
+        "backend": "ORDIVON_M5",
+        "kind": "failure-repair-loop",
+        "pairId": "failure-repair-loop-1-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 653,
+        "toolCalls": 6,
+        "contextBytes": 2162,
+        "outputBytes": 786,
+        "httpRequests": 6,
+        "repairRounds": 1,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:0b442def088595abcd1a16fa887a33c29c83754f303a8c335c8bce57dabaa119"
+      },
+      {
+        "backend": "ORDIVON_M5",
+        "kind": "failure-repair-loop",
+        "pairId": "failure-repair-loop-2-ff57d258c0",
+        "succeeded": true,
+        "elapsedMs": 578,
+        "toolCalls": 6,
+        "contextBytes": 2162,
+        "outputBytes": 786,
+        "httpRequests": 6,
+        "repairRounds": 1,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:a3f8eb999dd93fa7a31eb44cf4e7f649c0f454f0eb004b041d8902579c26cf1f"
+      }
+    ]
+  },
+  "summaries": {
+    "byKind": {
+      "readonly-audit": {
+        "legacy": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 465,
+          "toolCalls": 4,
+          "contextBytes": 1738,
+          "outputBytes": 153,
+          "httpRequests": 4,
+          "repairRounds": 0,
+          "fallbackCount": 0
+        },
+        "ordivon": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 536,
+          "toolCalls": 4,
+          "contextBytes": 1280,
+          "outputBytes": 75,
+          "httpRequests": 4,
+          "repairRounds": 0,
+          "fallbackCount": 0
+        }
+      },
+      "single-file-edit": {
+        "legacy": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 539,
+          "toolCalls": 5,
+          "contextBytes": 3333,
+          "outputBytes": 0,
+          "httpRequests": 5,
+          "repairRounds": 0,
+          "fallbackCount": 0
+        },
+        "ordivon": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 344,
+          "toolCalls": 5,
+          "contextBytes": 3376,
+          "outputBytes": 0,
+          "httpRequests": 5,
+          "repairRounds": 0,
+          "fallbackCount": 0
+        }
+      },
+      "multi-file-test": {
+        "legacy": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 665,
+          "toolCalls": 4,
+          "contextBytes": 776,
+          "outputBytes": 233,
+          "httpRequests": 4,
+          "repairRounds": 0,
+          "fallbackCount": 0
+        },
+        "ordivon": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 402,
+          "toolCalls": 4,
+          "contextBytes": 976,
+          "outputBytes": 155,
+          "httpRequests": 4,
+          "repairRounds": 0,
+          "fallbackCount": 0
+        }
+      },
+      "failure-repair-loop": {
+        "legacy": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 711,
+          "toolCalls": 6,
+          "contextBytes": 1706,
+          "outputBytes": 926,
+          "httpRequests": 6,
+          "repairRounds": 1,
+          "fallbackCount": 0
+        },
+        "ordivon": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 578,
+          "toolCalls": 6,
+          "contextBytes": 2162,
+          "outputBytes": 786,
+          "httpRequests": 6,
+          "repairRounds": 1,
+          "fallbackCount": 0
+        }
+      }
+    },
+    "overall": {
+      "legacy": {
+        "samples": 12,
+        "succeeded": true,
+        "elapsedMs": 603,
+        "toolCalls": 5,
+        "contextBytes": 1722,
+        "outputBytes": 193,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0
+      },
+      "ordivon": {
+        "samples": 12,
+        "succeeded": true,
+        "elapsedMs": 477,
+        "toolCalls": 5,
+        "contextBytes": 1721,
+        "outputBytes": 115,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0
+      }
+    }
+  },
+  "decision": {
+    "limitedDogfoodEligible": true,
+    "gates": {
+      "completionNotWorse": true,
+      "semanticEquivalence": true,
+      "repairRoundsNotWorse": true,
+      "toolCallsNotWorse": true,
+      "contextWithinTenPercent": true,
+      "elapsedWithinTwentyFivePercent": true,
+      "noFallback": true
+    }
+  },
+  "claimsNotMade": [
+    "Scripted Shadow journeys do not measure autonomous model planning quality.",
+    "Twelve paired samples do not establish production reliability.",
+    "The decision authorizes only bounded local Dogfood, not production routing."
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "phase": "ORDIVON-M5-WIRE-CONTRACT",
+  "workspaceId": "m5-wire-workspace-840972-1784666366932",
+  "taskId": "m5-wire-task-840972-1784666366932",
+  "observations": [
+    {
+      "name": "workspace.open",
+      "bytes": 167
+    },
+    {
+      "name": "workspace.read",
+      "bytes": 251
+    },
+    {
+      "name": "workspace.mutate",
+      "bytes": 200
+    },
+    {
+      "name": "workspace.exec",
+      "bytes": 185
+    },
+    {
+      "name": "task.observe",
+      "bytes": 185
+    },
+    {
+      "name": "artifact.read",
+      "bytes": 299
+    },
+    {
+      "name": "workspace.diff",
+      "bytes": 94
+    }
+  ],
+  "concurrentReads": 64,
+  "coreTraceRows": 71,
+  "httpTraceRows": 77,
+  "clientTraceIds": 76,
+  "passed": true
+}

@@ -1,0 +1,153 @@
+{
+  "stage_id": "ORDIVON-M5-LIMITED-DOGFOOD-2026-07-22",
+  "receipt_type": "R2",
+  "risk_class": "R2",
+  "draft": true,
+  "status": "LIMITED_LOCAL_DOGFOOD_GATES_PASS_NO_PRODUCTION_CUTOVER",
+  "task_type": "limited_agent_dogfood_and_shadow_comparison",
+  "timestamp": "2026-07-22T00:00:00Z",
+  "branch": "agent/m5-limited-dogfood",
+  "base_commit": "97b609e65d024c881f85521b8812aaa634175758",
+  "measured_implementation_commit": "ff57d258c0697dba1335bf8a86ccb32ca85e9128",
+  "files_changed": [
+    "crates/ordivon-mcp/src/bin/ordivon-m4-http.rs",
+    "crates/ordivon-mcp/src/m4/mod.rs",
+    "crates/ordivon-mcp/src/m4/tests.rs",
+    "crates/ordivon-mcp/src/m4/tools.rs",
+    "docs/architecture/ordivon-m5-limited-dogfood.md",
+    "docs/audits/runtime/ordivon-m5-limited-dogfood-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m5-shadow-comparison-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m5-wire-contract-evidence-2026-07-22.json",
+    "docs/governance/document-registry.jsonl",
+    "receipts/governance/ordivon-m5-limited-dogfood-2026-07-22.json",
+    "scripts/README.md",
+    "scripts/mcp/check_m5_evidence.py",
+    "scripts/mcp/client.mjs",
+    "scripts/mcp/m5_dogfood.mjs",
+    "scripts/mcp/m5_shadow.mjs",
+    "scripts/mcp/m5_wire_contract.mjs",
+    "scripts/mcp/sdk-lock.json",
+    "scripts/mcp/stack.py"
+  ],
+  "implemented_contracts": [
+    "locked MCP SDK version and package identity",
+    "reproducible transient local MCP stack with success and failure cleanup",
+    "M5 source repository and exact revision admission",
+    "wire response budgets and 64-way trace identity verification",
+    "seven bounded local Dogfood journeys without Legacy fallback",
+    "twelve paired Shadow samples across four safe journeys",
+    "independent evidence recomputation and tamper rejection",
+    "explicit no-production-cutover and forbidden external side-effect policy"
+  ],
+  "evidence": "M5 wire responses were 94 to 299 bytes for seven exercised tools and 64 concurrent reads preserved unique trace identities. Seven Dogfood journeys succeeded with 33 calls, 15090 context bytes, one repair round, zero fallback, disconnect recovery, cancellation cleanup, a real Rust target test, and bounded large-log Artifact retrieval. Twelve Shadow pairs achieved semantic equivalence; overall medians were Legacy 603 ms and 1722 context bytes versus Ordivon 477 ms and 1721 context bytes with equal calls and HTTP requests.",
+  "verification_result": "M5 is eligible for continued bounded local Dogfood only. The evidence does not authorize production routing, remote exposure, credentials, deployment, or external side effects.",
+  "degraded_reasons": [
+    "The read-only Shadow journey was slower on Ordivon: 536 ms versus 465 ms.",
+    "Multi-file and repair journeys returned more Context than Legacy despite lower latency.",
+    "The Dogfood and Shadow harnesses are scripted and do not measure end-to-end autonomous model planning quality.",
+    "The filesystem Task registry remains non-transactional and has no production concurrency guarantee.",
+    "The worker still lacks a dedicated non-privileged identity.",
+    "Retention, quota, garbage collection, full reconciliation, remote authentication, and broader workload coverage remain absent.",
+    "Repository document governance retains the exact pre-existing violations from the M4 base."
+  ],
+  "remaining_debt": [
+    "Build the transactional Job and Attempt registry with idempotency and concurrency reservation.",
+    "Move execution to a dedicated non-privileged worker before higher-risk capabilities.",
+    "Add retention, quota, garbage collection, startup reconciliation, and reboot classification.",
+    "Optimize short read-only routing and per-journey mutation and repair projections.",
+    "Expand Dogfood to autonomous model planning, concurrent Tasks, Rust build failures, and longer repair loops.",
+    "Keep Cloudflare, credentials, deployment, push, and merge out of scope until explicit Authority stages."
+  ],
+  "authorization": {
+    "status": "not_requested",
+    "rationale": "M5 uses a localhost-only experimental MCP stack and explicitly forbids production routing and external side effects."
+  },
+  "next_bounded_action": "Begin M6 as a separate transactional Job and Attempt control-plane stage; continue M5 only as bounded local Dogfood evidence.",
+  "canonical_sources": [
+    "docs/architecture/ordivon-m4-experimental-mcp-adapter.md",
+    "docs/architecture/ordivon-m5-limited-dogfood.md",
+    "docs/audits/runtime/ordivon-m5-wire-contract-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m5-limited-dogfood-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m5-shadow-comparison-evidence-2026-07-22.json"
+  ],
+  "verification_results": [
+    {
+      "id": "m5-wire-contract",
+      "command": "run m5_wire_contract through stack.py exec",
+      "passed": true,
+      "summary": "Seven tool responses stayed within budget; 64 concurrent reads preserved trace identity."
+    },
+    {
+      "id": "m5-dogfood",
+      "command": "run seven bounded Dogfood journeys",
+      "passed": true,
+      "summary": "Seven journeys passed with one repair round, zero fallback, recovery, cancellation, Rust test, and bounded Artifact evidence."
+    },
+    {
+      "id": "m5-shadow",
+      "command": "run four journeys as three alternating Shadow pairs",
+      "passed": true,
+      "summary": "Twelve pairs passed semantic equivalence; overall Ordivon median was 477 ms versus Legacy 603 ms."
+    },
+    {
+      "id": "m5-independent-checker",
+      "command": "recompute wire, Dogfood, and Shadow evidence",
+      "passed": true,
+      "summary": "M5_EVIDENCE_PASS"
+    },
+    {
+      "id": "m5-tamper-negative",
+      "command": "modify Shadow median and rerun checker",
+      "passed": true,
+      "summary": "Checker rejected the modified evidence with exit 1."
+    },
+    {
+      "id": "stack-failure-cleanup",
+      "command": "run a deliberately failing child through stack.py exec",
+      "passed": true,
+      "summary": "Nonzero child exit preserved and manifest, store, unit, and worktree state were removed."
+    },
+    {
+      "id": "workspace-tests",
+      "command": "cargo test --workspace",
+      "passed": true,
+      "summary": "95 default tests passed; experimental execution remains excluded by default."
+    },
+    {
+      "id": "universal-executor-tests",
+      "command": "cargo test -p ordivon-exec --features universal-executor-m1 --lib",
+      "passed": true,
+      "summary": "82 feature-gated executor tests passed."
+    },
+    {
+      "id": "mcp-feature-tests",
+      "command": "cargo test -p ordivon-mcp --features experimental-http-m4",
+      "passed": true,
+      "summary": "Five M4/M5 library tests and the existing MCP main test passed."
+    },
+    {
+      "id": "strict-clippy",
+      "command": "run default, executor-feature, and MCP-feature Clippy with warnings denied",
+      "passed": true,
+      "summary": "All strict Clippy gates passed."
+    },
+    {
+      "id": "document-governance-delta",
+      "command": "compare document registry checker at M5 head and exact M4 base",
+      "passed": true,
+      "summary": "Both report the same three pre-existing violations; M5 adds none."
+    },
+    {
+      "id": "receipt-integrity",
+      "command": "run receipt integrity and overclaim checks on the M5 receipt",
+      "passed": true,
+      "summary": "Receipt integrity passed and overclaim findings are zero after wording correction."
+    },
+    {
+      "id": "final-cleanup",
+      "command": "scan M5 units, stores, worktrees, processes, and temporary files",
+      "passed": true,
+      "summary": "No M5 runtime residue remains."
+    }
+  ]
+}

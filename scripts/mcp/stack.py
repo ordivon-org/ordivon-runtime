@@ -212,6 +212,10 @@ def stop_stack(state_root: Path, *, tolerate_missing: bool = False) -> dict[str,
     for item in manifest.get("temporaryFiles", []):
         Path(item).unlink(missing_ok=True)
     manifest_path.unlink(missing_ok=True)
+    try:
+        state_root.rmdir()
+    except OSError:
+        pass
     return {"stopped": True, "unit": unit, "removedWorktrees": removed}
 
 
