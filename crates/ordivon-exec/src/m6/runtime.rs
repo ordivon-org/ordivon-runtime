@@ -18,6 +18,7 @@ use crate::{
     SupervisorObservation, SupervisorRecoveryDisposition, SupervisorUnitState, TerminationIntent,
 };
 
+use super::registry::JobSnapshotM6;
 use super::{
     AdmissionOutcomeM6, ArtifactRegistrationM6, AttemptRecordM6, AttemptState, JobListRequestM6,
     JobListResultM6, M6ArtifactReadRequest, M6ArtifactReadResult, M6Error, M6ErrorCode,
@@ -190,9 +191,50 @@ impl M6Runtime {
                 false,
             ));
         }
-        let job = self.registry.get_job(&attempt.job_id)?;
-        let plan = self.registry.execution_plan(&job.job_id)?;
-        let launch_token = self.registry.launch_token(&attempt.attempt_id)?;
+        let snapshot = self.registry.job_snapshot(&attempt.job_id)?;
+        let job = snapshot.job;
+        let stored_attempt = snapshot.attempt.ok_or_else(|| {
+            M6Error::new(
+                M6ErrorCode::RegistryCorrupt,
+                "Job has no Attempt while materializing bundle",
+                Some("attemptId"),
+                false,
+            )
+        })?;
+        if stored_attempt.attempt_id != attempt.attempt_id
+            || stored_attempt.row_version != attempt.row_version
+        {
+            return Err(M6Error::new(
+                M6ErrorCode::AttemptStateConflict,
+                "Attempt changed before bundle materialization",
+                Some("attemptId"),
+                false,
+            ));
+        }
+        let plan: M6ExecutionPlan =
+            serde_json::from_str(&job.execution_plan_json).map_err(|error| {
+                M6Error::new(
+                    M6ErrorCode::RegistryCorrupt,
+                    format!("stored execution plan is invalid: {error}"),
+                    Some("executionPlan"),
+                    false,
+                )
+            })?;
+        let launch_token = sha256_bytes(
+            format!(
+                "m6-launch-v1\0{}\0{}",
+                attempt.attempt_id, job.operation_digest
+            )
+            .as_bytes(),
+        );
+        if sha256_bytes(launch_token.as_bytes()) != attempt.launch_token_digest {
+            return Err(M6Error::new(
+                M6ErrorCode::RegistryCorrupt,
+                "stored launch-token digest is inconsistent",
+                Some("launchTokenDigest"),
+                false,
+            ));
+        }
         let request = RunnerTaskRequest {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             job_id: Some(job.job_id.clone()),
@@ -498,7 +540,7 @@ impl M6Runtime {
             artifacts,
             reason_code: reason_code.to_string(),
         })?;
-        self.observation_from_projection(projection, 4096, 4096)
+        self.observation_from_parts(projection, Some(current), 4096, 4096)
     }
 
     fn validate_captured_output(
@@ -545,10 +587,13 @@ impl M6Runtime {
         let deadline = Instant::now() + Duration::from_millis(request.wait_ms);
         loop {
             self.reconcile_job(&request.job_id)?;
-            let projection = self.registry.project_job(&request.job_id)?;
-            if projection.result_available || request.wait_ms == 0 || Instant::now() >= deadline {
-                return self.observation_from_projection(
-                    projection,
+            let snapshot = self.registry.job_snapshot(&request.job_id)?;
+            if snapshot.projection.result_available
+                || request.wait_ms == 0
+                || Instant::now() >= deadline
+            {
+                return self.observation_from_snapshot(
+                    snapshot,
                     request.stdout_tail_bytes,
                     request.stderr_tail_bytes,
                 );
@@ -563,17 +608,31 @@ impl M6Runtime {
         stdout_tail_bytes: u64,
         stderr_tail_bytes: u64,
     ) -> M6Result<M6TaskObservation> {
-        let projection = self.registry.project_job(job_id)?;
-        self.observation_from_projection(projection, stdout_tail_bytes, stderr_tail_bytes)
+        let snapshot = self.registry.job_snapshot(job_id)?;
+        self.observation_from_snapshot(snapshot, stdout_tail_bytes, stderr_tail_bytes)
     }
 
-    fn observation_from_projection(
+    fn observation_from_snapshot(
         &self,
-        projection: super::JobProjectionM6,
+        snapshot: JobSnapshotM6,
         stdout_tail_bytes: u64,
         stderr_tail_bytes: u64,
     ) -> M6Result<M6TaskObservation> {
-        let attempt = self.registry.get_latest_attempt(&projection.job_id)?;
+        self.observation_from_parts(
+            snapshot.projection,
+            snapshot.attempt,
+            stdout_tail_bytes,
+            stderr_tail_bytes,
+        )
+    }
+
+    fn observation_from_parts(
+        &self,
+        projection: super::JobProjectionM6,
+        attempt: Option<AttemptRecordM6>,
+        stdout_tail_bytes: u64,
+        stderr_tail_bytes: u64,
+    ) -> M6Result<M6TaskObservation> {
         let (stdout_tail, stderr_tail, stdout_truncated, stderr_truncated, error_summary) =
             if let Some(attempt) = &attempt {
                 let stdout_tail = read_tail_text(
@@ -623,11 +682,11 @@ impl M6Runtime {
     }
 
     fn reconcile_job(&self, job_id: &str) -> M6Result<()> {
-        let job = self.registry.get_job(job_id)?;
-        if job.resolution.is_some() {
+        let snapshot = self.registry.job_snapshot(job_id)?;
+        if snapshot.job.resolution.is_some() {
             return Ok(());
         }
-        let attempt = self.registry.get_latest_attempt(job_id)?.ok_or_else(|| {
+        let attempt = snapshot.attempt.ok_or_else(|| {
             M6Error::new(
                 M6ErrorCode::RegistryCorrupt,
                 "unresolved Job has no Attempt",
@@ -873,7 +932,7 @@ impl M6Runtime {
             artifacts,
             reason_code: reason_code.to_string(),
         })?;
-        self.observation_from_projection(projection, 4096, 4096)
+        self.observation_from_parts(projection, Some(current), 4096, 4096)
     }
 
     pub fn cancel_task(&self, request: &M6TaskCancelRequest) -> M6Result<M6TaskObservation> {
@@ -885,7 +944,7 @@ impl M6Runtime {
         }
         let projection = self.registry.request_cancel(&request.job_id, now_ms()?)?;
         if projection.result_available {
-            return self.observation_from_projection(projection, 4096, 4096);
+            return self.observation_from_registry(&request.job_id, 4096, 4096);
         }
         let attempt = self
             .registry

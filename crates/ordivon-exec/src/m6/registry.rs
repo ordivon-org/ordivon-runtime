@@ -34,6 +34,13 @@ pub struct M6Registry {
     config: M6RegistryConfig,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct JobSnapshotM6 {
+    pub job: JobRecordM6,
+    pub attempt: Option<AttemptRecordM6>,
+    pub projection: JobProjectionM6,
+}
+
 impl M6RegistryConfig {
     pub fn validate(&self) -> M6Result<()> {
         if !self.db_path.is_absolute() {
@@ -70,6 +77,7 @@ impl M6Registry {
         }
         let registry = Self { config };
         let mut connection = registry.open_connection()?;
+        registry.ensure_wal_mode(&connection)?;
         registry.apply_migrations(&mut connection)?;
         registry.validate_database(&connection)?;
         set_private_file(&registry.config.db_path)?;
@@ -98,6 +106,10 @@ impl M6Registry {
         connection
             .pragma_update(None, "synchronous", "FULL")
             .map_err(|error| M6Error::from_sql(error, "cannot set synchronous mode"))?;
+        Ok(connection)
+    }
+
+    fn ensure_wal_mode(&self, connection: &Connection) -> M6Result<()> {
         let mode: String = connection
             .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
             .map_err(|error| M6Error::from_sql(error, "cannot enable WAL mode"))?;
@@ -109,7 +121,7 @@ impl M6Registry {
                 false,
             ));
         }
-        Ok(connection)
+        Ok(())
     }
 
     fn apply_migrations(&self, connection: &mut Connection) -> M6Result<()> {
@@ -613,13 +625,13 @@ impl M6Registry {
             ))
     }
 
+    pub(crate) fn job_snapshot(&self, job_id: &str) -> M6Result<JobSnapshotM6> {
+        let connection = self.open_connection()?;
+        load_job_snapshot(&connection, job_id)
+    }
+
     pub fn project_job(&self, job_id: &str) -> M6Result<JobProjectionM6> {
-        let job = self.get_job(job_id)?;
-        let attempt = match job.current_attempt_id.as_deref() {
-            Some(attempt_id) => Some(self.get_attempt(attempt_id)?),
-            None => self.get_latest_attempt(job_id)?,
-        };
-        Ok(project_job(&job, attempt.as_ref()))
+        Ok(self.job_snapshot(job_id)?.projection)
     }
 
     pub fn list_jobs(&self, request: &JobListRequestM6) -> M6Result<JobListResultM6> {
@@ -814,7 +826,7 @@ impl M6Registry {
         transaction
             .commit()
             .map_err(|error| M6Error::from_sql(error, "cannot commit bundle identity"))?;
-        self.get_attempt(attempt_id)
+        load_attempt(&connection, attempt_id)
     }
 
     pub fn mark_dispatch_issued(
@@ -870,7 +882,7 @@ impl M6Registry {
         transaction
             .commit()
             .map_err(|error| M6Error::from_sql(error, "cannot commit dispatch intent"))?;
-        self.get_attempt(attempt_id)
+        load_attempt(&connection, attempt_id)
     }
 
     pub fn bind_running(
@@ -946,7 +958,7 @@ impl M6Registry {
         transaction
             .commit()
             .map_err(|error| M6Error::from_sql(error, "cannot commit Runner identity"))?;
-        self.get_attempt(attempt_id)
+        load_attempt(&connection, attempt_id)
     }
 
     pub fn request_cancel(&self, job_id: &str, observed_at_ms: u64) -> M6Result<JobProjectionM6> {
@@ -954,15 +966,10 @@ impl M6Registry {
         let transaction = immediate(&mut connection, "cancel-intent transaction")?;
         let job = load_job(&transaction, job_id)?;
         if job.resolution.is_some() {
-            let attempt = job
-                .current_attempt_id
-                .as_deref()
-                .map(|attempt_id| load_attempt(&transaction, attempt_id))
-                .transpose()?;
             transaction
                 .commit()
                 .map_err(|error| M6Error::from_sql(error, "cannot close terminal cancel replay"))?;
-            return Ok(project_job(&job, attempt.as_ref()));
+            return Ok(load_job_snapshot(&connection, job_id)?.projection);
         }
         let attempt_id = job.current_attempt_id.clone().ok_or_else(|| {
             M6Error::new(
@@ -1044,7 +1051,7 @@ impl M6Registry {
         transaction
             .commit()
             .map_err(|error| M6Error::from_sql(error, "cannot commit cancel intent"))?;
-        self.project_job(job_id)
+        Ok(load_job_snapshot(&connection, job_id)?.projection)
     }
 
     pub fn commit_terminal(&self, request: &TerminalCommitM6) -> M6Result<JobProjectionM6> {
@@ -1069,7 +1076,7 @@ impl M6Registry {
                 transaction
                     .commit()
                     .map_err(|error| M6Error::from_sql(error, "cannot close terminal replay"))?;
-                return self.project_job(&job.job_id);
+                return Ok(load_job_snapshot(&connection, &job.job_id)?.projection);
             }
             return Err(M6Error::new(
                 M6ErrorCode::ResultIdentityConflict,
@@ -1204,7 +1211,7 @@ impl M6Registry {
         transaction
             .commit()
             .map_err(|error| M6Error::from_sql(error, "cannot commit terminal transaction"))?;
-        self.project_job(&attempt.job_id)
+        Ok(load_job_snapshot(&connection, &attempt.job_id)?.projection)
     }
 
     pub fn list_nonterminal_attempts(&self) -> M6Result<Vec<AttemptRecordM6>> {
@@ -1662,6 +1669,32 @@ fn resolution_for_state(state: AttemptState) -> M6Result<JobResolution> {
         AttemptState::Orphaned => Ok(JobResolution::Orphaned),
         _ => Err(M6Error::invalid("Attempt state is not terminal", "state")),
     }
+}
+
+fn load_job_snapshot(connection: &Connection, job_id: &str) -> M6Result<JobSnapshotM6> {
+    let job = load_job(connection, job_id)?;
+    let attempt = match job.current_attempt_id.as_deref() {
+        Some(attempt_id) => Some(load_attempt(connection, attempt_id)?),
+        None => {
+            let attempt_id: Option<String> = connection
+                .query_row(
+                    "SELECT attempt_id FROM attempts WHERE job_id=?1 ORDER BY attempt_number DESC LIMIT 1",
+                    [job_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| M6Error::from_sql(error, "cannot find latest Attempt"))?;
+            attempt_id
+                .map(|attempt_id| load_attempt(connection, &attempt_id))
+                .transpose()?
+        }
+    };
+    let projection = project_job(&job, attempt.as_ref());
+    Ok(JobSnapshotM6 {
+        job,
+        attempt,
+        projection,
+    })
 }
 
 fn project_job(job: &JobRecordM6, attempt: Option<&AttemptRecordM6>) -> JobProjectionM6 {
