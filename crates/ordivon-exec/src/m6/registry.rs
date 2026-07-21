@@ -567,13 +567,58 @@ impl M6Registry {
         load_reservation(&connection, attempt_id)
     }
 
+    pub fn get_latest_attempt(&self, job_id: &str) -> M6Result<Option<AttemptRecordM6>> {
+        let connection = self.open_connection()?;
+        let attempt_id: Option<String> = connection
+            .query_row(
+                "SELECT attempt_id FROM attempts WHERE job_id=?1 ORDER BY attempt_number DESC LIMIT 1",
+                [job_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| M6Error::from_sql(error, "cannot find latest Attempt"))?;
+        attempt_id
+            .map(|attempt_id| load_attempt(&connection, &attempt_id))
+            .transpose()
+    }
+
+    pub fn get_artifact(&self, job_id: &str, artifact_id: &str) -> M6Result<ArtifactRecordM6> {
+        let connection = self.open_connection()?;
+        connection
+            .query_row(
+                "SELECT artifact_id,job_id,attempt_id,kind,relative_path,digest,media_type,byte_length,truncated,created_at_ms FROM artifacts WHERE job_id=?1 AND artifact_id=?2",
+                params![job_id, artifact_id],
+                |row| {
+                    Ok(ArtifactRecordM6 {
+                        artifact_id: row.get(0)?,
+                        job_id: row.get(1)?,
+                        attempt_id: row.get(2)?,
+                        kind: row.get(3)?,
+                        relative_path: row.get(4)?,
+                        digest: row.get(5)?,
+                        media_type: row.get(6)?,
+                        byte_length: row.get(7)?,
+                        truncated: row.get::<_, i64>(8)? != 0,
+                        created_at_ms: row.get(9)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| M6Error::from_sql(error, "cannot load Artifact"))?
+            .ok_or_else(|| M6Error::new(
+                M6ErrorCode::ArtifactIdentityConflict,
+                "Artifact not found for Job",
+                Some("artifactId"),
+                false,
+            ))
+    }
+
     pub fn project_job(&self, job_id: &str) -> M6Result<JobProjectionM6> {
         let job = self.get_job(job_id)?;
-        let attempt = job
-            .current_attempt_id
-            .as_deref()
-            .map(|attempt_id| self.get_attempt(attempt_id))
-            .transpose()?;
+        let attempt = match job.current_attempt_id.as_deref() {
+            Some(attempt_id) => Some(self.get_attempt(attempt_id)?),
+            None => self.get_latest_attempt(job_id)?,
+        };
         Ok(project_job(&job, attempt.as_ref()))
     }
 
@@ -634,11 +679,22 @@ impl M6Registry {
         };
         let mut projections = Vec::with_capacity(jobs.len());
         for job in jobs {
-            let attempt = job
-                .current_attempt_id
-                .as_deref()
-                .map(|attempt_id| load_attempt(&connection, attempt_id))
-                .transpose()?;
+            let attempt = match job.current_attempt_id.as_deref() {
+                Some(attempt_id) => Some(load_attempt(&connection, attempt_id)?),
+                None => {
+                    let attempt_id: Option<String> = connection
+                        .query_row(
+                            "SELECT attempt_id FROM attempts WHERE job_id=?1 ORDER BY attempt_number DESC LIMIT 1",
+                            [&job.job_id],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(|error| M6Error::from_sql(error, "cannot find latest Attempt"))?;
+                    attempt_id
+                        .map(|attempt_id| load_attempt(&connection, &attempt_id))
+                        .transpose()?
+                }
+            };
             projections.push(project_job(&job, attempt.as_ref()));
         }
         Ok(JobListResultM6 {
@@ -1026,6 +1082,12 @@ impl M6Registry {
             return Err(state_conflict(
                 "Attempt row version changed before terminal commit",
             ));
+        }
+        if !attempt.state.can_transition_to(request.state) {
+            return Err(state_conflict(format!(
+                "invalid Attempt transition {:?} -> {:?}",
+                attempt.state, request.state
+            )));
         }
         if job.resolution.is_some() {
             return Err(M6Error::new(
@@ -1540,9 +1602,21 @@ fn release_reservation(
             ));
         }
     }
+    upsert_condition(
+        transaction,
+        attempt_id,
+        &ConditionUpdateM6 {
+            condition_type: "reservation_held".to_string(),
+            status: "false".to_string(),
+            reason_code: reason.to_string(),
+            evidence_digest: sha256_bytes(
+                format!("m6-reservation-release\0{attempt_id}\0{released_at_ms}").as_bytes(),
+            ),
+            observed_at_ms: released_at_ms,
+        },
+    )?;
     Ok(())
 }
-
 fn hold_orphaned_reservation(
     transaction: &Transaction<'_>,
     attempt_id: &str,

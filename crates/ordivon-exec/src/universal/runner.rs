@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use super::{
     canonical_directory, now_unix_ms, sha256_file, write_json_atomic, CapturedOutput,
-    RunnerTaskRequest, RunnerTaskResult, TaskTerminalStatus, UniversalExecError,
-    UniversalExecErrorCode, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    RunnerStartEvidence, RunnerTaskRequest, RunnerTaskResult, TaskTerminalStatus,
+    UniversalExecError, UniversalExecErrorCode, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
 const REQUEST_FILE: &str = "request.json";
@@ -18,6 +18,7 @@ const RESULT_FILE: &str = "result.json";
 const CANCEL_FILE: &str = "cancel-requested.json";
 const STDOUT_FILE: &str = "stdout.log";
 const STDERR_FILE: &str = "stderr.log";
+const RUNNER_START_FILE: &str = "runner-start.json";
 
 pub fn run_task_runner(task_dir: &Path) -> Result<(), UniversalExecError> {
     if !task_dir.is_absolute() {
@@ -26,11 +27,17 @@ pub fn run_task_runner(task_dir: &Path) -> Result<(), UniversalExecError> {
     let task_dir = canonical_directory(task_dir, "taskDir")?;
     let request = load_request(&task_dir)?;
     let started_unix_ms = now_unix_ms()?;
-    let result = execute_request(&task_dir, &request, started_unix_ms).unwrap_or_else(|error| {
+    let execution = validate_request_identity(&request)
+        .and_then(|()| write_runner_start_if_m6(&task_dir, &request, started_unix_ms))
+        .and_then(|()| execute_request(&task_dir, &request, started_unix_ms));
+    let result = execution.unwrap_or_else(|error| {
         failure_result(&task_dir, &request, started_unix_ms, error.to_string()).unwrap_or_else(
             |secondary| RunnerTaskResult {
                 schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
                 task_id: request.task_id.clone(),
+                job_id: request.job_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                launch_token_digest: request.launch_token.as_deref().map(sha256_text),
                 status: TaskTerminalStatus::Failed,
                 exit_code: None,
                 timed_out: false,
@@ -160,6 +167,9 @@ fn execute_request(
     Ok(RunnerTaskResult {
         schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
         task_id: request.task_id.clone(),
+        job_id: request.job_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        launch_token_digest: request.launch_token.as_deref().map(sha256_text),
         status: terminal_status,
         exit_code: status.code(),
         timed_out,
@@ -314,6 +324,9 @@ fn failure_result(
     Ok(RunnerTaskResult {
         schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
         task_id: request.task_id.clone(),
+        job_id: request.job_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        launch_token_digest: request.launch_token.as_deref().map(sha256_text),
         status: TaskTerminalStatus::Failed,
         exit_code: None,
         timed_out: false,
@@ -391,4 +404,80 @@ fn runner_error(message: impl Into<String>) -> UniversalExecError {
         None,
         false,
     )
+}
+
+fn sha256_text(value: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(value.as_bytes())))
+}
+
+fn write_runner_start_if_m6(
+    task_dir: &Path,
+    request: &RunnerTaskRequest,
+    observed_unix_ms: u128,
+) -> Result<(), UniversalExecError> {
+    let identity = match (
+        request.job_id.as_deref(),
+        request.attempt_id.as_deref(),
+        request.launch_token.as_deref(),
+        request.unit_name.as_deref(),
+    ) {
+        (None, None, None, None) => return Ok(()),
+        (Some(job_id), Some(attempt_id), Some(launch_token), Some(unit_name)) => {
+            if request.task_id != attempt_id {
+                return Err(runner_error("M6 taskId must equal attemptId"));
+            }
+            super::validate_id(job_id, "jobId")?;
+            super::validate_id(attempt_id, "attemptId")?;
+            if !unit_name.ends_with(".service") {
+                return Err(runner_error("M6 unitName must identify a service"));
+            }
+            let invocation_id = std::env::var("INVOCATION_ID")
+                .map_err(|_| runner_error("systemd INVOCATION_ID is unavailable"))?;
+            RunnerStartEvidence {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                job_id: job_id.to_string(),
+                attempt_id: attempt_id.to_string(),
+                launch_token_digest: sha256_text(launch_token),
+                unit_name: unit_name.to_string(),
+                invocation_id,
+                control_group: read_self_cgroup()?,
+                namespace_pid: std::process::id(),
+                namespace_process_start_identity: read_process_start_identity(std::process::id())?,
+                observed_unix_ms,
+            }
+        }
+        _ => {
+            return Err(runner_error(
+                "M6 Runner identity fields must appear together",
+            ))
+        }
+    };
+    write_json_atomic(&task_dir.join(RUNNER_START_FILE), &identity)
+}
+
+fn read_trimmed(path: &str) -> Result<String, UniversalExecError> {
+    fs::read_to_string(path)
+        .map(|value| value.trim().to_string())
+        .map_err(|error| runner_error(format!("cannot read {path}: {error}")))
+}
+
+fn read_self_cgroup() -> Result<String, UniversalExecError> {
+    let text = read_trimmed("/proc/self/cgroup")?;
+    text.lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .map(ToString::to_string)
+        .filter(|path| path.starts_with('/'))
+        .ok_or_else(|| runner_error("cannot identify cgroup v2 path"))
+}
+
+fn read_process_start_identity(pid: u32) -> Result<String, UniversalExecError> {
+    let stat = read_trimmed(&format!("/proc/{pid}/stat"))?;
+    let close = stat
+        .rfind(')')
+        .ok_or_else(|| runner_error("invalid proc stat format"))?;
+    stat[close + 1..]
+        .split_whitespace()
+        .nth(19)
+        .map(ToString::to_string)
+        .ok_or_else(|| runner_error("proc stat omitted process starttime"))
 }

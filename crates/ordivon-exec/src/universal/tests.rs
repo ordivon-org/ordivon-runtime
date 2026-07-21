@@ -202,6 +202,10 @@ fn runner_executes_model_authored_script_and_bounds_output() {
     let executable = real_executable("/usr/bin/python3");
     let request = RunnerTaskRequest {
         schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
         task_id: "task-runner".to_string(),
         workspace_id: "workspace-runner".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
@@ -241,6 +245,10 @@ fn runner_timeout_is_a_durable_failed_result() {
     let executable = real_executable("/usr/bin/python3");
     let request = RunnerTaskRequest {
         schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
         task_id: "task-timeout".to_string(),
         workspace_id: "workspace-timeout".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
@@ -283,6 +291,9 @@ fn terminal_result_rebuilds_task_and_artifact_handles_without_systemd() {
     let result = RunnerTaskResult {
         schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
         task_id: task_id.to_string(),
+        job_id: None,
+        attempt_id: None,
+        launch_token_digest: None,
         status: TaskTerminalStatus::Completed,
         exit_code: Some(0),
         timed_out: false,
@@ -505,6 +516,9 @@ fn compact_terminal_observation_inlines_bounded_tails() {
     let result = RunnerTaskResult {
         schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
         task_id: task_id.to_string(),
+        job_id: None,
+        attempt_id: None,
+        launch_token_digest: None,
         status: TaskTerminalStatus::Completed,
         exit_code: Some(0),
         timed_out: false,
@@ -574,4 +588,54 @@ fn run_git<'a>(path: &Path, args: impl IntoIterator<Item = &'a str>) {
 
 fn real_executable(path: &str) -> PathBuf {
     fs::canonicalize(path).unwrap()
+}
+
+#[test]
+fn legacy_runner_wire_omits_m6_identity_fields() {
+    let executable = real_executable("/usr/bin/true");
+    let request = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        task_id: "task-wire".to_string(),
+        workspace_id: "workspace-wire".to_string(),
+        workspace_path: "/tmp".to_string(),
+        executable: executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&executable).unwrap(),
+        args: Vec::new(),
+        cwd: "/tmp".to_string(),
+        env: BTreeMap::new(),
+        timeout_ms: 1000,
+        stdout_limit_bytes: 1024,
+        stderr_limit_bytes: 1024,
+    };
+    let encoded = serde_json::to_value(&request).unwrap();
+    for field in ["jobId", "attemptId", "launchToken", "unitName"] {
+        assert!(
+            encoded.get(field).is_none(),
+            "legacy request leaked {field}"
+        );
+    }
+
+    let sandbox = Sandbox::new("partial-m6-identity");
+    let workspace = sandbox.root.join("workspace");
+    let task_dir = sandbox.root.join("task");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&task_dir).unwrap();
+    let mut partial = request;
+    partial.workspace_path = workspace.to_string_lossy().into_owned();
+    partial.cwd = partial.workspace_path.clone();
+    partial.job_id = Some("job-partial".to_string());
+    write_json_atomic(&task_dir.join("request.json"), &partial).unwrap();
+    run_task_runner(&task_dir).unwrap();
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result.status, TaskTerminalStatus::Failed);
+    assert!(result
+        .infrastructure_error
+        .as_deref()
+        .is_some_and(|message| message.contains("must appear together")));
+    assert!(!task_dir.join("runner-start.json").exists());
 }

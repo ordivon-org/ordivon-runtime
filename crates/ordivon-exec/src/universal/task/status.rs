@@ -125,6 +125,9 @@ pub fn cancel_universal_task(
     let result = RunnerTaskResult {
         schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
         task_id: request.task_id.clone(),
+        job_id: None,
+        attempt_id: None,
+        launch_token_digest: None,
         status: TaskTerminalStatus::Cancelled,
         exit_code: None,
         timed_out: false,

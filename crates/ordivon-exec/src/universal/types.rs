@@ -610,6 +610,14 @@ fn is_false(value: &bool) -> bool {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RunnerTaskRequest {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_name: Option<String>,
     pub task_id: String,
     pub workspace_id: String,
     pub workspace_path: String,
@@ -621,6 +629,21 @@ pub(crate) struct RunnerTaskRequest {
     pub timeout_ms: u64,
     pub stdout_limit_bytes: u64,
     pub stderr_limit_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RunnerStartEvidence {
+    pub schema_version: u32,
+    pub job_id: String,
+    pub attempt_id: String,
+    pub launch_token_digest: String,
+    pub unit_name: String,
+    pub invocation_id: String,
+    pub control_group: String,
+    pub namespace_pid: u32,
+    pub namespace_process_start_identity: String,
+    pub observed_unix_ms: u128,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -659,6 +682,12 @@ pub(crate) struct CapturedOutput {
 pub(crate) struct RunnerTaskResult {
     pub schema_version: u32,
     pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_token_digest: Option<String>,
     pub status: TaskTerminalStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,

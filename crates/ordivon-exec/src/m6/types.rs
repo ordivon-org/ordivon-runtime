@@ -152,6 +152,64 @@ impl AttemptState {
                 | Self::Orphaned
         )
     }
+
+    pub fn can_transition_to(self, next: Self) -> bool {
+        match self {
+            Self::Accepted => matches!(
+                next,
+                Self::Starting | Self::Cancelled | Self::Failed | Self::Lost | Self::Orphaned
+            ),
+            Self::Starting => matches!(
+                next,
+                Self::Running
+                    | Self::Recovering
+                    | Self::Succeeded
+                    | Self::Failed
+                    | Self::TimedOut
+                    | Self::Cancelled
+                    | Self::Lost
+                    | Self::Orphaned
+            ),
+            Self::Running => matches!(
+                next,
+                Self::Stopping
+                    | Self::Recovering
+                    | Self::Succeeded
+                    | Self::Failed
+                    | Self::TimedOut
+                    | Self::Cancelled
+                    | Self::Lost
+                    | Self::Orphaned
+            ),
+            Self::Stopping => matches!(
+                next,
+                Self::Recovering
+                    | Self::Cancelled
+                    | Self::Failed
+                    | Self::TimedOut
+                    | Self::Lost
+                    | Self::Orphaned
+            ),
+            Self::Recovering => matches!(
+                next,
+                Self::Starting
+                    | Self::Running
+                    | Self::Stopping
+                    | Self::Succeeded
+                    | Self::Failed
+                    | Self::TimedOut
+                    | Self::Cancelled
+                    | Self::Lost
+                    | Self::Orphaned
+            ),
+            Self::Succeeded
+            | Self::Failed
+            | Self::TimedOut
+            | Self::Cancelled
+            | Self::Lost
+            | Self::Orphaned => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
@@ -460,4 +518,122 @@ pub struct ConditionUpdateM6 {
 
 pub(crate) fn default_m6_list_limit() -> u32 {
     50
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct M6UniversalExecutionRequest {
+    pub workspace_id: String,
+    pub executable: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub cwd_relative: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    pub timeout_ms: u64,
+    pub stdout_limit_bytes: u64,
+    pub stderr_limit_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct M6TaskRunRequest {
+    pub schema_version: u32,
+    pub client_request_id: String,
+    pub principal: String,
+    pub authority_ref: String,
+    pub policy_id: String,
+    pub policy_version: String,
+    pub policy_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    pub global_limit: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_limit: Option<u32>,
+    pub execution: M6UniversalExecutionRequest,
+    #[serde(default = "default_m6_wait_ms")]
+    pub wait_ms: u64,
+    #[serde(default = "default_m6_tail_bytes")]
+    pub stdout_tail_bytes: u64,
+    #[serde(default = "default_m6_tail_bytes")]
+    pub stderr_tail_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct M6TaskObserveRequest {
+    pub schema_version: u32,
+    pub job_id: String,
+    #[serde(default)]
+    pub wait_ms: u64,
+    #[serde(default = "default_m6_tail_bytes")]
+    pub stdout_tail_bytes: u64,
+    #[serde(default = "default_m6_tail_bytes")]
+    pub stderr_tail_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct M6TaskCancelRequest {
+    pub schema_version: u32,
+    pub job_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct M6TaskObservation {
+    pub job_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stdout_tail: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr_tail: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stdout_truncated: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stderr_truncated: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub artifacts_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poll_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_summary: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct M6ArtifactReadRequest {
+    pub schema_version: u32,
+    pub job_id: String,
+    pub artifact_id: String,
+    pub offset: u64,
+    pub max_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct M6ArtifactReadResult {
+    pub job_id: String,
+    pub artifact_id: String,
+    pub content: String,
+    pub offset: u64,
+    pub next_offset: u64,
+    pub eof: bool,
+    pub digest: String,
+}
+
+pub(crate) fn default_m6_wait_ms() -> u64 {
+    30_000
+}
+
+pub(crate) fn default_m6_tail_bytes() -> u64 {
+    4096
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }

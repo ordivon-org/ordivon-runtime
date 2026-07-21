@@ -60,6 +60,10 @@ pub fn start_universal_task(
     })?;
     let runner_request = RunnerTaskRequest {
         schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
         task_id: request.task_id.clone(),
         workspace_id: request.workspace_id.clone(),
         workspace_path: workspace_path.to_string_lossy().into_owned(),
@@ -257,6 +261,9 @@ fn infrastructure_failure_result(
     Ok(RunnerTaskResult {
         schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
         task_id: task_id.to_string(),
+        job_id: None,
+        attempt_id: None,
+        launch_token_digest: None,
         status: TaskTerminalStatus::Failed,
         exit_code: None,
         timed_out: false,

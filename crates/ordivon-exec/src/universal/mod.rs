@@ -46,7 +46,8 @@ pub(crate) use fsutil::{
     validate_env, validate_id, validate_relative_path, write_bytes_atomic, write_json_atomic,
 };
 pub(crate) use types::{
-    CapturedOutput, RunnerTaskRequest, RunnerTaskResult, TaskMetadata, TaskTerminalStatus,
+    CapturedOutput, RunnerStartEvidence, RunnerTaskRequest, RunnerTaskResult, TaskMetadata,
+    TaskTerminalStatus,
 };
 pub(crate) use workspace::{
     preflight_workspace_write_path, remove_workspace_file, resolve_existing_workspace_path,
