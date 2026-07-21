@@ -43,7 +43,7 @@ pub struct M5DogfoodPolicy {
 }
 
 impl M5DogfoodPolicy {
-    fn canonicalized(self) -> Result<Self, M4Error> {
+    pub(crate) fn canonicalized(self) -> Result<Self, M4Error> {
         if self.allowed_source_repos.is_empty() {
             return Err(M4Error::invalid(
                 "M5 dogfood requires at least one source repository",
@@ -77,7 +77,7 @@ impl M5DogfoodPolicy {
         })
     }
 
-    fn authorize(&self, request: &GitWorkspaceCreateRequest) -> Result<(), M4Error> {
+    pub(crate) fn authorize(&self, request: &GitWorkspaceCreateRequest) -> Result<(), M4Error> {
         let source_repo =
             std::fs::canonicalize(Path::new(&request.source_repo)).map_err(|error| {
                 M4Error::invalid(

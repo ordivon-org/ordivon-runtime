@@ -51,6 +51,21 @@ export function m5Config() {
 }
 
 
+
+export function m6Config() {
+  return {
+    endpoint: new URL(requiredEnvironment('ORDIVON_M6_MCP_URL')),
+    token: requiredEnvironment('ORDIVON_M6_BEARER_TOKEN'),
+    repoRoot: requiredEnvironment('ORDIVON_M6_REPO_ROOT'),
+    sourceRevision: requiredEnvironment('ORDIVON_M6_SOURCE_REVISION'),
+    storeRoot: requiredEnvironment('ORDIVON_M6_STORE_ROOT'),
+    registryRoot: requiredEnvironment('ORDIVON_M6_REGISTRY_ROOT'),
+    registryDb: requiredEnvironment('ORDIVON_M6_REGISTRY_DB'),
+    tracePath: requiredEnvironment('ORDIVON_M6_TRACE_PATH'),
+    httpTracePath: requiredEnvironment('ORDIVON_M6_HTTP_TRACE_PATH')
+  };
+}
+
 export async function connectEndpoint(name, endpoint, options = {}) {
   const client = new Client({ name, version: '1.0.0' });
   const transport = new StreamableHTTPClientTransport(new URL(endpoint), options);
@@ -65,6 +80,27 @@ export async function connectLegacy(name, measuredFetch = fetch) {
 
 export async function connectM5(name, measuredFetch = fetch) {
   const config = m5Config();
+  const client = new Client({ name, version: '1.0.0' });
+  const traceIds = [];
+  const wrappedFetch = async (input, init = {}) => {
+    const response = await measuredFetch(input, init);
+    const traceId = response.headers.get('x-ordivon-trace-id');
+    if (traceId) traceIds.push(traceId);
+    return response;
+  };
+  const transport = new StreamableHTTPClientTransport(config.endpoint, {
+    requestInit: {
+      headers: { Authorization: `Bearer ${config.token}` }
+    },
+    fetch: wrappedFetch
+  });
+  await client.connect(transport);
+  return { client, transport, traceIds, config };
+}
+
+
+export async function connectM6(name, measuredFetch = fetch) {
+  const config = m6Config();
   const client = new Client({ name, version: '1.0.0' });
   const traceIds = [];
   const wrappedFetch = async (input, init = {}) => {
