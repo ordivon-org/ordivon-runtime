@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "ORDIVON-MIGRATION-M4-RESILIENCE-2026-07-22",
+  "generatedAt": "2026-07-21T19:40:26.131Z",
+  "sourceRevision": "4592689dc9183fcb08f4828d3d752a4cf57e318f",
+  "serverUnit": "ordivon-m4-formal-http.service",
+  "serverRestartRecovery": {
+    "taskId": "m4-restart-task-761931-1784662823011",
+    "status": "completed",
+    "stdoutTail": "RESTART_START\nRESTART_DONE\n",
+    "recovered": true
+  },
+  "cancellation": {
+    "taskId": "m4-cancel-task-761931-1784662823011",
+    "status": "cancelled",
+    "resultIsError": true,
+    "errorCode": "TASK_CANCELLED",
+    "stdoutTail": "task was cancelled",
+    "cgroupClean": true
+  },
+  "cleanup": {
+    "residualUnits": "",
+    "residualProcesses": []
+  }
+}

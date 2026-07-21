@@ -1,0 +1,2650 @@
+{
+  "schemaVersion": 1,
+  "phase": "ORDIVON-MIGRATION-M4B-2026-07-22",
+  "evidenceClass": "MCP_TO_MCP_M4B_DIFFERENTIAL_BENCHMARK",
+  "generatedAt": "2026-07-21T19:18:28.792Z",
+  "sourceRevision": "4592689dc9183fcb08f4828d3d752a4cf57e318f",
+  "taskJourney": "M4B_TARGETED_READ_MCP_TASK_JOURNEY",
+  "metricSemantics": {
+    "elapsedMs": "Median task journey wall time; adapter bootstrap and cleanup excluded.",
+    "toolCalls": "Logical model-facing adapter calls.",
+    "remoteRoundTrips": "Actual task-phase HTTP request count measured by the shared client fetch wrapper.",
+    "contextBytes": "Serialized tool or CLI responses returned to the model-facing caller.",
+    "outputBytes": "Task stdout and stderr bytes deliberately consumed by the caller.",
+    "legacyTransport": "Actual HTTP metrics are supplementary.",
+    "ordivonTransport": "Actual stateless Streamable HTTP JSON metrics measured by the same client."
+  },
+  "runtimeIdentity": {
+    "branch": "agent/m4-experimental-mcp-adapter",
+    "gitHeadAtRun": "4592689dc9183fcb08f4828d3d752a4cf57e318f",
+    "desktopCommander": {
+      "name": "desktop-commander",
+      "version": "0.2.46"
+    },
+    "mcpSdkVersion": "1.29.0",
+    "nodeVersion": "v26.4.0",
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "systemd": "systemd 261 (261.1-1-arch)",
+    "m4Binary": {
+      "path": "/root/projects/ordivon-structured-exec-v0/target/debug/ordivon-m4-http",
+      "digest": "sha256:24238e656fc6311582af467ef237015947aeee1a7fe7ab6e0a8494895f5af438"
+    },
+    "m4Runner": {
+      "path": "/root/projects/ordivon-structured-exec-v0/target/debug/ordivon-task-runner",
+      "digest": "sha256:1b11fc7a2b6826e337adccaa178b9817c5e03258678ab6e92b48c0b7e3a724f6"
+    },
+    "m4Server": {
+      "name": "ordivon-m4-experimental",
+      "title": "Ordivon Experimental MCP Adapter",
+      "version": "0.1.0"
+    }
+  },
+  "configuration": {
+    "iterations": 20,
+    "warmups": 3,
+    "alternatingOrder": true,
+    "scriptSleepSeconds": 0.35,
+    "legacyMcpUrl": "http://127.0.0.1:8811/mcp",
+    "m4McpUrl": "http://127.0.0.1:8895/mcp",
+    "sdkRootProvidedExternally": true
+  },
+  "rawSamples": {
+    "legacy": [
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661426572-3",
+        "succeeded": true,
+        "elapsedMs": 1031,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1533,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:c36ce725787b5814ea153a45691124a64b224eaa7527c2f843f51c4cb16cd4be",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 664
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 244,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2815,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3059,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661430483-4",
+        "succeeded": true,
+        "elapsedMs": 1067,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1533,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:9fefbebc4020efe95be68e8e5a2c6737fc2a2cabee7854b31e814160a761ca04",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 664
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 244,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2815,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3059,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661435008-5",
+        "succeeded": true,
+        "elapsedMs": 1019,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1533,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:a75f5b64c745b3737b1b2c34429429ee84d2a6e7b1c86057138fa9ec24f4a579",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 664
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 244,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2815,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3059,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661438760-6",
+        "succeeded": true,
+        "elapsedMs": 979,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1533,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:341459686f98c5d4bb9921400fbc0e3237b48be645ddca1148cba5af066a4042",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 664
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 244,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2815,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3059,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661442232-7",
+        "succeeded": true,
+        "elapsedMs": 1000,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1533,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:4169acdc1c65c3c649a7c16766b4fc1b002561a38f8d4ced497086edac0edd2c",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 664
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 244,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2815,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3059,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661445774-8",
+        "succeeded": true,
+        "elapsedMs": 985,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1533,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:dfb97df8997d8b94ecb43d7441787cff0da6261d527fd40cb533586925d7cef4",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 664
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 244,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2815,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3059,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661449365-9",
+        "succeeded": true,
+        "elapsedMs": 1011,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1533,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:21b8bfb63ad5a3c25e15bff650eafad44495653b0ba116afc4295cbb50aa4500",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 664
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 244,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2815,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3059,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661452993-10",
+        "succeeded": true,
+        "elapsedMs": 1012,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:fd4d37ffef4c823ff57a41e7161ed4968c2878ffc83c886d1b496e8a5d101f80",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661456994-11",
+        "succeeded": true,
+        "elapsedMs": 1024,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:6410bfd291a3f37c4f6bbdf3fb833cbe4ce21f8e92b57178d8d51a8731019bb5",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661460626-12",
+        "succeeded": true,
+        "elapsedMs": 1028,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:b07f06f44ceb7ddaed30a44cfbbd82210bc9ccbef7ccf7ddfb03b4a95b2187c6",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661464174-13",
+        "succeeded": true,
+        "elapsedMs": 1005,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:af08602175cbf8f7aef19006b602785080ed64ae67e3172d1885c2911e58b4e6",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661468012-14",
+        "succeeded": true,
+        "elapsedMs": 1014,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:c19e86841f252163eee63a64771c04a204d6365635e60cd485213bbe6a3c777d",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661471589-15",
+        "succeeded": true,
+        "elapsedMs": 994,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:522ff2f2b99f19e1dea2da70756fae4ebfbf1d285002fc7b9bb775c2b6e4a767",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661475307-16",
+        "succeeded": true,
+        "elapsedMs": 1018,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:266e2c8b6c498eef2bdbc6ae90de91010db1dfebf087cd7b034a92129cdbe12a",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661478956-17",
+        "succeeded": true,
+        "elapsedMs": 1009,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:68b7d0c4bc2649110ea3501278325ec087e308dd82ab0e5eafa62820dd1f06b9",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661484479-18",
+        "succeeded": true,
+        "elapsedMs": 995,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:e599509fba9d11509302d3fec659de5a2dd0fcbdf41f2d4dc4259d87dd8d0a9c",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661488039-19",
+        "succeeded": true,
+        "elapsedMs": 998,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:0ae2b6801810aabdec37d758eb54ca8efc911b9a0ba125e708a8c8664b103b9e",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661491740-20",
+        "succeeded": true,
+        "elapsedMs": 991,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:cf579eaec43420d356c4da4f778efdbf28a99c0504e5a18eb9dc54b5ee73c49c",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661495380-21",
+        "succeeded": true,
+        "elapsedMs": 1026,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:837433f8ddaabf2baef8673a38b98ee672a6d02e84e00b16d1412c38f53b4ea6",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      },
+      {
+        "backend": "LEGACY_DESKTOP_COMMANDER",
+        "pairId": "733464-1784661499052-22",
+        "succeeded": true,
+        "elapsedMs": 1007,
+        "toolCalls": 5,
+        "remoteRoundTrips": 6,
+        "contextBytes": 1534,
+        "outputBytes": 43,
+        "recoveredAfterDisconnect": false,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:bd4137ab64ed38965d78aef9fa25f8da32137e9195123de3d3f588630725094c",
+        "callBreakdown": [
+          {
+            "name": "start_process",
+            "responseBytes": 246
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 318
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 129
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 176
+          },
+          {
+            "name": "start_process",
+            "responseBytes": 665
+          }
+        ],
+        "serverVersion": {
+          "name": "desktop-commander",
+          "version": "0.2.46"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 245,
+            "responseBytes": 0,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": true
+          },
+          "task": {
+            "requestBytes": 2825,
+            "responseBytes": 0,
+            "httpRequests": 6,
+            "sseResponseBytesUnmeasured": true
+          },
+          "total": {
+            "requestBytes": 3070,
+            "responseBytes": 0,
+            "httpRequests": 9,
+            "sseResponseBytesUnmeasured": true
+          }
+        }
+      }
+    ],
+    "ordivon": [
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661426572-3",
+        "succeeded": true,
+        "elapsedMs": 678,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1601,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:c36ce725787b5814ea153a45691124a64b224eaa7527c2f843f51c4cb16cd4be",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 165
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 234
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 597
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 237,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2034,
+            "responseBytes": 1789,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2271,
+            "responseBytes": 2255,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661430483-4",
+        "succeeded": true,
+        "elapsedMs": 722,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1601,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:9fefbebc4020efe95be68e8e5a2c6737fc2a2cabee7854b31e814160a761ca04",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 165
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 234
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 597
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 237,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2034,
+            "responseBytes": 1789,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2271,
+            "responseBytes": 2255,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661435008-5",
+        "succeeded": true,
+        "elapsedMs": 723,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1601,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:a75f5b64c745b3737b1b2c34429429ee84d2a6e7b1c86057138fa9ec24f4a579",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 165
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 234
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 597
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 237,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2034,
+            "responseBytes": 1789,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2271,
+            "responseBytes": 2255,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661438760-6",
+        "succeeded": true,
+        "elapsedMs": 682,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1601,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:341459686f98c5d4bb9921400fbc0e3237b48be645ddca1148cba5af066a4042",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 165
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 234
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 597
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 237,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2034,
+            "responseBytes": 1789,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2271,
+            "responseBytes": 2255,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661442232-7",
+        "succeeded": true,
+        "elapsedMs": 684,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1601,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:4169acdc1c65c3c649a7c16766b4fc1b002561a38f8d4ced497086edac0edd2c",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 165
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 234
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 597
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 237,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2034,
+            "responseBytes": 1789,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2271,
+            "responseBytes": 2255,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661445774-8",
+        "succeeded": true,
+        "elapsedMs": 684,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1601,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:dfb97df8997d8b94ecb43d7441787cff0da6261d527fd40cb533586925d7cef4",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 165
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 234
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 597
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 237,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2034,
+            "responseBytes": 1789,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2271,
+            "responseBytes": 2255,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661449365-9",
+        "succeeded": true,
+        "elapsedMs": 690,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1601,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:21b8bfb63ad5a3c25e15bff650eafad44495653b0ba116afc4295cbb50aa4500",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 165
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 234
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 597
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 237,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2034,
+            "responseBytes": 1789,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2271,
+            "responseBytes": 2255,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661452993-10",
+        "succeeded": true,
+        "elapsedMs": 691,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:fd4d37ffef4c823ff57a41e7161ed4968c2878ffc83c886d1b496e8a5d101f80",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661456994-11",
+        "succeeded": true,
+        "elapsedMs": 699,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:6410bfd291a3f37c4f6bbdf3fb833cbe4ce21f8e92b57178d8d51a8731019bb5",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661460626-12",
+        "succeeded": true,
+        "elapsedMs": 675,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:b07f06f44ceb7ddaed30a44cfbbd82210bc9ccbef7ccf7ddfb03b4a95b2187c6",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661464174-13",
+        "succeeded": true,
+        "elapsedMs": 686,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:af08602175cbf8f7aef19006b602785080ed64ae67e3172d1885c2911e58b4e6",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661468012-14",
+        "succeeded": true,
+        "elapsedMs": 718,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:c19e86841f252163eee63a64771c04a204d6365635e60cd485213bbe6a3c777d",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661471589-15",
+        "succeeded": true,
+        "elapsedMs": 724,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:522ff2f2b99f19e1dea2da70756fae4ebfbf1d285002fc7b9bb775c2b6e4a767",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661475307-16",
+        "succeeded": true,
+        "elapsedMs": 685,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:266e2c8b6c498eef2bdbc6ae90de91010db1dfebf087cd7b034a92129cdbe12a",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661478956-17",
+        "succeeded": true,
+        "elapsedMs": 679,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:68b7d0c4bc2649110ea3501278325ec087e308dd82ab0e5eafa62820dd1f06b9",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661484479-18",
+        "succeeded": true,
+        "elapsedMs": 731,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:e599509fba9d11509302d3fec659de5a2dd0fcbdf41f2d4dc4259d87dd8d0a9c",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661488039-19",
+        "succeeded": true,
+        "elapsedMs": 727,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:0ae2b6801810aabdec37d758eb54ca8efc911b9a0ba125e708a8c8664b103b9e",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661491740-20",
+        "succeeded": true,
+        "elapsedMs": 697,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:cf579eaec43420d356c4da4f778efdbf28a99c0504e5a18eb9dc54b5ee73c49c",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661495380-21",
+        "succeeded": true,
+        "elapsedMs": 681,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:837433f8ddaabf2baef8673a38b98ee672a6d02e84e00b16d1412c38f53b4ea6",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      },
+      {
+        "backend": "ORDIVON_M4",
+        "pairId": "733464-1784661499052-22",
+        "succeeded": true,
+        "elapsedMs": 702,
+        "toolCalls": 5,
+        "remoteRoundTrips": 5,
+        "contextBytes": 1604,
+        "outputBytes": 45,
+        "recoveredAfterDisconnect": true,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:bd4137ab64ed38965d78aef9fa25f8da32137e9195123de3d3f588630725094c",
+        "callBreakdown": [
+          {
+            "name": "workspace.open",
+            "responseBytes": 166
+          },
+          {
+            "name": "workspace.read",
+            "responseBytes": 248
+          },
+          {
+            "name": "workspace.mutate",
+            "responseBytes": 357
+          },
+          {
+            "name": "workspace.exec",
+            "responseBytes": 235
+          },
+          {
+            "name": "workspace.diff",
+            "responseBytes": 598
+          }
+        ],
+        "serverVersion": {
+          "name": "ordivon-m4-experimental",
+          "title": "Ordivon Experimental MCP Adapter",
+          "version": "0.1.0"
+        },
+        "transport": {
+          "bootstrap": {
+            "requestBytes": 238,
+            "responseBytes": 466,
+            "httpRequests": 3,
+            "sseResponseBytesUnmeasured": false
+          },
+          "task": {
+            "requestBytes": 2042,
+            "responseBytes": 1792,
+            "httpRequests": 5,
+            "sseResponseBytesUnmeasured": false
+          },
+          "total": {
+            "requestBytes": 2280,
+            "responseBytes": 2258,
+            "httpRequests": 8,
+            "sseResponseBytesUnmeasured": false
+          }
+        }
+      }
+    ]
+  },
+  "summaries": {
+    "legacy": {
+      "elapsedMs": 1010,
+      "toolCalls": 5,
+      "remoteRoundTrips": 6,
+      "contextBytes": 1534,
+      "outputBytes": 43,
+      "elapsedP50Ms": 1009,
+      "elapsedP95Ms": 1031,
+      "taskHttpRequests": 6,
+      "taskRequestBytes": 2825,
+      "taskResponseBytes": 0,
+      "succeeded": true,
+      "recoveredAfterDisconnect": false,
+      "fallbackCount": 0,
+      "semanticDigests": [
+        "sha256:0ae2b6801810aabdec37d758eb54ca8efc911b9a0ba125e708a8c8664b103b9e",
+        "sha256:21b8bfb63ad5a3c25e15bff650eafad44495653b0ba116afc4295cbb50aa4500",
+        "sha256:266e2c8b6c498eef2bdbc6ae90de91010db1dfebf087cd7b034a92129cdbe12a",
+        "sha256:341459686f98c5d4bb9921400fbc0e3237b48be645ddca1148cba5af066a4042",
+        "sha256:4169acdc1c65c3c649a7c16766b4fc1b002561a38f8d4ced497086edac0edd2c",
+        "sha256:522ff2f2b99f19e1dea2da70756fae4ebfbf1d285002fc7b9bb775c2b6e4a767",
+        "sha256:6410bfd291a3f37c4f6bbdf3fb833cbe4ce21f8e92b57178d8d51a8731019bb5",
+        "sha256:68b7d0c4bc2649110ea3501278325ec087e308dd82ab0e5eafa62820dd1f06b9",
+        "sha256:837433f8ddaabf2baef8673a38b98ee672a6d02e84e00b16d1412c38f53b4ea6",
+        "sha256:9fefbebc4020efe95be68e8e5a2c6737fc2a2cabee7854b31e814160a761ca04",
+        "sha256:a75f5b64c745b3737b1b2c34429429ee84d2a6e7b1c86057138fa9ec24f4a579",
+        "sha256:af08602175cbf8f7aef19006b602785080ed64ae67e3172d1885c2911e58b4e6",
+        "sha256:b07f06f44ceb7ddaed30a44cfbbd82210bc9ccbef7ccf7ddfb03b4a95b2187c6",
+        "sha256:bd4137ab64ed38965d78aef9fa25f8da32137e9195123de3d3f588630725094c",
+        "sha256:c19e86841f252163eee63a64771c04a204d6365635e60cd485213bbe6a3c777d",
+        "sha256:c36ce725787b5814ea153a45691124a64b224eaa7527c2f843f51c4cb16cd4be",
+        "sha256:cf579eaec43420d356c4da4f778efdbf28a99c0504e5a18eb9dc54b5ee73c49c",
+        "sha256:dfb97df8997d8b94ecb43d7441787cff0da6261d527fd40cb533586925d7cef4",
+        "sha256:e599509fba9d11509302d3fec659de5a2dd0fcbdf41f2d4dc4259d87dd8d0a9c",
+        "sha256:fd4d37ffef4c823ff57a41e7161ed4968c2878ffc83c886d1b496e8a5d101f80"
+      ],
+      "callBreakdown": [
+        {
+          "sequence": 1,
+          "name": "start_process",
+          "medianResponseBytes": 246
+        },
+        {
+          "sequence": 2,
+          "name": "start_process",
+          "medianResponseBytes": 318
+        },
+        {
+          "sequence": 3,
+          "name": "start_process",
+          "medianResponseBytes": 129
+        },
+        {
+          "sequence": 4,
+          "name": "start_process",
+          "medianResponseBytes": 176
+        },
+        {
+          "sequence": 5,
+          "name": "start_process",
+          "medianResponseBytes": 665
+        }
+      ]
+    },
+    "ordivon": {
+      "elapsedMs": 691,
+      "toolCalls": 5,
+      "remoteRoundTrips": 5,
+      "contextBytes": 1604,
+      "outputBytes": 45,
+      "elapsedP50Ms": 690,
+      "elapsedP95Ms": 727,
+      "taskHttpRequests": 5,
+      "taskRequestBytes": 2042,
+      "taskResponseBytes": 1792,
+      "succeeded": true,
+      "recoveredAfterDisconnect": true,
+      "fallbackCount": 0,
+      "semanticDigests": [
+        "sha256:0ae2b6801810aabdec37d758eb54ca8efc911b9a0ba125e708a8c8664b103b9e",
+        "sha256:21b8bfb63ad5a3c25e15bff650eafad44495653b0ba116afc4295cbb50aa4500",
+        "sha256:266e2c8b6c498eef2bdbc6ae90de91010db1dfebf087cd7b034a92129cdbe12a",
+        "sha256:341459686f98c5d4bb9921400fbc0e3237b48be645ddca1148cba5af066a4042",
+        "sha256:4169acdc1c65c3c649a7c16766b4fc1b002561a38f8d4ced497086edac0edd2c",
+        "sha256:522ff2f2b99f19e1dea2da70756fae4ebfbf1d285002fc7b9bb775c2b6e4a767",
+        "sha256:6410bfd291a3f37c4f6bbdf3fb833cbe4ce21f8e92b57178d8d51a8731019bb5",
+        "sha256:68b7d0c4bc2649110ea3501278325ec087e308dd82ab0e5eafa62820dd1f06b9",
+        "sha256:837433f8ddaabf2baef8673a38b98ee672a6d02e84e00b16d1412c38f53b4ea6",
+        "sha256:9fefbebc4020efe95be68e8e5a2c6737fc2a2cabee7854b31e814160a761ca04",
+        "sha256:a75f5b64c745b3737b1b2c34429429ee84d2a6e7b1c86057138fa9ec24f4a579",
+        "sha256:af08602175cbf8f7aef19006b602785080ed64ae67e3172d1885c2911e58b4e6",
+        "sha256:b07f06f44ceb7ddaed30a44cfbbd82210bc9ccbef7ccf7ddfb03b4a95b2187c6",
+        "sha256:bd4137ab64ed38965d78aef9fa25f8da32137e9195123de3d3f588630725094c",
+        "sha256:c19e86841f252163eee63a64771c04a204d6365635e60cd485213bbe6a3c777d",
+        "sha256:c36ce725787b5814ea153a45691124a64b224eaa7527c2f843f51c4cb16cd4be",
+        "sha256:cf579eaec43420d356c4da4f778efdbf28a99c0504e5a18eb9dc54b5ee73c49c",
+        "sha256:dfb97df8997d8b94ecb43d7441787cff0da6261d527fd40cb533586925d7cef4",
+        "sha256:e599509fba9d11509302d3fec659de5a2dd0fcbdf41f2d4dc4259d87dd8d0a9c",
+        "sha256:fd4d37ffef4c823ff57a41e7161ed4968c2878ffc83c886d1b496e8a5d101f80"
+      ],
+      "callBreakdown": [
+        {
+          "sequence": 1,
+          "name": "workspace.open",
+          "medianResponseBytes": 166
+        },
+        {
+          "sequence": 2,
+          "name": "workspace.read",
+          "medianResponseBytes": 248
+        },
+        {
+          "sequence": 3,
+          "name": "workspace.mutate",
+          "medianResponseBytes": 357
+        },
+        {
+          "sequence": 4,
+          "name": "workspace.exec",
+          "medianResponseBytes": 235
+        },
+        {
+          "sequence": 5,
+          "name": "workspace.diff",
+          "medianResponseBytes": 598
+        }
+      ]
+    }
+  },
+  "contractSamples": {
+    "legacy": {
+      "schemaVersion": 1,
+      "sampleId": "m2-legacy-median",
+      "capability": "WORKSPACE_EXEC",
+      "backend": "LEGACY_DESKTOP_COMMANDER",
+      "succeeded": true,
+      "elapsedMs": 1010,
+      "toolCalls": 5,
+      "remoteRoundTrips": 6,
+      "contextBytes": 1534,
+      "outputBytes": 43,
+      "recoveredAfterDisconnect": false,
+      "fallbackCount": 0
+    },
+    "ordivon": {
+      "schemaVersion": 1,
+      "sampleId": "m2-ordivon-median",
+      "capability": "WORKSPACE_EXEC",
+      "backend": "ORDIVON",
+      "succeeded": true,
+      "elapsedMs": 691,
+      "toolCalls": 5,
+      "remoteRoundTrips": 5,
+      "contextBytes": 1604,
+      "outputBytes": 45,
+      "recoveredAfterDisconnect": true,
+      "fallbackCount": 0
+    }
+  },
+  "performanceDelta": {
+    "elapsedMs": -319,
+    "toolCalls": 0,
+    "remoteRoundTrips": -1,
+    "contextBytes": 70,
+    "outputBytes": 2,
+    "disconnectRecoveryImproved": true
+  },
+  "m4DisconnectProbe": {
+    "recovered": true,
+    "observation": {
+      "artifactsAvailable": true,
+      "exitCode": 0,
+      "status": "COMPLETED",
+      "stdoutTail": "M4_PROBE_START\nM4_PROBE_DONE\n",
+      "taskId": "m4-probe-task-733464-1784661506976"
+    },
+    "logicalCalls": 2,
+    "httpRequests": 11
+  },
+  "disconnectProbe": {
+    "backend": "LEGACY_DESKTOP_COMMANDER",
+    "recovered": false,
+    "observation": "Error: read_process_output returned an MCP tool error: No session found for PID 740975",
+    "logicalCalls": 2,
+    "httpRequests": 10
+  },
+  "cutover": {
+    "eligible": true,
+    "gates": {
+      "completionNotWorse": true,
+      "toolCallsAtMostFive": true,
+      "contextAtMost3220": true,
+      "elapsedWithin10Percent": true,
+      "p95Within10Percent": true,
+      "httpRequestsNotWorse": true,
+      "disconnectRecovery": true,
+      "noFallback": true,
+      "semanticEquivalence": true
+    },
+    "reductions": {
+      "toolCallsPercent": 0,
+      "contextBytesPercent": -4.563233376792699,
+      "outputBytesPercent": -4.651162790697675
+    },
+    "elapsedRatio": 0.6841584158415842,
+    "p95Ratio": 0.7051406401551892
+  },
+  "claimsNotMade": [
+    "Both backends use real Streamable HTTP MCP through the same JS SDK.",
+    "This benchmark covers one local Python task journey, not all coding work.",
+    "The result can authorize limited dogfood only, not production routing."
+  ]
+}

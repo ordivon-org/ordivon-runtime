@@ -23,3 +23,20 @@ against real Desktop Commander MCP paths. The M3 evidence checker recomputes
 medians, semantic equivalence, recovery claims, and performance gates.
 
 These are development evidence tools and do not change production routing.
+
+## M4 benchmarks
+
+The M4A and M4B differential scripts compare the active Legacy MCP endpoint
+with the independent experimental Ordivon Streamable HTTP MCP endpoint through
+the same JavaScript MCP SDK. They record paired semantic digests, p50 and p95
+latency, logical calls, real task HTTP requests, request bytes, response bytes,
+context bytes, fallback, and disconnect recovery.
+
+`m4_transport_security.mjs` verifies authentication, Origin, Host, and body-size
+rejection. `m4_resilience.mjs` verifies server-restart Task recovery, native MCP
+Task cancellation, cgroup cleanup, and residual-process cleanup.
+
+`check_m4_evidence.py` independently recomputes both 20-pair benchmark summaries
+and optionally validates Core and HTTP trace uniqueness and credential absence.
+These scripts authorize only bounded local Dogfood eligibility; they do not
+change port 8811, Cloudflare, production service definitions, or default routing.

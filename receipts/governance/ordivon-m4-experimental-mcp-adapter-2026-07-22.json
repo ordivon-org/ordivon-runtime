@@ -1,0 +1,184 @@
+{
+  "stage_id": "ORDIVON-M4-EXPERIMENTAL-MCP-ADAPTER-2026-07-22",
+  "receipt_type": "R2",
+  "risk_class": "R2",
+  "draft": true,
+  "status": "LOCAL_MCP_GATES_PASS_LIMITED_DOGFOOD_ELIGIBLE_NO_PRODUCTION_CUTOVER",
+  "task_type": "experimental_mcp_adapter_and_differential_evaluation",
+  "timestamp": "2026-07-22T00:00:00Z",
+  "branch": "agent/m4-experimental-mcp-adapter",
+  "base_commit": "405fe2ec57d90456f5811b6912e2beaf2ef95bf3",
+  "measured_implementation_commit": "4592689dc9183fcb08f4828d3d752a4cf57e318f",
+  "files_changed": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/ordivon-exec/src/lib.rs",
+    "crates/ordivon-exec/src/universal/mod.rs",
+    "crates/ordivon-exec/src/universal/task/compact.rs",
+    "crates/ordivon-exec/src/universal/task/mod.rs",
+    "crates/ordivon-exec/src/universal/types.rs",
+    "crates/ordivon-mcp/Cargo.toml",
+    "crates/ordivon-mcp/src/bin/ordivon-m4-http.rs",
+    "crates/ordivon-mcp/src/lib.rs",
+    "crates/ordivon-mcp/src/m4/mod.rs",
+    "crates/ordivon-mcp/src/m4/tasks.rs",
+    "crates/ordivon-mcp/src/m4/tests.rs",
+    "crates/ordivon-mcp/src/m4/tools.rs",
+    "docs/architecture/ordivon-m4-experimental-mcp-adapter.md",
+    "docs/audits/runtime/ordivon-m4-core-trace-2026-07-22.jsonl",
+    "docs/audits/runtime/ordivon-m4-http-trace-2026-07-22.jsonl",
+    "docs/audits/runtime/ordivon-m4-resilience-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m4-transport-security-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m4a-mcp-differential-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m4b-mcp-differential-evidence-2026-07-22.json",
+    "docs/governance/document-registry.jsonl",
+    "receipts/governance/ordivon-m4-experimental-mcp-adapter-2026-07-22.json",
+    "scripts/README.md",
+    "scripts/benchmarks/check_m4_evidence.py",
+    "scripts/benchmarks/m4_resilience.mjs",
+    "scripts/benchmarks/m4_transport_security.mjs",
+    "scripts/benchmarks/m4a_mcp_differential.mjs",
+    "scripts/benchmarks/m4b_mcp_differential.mjs"
+  ],
+  "implemented_contracts": [
+    "feature-gated localhost-only Streamable HTTP MCP adapter on an independent port",
+    "eight-tool Agent-facing thin waist with strict input and output schemas",
+    "structured tool errors separated from JSON-RPC protocol errors",
+    "native MCP Tasks and explicit Ordivon Task-handle compatibility over one durable Task truth",
+    "tasks get result list and cancel projection with restart recovery",
+    "loopback bearer Host Origin and request-body transport boundaries",
+    "process-wide unique Core and HTTP tracing without credential material",
+    "M4A full-read and M4B targeted-read real MCP-to-MCP differential evaluation",
+    "server-restart recovery native Task cancellation and cgroup cleanup probes",
+    "independent evidence recomputation and tamper rejection"
+  ],
+  "evidence": "Fresh local evidence contains twenty alternating measured pairs after three warm-ups for both M4A and M4B. M4A records Legacy at 924 ms median, 1006 ms p95, 7 calls, 8 task HTTP requests, and 7192 context bytes versus Ordivon at 698 ms median, 710 ms p95, 6 calls, 6 task HTTP requests, and 7113 context bytes. M4B records optimized Legacy at 1010 ms median, 1031 ms p95, 5 calls, 6 task HTTP requests, and 1534 context bytes versus Ordivon at 691 ms median, 727 ms p95, 5 calls, 5 task HTTP requests, and 1604 context bytes. Every paired semantic digest matches. Ordivon recovers after MCP client disconnect and experimental Server restart; Legacy disconnect recovery remains false.",
+  "verification_result": "M4 closes the M3 transport asymmetry for two bounded local coding journeys. Both MCP-to-MCP gate sets pass, including p50, p95, call, HTTP request, Context budget, semantic equivalence, fallback, and recovery checks. The result permits only M5 limited low-risk Dogfood design and does not authorize production routing, remote exposure, external side effects, or Legacy retirement.",
+  "degraded_reasons": [
+    "The experimental Server is localhost-only and is not a production authentication or deployment design.",
+    "The filesystem Task registry remains non-transactional and does not provide atomic Job or Attempt semantics.",
+    "The execution Worker does not yet use a dedicated non-privileged identity.",
+    "Task retention garbage collection quotas and full reconciliation are absent.",
+    "Network and credential capabilities remain closed rather than explicitly scoped.",
+    "The formal performance evidence covers two local Python coding journeys and debug binaries.",
+    "Concurrency WSL reboot long builds disk pressure and large-output matrices remain pending.",
+    "Repository document governance retains three exact-base violations."
+  ],
+  "remaining_debt": [
+    "Run M5 limited Dogfood and shadow routing with explicit per-task Legacy fallback evidence.",
+    "Add broader real coding journeys including Rust builds failures long logs and repeated repair loops.",
+    "Replace the filesystem registry with transactional Job Attempt idempotency and concurrency reservations before broad concurrency.",
+    "Add Task retention garbage collection quotas and full reconciliation.",
+    "Move execution to a dedicated non-privileged Worker before opening high-risk capabilities.",
+    "Design scoped network credential approval and external-action authority before remote side effects.",
+    "Keep production port 8811 and Cloudflare routing unchanged until a later explicit cutover stage."
+  ],
+  "authorization": {
+    "status": "not_requested",
+    "rationale": "M4 is feature-gated, localhost-only, independently ported, and does not change production routing or external authority."
+  },
+  "next_bounded_action": "Implement M5 limited low-risk Dogfood and shadow routing while retaining explicit Legacy fallback and zero production-side effects.",
+  "canonical_sources": [
+    "docs/architecture/ordivon-migration-contract-v0.md",
+    "docs/architecture/ordivon-m3-compact-agent-interface.md",
+    "docs/architecture/ordivon-m4-experimental-mcp-adapter.md",
+    "docs/audits/runtime/ordivon-m4a-mcp-differential-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m4b-mcp-differential-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m4-resilience-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m4-transport-security-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m4-core-trace-2026-07-22.jsonl",
+    "docs/audits/runtime/ordivon-m4-http-trace-2026-07-22.jsonl"
+  ],
+  "verification_results": [
+    {
+      "id": "m4a-formal-benchmark",
+      "command": "run M4A with twenty measured pairs after three warm-ups",
+      "passed": true,
+      "summary": "Ordivon 698 ms median, 710 ms p95, 6 calls, 6 task HTTP requests, and 7113 context bytes; all gates pass."
+    },
+    {
+      "id": "m4b-formal-benchmark",
+      "command": "run M4B with twenty measured pairs after three warm-ups",
+      "passed": true,
+      "summary": "Ordivon 691 ms median, 727 ms p95, 5 calls, 5 task HTTP requests, and 1604 context bytes; all gates pass."
+    },
+    {
+      "id": "m4-independent-checker",
+      "command": "recompute both evidence files and validate sealed Core and HTTP traces",
+      "passed": true,
+      "summary": "M4_EVIDENCE_PASS"
+    },
+    {
+      "id": "m4-tamper-negative",
+      "command": "alter the M4A recorded median and rerun checker",
+      "passed": true,
+      "summary": "Checker rejected modified evidence with exit 1."
+    },
+    {
+      "id": "m4-transport-security",
+      "command": "run bearer Origin Host and body-limit negative probes",
+      "passed": true,
+      "summary": "Missing and invalid authorization 401, disallowed Origin and Host 403, oversized body 413."
+    },
+    {
+      "id": "m4-resilience",
+      "command": "restart experimental Server during native Task and cancel a second Task",
+      "passed": true,
+      "summary": "Restart recovery succeeded; cancellation returned TASK_CANCELLED; cgroups and target processes were clean."
+    },
+    {
+      "id": "workspace-tests",
+      "command": "cargo test --workspace",
+      "passed": true,
+      "summary": "95 default tests passed; experimental Universal Executor and M4 HTTP remain excluded by default."
+    },
+    {
+      "id": "universal-executor-tests",
+      "command": "cargo test -p ordivon-exec --features universal-executor-m1 --lib",
+      "passed": true,
+      "summary": "82 feature-gated executor tests passed."
+    },
+    {
+      "id": "m4-feature-tests",
+      "command": "cargo test -p ordivon-mcp --features experimental-http-m4",
+      "passed": true,
+      "summary": "Five MCP tests passed, including four M4 contracts and the existing stdio error test."
+    },
+    {
+      "id": "strict-clippy",
+      "command": "run default, executor-feature, and M4-feature Clippy with warnings denied",
+      "passed": true,
+      "summary": "No warnings."
+    },
+    {
+      "id": "script-static",
+      "command": "Node syntax plus Python compilation and Ruff",
+      "passed": true,
+      "summary": "All four Node scripts and the Python checker passed static checks."
+    },
+    {
+      "id": "document-governance-delta",
+      "command": "compare document registry checker at exact base and M4 head",
+      "passed": true,
+      "summary": "Base and head report the same three pre-existing violations; M4 adds none."
+    },
+    {
+      "id": "trace-integrity",
+      "command": "validate sealed Core and HTTP traces",
+      "passed": true,
+      "summary": "Trace IDs are unique and no bearer material is present."
+    },
+    {
+      "id": "receipt-integrity",
+      "command": "run receipt-integrity checker on the M4 receipt",
+      "passed": true,
+      "summary": "Receipt integrity checker passed with no advisory warnings."
+    },
+    {
+      "id": "cleanup",
+      "command": "stop transient M4 Server and scan units processes worktrees stores and port",
+      "passed": true,
+      "summary": "No M4 Server or Task units, ports, processes, stores, benchmark worktrees, or target-script residue remain."
+    }
+  ]
+}
