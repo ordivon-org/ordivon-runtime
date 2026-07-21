@@ -1,0 +1,98 @@
+{
+  "stage_id": "ORDIVON-DURABLE-JOB-CONTRACT-V0-2026-07-21",
+  "receipt_type": "R2",
+  "risk_class": "R2",
+  "draft": true,
+  "status": "DEGRADED_CONTRACT_ONLY",
+  "authority_impact": "contract_only_no_execution_authority",
+  "task_type": "durable_job_contract_freeze",
+  "timestamp": "2026-07-21T00:00:00Z",
+  "branch": "agent/job-contract-v0",
+  "base_commit": "f5c82bc37f586b1a1db00ae4d47cfa8b5e94d828",
+  "canonical_sources": [
+    "docs/ai/ordivon-core-refrozen.md",
+    "docs/architecture/semantic-firebreak.md",
+    "docs/architecture/runtime-governance-alignment.md",
+    "docs/architecture/ordivon-durable-job-contract-v0.md"
+  ],
+  "files_changed": [
+    "crates/ordivon-exec/README.md",
+    "crates/ordivon-exec/src/job/error.rs",
+    "crates/ordivon-exec/src/job/io.rs",
+    "crates/ordivon-exec/src/job/mod.rs",
+    "crates/ordivon-exec/src/job/policy.rs",
+    "crates/ordivon-exec/src/job/receipt.rs",
+    "crates/ordivon-exec/src/job/state.rs",
+    "crates/ordivon-exec/src/job/tests.rs",
+    "crates/ordivon-exec/src/job/validation.rs",
+    "crates/ordivon-exec/src/lib.rs",
+    "docs/architecture/ordivon-durable-job-contract-v0.md",
+    "docs/governance/document-registry.jsonl",
+    "receipts/governance/ordivon-durable-job-contract-v0-2026-07-21.json"
+  ],
+  "implemented_contracts": [
+    "JobStartRequest without command, shell, or executable fields",
+    "Versioned CapabilityPolicy and digest-bound ExecutionProfile",
+    "Resolved ExecutionPlan with principal and authority references",
+    "Internal and public Job states with explicit transition matrix",
+    "JobRecord binding supervisor and process-start identity",
+    "Bounded stdout/stderr metadata, read cursors, and list pagination",
+    "Stable Job error taxonomy",
+    "OperationalReceiptEvent separated from comparator governance Receipt",
+    "SYSTEM_OBSERVED requirement for process and recovery observations"
+  ],
+  "evidence": "Fresh local evidence on branch agent/job-contract-v0: cargo test --workspace passed 51 Rust tests; cargo clippy --workspace --all-targets -- -D warnings passed; cargo fmt --all --check and git diff --check passed. The public JobStartRequest serde and generated JSON Schema tests prove command, shell, and executable are absent and unknown fields are rejected. An exact-base worktree at f5c82bc reproduced the same three document-registry violations seen on this branch, establishing zero new document-governance violations.",
+  "verification_result": "Contract types, serialization boundaries, state transitions, cursor binding, metadata invariants, and operational-origin restrictions are locally verified. No durable process, supervisor, persistence, authorization evaluator, MCP job tool, production route, or release build was implemented or verified.",
+  "verification_results": [
+    {
+      "id": "ordivon-exec-tests",
+      "command": "cargo test -p ordivon-exec",
+      "passed": true,
+      "summary": "27 passed; 18 job-contract tests plus 9 existing read-only tests"
+    },
+    {
+      "id": "workspace-tests",
+      "command": "cargo test --workspace",
+      "passed": true,
+      "summary": "51 passed: exec 27, kernel 17, ledger 6, MCP 1"
+    },
+    {
+      "id": "workspace-clippy",
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "passed": true,
+      "summary": "No warnings"
+    },
+    {
+      "id": "format-and-diff",
+      "command": "cargo fmt --all --check && git diff --check",
+      "passed": true,
+      "summary": "Formatting and whitespace checks passed"
+    },
+    {
+      "id": "document-governance-delta",
+      "command": "scripts/check_document_registry.py on branch and exact base f5c82bc",
+      "passed": true,
+      "summary": "Both report the same 3 pre-existing violations; P1 adds no new violation"
+    }
+  ],
+  "degraded_reasons": [
+    "The supervisor lifecycle model has not been proven with a systemd/cgroup spike",
+    "CapabilityPolicy is a schema only and is not loaded or enforced",
+    "Operational receipt events are types only and are not durably appended",
+    "The repository-wide document governance checker remains red on three exact-base debts"
+  ],
+  "remaining_debt": [
+    "P2 must prove transient-unit survival across Core exit and restart",
+    "P2 must prove full cgroup termination of child and grandchild processes",
+    "P2 must define lost versus orphaned from real supervisor observations",
+    "P3 must implement canonical path scope, executable digest verification, exact argument evaluation, environment rules, and concurrency enforcement",
+    "P4 must implement atomic durable Job records, byte logs, cursors, recovery, and idempotency",
+    "No job_start, job_stop, job_status, job_read, or job_list MCP tool exists",
+    "Pre-existing document governance debts remain outside this P1 scope"
+  ],
+  "authorization": {
+    "status": "not_requested",
+    "rationale": "This contract freeze does not authorize process execution, systemd unit creation, filesystem persistence, MCP exposure, or production deployment."
+  },
+  "next_bounded_action": "Run a non-production systemd/cgroup supervisor spike with a dedicated fixture binary before implementing the persistent Job Registry."
+}

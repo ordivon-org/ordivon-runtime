@@ -17,10 +17,21 @@ outside the core contract.
 - `repo_snapshot`: one Git porcelain-v2 call returning branch, exact HEAD,
   upstream distance, and staged/unstaged/untracked/conflict counts.
 
+## Frozen durable-job contract
+
+P1 defines pure, non-executing contracts for capability profiles, structured
+job requests, resolved execution plans, internal/public state projection,
+job records, bounded output cursors, list pagination, stable error codes, and
+operational receipt events. The contract rejects unknown input fields and does
+not expose a shell command or executable in `JobStartRequest`.
+
+See `docs/architecture/ordivon-durable-job-contract-v0.md`. Contract presence
+does not authorize or implement process execution.
+
 ## Explicitly not implemented
 
 - patch or write operations;
-- short commands or durable jobs;
+- process creation, supervision, persistence, or durable-job MCP tools;
 - MCP, HTTP, Cloudflare, or Hermes adapters;
 - search continuation cursors or hard execution timeout;
 - authorization, sealed receipts, or runtime observation emission.
