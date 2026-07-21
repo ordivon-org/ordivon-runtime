@@ -1,0 +1,394 @@
+use sha2::{Digest, Sha256};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use super::{
+    canonical_directory, now_unix_ms, sha256_file, write_json_atomic, CapturedOutput,
+    RunnerTaskRequest, RunnerTaskResult, TaskTerminalStatus, UniversalExecError,
+    UniversalExecErrorCode, UNIVERSAL_EXEC_SCHEMA_VERSION,
+};
+
+const REQUEST_FILE: &str = "request.json";
+const RESULT_FILE: &str = "result.json";
+const CANCEL_FILE: &str = "cancel-requested.json";
+const STDOUT_FILE: &str = "stdout.log";
+const STDERR_FILE: &str = "stderr.log";
+
+pub fn run_task_runner(task_dir: &Path) -> Result<(), UniversalExecError> {
+    if !task_dir.is_absolute() {
+        return Err(runner_error("task directory must be absolute"));
+    }
+    let task_dir = canonical_directory(task_dir, "taskDir")?;
+    let request = load_request(&task_dir)?;
+    let started_unix_ms = now_unix_ms()?;
+    let result = execute_request(&task_dir, &request, started_unix_ms).unwrap_or_else(|error| {
+        failure_result(&task_dir, &request, started_unix_ms, error.to_string()).unwrap_or_else(
+            |secondary| RunnerTaskResult {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                task_id: request.task_id.clone(),
+                status: TaskTerminalStatus::Failed,
+                exit_code: None,
+                timed_out: false,
+                infrastructure_error: Some(format!(
+                    "runner failure: {error}; result construction failure: {secondary}"
+                )),
+                started_unix_ms,
+                finished_unix_ms: started_unix_ms,
+                stdout: empty_output(&request.task_id, true),
+                stderr: empty_output(&request.task_id, false),
+            },
+        )
+    });
+    write_json_atomic(&task_dir.join(RESULT_FILE), &result)
+}
+
+fn execute_request(
+    task_dir: &Path,
+    request: &RunnerTaskRequest,
+    started_unix_ms: u128,
+) -> Result<RunnerTaskResult, UniversalExecError> {
+    validate_request_identity(request)?;
+    let workspace = canonical_directory(Path::new(&request.workspace_path), "workspacePath")?;
+    let cwd = canonical_directory(Path::new(&request.cwd), "cwd")?;
+    if !cwd.starts_with(&workspace) {
+        return Err(runner_error("runner cwd escaped workspace"));
+    }
+    let executable = validate_executable(request)?;
+    let mut command = Command::new(&executable);
+    command
+        .args(&request.args)
+        .current_dir(&cwd)
+        .env_clear()
+        .envs(&request.env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::ToolFailed,
+            format!("cannot start target executable: {error}"),
+            Some("executable"),
+            false,
+        )
+    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| runner_error("target stdout pipe is unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| runner_error("target stderr pipe is unavailable"))?;
+    let stdout_path = task_dir.join(STDOUT_FILE);
+    let stderr_path = task_dir.join(STDERR_FILE);
+    let stdout_limit = request.stdout_limit_bytes;
+    let stderr_limit = request.stderr_limit_bytes;
+    let task_id_stdout = request.task_id.clone();
+    let task_id_stderr = request.task_id.clone();
+    let stdout_thread = thread::spawn(move || {
+        capture_stream(
+            stdout,
+            &stdout_path,
+            stdout_limit,
+            format!("{task_id_stdout}.stdout"),
+            STDOUT_FILE,
+        )
+    });
+    let stderr_thread = thread::spawn(move || {
+        capture_stream(
+            stderr,
+            &stderr_path,
+            stderr_limit,
+            format!("{task_id_stderr}.stderr"),
+            STDERR_FILE,
+        )
+    });
+
+    let deadline = Instant::now() + Duration::from_millis(request.timeout_ms);
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            UniversalExecError::new(
+                UniversalExecErrorCode::ToolFailed,
+                format!("cannot observe target process: {error}"),
+                None,
+                false,
+            )
+        })? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            child.kill().map_err(|error| {
+                UniversalExecError::new(
+                    UniversalExecErrorCode::ToolFailed,
+                    format!("cannot terminate timed-out target: {error}"),
+                    None,
+                    false,
+                )
+            })?;
+            break child.wait().map_err(|error| {
+                UniversalExecError::new(
+                    UniversalExecErrorCode::ToolFailed,
+                    format!("cannot reap timed-out target: {error}"),
+                    None,
+                    false,
+                )
+            })?;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let stdout = stdout_thread
+        .join()
+        .map_err(|_| runner_error("stdout capture thread panicked"))??;
+    let stderr = stderr_thread
+        .join()
+        .map_err(|_| runner_error("stderr capture thread panicked"))??;
+    let cancelled = task_dir.join(CANCEL_FILE).exists();
+    let terminal_status = if cancelled {
+        TaskTerminalStatus::Cancelled
+    } else if timed_out || !status.success() {
+        TaskTerminalStatus::Failed
+    } else {
+        TaskTerminalStatus::Completed
+    };
+    Ok(RunnerTaskResult {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        task_id: request.task_id.clone(),
+        status: terminal_status,
+        exit_code: status.code(),
+        timed_out,
+        infrastructure_error: None,
+        started_unix_ms,
+        finished_unix_ms: now_unix_ms()?,
+        stdout,
+        stderr,
+    })
+}
+
+fn capture_stream(
+    mut reader: impl Read,
+    path: &Path,
+    limit: u64,
+    artifact_id: String,
+    file_name: &str,
+) -> Result<CapturedOutput, UniversalExecError> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            UniversalExecError::new(
+                UniversalExecErrorCode::IoError,
+                format!("cannot create {}: {error}", path.display()),
+                None,
+                false,
+            )
+        })?;
+    let mut hasher = Sha256::new();
+    let mut retained = 0_u64;
+    let mut dropped = 0_u64;
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).map_err(|error| {
+            UniversalExecError::new(
+                UniversalExecErrorCode::IoError,
+                format!("cannot read target output: {error}"),
+                None,
+                false,
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(retained) as usize;
+        let write_len = read.min(remaining);
+        if write_len > 0 {
+            file.write_all(&buffer[..write_len]).map_err(|error| {
+                UniversalExecError::new(
+                    UniversalExecErrorCode::IoError,
+                    format!("cannot persist target output: {error}"),
+                    None,
+                    false,
+                )
+            })?;
+            hasher.update(&buffer[..write_len]);
+            retained += write_len as u64;
+        }
+        dropped += (read - write_len) as u64;
+    }
+    file.sync_all().map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::IoError,
+            format!("cannot sync target output: {error}"),
+            None,
+            false,
+        )
+    })?;
+    Ok(CapturedOutput {
+        artifact_id,
+        file_name: file_name.to_string(),
+        digest: format!("sha256:{}", hex::encode(hasher.finalize())),
+        retained_bytes: retained,
+        dropped_bytes: dropped,
+        truncated: dropped > 0,
+    })
+}
+
+fn load_request(task_dir: &Path) -> Result<RunnerTaskRequest, UniversalExecError> {
+    let path = task_dir.join(REQUEST_FILE);
+    let bytes = fs::read(&path).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::MetadataCorrupt,
+            format!("cannot read runner request: {error}"),
+            None,
+            false,
+        )
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::MetadataCorrupt,
+            format!("invalid runner request: {error}"),
+            None,
+            false,
+        )
+    })
+}
+
+fn validate_request_identity(request: &RunnerTaskRequest) -> Result<(), UniversalExecError> {
+    if request.schema_version != UNIVERSAL_EXEC_SCHEMA_VERSION {
+        return Err(runner_error("unsupported runner request schema"));
+    }
+    super::validate_id(&request.task_id, "taskId")?;
+    super::validate_id(&request.workspace_id, "workspaceId")?;
+    super::validate_args(&request.args)?;
+    super::validate_env(&request.env)
+}
+
+fn validate_executable(request: &RunnerTaskRequest) -> Result<PathBuf, UniversalExecError> {
+    let path = Path::new(&request.executable);
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::InvalidRequest,
+            format!("cannot inspect target executable: {error}"),
+            Some("executable"),
+            false,
+        )
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.permissions().mode() & 0o111 == 0
+    {
+        return Err(runner_error(
+            "target executable must remain a non-symlink executable file",
+        ));
+    }
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::InvalidRequest,
+            format!("cannot canonicalize target executable: {error}"),
+            Some("executable"),
+            false,
+        )
+    })?;
+    let digest = sha256_file(&canonical)?;
+    if digest != request.executable_digest {
+        return Err(runner_error(
+            "target executable digest changed before launch",
+        ));
+    }
+    Ok(canonical)
+}
+
+fn failure_result(
+    task_dir: &Path,
+    request: &RunnerTaskRequest,
+    started_unix_ms: u128,
+    message: String,
+) -> Result<RunnerTaskResult, UniversalExecError> {
+    Ok(RunnerTaskResult {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        task_id: request.task_id.clone(),
+        status: TaskTerminalStatus::Failed,
+        exit_code: None,
+        timed_out: false,
+        infrastructure_error: Some(message),
+        started_unix_ms,
+        finished_unix_ms: now_unix_ms()?,
+        stdout: capture_empty_if_missing(task_dir, &request.task_id, true)?,
+        stderr: capture_empty_if_missing(task_dir, &request.task_id, false)?,
+    })
+}
+
+fn capture_empty_if_missing(
+    task_dir: &Path,
+    task_id: &str,
+    stdout: bool,
+) -> Result<CapturedOutput, UniversalExecError> {
+    let (suffix, file_name) = if stdout {
+        ("stdout", STDOUT_FILE)
+    } else {
+        ("stderr", STDERR_FILE)
+    };
+    let path = task_dir.join(file_name);
+    if !path.exists() {
+        File::create(&path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| {
+                UniversalExecError::new(
+                    UniversalExecErrorCode::IoError,
+                    format!("cannot create empty output: {error}"),
+                    None,
+                    false,
+                )
+            })?;
+    }
+    let retained = fs::metadata(&path)
+        .map_err(|error| {
+            UniversalExecError::new(
+                UniversalExecErrorCode::IoError,
+                format!("cannot inspect output: {error}"),
+                None,
+                false,
+            )
+        })?
+        .len();
+    Ok(CapturedOutput {
+        artifact_id: format!("{task_id}.{suffix}"),
+        file_name: file_name.to_string(),
+        digest: sha256_file(&path)?,
+        retained_bytes: retained,
+        dropped_bytes: 0,
+        truncated: false,
+    })
+}
+
+fn empty_output(task_id: &str, stdout: bool) -> CapturedOutput {
+    let (suffix, file_name) = if stdout {
+        ("stdout", STDOUT_FILE)
+    } else {
+        ("stderr", STDERR_FILE)
+    };
+    CapturedOutput {
+        artifact_id: format!("{task_id}.{suffix}"),
+        file_name: file_name.to_string(),
+        digest: format!("sha256:{}", hex::encode(Sha256::digest([]))),
+        retained_bytes: 0,
+        dropped_bytes: 0,
+        truncated: false,
+    }
+}
+
+fn runner_error(message: impl Into<String>) -> UniversalExecError {
+    UniversalExecError::new(
+        UniversalExecErrorCode::MetadataCorrupt,
+        message,
+        None,
+        false,
+    )
+}

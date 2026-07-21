@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "phase": "ORDIVON-MIGRATION-M1-2026-07-21",
+  "evidenceClass": "LOCAL_SYSTEM_OBSERVATION_SUMMARY",
+  "branch": "agent/universal-executor-m1",
+  "baseCommit": "a0074e767944518183167833a17e59df7680729d",
+  "runtime": {
+    "systemd": "systemd 261 (261.1-1-arch)",
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "bootId": "f51d3f64-44b8-4756-bb93-23fb5d52da82",
+    "cgroupFilesystem": "cgroup2fs"
+  },
+  "binaryIdentity": {
+    "cli": {
+      "path": "target/debug/ordivon-m1-cli",
+      "digest": "sha256:ca508589fd8d3e568998e9eaacfac1f808647077e9b0257d3ab152b96b5527c1",
+      "byteLength": 16353816
+    },
+    "runner": {
+      "path": "target/debug/ordivon-task-runner",
+      "digest": "sha256:c39de38d8a3fab5ef708163c7bbd9aeee3b36c6cbb7a829107117928f66bd219",
+      "byteLength": 15155192
+    }
+  },
+  "observedJourney": {
+    "cancelledStatus": "CANCELLED",
+    "cancelledTaskId": "m1-cancel-358481-1784637753401526917",
+    "cliCalls": 14,
+    "completedArtifacts": [
+      {
+        "artifactId": "m1-complete-358481-1784637753401526917.stdout",
+        "byteLength": 26,
+        "digest": "sha256:71cc71f30cbf51e92d4df6dd0f062ffe76b036195c9f8776680fad5b447bfbf8",
+        "kind": "STDOUT",
+        "mediaType": "text/plain; charset=utf-8",
+        "taskId": "m1-complete-358481-1784637753401526917"
+      },
+      {
+        "artifactId": "m1-complete-358481-1784637753401526917.stderr",
+        "byteLength": 21,
+        "digest": "sha256:42acda0300cd0e07ebe6f42fe651ad34a4492f5542e5cea04a87aea66fcf124a",
+        "kind": "STDERR",
+        "mediaType": "text/plain; charset=utf-8",
+        "taskId": "m1-complete-358481-1784637753401526917"
+      },
+      {
+        "artifactId": "m1-complete-358481-1784637753401526917.result",
+        "byteLength": 762,
+        "digest": "sha256:85561a7d91dcd79422dc3c32074033f5fe7ab261629d458063890a59ce974f15",
+        "kind": "EXECUTION_RESULT",
+        "mediaType": "application/json",
+        "taskId": "m1-complete-358481-1784637753401526917"
+      }
+    ],
+    "completedStatus": "COMPLETED",
+    "completedTaskId": "m1-complete-358481-1784637753401526917",
+    "diffDigest": "sha256:d21f162c2f24dea6a76916c14cabe410f9bf90d27f06f630f3e132e10cdeefb8",
+    "elapsedMs": 2226,
+    "generatedOutputDigest": "sha256:2139e5ab53fa8275504b55c17cb5442698b745a7121ef2236ba5546e5f4e283d",
+    "hostWriteDenied": true,
+    "legacyComparison": "pending_m2",
+    "longPollingEnabled": true,
+    "phase": "M1",
+    "schemaVersion": 1,
+    "sourceRevision": "a0074e767944518183167833a17e59df7680729d",
+    "stderrDigest": "sha256:42acda0300cd0e07ebe6f42fe651ad34a4492f5542e5cea04a87aea66fcf124a",
+    "stdoutDigest": "sha256:71cc71f30cbf51e92d4df6dd0f062ffe76b036195c9f8776680fad5b447bfbf8",
+    "systemControlDenied": true,
+    "untrackedPaths": [
+      "m1-output.txt",
+      "m1_tool.py"
+    ],
+    "workspaceAfterDigest": "sha256:fec2f6b0610680bb5b04fff733c3b102e4df76793a95cd1993af88cd6f5f01d5",
+    "workspaceId": "m1-workspace-358481-1784637753401526917"
+  },
+  "developmentComparison": {
+    "beforeLongPollingCliCalls": 38,
+    "afterLongPollingCliCalls": 14,
+    "callReductionPercent": 63.2,
+    "classification": "internal_m1_polling_optimization_not_legacy_comparison"
+  },
+  "sandboxObservations": {
+    "hostEtcWriteDenied": true,
+    "systemdControlDenied": true,
+    "networkMode": "private_network",
+    "systemView": "read_only_except_workspace_and_task_directory",
+    "capabilityBoundingSet": "empty"
+  },
+  "cleanupObservations": {
+    "residualSystemdUnits": [],
+    "residualRunnerProcesses": [],
+    "residualTestStores": [],
+    "hostEscapeFileExists": false
+  },
+  "claimsNotMade": [
+    "No Legacy Desktop Commander comparison was performed; that is M2.",
+    "No production MCP tool or route was exposed.",
+    "No production Bridge, Cloudflare, system service, or port was changed.",
+    "The filesystem Task registry is not a transactional production registry.",
+    "The runner still executes under root UID inside a constrained systemd sandbox."
+  ]
+}

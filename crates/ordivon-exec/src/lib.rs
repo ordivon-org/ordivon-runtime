@@ -4,6 +4,8 @@ mod job;
 mod migration;
 mod repo;
 mod search;
+#[cfg(feature = "universal-executor-m1")]
+mod universal;
 
 pub use error::{ExecError, ExecErrorCode};
 pub use file::{
@@ -38,4 +40,18 @@ pub use repo::{repo_snapshot, RepoSnapshotRequest, RepoSnapshotResult};
 pub use search::{
     search_text, SearchHit, SearchPatternMode, SearchSubmatch, SearchTextRequest, SearchTextResult,
     MAX_SEARCH_BYTES, MAX_SEARCH_GLOBS, MAX_SEARCH_RESULTS,
+};
+
+#[cfg(feature = "universal-executor-m1")]
+pub use universal::{
+    cancel_universal_task, create_git_workspace, get_universal_task, load_workspace_record,
+    read_task_artifact, read_workspace_text, remove_git_workspace, run_task_runner,
+    start_universal_task, workspace_diff, write_workspace_text, ArtifactReadRequest,
+    ArtifactReadResult, GitWorkspaceCreateRequest, TaskCancelRequest, TaskGetRequest,
+    UniversalExecError, UniversalExecErrorCode, UniversalExecRequest, UniversalExecutorConfig,
+    WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceReadRequest, WorkspaceReadResult,
+    WorkspaceRecord, WorkspaceWriteRequest, WorkspaceWriteResult, MAX_ARTIFACT_READ_BYTES,
+    MAX_TASK_WAIT_MS, MAX_UNIVERSAL_ARGS, MAX_UNIVERSAL_ARG_BYTES, MAX_UNIVERSAL_ENV_VALUE_BYTES,
+    MAX_UNIVERSAL_ENV_VARS, MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS,
+    MAX_WORKSPACE_IO_BYTES, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };

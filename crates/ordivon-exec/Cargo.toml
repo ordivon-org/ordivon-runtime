@@ -7,11 +7,22 @@ license.workspace = true
 [features]
 default = []
 supervisor-spike = ["dep:libc"]
+universal-executor-m1 = ["dep:libc"]
 
 [[bin]]
 name = "ordivon-job-fixture"
 path = "src/bin/ordivon-job-fixture.rs"
 required-features = ["supervisor-spike"]
+
+[[bin]]
+name = "ordivon-task-runner"
+path = "src/bin/ordivon-task-runner.rs"
+required-features = ["universal-executor-m1"]
+
+[[bin]]
+name = "ordivon-m1-cli"
+path = "src/bin/ordivon-m1-cli.rs"
+required-features = ["universal-executor-m1"]
 
 [dependencies]
 hex.workspace = true

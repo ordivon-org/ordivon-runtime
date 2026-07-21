@@ -63,13 +63,33 @@ The tracked local Cargo policy is machine-bound supporting configuration. Its
 presence does not activate execution, and toolchain or workspace drift makes
 it fail closed.
 
+## Minimal universal executor M1
+
+M1 adds a feature-gated local vertical slice for AI-authored programs. It can
+create a detached Git workspace, perform digest-bound text writes, run an
+absolute executable plus argv as a durable systemd Task, recover Task state
+from later CLI processes, retain bounded stdout/stderr/result Artifacts, cancel
+a cgroup-owned Task, and report tracked diff plus untracked paths.
+
+The target process receives a cleared environment, private network, bounded
+resources, a read-only system view, and write access only to the workspace and
+Task directory. The real integration test proved completion, cancellation,
+cross-process recovery, Artifact reads, and denial of host `/etc` writes and
+systemd control.
+
+The binaries require the `universal-executor-m1` feature and are not exposed by
+the current MCP server. The filesystem Task registry is experimental evidence,
+not the future transactional registry. See
+`docs/architecture/ordivon-universal-executor-m1.md`.
+
 ## Explicitly not implemented
 
-- patch or write operations;
-- process creation, supervision, persistence, or durable-job MCP tools;
-- MCP, HTTP, Cloudflare, or Hermes adapters;
-- search continuation cursors or hard execution timeout;
-- authorization, sealed receipts, or runtime observation emission.
+- production MCP, HTTP, Cloudflare, or Hermes execution adapters;
+- a transactional Task registry, atomic idempotency, or concurrency slots;
+- Task listing, retention, garbage collection, or complete orphan recovery;
+- scoped network opt-in, credential delegation, or non-root worker identity;
+- binary Artifact decoding or model-oriented log summarization;
+- authorization, sealed receipts, or production runtime observation emission.
 
-The current crate is a local read-only core slice. Performance claims require a
-separate benchmark against the legacy Desktop Commander route.
+M1 is a feature-gated local execution slice. Performance claims against the
+legacy Desktop Commander route still require the M2 comparative benchmark.
