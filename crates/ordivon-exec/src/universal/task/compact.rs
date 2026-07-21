@@ -5,12 +5,41 @@ use std::path::Path;
 use crate::migration::{MigrationTaskHandle, MigrationTaskStatus};
 
 use super::super::{
-    CompactTaskObservation, RunnerTaskResult, TaskAwaitRequest, TaskGetRequest, TaskRunRequest,
-    TaskTerminalStatus, UniversalExecError, UniversalExecutorConfig,
+    CompactTaskObservation, DurableTaskSnapshot, RunnerTaskResult, TaskAwaitRequest,
+    TaskGetRequest, TaskRunRequest, TaskTerminalStatus, UniversalExecError,
+    UniversalExecutorConfig,
 };
 use super::start::start_universal_task;
 use super::status::{get_universal_task, load_task_metadata, load_task_result_if_present};
 use super::{STDERR_FILE, STDOUT_FILE};
+
+pub fn snapshot_universal_task(
+    config: &UniversalExecutorConfig,
+    task_id: &str,
+) -> Result<DurableTaskSnapshot, UniversalExecError> {
+    let task_dir = config.task_path(task_id);
+    let metadata = load_task_metadata(&task_dir, task_id)?;
+    let handle = get_universal_task(
+        config,
+        &TaskGetRequest {
+            schema_version: super::super::UNIVERSAL_EXEC_SCHEMA_VERSION,
+            task_id: task_id.to_string(),
+            wait_ms: 0,
+        },
+    )?;
+    let updated_unix_ms = load_task_result_if_present(&task_dir)?
+        .map(|result| result.finished_unix_ms)
+        .unwrap_or(metadata.created_unix_ms);
+    Ok(DurableTaskSnapshot {
+        task_id: handle.task_id,
+        status: handle.status,
+        status_message: handle.status_message,
+        created_unix_ms: metadata.created_unix_ms,
+        updated_unix_ms,
+        poll_after_ms: handle.poll_after_ms,
+        result_available: handle.result_available,
+    })
+}
 
 pub fn run_universal_task_compact(
     config: &UniversalExecutorConfig,

@@ -370,6 +370,19 @@ impl TaskRunRequest {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DurableTaskSnapshot {
+    pub task_id: String,
+    pub status: MigrationTaskStatus,
+    pub status_message: String,
+    pub created_unix_ms: u128,
+    pub updated_unix_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poll_after_ms: Option<u64>,
+    pub result_available: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompactTaskObservation {
     pub task_id: String,
     pub status: MigrationTaskStatus,

@@ -4,10 +4,34 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+experimental-http-m4 = [
+    "dep:axum",
+    "dep:tokio-util",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "ordivon-exec/universal-executor-m1",
+    "rmcp/transport-streamable-http-server",
+    "tokio/net",
+    "tokio/signal",
+    "tokio/time",
+]
+
+[[bin]]
+name = "ordivon-m4-http"
+path = "src/bin/ordivon-m4-http.rs"
+required-features = ["experimental-http-m4"]
+
 [dependencies]
+axum = { workspace = true, optional = true }
 ordivon-exec = { path = "../ordivon-exec" }
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+time.workspace = true
 tokio.workspace = true
+tokio-util = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }

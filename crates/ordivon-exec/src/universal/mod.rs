@@ -23,16 +23,17 @@ pub use projection::{
 pub use runner::run_task_runner;
 pub use task::{
     await_universal_task_compact, cancel_universal_task, get_universal_task, read_task_artifact,
-    run_universal_task_compact, start_universal_task,
+    run_universal_task_compact, snapshot_universal_task, start_universal_task,
 };
 pub use types::{
     ArtifactReadRequest, ArtifactReadResult, CompactTaskObservation, CompactWorkspaceDiffResult,
     CompactWorkspaceOpenResult, CompactWorkspaceReadResult, CompactWorkspaceSliceResult,
-    GitWorkspaceCreateRequest, TaskAwaitRequest, TaskCancelRequest, TaskGetRequest, TaskRunRequest,
-    UniversalExecRequest, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceMutateRequest,
-    WorkspaceMutateResult, WorkspaceMutation, WorkspaceMutationMode, WorkspaceMutationResult,
-    WorkspaceReadRequest, WorkspaceReadResult, WorkspaceReadSliceRequest, WorkspaceReadSliceResult,
-    WorkspaceRecord, WorkspaceWriteRequest, WorkspaceWriteResult,
+    DurableTaskSnapshot, GitWorkspaceCreateRequest, TaskAwaitRequest, TaskCancelRequest,
+    TaskGetRequest, TaskRunRequest, UniversalExecRequest, WorkspaceDiffRequest,
+    WorkspaceDiffResult, WorkspaceMutateRequest, WorkspaceMutateResult, WorkspaceMutation,
+    WorkspaceMutationMode, WorkspaceMutationResult, WorkspaceReadRequest, WorkspaceReadResult,
+    WorkspaceReadSliceRequest, WorkspaceReadSliceResult, WorkspaceRecord, WorkspaceWriteRequest,
+    WorkspaceWriteResult,
 };
 pub use workspace::{
     create_git_workspace, load_workspace_record, read_workspace_text, remove_git_workspace,
