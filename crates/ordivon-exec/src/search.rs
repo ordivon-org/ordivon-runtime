@@ -1,4 +1,5 @@
 use crate::{ExecError, ExecErrorCode};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
@@ -9,14 +10,14 @@ pub const MAX_SEARCH_RESULTS: usize = 10_000;
 pub const MAX_SEARCH_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SEARCH_GLOBS: usize = 64;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchPatternMode {
     Regex,
     Fixed,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchTextRequest {
     pub root: String,
@@ -30,7 +31,7 @@ pub struct SearchTextRequest {
     pub max_bytes: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchSubmatch {
     pub start_byte: u64,
@@ -38,7 +39,7 @@ pub struct SearchSubmatch {
     pub text: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchHit {
     pub path: String,
@@ -47,7 +48,7 @@ pub struct SearchHit {
     pub submatches: Vec<SearchSubmatch>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchTextResult {
     pub root: String,

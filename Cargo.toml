@@ -2,6 +2,7 @@
 members = [
     "crates/ordivon-kernel",
     "crates/ordivon-ledger",
+    "crates/ordivon-mcp",
     "crates/ordivon-exec",
 ]
 resolver = "2"
@@ -17,6 +18,8 @@ ed25519-dalek = "2"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = "1"
+rmcp = { version = "2.2.0", default-features = false, features = ["server", "macros", "transport-io"] }
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "json"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }

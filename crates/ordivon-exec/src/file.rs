@@ -1,4 +1,5 @@
 use crate::{ExecError, ExecErrorCode};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -9,7 +10,7 @@ pub const MAX_READ_LINES: u64 = 10_000;
 pub const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_BATCH_FILES: usize = 64;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadTextRequest {
     pub path: String,
@@ -18,7 +19,7 @@ pub struct ReadTextRequest {
     pub max_bytes: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadTextResult {
     pub path: String,
@@ -34,14 +35,14 @@ pub struct ReadTextResult {
     pub content: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadManyRequest {
     pub requests: Vec<ReadTextRequest>,
     pub max_total_bytes: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadManyItem {
     pub path: String,
@@ -51,7 +52,7 @@ pub struct ReadManyItem {
     pub error: Option<ExecError>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadManyResult {
     pub items: Vec<ReadManyItem>,

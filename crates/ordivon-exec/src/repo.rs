@@ -1,18 +1,19 @@
 use crate::{ExecError, ExecErrorCode};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::process::Command;
 
 const MAX_GIT_STATUS_BYTES: usize = 8 * 1024 * 1024;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoSnapshotRequest {
     pub root: String,
     pub include_untracked: bool,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoSnapshotResult {
     pub root: String,
