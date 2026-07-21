@@ -11,6 +11,7 @@ experimental-http-m4 = [
     "dep:tokio-util",
     "dep:tracing",
     "dep:tracing-subscriber",
+    "dep:tower-http",
     "ordivon-exec/universal-executor-m1",
     "rmcp/transport-streamable-http-server",
     "tokio/net",
@@ -35,3 +36,4 @@ tokio.workspace = true
 tokio-util = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }

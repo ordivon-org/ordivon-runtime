@@ -1,10 +1,14 @@
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{header, Request, StatusCode};
+use axum::extract::State;
+use axum::http::{header, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
@@ -14,12 +18,18 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use tokio_util::sync::CancellationToken;
+use tower_http::limit::RequestBodyLimitLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Clone)]
-struct AuthState {
+struct HttpState {
     bearer: Arc<str>,
+    trace_path: Option<Arc<PathBuf>>,
+    body_limit_bytes: u64,
 }
+
+static HTTP_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static HTTP_TRACE_LOCK: Mutex<()> = Mutex::new(());
 
 struct AppConfig {
     bind: SocketAddr,
@@ -55,13 +65,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         transport_config(address, &app.allowed_origins, cancellation.child_token()),
     );
 
-    let auth = AuthState {
+    let http_state = HttpState {
         bearer: Arc::from(format!("Bearer {}", app.token)),
+        trace_path: app
+            .server
+            .trace_path
+            .as_ref()
+            .map(|path| Arc::new(PathBuf::from(format!("{}.http.jsonl", path.display())))),
+        body_limit_bytes: app.body_limit_bytes.try_into()?,
     };
     let router = Router::new()
         .nest_service("/mcp", service)
-        .layer(DefaultBodyLimit::max(app.body_limit_bytes))
-        .layer(middleware::from_fn_with_state(auth, authenticate));
+        .layer(RequestBodyLimitLayer::new(app.body_limit_bytes))
+        .layer(middleware::from_fn_with_state(
+            http_state,
+            authenticate_and_trace,
+        ));
 
     tracing::info!(
         bind = %address,
@@ -81,20 +100,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn authenticate(
-    State(state): State<AuthState>,
+async fn authenticate_and_trace(
+    State(state): State<HttpState>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    let started = Instant::now();
+    let trace_id = format!(
+        "m4-http-{}-{}-{}",
+        std::process::id(),
+        unix_ms(),
+        HTTP_TRACE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let request_bytes = content_length(request.headers());
     let supplied = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if !constant_time_eq(supplied.as_bytes(), state.bearer.as_bytes()) {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let authorized = constant_time_eq(supplied.as_bytes(), state.bearer.as_bytes());
+    let too_large = request_bytes.is_some_and(|bytes| bytes > state.body_limit_bytes);
+    let mut response = if too_large {
+        StatusCode::PAYLOAD_TOO_LARGE.into_response()
+    } else if authorized {
+        next.run(request).await
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
+    };
+    if let Ok(value) = HeaderValue::from_str(&trace_id) {
+        response.headers_mut().insert("x-ordivon-trace-id", value);
     }
-    next.run(request).await
+    let response_bytes = content_length(response.headers());
+    append_http_trace(
+        state.trace_path.as_deref(),
+        &trace_id,
+        &method,
+        &path,
+        authorized,
+        response.status().as_u16(),
+        request_bytes,
+        response_bytes,
+        started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+    );
+    response
 }
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
@@ -176,4 +226,66 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
 
 fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
     std::env::var(name).map_err(|error| format!("{name} is required: {error}").into())
+}
+
+fn content_length(headers: &axum::http::HeaderMap) -> Option<u64> {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_http_trace(
+    path: Option<&PathBuf>,
+    trace_id: &str,
+    method: &str,
+    request_path: &str,
+    authorized: bool,
+    status: u16,
+    request_bytes: Option<u64>,
+    response_bytes: Option<u64>,
+    total_ms: u64,
+) {
+    let Some(path) = path else {
+        return;
+    };
+    let record = serde_json::json!({
+        "traceId": trace_id,
+        "kind": "http",
+        "method": method,
+        "path": request_path,
+        "authorized": authorized,
+        "status": status,
+        "requestBytes": request_bytes,
+        "responseBytes": response_bytes,
+        "totalMs": total_ms,
+        "observedUnixMs": unix_ms(),
+    });
+    let guard = match HTTP_TRACE_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(error) => {
+            tracing::warn!("M4 HTTP trace lock poisoned: {error}");
+            return;
+        }
+    };
+    let result = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| {
+            serde_json::to_writer(&mut file, &record)?;
+            file.write_all(b"\n")
+        });
+    drop(guard);
+    if let Err(error) = result {
+        tracing::warn!("cannot append M4 HTTP trace {}: {error}", path.display());
+    }
+}
+
+fn unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
