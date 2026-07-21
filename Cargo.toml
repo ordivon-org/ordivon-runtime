@@ -2,6 +2,7 @@
 members = [
     "crates/ordivon-kernel",
     "crates/ordivon-ledger",
+    "crates/ordivon-exec",
 ]
 resolver = "2"
 
