@@ -144,11 +144,10 @@ impl ServerHandler for M4Server {
             total_ms: elapsed_ms(protocol_started),
         };
         self.record_trace("tasks.result", &trace, ok);
-        let outcome = M4Outcome {
-            ok,
-            result: Some(observation),
-            error,
-            trace: None,
+        let outcome = if ok {
+            M4Outcome::Success(observation)
+        } else {
+            M4Outcome::Error(error.expect("terminal non-success has an error"))
         };
         let tool_result = outcome.into_call_tool_result()?;
         let value = serde_json::to_value(tool_result).map_err(|error| {

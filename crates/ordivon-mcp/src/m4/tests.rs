@@ -74,12 +74,7 @@ fn tool_catalog_is_thin_and_exec_is_optional_task() {
 
 #[test]
 fn structured_failure_is_a_tool_error_not_protocol_failure() {
-    let outcome = M4Outcome::<String> {
-        ok: false,
-        result: None,
-        error: Some(M4Error::invalid("digest mismatch", "expectedDigest")),
-        trace: None,
-    };
+    let outcome = M4Outcome::<String>::Error(M4Error::invalid("digest mismatch", "expectedDigest"));
     let result = outcome.into_call_tool_result().unwrap();
     assert_eq!(result.is_error, Some(true));
     assert_eq!(

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -22,7 +23,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 static GLOBAL_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -110,16 +111,28 @@ impl From<UniversalExecError> for M4Error {
     }
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct M4Outcome<T> {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<T>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<M4Error>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace: Option<M4TraceSummary>,
+#[derive(Clone, Debug)]
+pub enum M4Outcome<T> {
+    Success(T),
+    Error(M4Error),
+}
+
+impl<T: JsonSchema> JsonSchema for M4Outcome<T> {
+    fn inline_schema() -> bool {
+        T::inline_schema()
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        T::schema_name()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        T::schema_id()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        T::json_schema(generator)
+    }
 }
 
 impl<T> IntoCallToolResult for M4Outcome<T>
@@ -127,19 +140,17 @@ where
     T: Serialize + JsonSchema + Send + 'static,
 {
     fn into_call_tool_result(self) -> Result<CallToolResult, McpError> {
-        let ok = self.ok;
-        let value = serde_json::to_value(self).map_err(|error| {
-            McpError::internal_error(format!("cannot serialize M4 result: {error}"), None)
-        })?;
-        let compatibility_text = if ok {
-            "ok".to_string()
-        } else {
-            value
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("tool error")
-                .to_string()
+        let (ok, value, compatibility_text) = match self {
+            Self::Success(result) => {
+                let value = serde_json::to_value(result).map_err(|error| {
+                    McpError::internal_error(format!("cannot serialize M4 result: {error}"), None)
+                })?;
+                (true, value, "ok".to_string())
+            }
+            Self::Error(error) => {
+                let compatibility_text = error.message.clone();
+                (false, json!({ "error": error }), compatibility_text)
+            }
         };
         let mut result = if ok {
             CallToolResult::success(vec![ContentBlock::text(compatibility_text)])
@@ -150,6 +161,7 @@ where
         Ok(result)
     }
 }
+
 impl M4Server {
     async fn run_core<T, F>(&self, tool: &'static str, operation: F) -> M4Outcome<T>
     where
@@ -174,18 +186,8 @@ impl M4Server {
         };
         self.record_trace(tool, &trace, result.is_ok());
         match result {
-            Ok(value) => M4Outcome {
-                ok: true,
-                result: Some(value),
-                error: None,
-                trace: None,
-            },
-            Err(error) => M4Outcome {
-                ok: false,
-                result: None,
-                error: Some(error),
-                trace: None,
-            },
+            Ok(value) => M4Outcome::Success(value),
+            Err(error) => M4Outcome::Error(error),
         }
     }
     fn record_trace(&self, tool: &str, trace: &M4TraceSummary, ok: bool) {
