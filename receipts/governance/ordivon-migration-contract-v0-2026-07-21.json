@@ -1,0 +1,104 @@
+{
+  "stage_id": "ORDIVON-MIGRATION-CONTRACT-V0-2026-07-21",
+  "receipt_type": "R2",
+  "risk_class": "R2",
+  "draft": true,
+  "status": "DEGRADED_CONTRACT_ONLY",
+  "task_type": "migration_contract",
+  "timestamp": "2026-07-21T00:00:00Z",
+  "branch": "agent/migration-contract-v0",
+  "base_commit": "a7638481fb0594554a8f5e43b42b3d260e2f4c75",
+  "files_changed": [
+    "crates/ordivon-exec/README.md",
+    "crates/ordivon-exec/src/lib.rs",
+    "crates/ordivon-exec/src/migration/benchmark.rs",
+    "crates/ordivon-exec/src/migration/error.rs",
+    "crates/ordivon-exec/src/migration/mod.rs",
+    "crates/ordivon-exec/src/migration/route.rs",
+    "crates/ordivon-exec/src/migration/task.rs",
+    "crates/ordivon-exec/src/migration/tests.rs",
+    "crates/ordivon-exec/src/migration/validation.rs",
+    "docs/architecture/ordivon-migration-contract-v0.md",
+    "docs/governance/document-registry.jsonl",
+    "receipts/governance/ordivon-migration-contract-v0-2026-07-21.json"
+  ],
+  "implemented_contracts": [
+    "Ordivon-first pure backend routing",
+    "workspace-only explicit legacy fallback",
+    "read-only shadow comparison",
+    "agent-facing Task and input-required states",
+    "digest-bound Artifact references",
+    "legacy fallback demand records",
+    "legacy-versus-Ordivon benchmark samples and signed deltas"
+  ],
+  "evidence": "Fresh local evidence: 71 ordivon-exec tests and 95 workspace tests passed; strict Clippy and format checks passed; exact-base document comparison showed zero new governance violations; no process, MCP execution tool, backend call, route switch, or production change was created.",
+  "verification_result": "The migration thin waist is locally verified as pure contracts only. It does not yet migrate or execute a task journey.",
+  "degraded_reasons": [
+    "No durable Task registry exists.",
+    "No universal executor or isolated workspace runtime exists.",
+    "No automatic legacy backend invocation exists.",
+    "No comparative task-journey benchmark has been collected.",
+    "Repository document governance retains three exact-base violations."
+  ],
+  "remaining_debt": [
+    "Implement one isolated workspace fixture.",
+    "Implement one durable fixture execution path behind Task and Artifact contracts.",
+    "Run the first legacy-versus-Ordivon comparative journey.",
+    "Keep production Bridge, Cloudflare, host services, credentials, and remote Git outside automatic routing."
+  ],
+  "authorization": {
+    "status": "not_requested",
+    "rationale": "M0 defines routing and evidence contracts but performs no routed action."
+  },
+  "next_bounded_action": "Implement M1 minimal universal executor for one isolated fixture task journey without MCP or production routing.",
+  "canonical_sources": [
+    "docs/ai/ordivon-core-refrozen.md",
+    "docs/architecture/semantic-firebreak.md",
+    "docs/architecture/ordivon-capability-scope-v0.md",
+    "docs/architecture/ordivon-migration-contract-v0.md"
+  ],
+  "verification_results": [
+    {
+      "id": "ordivon-exec-tests",
+      "command": "cargo test -p ordivon-exec --lib",
+      "passed": true,
+      "summary": "71 passed; 12 migration contract tests plus prior contracts"
+    },
+    {
+      "id": "workspace-tests",
+      "command": "cargo test --workspace",
+      "passed": true,
+      "summary": "95 passed: exec 71, kernel 17, ledger 6, MCP 1"
+    },
+    {
+      "id": "workspace-clippy",
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "passed": true,
+      "summary": "No warnings"
+    },
+    {
+      "id": "supervisor-feature-compatibility",
+      "command": "cargo test/clippy with supervisor-spike feature",
+      "passed": true,
+      "summary": "Feature targets compile and lint cleanly"
+    },
+    {
+      "id": "document-governance-delta",
+      "command": "uv document registry check on branch and exact base a763848",
+      "passed": true,
+      "summary": "Both report the same three pre-existing violations; M0 adds none"
+    },
+    {
+      "id": "registry-jsonl",
+      "command": "parse every document registry line as JSON",
+      "passed": true,
+      "summary": "Valid JSONL"
+    },
+    {
+      "id": "receipt-integrity",
+      "command": "run receipt-integrity check directly against the M0 receipt",
+      "passed": true,
+      "summary": "0 advisory warnings on the M0 receipt; repository-wide legacy receipts retain pre-existing warnings"
+    }
+  ]
+}

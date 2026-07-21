@@ -1,6 +1,7 @@
 mod error;
 mod file;
 mod job;
+mod migration;
 mod repo;
 mod search;
 
@@ -23,6 +24,15 @@ pub use job::{
     MAX_CAPABILITY_PROFILES, MAX_CAPABILITY_ROOTS, MAX_EXECUTION_CONCURRENCY,
     MAX_EXECUTION_RUNTIME_MS, MAX_JOB_ARGS, MAX_JOB_ARG_BYTES, MAX_JOB_ENV_VALUE_BYTES,
     MAX_JOB_ENV_VARS, MAX_JOB_LIST_LIMIT, MAX_JOB_OUTPUT_RETENTION_BYTES, MAX_JOB_READ_BYTES,
+};
+pub use migration::{
+    compare_migration_samples, decide_backend_route, ArtifactKind, ArtifactReference,
+    BackendSupport, LegacyFallbackPolicy, LegacyFallbackRecord, MigrationBackend,
+    MigrationBenchmarkSample, MigrationCapability, MigrationContractError,
+    MigrationContractErrorCode, MigrationOperationClass, MigrationPerformanceDelta,
+    MigrationRouteDecision, MigrationRouteReason, MigrationRouteRequest, MigrationTaskHandle,
+    MigrationTaskStatus, TaskInputRequest, MAX_INPUT_OPTIONS, MAX_POLL_AFTER_MS,
+    MAX_STATUS_MESSAGE_BYTES, MAX_TASK_ARTIFACTS, MIGRATION_CONTRACT_SCHEMA_VERSION,
 };
 pub use repo::{repo_snapshot, RepoSnapshotRequest, RepoSnapshotResult};
 pub use search::{

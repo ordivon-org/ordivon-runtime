@@ -41,6 +41,16 @@ The fixture and real systemd tests require the explicit `supervisor-spike`
 feature and are not part of the normal release target. See
 `docs/architecture/ordivon-job-supervisor-spike-v0.md`.
 
+## Migration contract
+
+M0 adds pure contracts for new-versus-legacy backend routing, agent-facing Task
+handles, Artifact references, fallback observations, and comparative performance
+samples. Ordivon is preferred when available; automatic legacy fallback is
+limited to read-only or isolated-workspace operations, and shadow comparison is
+read-only. The module performs no execution or legacy calls.
+
+See `docs/architecture/ordivon-migration-contract-v0.md`.
+
 ## Verified capability evaluator
 
 P3 loads a bounded deny-by-default policy, rejects duplicate JSON keys and
