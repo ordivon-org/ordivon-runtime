@@ -1,11 +1,12 @@
 use ordivon_exec::{
-    await_universal_task_compact, cancel_universal_task, create_git_workspace, get_universal_task,
-    mutate_workspace, read_task_artifact, read_workspace_slice, read_workspace_text,
-    run_universal_task_compact, start_universal_task, workspace_diff, write_workspace_text,
-    ArtifactReadRequest, GitWorkspaceCreateRequest, TaskAwaitRequest, TaskCancelRequest,
-    TaskGetRequest, TaskRunRequest, UniversalExecError, UniversalExecRequest,
-    UniversalExecutorConfig, WorkspaceDiffRequest, WorkspaceMutateRequest, WorkspaceReadRequest,
-    WorkspaceReadSliceRequest, WorkspaceWriteRequest,
+    await_universal_task_compact, cancel_universal_task, create_git_workspace,
+    create_git_workspace_compact, get_universal_task, mutate_workspace, read_task_artifact,
+    read_workspace_slice, read_workspace_slice_compact, read_workspace_text,
+    read_workspace_text_compact, run_universal_task_compact, start_universal_task, workspace_diff,
+    workspace_diff_compact, write_workspace_text, ArtifactReadRequest, GitWorkspaceCreateRequest,
+    TaskAwaitRequest, TaskCancelRequest, TaskGetRequest, TaskRunRequest, UniversalExecError,
+    UniversalExecRequest, UniversalExecutorConfig, WorkspaceDiffRequest, WorkspaceMutateRequest,
+    WorkspaceReadRequest, WorkspaceReadSliceRequest, WorkspaceWriteRequest,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -36,8 +37,14 @@ fn main() -> ExitCode {
         "workspace-create" => dispatch::<GitWorkspaceCreateRequest, _>(&body, |request| {
             create_git_workspace(&config, request)
         }),
+        "workspace-open" => dispatch::<GitWorkspaceCreateRequest, _>(&body, |request| {
+            create_git_workspace_compact(&config, request)
+        }),
         "workspace-read" => dispatch::<WorkspaceReadRequest, _>(&body, |request| {
             read_workspace_text(&config, request)
+        }),
+        "workspace-read-compact" => dispatch::<WorkspaceReadRequest, _>(&body, |request| {
+            read_workspace_text_compact(&config, request)
         }),
         "workspace-write" => dispatch::<WorkspaceWriteRequest, _>(&body, |request| {
             write_workspace_text(&config, request)
@@ -48,9 +55,17 @@ fn main() -> ExitCode {
         "workspace-read-slice" => dispatch::<WorkspaceReadSliceRequest, _>(&body, |request| {
             read_workspace_slice(&config, request)
         }),
+        "workspace-read-slice-compact" => {
+            dispatch::<WorkspaceReadSliceRequest, _>(&body, |request| {
+                read_workspace_slice_compact(&config, request)
+            })
+        }
         "workspace-diff" => {
             dispatch::<WorkspaceDiffRequest, _>(&body, |request| workspace_diff(&config, request))
         }
+        "workspace-diff-compact" => dispatch::<WorkspaceDiffRequest, _>(&body, |request| {
+            workspace_diff_compact(&config, request)
+        }),
         "task-start" => dispatch::<UniversalExecRequest, _>(&body, |request| {
             start_universal_task(&config, request)
         }),

@@ -59,6 +59,13 @@ pub struct WorkspaceRecord {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompactWorkspaceOpenResult {
+    pub workspace_id: String,
+    pub source_revision: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceReadRequest {
     pub schema_version: u32,
     pub workspace_id: String,
@@ -89,6 +96,13 @@ pub struct WorkspaceReadResult {
     pub content: String,
     pub digest: String,
     pub byte_length: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompactWorkspaceReadResult {
+    pub content: String,
+    pub digest: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
@@ -164,6 +178,15 @@ pub struct WorkspaceDiffResult {
     pub diff: String,
     pub digest: String,
     pub byte_length: u64,
+    pub truncated: bool,
+    pub untracked_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompactWorkspaceDiffResult {
+    pub diff: String,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
     pub untracked_paths: Vec<String>,
 }
@@ -521,6 +544,16 @@ pub struct WorkspaceReadSliceResult {
     pub eof: bool,
     pub file_digest: String,
     pub file_byte_length: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompactWorkspaceSliceResult {
+    pub content: String,
+    pub file_digest: String,
+    pub file_byte_length: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub eof: bool,
 }
 
 fn validate_wait_and_tails(

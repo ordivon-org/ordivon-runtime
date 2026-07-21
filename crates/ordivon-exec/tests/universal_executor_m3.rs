@@ -53,7 +53,7 @@ fn compact_task_run_completes_in_six_model_facing_calls() {
     let mut cli_calls = 0_u64;
 
     let create = cli_ok(
-        "workspace-create",
+        "workspace-open",
         json!({
             "schemaVersion": 1,
             "workspaceId": workspace_id,
@@ -66,7 +66,7 @@ fn compact_task_run_completes_in_six_model_facing_calls() {
     assert_eq!(create["workspaceId"], sandbox.workspace_id);
 
     let slice = cli_ok(
-        "workspace-read-slice",
+        "workspace-read-slice-compact",
         json!({
             "schemaVersion": 1,
             "workspaceId": sandbox.workspace_id,
@@ -142,7 +142,7 @@ fn compact_task_run_completes_in_six_model_facing_calls() {
     assert_eq!(compact["artifactsAvailable"], true);
 
     let generated = cli_ok(
-        "workspace-read-slice",
+        "workspace-read-slice-compact",
         json!({
             "schemaVersion": 1,
             "workspaceId": sandbox.workspace_id,
@@ -155,7 +155,7 @@ fn compact_task_run_completes_in_six_model_facing_calls() {
     );
     assert_eq!(generated["content"], "marker=True");
     let diff = cli_ok(
-        "workspace-diff",
+        "workspace-diff-compact",
         json!({
             "schemaVersion": 1,
             "workspaceId": sandbox.workspace_id,
