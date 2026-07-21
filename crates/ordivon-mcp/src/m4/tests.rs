@@ -30,6 +30,7 @@ impl Sandbox {
                 max_output_bytes: 1024 * 1024,
             },
             trace_path: None,
+            dogfood_policy: None,
         })
         .unwrap()
     }
@@ -140,4 +141,37 @@ fn durable_snapshot_maps_to_protocol_task_without_session_state() {
     assert_eq!(task.poll_interval, Some(250));
     assert_eq!(task.ttl, Some(60_000));
     assert!(task.created_at.starts_with("2023-"));
+}
+
+#[test]
+fn m5_dogfood_policy_binds_source_repo_and_revision() {
+    let sandbox = Sandbox::new("dogfood-policy");
+    let allowed_repo = sandbox.root.join("allowed-repo");
+    let denied_repo = sandbox.root.join("denied-repo");
+    fs::create_dir_all(&allowed_repo).unwrap();
+    fs::create_dir_all(&denied_repo).unwrap();
+    let policy = M5DogfoodPolicy {
+        allowed_source_repos: vec![allowed_repo.clone()],
+        allowed_source_revisions: vec!["allowed-head".to_string()],
+    }
+    .canonicalized()
+    .unwrap();
+
+    let request = GitWorkspaceCreateRequest {
+        schema_version: 1,
+        workspace_id: "m5-policy-workspace".to_string(),
+        source_repo: allowed_repo.display().to_string(),
+        source_revision: "allowed-head".to_string(),
+    };
+    policy.authorize(&request).unwrap();
+
+    let mut denied_repo_request = request.clone();
+    denied_repo_request.source_repo = denied_repo.display().to_string();
+    let error = policy.authorize(&denied_repo_request).unwrap_err();
+    assert_eq!(error.code, "SOURCE_REPO_NOT_ALLOWED");
+
+    let mut denied_revision_request = request;
+    denied_revision_request.source_revision = "other-head".to_string();
+    let error = policy.authorize(&denied_revision_request).unwrap_err();
+    assert_eq!(error.code, "SOURCE_REVISION_NOT_ALLOWED");
 }

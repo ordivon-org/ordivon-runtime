@@ -13,7 +13,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use ordivon_exec::UniversalExecutorConfig;
-use ordivon_mcp::m4::{M4Server, M4ServerConfig};
+use ordivon_mcp::m4::{M4Server, M4ServerConfig, M5DogfoodPolicy};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -220,8 +220,33 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                 max_output_bytes: 16 * 1024 * 1024,
             },
             trace_path,
+            dogfood_policy: load_dogfood_policy()?,
         },
     })
+}
+
+fn load_dogfood_policy() -> Result<Option<M5DogfoodPolicy>, Box<dyn std::error::Error>> {
+    let repos = std::env::var("ORDIVON_M5_ALLOWED_SOURCE_REPOS").ok();
+    let revisions = std::env::var("ORDIVON_M5_ALLOWED_SOURCE_REVISIONS").ok();
+    match (repos, revisions) {
+        (None, None) => Ok(None),
+        (Some(repos), Some(revisions)) => Ok(Some(M5DogfoodPolicy {
+            allowed_source_repos: repos
+                .split(':')
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .collect(),
+            allowed_source_revisions: revisions
+                .split(',')
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect(),
+        })),
+        _ => Err(
+            "ORDIVON_M5_ALLOWED_SOURCE_REPOS and ORDIVON_M5_ALLOWED_SOURCE_REVISIONS must be set together"
+                .into(),
+        ),
+    }
 }
 
 fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {

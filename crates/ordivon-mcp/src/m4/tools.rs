@@ -17,6 +17,11 @@ impl M4Server {
         &self,
         Parameters(request): Parameters<GitWorkspaceCreateRequest>,
     ) -> M4Outcome<CompactWorkspaceOpenResult> {
+        if let Some(policy) = &self.state.config.dogfood_policy {
+            if let Err(error) = policy.authorize(&request) {
+                return M4Outcome::Error(error);
+            }
+        }
         let config = self.state.config.executor.clone();
         self.run_core("workspace.open", move || {
             create_git_workspace_compact(&config, &request).map_err(M4Error::from)

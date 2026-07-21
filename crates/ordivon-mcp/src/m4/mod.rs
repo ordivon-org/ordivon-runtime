@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -33,6 +33,78 @@ static GLOBAL_TRACE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 pub struct M4ServerConfig {
     pub executor: UniversalExecutorConfig,
     pub trace_path: Option<PathBuf>,
+    pub dogfood_policy: Option<M5DogfoodPolicy>,
+}
+
+#[derive(Clone, Debug)]
+pub struct M5DogfoodPolicy {
+    pub allowed_source_repos: Vec<PathBuf>,
+    pub allowed_source_revisions: Vec<String>,
+}
+
+impl M5DogfoodPolicy {
+    fn canonicalized(self) -> Result<Self, M4Error> {
+        if self.allowed_source_repos.is_empty() {
+            return Err(M4Error::invalid(
+                "M5 dogfood requires at least one source repository",
+                "allowedSourceRepos",
+            ));
+        }
+        if self.allowed_source_revisions.is_empty() {
+            return Err(M4Error::invalid(
+                "M5 dogfood requires at least one source revision",
+                "allowedSourceRevisions",
+            ));
+        }
+        let allowed_source_repos = self
+            .allowed_source_repos
+            .into_iter()
+            .map(|path| {
+                std::fs::canonicalize(&path).map_err(|error| {
+                    M4Error::invalid(
+                        format!(
+                            "cannot canonicalize allowed source repo {}: {error}",
+                            path.display()
+                        ),
+                        "allowedSourceRepos",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            allowed_source_repos,
+            allowed_source_revisions: self.allowed_source_revisions,
+        })
+    }
+
+    fn authorize(&self, request: &GitWorkspaceCreateRequest) -> Result<(), M4Error> {
+        let source_repo =
+            std::fs::canonicalize(Path::new(&request.source_repo)).map_err(|error| {
+                M4Error::invalid(
+                    format!("cannot canonicalize sourceRepo: {error}"),
+                    "sourceRepo",
+                )
+            })?;
+        if !self.allowed_source_repos.contains(&source_repo) {
+            return Err(M4Error::forbidden(
+                "SOURCE_REPO_NOT_ALLOWED",
+                "sourceRepo is outside the M5 dogfood allowlist",
+                "sourceRepo",
+            ));
+        }
+        if !self
+            .allowed_source_revisions
+            .iter()
+            .any(|revision| revision == &request.source_revision)
+        {
+            return Err(M4Error::forbidden(
+                "SOURCE_REVISION_NOT_ALLOWED",
+                "sourceRevision is outside the M5 dogfood allowlist",
+                "sourceRevision",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -47,8 +119,13 @@ struct M4State {
 }
 
 impl M4Server {
-    pub fn new(config: M4ServerConfig) -> Result<Self, M4Error> {
+    pub fn new(mut config: M4ServerConfig) -> Result<Self, M4Error> {
         config.executor.ensure_store().map_err(M4Error::from)?;
+        config.dogfood_policy = config
+            .dogfood_policy
+            .take()
+            .map(M5DogfoodPolicy::canonicalized)
+            .transpose()?;
         fs::create_dir_all(native_projection_root(&config.executor)).map_err(|error| {
             M4Error::internal(format!("cannot create M4 projection store: {error}"))
         })?;
@@ -84,6 +161,15 @@ impl M4Error {
             message: message.into(),
             field: None,
             retryable: true,
+        }
+    }
+
+    fn forbidden(code: &str, message: impl Into<String>, field: &str) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+            field: Some(field.to_string()),
+            retryable: false,
         }
     }
 
