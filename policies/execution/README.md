@@ -1,23 +1,15 @@
-# Execution capability policies
+# Execution capability policy
 
-Files in this directory define reviewed execution capability candidates. Their
-presence in Git does not activate execution, authorize a caller, start a
-process, or expose an MCP tool.
+The Runtime accepts an explicit capability policy for each executable profile. A policy closes over the executable digest, exact argument vectors, environment, runtime/output bounds, allowed CWD roots, and concurrency.
 
-`ordivon-local-dev-v1.json` is intentionally machine-bound to the current WSL
-workspace and stable Rust toolchain. It permits one exact request vector:
+`ordivon-local-dev-v1.json` is the one tracked local example. It is deliberately machine-bound to `/root/projects/Ordivon` and the current stable Cargo binary. Its presence does not activate execution or authorize a caller.
+
+Any toolchain update, executable replacement, repository relocation, permission weakening, or requested argv change makes the policy fail closed until the file is intentionally regenerated. Do not broaden the policy merely to avoid that explicit update.
+
+The profile authorizes exactly:
 
 ```text
 cargo build --release -p ordivon-mcp
 ```
 
-The evaluator resolves canonical paths and verifies the executable SHA-256.
-A toolchain update, executable replacement, path change, permission weakening,
-or workspace relocation makes the policy fail closed until it is reviewed and
-updated. The future runner must clear inherited environment variables and
-reverify the executable immediately before process creation.
-
-Cargo compilation can execute repository-controlled build scripts, procedural
-macros, linkers, and configured runners. This profile grants authority to run
-the reviewed repository build graph; it is not a sandbox or a claim that
-compilation is side-effect free.
+Cargo can execute repository-controlled build scripts, procedural macros, linkers, and configured runners. This policy is an authority boundary, not a sandbox or a claim that compilation is side-effect free.
