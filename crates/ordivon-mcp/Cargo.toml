@@ -32,16 +32,6 @@ name = "ordivon-m7-http"
 path = "src/bin/ordivon-m7-http.rs"
 required-features = ["experimental-http-m7"]
 
-[[bin]]
-name = "ordivon-m6-http"
-path = "src/bin/ordivon-m6-http.rs"
-required-features = ["experimental-http-m6"]
-
-[[bin]]
-name = "ordivon-m4-http"
-path = "src/bin/ordivon-m4-http.rs"
-required-features = ["experimental-http-m4"]
-
 [dependencies]
 axum = { workspace = true, optional = true }
 ordivon-exec = { path = "../ordivon-exec" }

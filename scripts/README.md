@@ -1,7 +1,5 @@
 # Scripts
 
-Scripts are limited to local development and operational support. Durable runtime behavior belongs in the Rust crates.
+The historical M-series benchmark, dogfood, evidence, shadow, transport, and reboot harnesses were removed from the active tree after closure.
 
-The remaining `benchmarks/`, `mcp/`, and `m7/` scripts are M-series historical harnesses. They stay temporarily so Batch 3 can remove the proof machinery as one auditable change.
-
-No script is part of the default CI path except Ruff linting. New scripts should be small, directly invoked, and tied to a current operational need.
+New scripts are permitted only for a current operational need and should remain small wrappers around the Rust runtime. The intended minimal set is a smoke journey, cleanup helper, and external SQLite backup helper.
