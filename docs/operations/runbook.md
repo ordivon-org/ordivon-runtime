@@ -10,13 +10,22 @@ cargo fmt --check
 cargo test --workspace
 ```
 
-## Run the current stdio MCP server
+## Run the MCP server
+
+Build the task runner and start the single current MCP entry:
 
 ```bash
+cargo build -p ordivon-exec --bin ordivon-task-runner --features universal-executor-m1
 cargo run -p ordivon-mcp
 ```
 
-The versioned local HTTP servers remain transitional until the entry points are unified.
+Required environment variables are listed in `.env.example`. The server binds to loopback, requires a random bearer token, bounds request bodies, and exposes `/mcp`.
+
+## Execution modes
+
+The runtime defaults to `trusted-local`. Only the common store, Registry, runner, executable roots, loopback bind, and bearer token are required.
+
+Set `ORDIVON_EXECUTION_MODE=isolated` for untrusted repositories or scripts. The static `ordivon-worker` identity and systemd directory definitions remain under `packaging/systemd/`; worker UID/GID and isolated roots are required only in this mode.
 
 ## Inspect repository state
 
@@ -36,10 +45,4 @@ m-series-closed-2026-07-22
 
 ## Persistent runtime state
 
-SQLite Registry and result files are the execution truth. Before manual maintenance, stop new dispatches and copy the control root with the SQLite backup API or `sqlite3 .backup`. Runtime cleanup and backup helpers will be reduced to small external scripts in a later batch.
-
-## Execution modes
-
-The MCP runtime defaults to `trusted-local`. Only the common store, Registry, runner, executable roots, loopback bind, and bearer token are required.
-
-Set `ORDIVON_M7_EXECUTION_MODE=isolated` for untrusted repositories or scripts. The static `ordivon-worker` identity and systemd directory definitions remain available under `packaging/systemd/`; worker UID/GID and isolated roots are required only in this mode.
+SQLite Registry and result files are the execution truth. Before manual maintenance, stop new dispatches and copy the control root with the SQLite backup API or `sqlite3 .backup`. Backup is an external operation, not a Runtime Core protocol.

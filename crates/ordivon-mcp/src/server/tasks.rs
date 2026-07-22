@@ -1,7 +1,7 @@
 use super::*;
 
 #[tool_handler]
-impl ServerHandler for M6Server {
+impl ServerHandler for OrdivonServer {
     fn get_info(&self) -> ServerInfo {
         let mut tools_task = ToolsTaskCapability::default();
         tools_task.call = Some(JsonObject::new());
@@ -18,11 +18,11 @@ impl ServerHandler for M6Server {
                 .build(),
         )
         .with_server_info(
-            Implementation::new("ordivon-m6-experimental", env!("CARGO_PKG_VERSION"))
-                .with_title("Ordivon M6 Transactional MCP Adapter"),
+            Implementation::new("ordivon-mcp", env!("CARGO_PKG_VERSION"))
+                .with_title("Ordivon MCP"),
         )
         .with_instructions(
-            "Experimental localhost-only transactional Ordivon adapter. workspace.exec creates a server-generated Job ID. Native MCP Tasks project the SQLite Job truth. No production routing or external side effects are authorized.",
+            "Local transactional Ordivon runtime. workspace.exec creates a durable server-generated Job and Attempt; MCP Tasks project SQLite truth. Reversible repository work is permitted, while irreversible external effects require explicit authority.",
         )
     }
 
@@ -43,10 +43,10 @@ impl ServerHandler for M6Server {
         let observation = tokio::task::spawn_blocking(move || runtime.run_task(&run_request))
             .await
             .map_err(|error| {
-                McpError::internal_error(format!("cannot join M6 task enqueue: {error}"), None)
+                McpError::internal_error(format!("cannot join task enqueue: {error}"), None)
             })?
-            .map_err(M6McpError::from)
-            .map_err(mcp_error_from_m6)?;
+            .map_err(ToolError::from)
+            .map_err(mcp_error)?;
         let task = self.load_mcp_task(&observation.job_id).await?;
         Ok(CreateTaskResult::new(task))
     }
@@ -79,18 +79,18 @@ impl ServerHandler for M6Server {
         })
         .await
         .map_err(|error| {
-            McpError::internal_error(format!("cannot join M6 task result load: {error}"), None)
+            McpError::internal_error(format!("cannot join task result load: {error}"), None)
         })?
-        .map_err(M6McpError::from)
-        .map_err(mcp_error_from_m6)?;
+        .map_err(ToolError::from)
+        .map_err(mcp_error)?;
         if matches!(observation.status.as_str(), "queued" | "working") {
             return Err(McpError::invalid_params("task result is not ready", None));
         }
         let ok = observation.status == "succeeded";
         let outcome = if ok {
-            M6Outcome::Success(observation)
+            ToolOutcome::Success(observation)
         } else {
-            M6Outcome::Error(terminal_task_error(&observation))
+            ToolOutcome::Error(terminal_task_error(&observation))
         };
         let tool_result = outcome.into_call_tool_result()?;
         let value = serde_json::to_value(tool_result).map_err(|error| {
@@ -114,10 +114,10 @@ impl ServerHandler for M6Server {
         })
         .await
         .map_err(|error| {
-            McpError::internal_error(format!("cannot join M6 task cancellation: {error}"), None)
+            McpError::internal_error(format!("cannot join task cancellation: {error}"), None)
         })?
-        .map_err(M6McpError::from)
-        .map_err(mcp_error_from_m6)?;
+        .map_err(ToolError::from)
+        .map_err(mcp_error)?;
         self.load_mcp_task(&request.task_id)
             .await
             .map(CancelTaskResult::new)
@@ -135,10 +135,10 @@ impl ServerHandler for M6Server {
         })
         .await
         .map_err(|error| {
-            McpError::internal_error(format!("cannot join M6 task listing: {error}"), None)
+            McpError::internal_error(format!("cannot join task listing: {error}"), None)
         })?
-        .map_err(M6McpError::from)
-        .map_err(mcp_error_from_m6)?;
+        .map_err(ToolError::from)
+        .map_err(mcp_error)?;
         let mut tasks = Vec::with_capacity(page.jobs.len());
         for projection in page.jobs {
             tasks.push(self.load_mcp_task(&projection.job_id).await?);
@@ -149,7 +149,7 @@ impl ServerHandler for M6Server {
     }
 }
 
-impl M6Server {
+impl OrdivonServer {
     async fn load_mcp_task(&self, job_id: &str) -> Result<Task, McpError> {
         let runtime = self.state.runtime.clone();
         let job_id_owned = job_id.to_string();
@@ -168,10 +168,10 @@ impl M6Server {
         })
         .await
         .map_err(|error| {
-            McpError::internal_error(format!("cannot join M6 task snapshot: {error}"), None)
+            McpError::internal_error(format!("cannot join task snapshot: {error}"), None)
         })?
-        .map_err(M6McpError::from)
-        .map_err(mcp_error_from_m6)?;
+        .map_err(ToolError::from)
+        .map_err(mcp_error)?;
         task_from_job(job, attempt.as_ref(), projection)
     }
 }
@@ -192,7 +192,7 @@ pub(super) fn task_from_job(
         "failed" | "timed_out" | "lost" | "orphaned" => TaskStatus::Failed,
         unknown => {
             return Err(McpError::internal_error(
-                format!("unknown M6 Job projection status {unknown}"),
+                format!("unknown Job projection status {unknown}"),
                 None,
             ));
         }
@@ -203,14 +203,14 @@ pub(super) fn task_from_job(
         format_unix_ms(job.created_at_ms)?,
         format_unix_ms(updated_at_ms)?,
     )
-    .with_status_message(format!("M6 Job is {}.", projection.status));
+    .with_status_message(format!("Job is {}.", projection.status));
     if let Some(poll) = projection.poll_after_ms {
         task = task.with_poll_interval(poll);
     }
     Ok(task)
 }
 
-fn terminal_task_error(observation: &M6TaskObservation) -> M6McpError {
+fn terminal_task_error(observation: &M6TaskObservation) -> ToolError {
     let (code, default_message) = match observation.status.as_str() {
         "cancelled" => ("TASK_CANCELLED", "task was cancelled"),
         "timed_out" => ("TASK_TIMED_OUT", "task exceeded its runtime limit"),
@@ -218,7 +218,7 @@ fn terminal_task_error(observation: &M6TaskObservation) -> M6McpError {
         "orphaned" => ("TASK_ORPHANED", "task execution identity is orphaned"),
         _ => ("TASK_FAILED", "task failed"),
     };
-    M6McpError {
+    ToolError {
         code: code.to_string(),
         message: observation
             .error_summary

@@ -1,7 +1,7 @@
 use super::*;
 
 #[tool_router(vis = "pub(super)")]
-impl M6Server {
+impl OrdivonServer {
     #[tool(
         name = "workspace.open",
         description = "Create one detached isolated Git workspace at an exact revision.",
@@ -16,20 +16,10 @@ impl M6Server {
     async fn workspace_open(
         &self,
         Parameters(request): Parameters<GitWorkspaceCreateRequest>,
-    ) -> M6Outcome<CompactWorkspaceOpenResult> {
-        if let Some(policy) = &self.state.dogfood_policy {
-            if let Err(error) = policy.authorize(&request) {
-                return M6Outcome::Error(M6McpError {
-                    code: error.code,
-                    message: error.message,
-                    field: error.field,
-                    retryable: error.retryable,
-                });
-            }
-        }
+    ) -> ToolOutcome<CompactWorkspaceOpenResult> {
         let config = self.state.executor.clone();
         self.run_core("workspace.open", move || {
-            create_git_workspace_compact(&config, &request).map_err(M6McpError::from)
+            create_git_workspace_compact(&config, &request).map_err(ToolError::from)
         })
         .await
     }
@@ -47,35 +37,35 @@ impl M6Server {
     )]
     async fn workspace_read(
         &self,
-        Parameters(request): Parameters<M4WorkspaceReadRequest>,
-    ) -> M6Outcome<M4WorkspaceReadResult> {
+        Parameters(request): Parameters<WorkspaceReadRequest>,
+    ) -> ToolOutcome<WorkspaceReadResult> {
         let config = self.state.executor.clone();
         self.run_core("workspace.read", move || match request.mode {
-            M4ReadMode::Full => {
+            WorkspaceReadMode::Full => {
                 if request.offset != 0 {
-                    return Err(M6McpError::invalid(
+                    return Err(ToolError::invalid(
                         "offset must be zero in FULL mode",
                         "offset",
                     ));
                 }
                 let result = read_workspace_text_compact(
                     &config,
-                    &WorkspaceReadRequest {
+                    &ExecWorkspaceReadRequest {
                         schema_version: request.schema_version,
                         workspace_id: request.workspace_id,
                         relative_path: request.relative_path,
                         max_bytes: request.max_bytes,
                     },
                 )
-                .map_err(M6McpError::from)?;
-                Ok(M4WorkspaceReadResult {
+                .map_err(ToolError::from)?;
+                Ok(WorkspaceReadResult {
                     content: result.content,
                     digest: result.digest,
                     file_byte_length: None,
                     eof: None,
                 })
             }
-            M4ReadMode::Slice => {
+            WorkspaceReadMode::Slice => {
                 let result = read_workspace_slice_compact(
                     &config,
                     &WorkspaceReadSliceRequest {
@@ -86,8 +76,8 @@ impl M6Server {
                         max_bytes: request.max_bytes,
                     },
                 )
-                .map_err(M6McpError::from)?;
-                Ok(M4WorkspaceReadResult {
+                .map_err(ToolError::from)?;
+                Ok(WorkspaceReadResult {
                     content: result.content,
                     digest: result.file_digest,
                     file_byte_length: Some(result.file_byte_length),
@@ -112,10 +102,10 @@ impl M6Server {
     async fn workspace_mutate(
         &self,
         Parameters(request): Parameters<WorkspaceMutateRequest>,
-    ) -> M6Outcome<WorkspaceMutateResult> {
+    ) -> ToolOutcome<WorkspaceMutateResult> {
         let config = self.state.executor.clone();
         self.run_core("workspace.mutate", move || {
-            mutate_workspace(&config, &request).map_err(M6McpError::from)
+            mutate_workspace(&config, &request).map_err(ToolError::from)
         })
         .await
     }
@@ -133,19 +123,19 @@ impl M6Server {
     )]
     async fn workspace_diff(
         &self,
-        Parameters(request): Parameters<M4WorkspaceDiffRequest>,
-    ) -> M6Outcome<CompactWorkspaceDiffResult> {
+        Parameters(request): Parameters<WorkspaceDiffRequest>,
+    ) -> ToolOutcome<CompactWorkspaceDiffResult> {
         let config = self.state.executor.clone();
         self.run_core("workspace.diff", move || {
             workspace_diff_compact(
                 &config,
-                &WorkspaceDiffRequest {
+                &ExecWorkspaceDiffRequest {
                     schema_version: request.schema_version,
                     workspace_id: request.workspace_id,
                     max_bytes: request.max_bytes,
                 },
             )
-            .map_err(M6McpError::from)
+            .map_err(ToolError::from)
         })
         .await
     }
@@ -165,10 +155,10 @@ impl M6Server {
     async fn workspace_exec(
         &self,
         Parameters(request): Parameters<M6TaskRunRequest>,
-    ) -> M6Outcome<M6TaskObservation> {
+    ) -> ToolOutcome<M6TaskObservation> {
         let runtime = self.state.runtime.clone();
         self.run_core("workspace.exec", move || {
-            runtime.run_task(&request).map_err(M6McpError::from)
+            runtime.run_task(&request).map_err(ToolError::from)
         })
         .await
     }
@@ -187,10 +177,10 @@ impl M6Server {
     async fn task_observe(
         &self,
         Parameters(request): Parameters<M6TaskObserveRequest>,
-    ) -> M6Outcome<M6TaskObservation> {
+    ) -> ToolOutcome<M6TaskObservation> {
         let runtime = self.state.runtime.clone();
         self.run_core("task.observe", move || {
-            runtime.observe_task(&request).map_err(M6McpError::from)
+            runtime.observe_task(&request).map_err(ToolError::from)
         })
         .await
     }
@@ -209,10 +199,10 @@ impl M6Server {
     async fn task_cancel(
         &self,
         Parameters(request): Parameters<M6TaskCancelRequest>,
-    ) -> M6Outcome<M6TaskObservation> {
+    ) -> ToolOutcome<M6TaskObservation> {
         let runtime = self.state.runtime.clone();
         self.run_core("task.cancel", move || {
-            runtime.cancel_task(&request).map_err(M6McpError::from)
+            runtime.cancel_task(&request).map_err(ToolError::from)
         })
         .await
     }
@@ -231,10 +221,10 @@ impl M6Server {
     async fn task_list(
         &self,
         Parameters(request): Parameters<JobListRequestM6>,
-    ) -> M6Outcome<JobListResultM6> {
+    ) -> ToolOutcome<JobListResultM6> {
         let runtime = self.state.runtime.clone();
         self.run_core("task.list", move || {
-            runtime.list_jobs(&request).map_err(M6McpError::from)
+            runtime.list_jobs(&request).map_err(ToolError::from)
         })
         .await
     }
@@ -253,10 +243,10 @@ impl M6Server {
     async fn artifact_read(
         &self,
         Parameters(request): Parameters<M6ArtifactReadRequest>,
-    ) -> M6Outcome<M6ArtifactReadResult> {
+    ) -> ToolOutcome<M6ArtifactReadResult> {
         let runtime = self.state.runtime.clone();
         self.run_core("artifact.read", move || {
-            runtime.read_artifact(&request).map_err(M6McpError::from)
+            runtime.read_artifact(&request).map_err(ToolError::from)
         })
         .await
     }

@@ -18,7 +18,7 @@ Code and repository files are treated as reversible through Git. Strong controls
 The active simplification removes historical governance machinery and converges on:
 
 - one Rust execution runtime;
-- one MCP surface;
+- one `ordivon-mcp` Streamable HTTP surface;
 - SQLite-backed Job and Attempt truth;
 - idempotency and concurrency reservation;
 - cgroup ownership, timeout, output bounds, cancellation, and recovery;

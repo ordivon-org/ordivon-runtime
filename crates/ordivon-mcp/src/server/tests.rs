@@ -19,15 +19,15 @@ impl Sandbox {
             .unwrap()
             .as_nanos();
         let root = PathBuf::from("/root/.local/share").join(format!(
-            "ordivon-m6-mcp-{label}-{}-{unique}",
+            "ordivon-mcp-{label}-{}-{unique}",
             std::process::id()
         ));
         fs::create_dir_all(&root).unwrap();
         Self { root }
     }
 
-    fn server(&self) -> M6Server {
-        M6Server::new(M6ServerConfig {
+    fn server(&self) -> OrdivonServer {
+        OrdivonServer::new(ServerConfig {
             runtime: M6RuntimeConfig {
                 registry: M6RegistryConfig {
                     db_path: self.root.join("registry/registry.sqlite3"),
@@ -45,11 +45,9 @@ impl Sandbox {
                     max_output_bytes: 1024 * 1024,
                 },
                 startup_grace_ms: 1000,
-                #[cfg(feature = "experimental-http-m7")]
                 hardening: None,
             },
             trace_path: None,
-            dogfood_policy: None,
         })
         .unwrap()
     }
@@ -61,7 +59,7 @@ impl Drop for Sandbox {
     }
 }
 
-fn submit(server: &M6Server, client_request_id: &str) -> ordivon_exec::CreatedAdmissionM6 {
+fn submit(server: &OrdivonServer, client_request_id: &str) -> ordivon_exec::CreatedAdmissionM6 {
     let outcome = server
         .state
         .runtime
@@ -137,7 +135,7 @@ fn tool_catalog_uses_transactional_job_contract() {
 
 #[test]
 fn structured_failure_is_a_tool_error_not_protocol_failure() {
-    let outcome = M6Outcome::<String>::Error(M6McpError::invalid(
+    let outcome = ToolOutcome::<String>::Error(ToolError::invalid(
         "idempotency mismatch",
         "clientRequestId",
     ));

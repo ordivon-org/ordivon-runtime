@@ -67,7 +67,7 @@ task.list
 artifact.read
 ```
 
-The repository still contains internal M6/M7 names while the implementation is being consolidated. Those names are historical implementation labels, not parallel product versions.
+The public server and binary are now simply `ordivon-mcp`. Some Rust execution data types still carry M6/M7 prefixes as internal schema-era names; they do not represent parallel servers or user-selectable product versions.
 
 ## Current simplification boundary
 
