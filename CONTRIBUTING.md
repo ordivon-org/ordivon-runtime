@@ -1,37 +1,39 @@
 # Contributing to Ordivon
 
-Ordivon optimizes for one understandable execution path, not a large governance platform.
+Ordivon optimizes for one understandable execution path, minimal active context, and rapid recovery.
 
 ## Start from current truth
 
-Read `docs/current-state.md` before creating an Issue or implementation. Confirm the checked-out branch, exact HEAD, live topology, and only active milestone. Dated reports and old Issues are not current architecture.
+Read `AGENTS.md` and `docs/current-state.md`. Confirm the branch, exact HEAD, relevant source and tests, and live topology. Do not load historical reports by default.
 
 ## Issue contract
 
-An implementation Issue must describe one observable state change:
+An implementation Issue describes one observable state change:
 
 ```text
 current state
-→ one bounded execution path
+→ one bounded change
 → target state
 → reproducible exit evidence
 ```
 
-It must include current evidence, target behavior, non-goals, affected path, and exit commands. An Issue must not double as a product vision, knowledge base, multi-stage roadmap, or catalogue of future capabilities.
-
-Keep only work that is ready for the active milestone open. Close obsolete or superseded Issues rather than extending them indefinitely. A new horizontal umbrella is not a substitute for choosing the next executable path.
+Keep only work that is ready for the active milestone open. Do not use Issues as product encyclopedias, capability catalogues, or permanent roadmaps.
 
 ## Change contract
 
-Every persistent addition must name the failure or missing user capability it addresses, the current mechanism that is insufficient, and the structure it replaces. Avoid permanent parallel implementations.
+Every persistent addition must name:
 
-Preserve unrelated user changes. Prefer an isolated worktree and small commits with ordinary Git rollback. Do not add generated governance Registries, Receipt hierarchies, evidence envelopes, wording gates, or stage-versioned current servers.
+1. the observed failure or missing capability;
+2. why the current code, Git, tests, Runtime, or an existing CLI cannot solve it;
+3. the structure it replaces.
 
-Hard controls are justified for irreversible external effects, credentials, ambiguous dispatch, concurrency ownership, persistent truth, and selected isolation boundaries.
+Preserve unrelated user changes. Prefer isolated worktrees and ordinary Git rollback. Do not add parallel execution paths, document Registries, Receipt hierarchies, evidence envelopes, wording gates, per-tool approval systems, or speculative Adapters.
+
+`trusted-local` inherits the service user's authority. `isolated` is explicit. Preserve Runtime invariants such as idempotency, ambiguous-dispatch handling, cgroup ownership, cancellation, result identity, and reconciliation without treating them as restrictions on Agent capability.
 
 ## Verification
 
-Run the smallest checks that can invalidate the change:
+Run the smallest checks that can invalidate the changed boundary:
 
 ```bash
 cargo fmt --check
@@ -39,4 +41,4 @@ cargo test --workspace
 ruff check scripts/
 ```
 
-Add strict Clippy, systemd and cgroup integration, restart recovery, isolated-worker tests, dependency audits, CodeQL, or release acceptance when the modified boundary requires them.
+Use stronger integration or Release checks when systemd, cgroups, persistence, transport, isolation, or deployment behavior changes.

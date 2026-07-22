@@ -1,6 +1,4 @@
-# Ordivon Local Operations
-
-Ordivon no longer requires PostgreSQL, NATS, Temporal, OpenFGA, OPA, Redis, DuckDB, or a Python governance service.
+# Ordivon Runbook
 
 ## Build and verify
 
@@ -8,64 +6,89 @@ Ordivon no longer requires PostgreSQL, NATS, Temporal, OpenFGA, OPA, Redis, Duck
 cargo build --workspace
 cargo fmt --check
 cargo test --workspace
+ruff check scripts/
 ```
 
-## Installable systemd entry
+Run strict Clippy, real systemd/cgroup tests, full-history secret scanning, and Release acceptance only when the changed boundary requires them.
 
-`packaging/systemd/ordivon-mcp.service` and `ordivon-mcp.env.example` define a loopback-only service without changing the currently active Desktop Commander bridge. Install and switch remote routing only during a separate rollback-capable maintenance window.
+## Start the Rust MCP
 
-## Run the MCP server
-
-Build the task runner and start the single current MCP entry:
+Build both binaries:
 
 ```bash
 cargo build -p ordivon-exec --bin ordivon-task-runner
-cargo run -p ordivon-mcp
+cargo build -p ordivon-mcp
 ```
 
-Required environment variables are listed in `.env.example`. The server binds to loopback, requires a random bearer token, bounds request bodies, and exposes `/mcp`.
-Registry and Store roots must be persistent paths visible to systemd transient units. Do not place them under a private or ephemeral `/tmp` boundary.
-
-## Execution modes
-
-The Runtime defaults to `trusted-local`. It inherits the service user's host authority and environment. `ORDIVON_ALLOWED_EXECUTABLE_ROOTS` is optional; when omitted, trusted mode accepts any canonical executable path. `ORDIVON_PRINCIPAL` and `ORDIVON_GLOBAL_MAX_CONCURRENCY` configure server-owned execution identity and capacity.
-
-Set `ORDIVON_EXECUTION_MODE=isolated` only when reduced authority is desired. The static `ordivon-worker` identity and isolated roots are required only in that mode.
-
-## Inspect repository state
-
-```bash
-git status --short --branch
-git rev-parse HEAD
-git diff --stat
-```
-
-## Recover code or documentation
-
-Use ordinary Git recovery. The complete pre-simplification M-series tree is tagged as:
+Required configuration:
 
 ```text
-m-series-closed-2026-07-22
+ORDIVON_BIND
+ORDIVON_BEARER_TOKEN
+ORDIVON_STORE_ROOT
+ORDIVON_REGISTRY_ROOT
+ORDIVON_RUNNER_PATH
 ```
 
-## Persistent runtime state
+`trusted-local` is the default. Executable roots default to `/`, so the service user may run any accessible executable. Set `ORDIVON_EXECUTION_MODE=isolated` only for an explicitly reduced-authority task and provide the isolated worker roots and UID/GID.
 
-SQLite Registry and result files are the execution truth. Before manual maintenance, stop new dispatches and copy the control root with the SQLite backup API or `sqlite3 .backup`. Backup is an external operation, not a Runtime Core protocol.
+The installable unit and environment example are under `packaging/systemd/`. The server remains loopback-bound and bearer-authenticated; Cloudflare Access and Tunnel authenticate and transport remote calls.
 
-## External maintenance helpers
+## Current live topology
+
+```text
+mcp.ordivon.com
+→ Cloudflare Tunnel
+→ localhost:8811
+→ Supergateway
+→ Desktop Commander
+```
+
+This live route is not the Rust candidate.
+
+## Local adoption sequence
+
+1. install `ordivon-mcp` and `ordivon-task-runner` at fixed paths;
+2. start Rust MCP on `127.0.0.1:8897` without changing 8811;
+3. run initialize, full MCP E2E, cancellation, restart observation, and backup/restore;
+4. use it on real repositories and record only repeated missing capabilities;
+5. expose a separate Cloudflare test route;
+6. switch production only after authenticated full-authority operation is proven;
+7. retain the old bridge until rollback is no longer needed.
+
+## Recovery
+
+### Code
+
+Use ordinary Git status, diff, branches, worktrees, tags, and remote Push. The complete pre-simplification tree remains at tag `m-series-closed-2026-07-22`.
+
+### Running tasks
+
+Use `task.list`, `task.observe`, and `task.cancel`. Restarting the MCP should reconcile nonterminal Attempts from SQLite, result bundles, and systemd state.
+
+### Persistent Runtime state
+
+Stop new dispatches before a coordinated snapshot. Use:
 
 ```bash
-python scripts/smoke.py --token "$ORDIVON_BEARER_TOKEN"
-python scripts/mcp_e2e.py --repo "$PWD"
-python scripts/acceptance.py merge
-python scripts/cleanup.py --root /var/lib/ordivon/registry
 python scripts/backup.py \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --control-root /var/lib/ordivon/registry \
   --destination /var/backups/ordivon/<snapshot>
+
 python scripts/restore.py \
   --snapshot /var/backups/ordivon/<snapshot> \
   --destination /var/lib/ordivon-restored
 ```
 
-Cleanup is dry-run unless `--apply` is supplied and only removes temporary staging names. Backup uses SQLite's online backup API; stop new dispatches first when a complete control-root snapshot is required.
+Cleanup is dry-run unless `--apply` is supplied. Do not create a second recovery Registry around Git, SQLite, or systemd.
+
+## Inspect exact state
+
+```bash
+git rev-parse HEAD
+git status --short --branch
+systemctl status ordivon-mcp.service
+systemctl status ordivon-mcp-bridge.service
+ss -ltnp
+```

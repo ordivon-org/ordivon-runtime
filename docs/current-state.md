@@ -1,90 +1,88 @@
 # Ordivon Current State
 
-This document is the single current-state entry for the repository. It describes what exists now, what is live, and the only active milestone. It is not a historical record or a future capability catalogue.
+This is the single current-state and roadmap document. It describes what exists now, what is live, and the next observable state changes. It is not a historical record or a future capability catalogue.
 
 ## Product identity
 
-Ordivon is a local execution runtime for capable agents. It converts a repository task into a bounded, observable, recoverable execution while preserving the facts that cannot be reconstructed after a crash or race.
+Ordivon is a local execution and recovery Runtime for capable Agents. It gives an authenticated Agent high-bandwidth access to the user's machine while preserving the execution facts that cannot be reconstructed after interruption.
 
-It is not currently a general governance operating system, organizational policy platform, cloud scheduler, knowledge graph, or multi-tenant control plane.
+It is not an Agent loop, governance operating system, policy platform, document knowledge base, cloud scheduler, or multi-tenant control plane.
 
-## Current code path
+## Current execution path
 
 ```text
 MCP client
 → ordivon-mcp
 → ordivon-exec
-→ SQLite Job / Attempt Registry
+→ SQLite Job / Attempt truth
 → systemd transient unit and cgroup
 → task runner
-→ bounded result and Artifacts
-→ reconciliation and recovery
+→ result and Artifacts
+→ reconciliation
 ```
 
-The current public MCP surface contains nine tools: workspace open, read, mutate, diff, and exec; task observe, cancel, and list; and Artifact read.
+The public MCP surface contains nine tools: workspace open, read, mutate, diff, and exec; task observe, cancel, and list; and Artifact read.
 
 ## Three distinct truths
 
-Do not collapse these states:
-
 | Surface | Current truth |
 |---|---|
-| Repository `main` | The pre-adoption mainline; it does not yet contain the simplification candidate. |
-| Simplification candidate | Published branch `agent/post-m-series-simplification`, tracked by Issue #25 and Draft PR #26; this is the proposed current architecture. |
-| Live remote service | `mcp.ordivon.com` still reaches Supergateway and Desktop Commander on port 8811. It does not run the Rust MCP candidate. |
+| Repository `main` | Pre-adoption mainline; it does not contain the simplification candidate. |
+| Candidate | `agent/post-m-series-simplification`, Issue #25, Draft PR #26. |
+| Live remote service | `mcp.ordivon.com` still reaches Supergateway and Desktop Commander on port 8811. |
 
-Use Git and the workstation for exact identity:
+Never present candidate code as merged code or local E2E evidence as proof of the live Cloudflare route.
 
-```bash
-git rev-parse HEAD
-git branch --show-current
-git status --short --branch
-systemctl status ordivon-mcp-bridge.service
-```
+## Three long-term shifts
 
-A document must never present candidate code as merged code or local E2E evidence as proof of the live Cloudflare path.
+### 1. Thin active context
 
-## Persistent truth
+An Agent should recover the repository's main mental model from `AGENTS.md`, this file, Runtime architecture, relevant source, and tests. Historical records remain in Git or dated files but do not enter the default context.
 
-The Runtime preserves Job, Attempt, idempotency, concurrency reservation, launch identity, process identity, cancellation intent, result, and Artifact identity. Git preserves repository history. Dated reports preserve historical observations only.
+### 2. Thin recovery and governance
+
+Git owns code history and rollback. SQLite, systemd/cgroups, and bounded result files preserve only non-reconstructable execution facts. Governance acts at actual failure points; it does not create a second proof system around ordinary reversible work.
+
+### 3. Reallocated responsibility
+
+The user owns intent, preferences, risk posture, and final commitments. The Agent owns implementation, testing, repair, and ordinary operations. The Runtime owns durable execution identity and recovery. Classical engineering mechanisms remain where they produce causal feedback or preserve reality, not as ceremony.
 
 ## Only active repository milestone
 
-**Adopt the simplified Runtime into `main` without restoring the removed governance platform or parallel M-series surfaces.**
+**Adopt the simplified Runtime into `main` as the single current architecture.**
 
-Exit conditions:
+Before PR #26 becomes ready:
 
-1. the candidate diff is reviewable as one coherent replacement of the old active surface;
-2. active documents agree on product identity, current topology, and operating boundary;
-3. exact-head fast and merge acceptance pass;
-4. published Draft PR #26 receives ordinary diff review;
-5. `main` adopts one MCP server and one execution Runtime.
+1. compress the active document surface to `AGENTS.md`, this file, Runtime architecture, and the Runbook;
+2. remove the uncalled legacy `job/` policy contract, tracked execution-policy examples, and `GovernedProfile` path that are not used by the current MCP Runtime;
+3. review the complete `main..candidate` replacement diff for accidental capability loss;
+4. run exact-head Fast, Merge, and Release acceptance;
+5. merge without changing the live 8811 route.
 
-Remote Rust MCP migration is the next milestone, not part of repository adoption. It begins only after the candidate is in `main` and keeps the current 8811 bridge available for rollback.
+Issue #25 remains the only open implementation Issue until this state change is complete.
 
-## Current issue disposition
+## Post-adoption route
 
-- #25 is the only open implementation Issue. It tracks adoption of the simplified Runtime into `main` and explicitly excludes live remote migration.
-- #22, the horizontal capability-fabric umbrella, is closed as superseded by #25.
-- #23, the GitHub-hosted read-only worker, is closed as not planned because CI is verification rather than the execution substrate.
-- #24, the Docker worker and draft Receipt path, is closed as superseded by the systemd, cgroup, SQLite, and Runner implementation.
+### A. Real local use
 
-Do not reopen these Issues to recover old capability catalogues. A future Issue must advance the current milestone through one observable state change.
+Install the Rust MCP on a separate loopback port and use it for real Ordivon, FinHarness, and research tasks. Do not add capabilities during installation. Measure where the Agent still falls back to Desktop Commander or manual intervention.
+
+### B. Recovery minimization
+
+Use Dogfood evidence to delete any persistent state, policy object, checker, or helper that does not preserve a non-reconstructable fact or improve observed recovery. Keep Git, minimal SQLite task truth, process ownership, cancellation, terminal results, and backup/restore.
+
+### C. Remote cutover
+
+Expose the Rust MCP through a separate Cloudflare route, verify authenticated full-authority operation, then switch the production hostname with the old bridge available for rollback. Remote transport does not imply reduced Agent authority.
+
+### D. Capability growth by failure
+
+Add a capability only after repeated real tasks demonstrate a missing operation. Prefer mature host CLIs through `workspace.exec`. Do not prebuild GitHub, Cloudflare, Docker, Browser, Scheduler, Memory, Skill Registry, or Agent-loop platforms.
 
 ## Truth precedence
 
-When sources disagree, use this order:
-
-1. observed code, tests, Git identity, and live process state;
-2. this current-state document;
-3. active architecture and operations documents listed in `docs/README.md`;
-4. dated audits, acceptance reports, closure notes, and retrospectives;
-5. Git history and closed Issues.
-
-Dated records explain how a decision was reached. They do not define the current Runtime.
+Use observed source, tests, Git identity, and live process state first; then this document, Runtime architecture, and the Runbook. Dated records and closed Issues explain history only.
 
 ## Explicit non-goals
 
-The active milestone does not add agent loops, cloud scheduling, browser automation, deployment adapters, a policy engine, a document Registry, Receipt generation, governance debt, multi-tenancy, or a user interface.
-
-A future capability becomes work only when a concrete user task cannot be completed by the current path and a smaller extension cannot solve it.
+No new governance platform, Receipt hierarchy, document Registry, policy engine, Agent loop, cloud scheduler, capability catalogue, multi-tenancy, or UI is planned. Future work begins from a concrete failed task, not an imagined platform surface.

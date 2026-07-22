@@ -2,64 +2,59 @@
 
 ## Purpose
 
-Ordivon is a local execution runtime for capable agents. It makes reversible repository work fast while preserving the small set of facts that reasoning cannot reconstruct after a crash or concurrent race.
+Ordivon is the durable execution substrate beneath a capable Agent. The Agent reasons and chooses actions; Ordivon executes, owns the process tree, records reality, and recovers after interruption.
 
-## Active execution chain
+## Active path
 
 ```text
-MCP request
-→ exact Git workspace
-→ validated execution plan
-→ SQLite admission transaction
-→ Job + Attempt + concurrency reservation
+workspace request
+→ exact Git worktree
+→ server-bound execution context
+→ SQLite admission
+→ Job + Attempt
 → immutable runner bundle
 → systemd transient unit / cgroup
-→ bounded stdout, stderr, result, and artifacts
+→ bounded stdout, stderr, result, and Artifacts
 → reconciliation
-→ terminal Job projection
 ```
 
-## Persistent truth
+## Minimal sources of truth
 
-The SQLite Registry owns:
+| Fact | Owner |
+|---|---|
+| Repository history, branch, diff, rollback | Git |
+| Request identity, dispatch state, cancellation, terminal resolution | SQLite Registry |
+| Running process tree and termination | systemd and cgroup |
+| Output, result, and Artifact bytes | bounded files bound by Digests |
+| Current architecture and next state change | `docs/current-state.md` |
 
-- idempotency through principal and client request identity;
-- Job desired state and terminal resolution;
-- Attempt lifecycle and row-version transitions;
-- launch, process, boot, unit, invocation, and cgroup identity;
-- global and profile concurrency reservations;
-- result and Artifact identity.
+Everything reconstructable from these sources should remain reconstructable rather than becoming another persistent Registry or Receipt.
 
-The filesystem stores immutable execution bundles, bounded output, runner-start evidence, terminal results, and Artifacts. Digests bind those files back to the Registry.
+## Authority
 
-## Execution ownership
+`trusted-local` is the default. A task inherits the Ordivon service user's network, environment, credentials, filesystem access, Git remotes, Docker, systemd, cloud tooling, and executable surface. The MCP client does not self-assert authority metadata; the server binds execution identity and concurrency once from deployment configuration.
 
-A task runs as a systemd transient unit. The Runtime records the unit, invocation, cgroup, PID, process-start identity, boot identity, and launch-token evidence. Cancellation persists intent before stopping the unit and reconciling the complete process tree.
+`isolated` is an explicit reduced-authority mode for untrusted input. It activates the non-root worker, private network and filesystem views, hidden credentials and host-control paths, and systemd hardening.
 
-In `trusted-local`, the transient unit retains host network, filesystem, credentials, capabilities, Docker/systemd access, and the service environment. The target executable may be any executable reachable by the service user; symlinks are resolved to a canonical file and bound by Digest before launch. An optional executable-root configuration can deliberately reduce this surface.
+## Runtime invariants
 
-In `isolated`, the same lifecycle machinery additionally activates the non-root worker and strong systemd sandbox.
+These mechanisms preserve reality rather than govern Agent judgment:
 
-Timeout and output bounds remain lifecycle controls, not permission gates.
+- idempotent admission for repeated client requests;
+- no speculative redispatch after an ambiguous launch;
+- one owned cgroup for the complete process tree;
+- persisted cancellation intent before termination;
+- timeout and bounded retained output;
+- Digest-bound executable, result, and Artifact identity;
+- startup and observation-time reconciliation.
 
 ## Recovery semantics
 
-At startup and observation time, Ordivon reconciles nonterminal Attempts against:
+A complete identity-bound Runner result is terminal truth even when a short-lived transient unit has already been collected. A dispatch that cannot be proven running or terminal becomes `lost` or `orphaned`; it is not automatically repeated.
 
-- committed Registry state;
-- runner-start evidence;
-- result files;
-- current boot identity;
-- systemd unit and cgroup state;
-- process identity.
-
-A dispatch whose outcome cannot be proven is not automatically retried. It becomes `lost` or `orphaned` so an external side effect cannot be duplicated by speculation.
+Git restores code. SQLite and result bundles restore task knowledge. systemd/cgroups restore observation and cancellation of live work. Backup and restore are operational helpers, not a second Runtime protocol.
 
 ## MCP surface
-
-The MCP server binds its configured Principal, authority, policy identity, and concurrency limit to every execution. Those values are not supplied by the Agent.
-
-The transactional surface is:
 
 ```text
 workspace.open
@@ -73,16 +68,8 @@ task.list
 artifact.read
 ```
 
-The public server and binary are `ordivon-mcp`. Runtime modules, features, tests, and schema types are unversioned; M-series names remain only in the two historical closure documents and Git history.
+Mature host CLIs remain the preferred extension mechanism. A bespoke Adapter is justified only when repeated real use proves that ordinary command execution cannot provide the required semantics.
 
-## Current simplification boundary
+## Current deletion target
 
-The following are not runtime dependencies:
-
-- Python governance services;
-- document registries or wording gates;
-- Receipts and staged evidence machinery;
-- PostgreSQL, NATS, Temporal, OpenFGA, OPA, Redis, or DuckDB;
-- M-series benchmark and dogfood harnesses.
-
-Historical implementations and proof artifacts remain recoverable through Git tag `m-series-closed-2026-07-22`.
+The candidate still contains an older `job/` capability-policy contract, tracked execution-policy examples, and a `GovernedProfile` plan path with no current MCP caller. They are not current architecture and must leave before repository adoption.

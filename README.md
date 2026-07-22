@@ -1,36 +1,34 @@
 # Ordivon
 
-Ordivon is a local execution Runtime for capable agents.
-
-It provides one path from a Git-backed repository task to a bounded process, persistent Job and Attempt truth, observable results, and recovery after interruption.
+Ordivon is a local execution and recovery Runtime for capable Agents.
 
 ```text
-agent intent
-→ exact repository state
-→ bounded execution
-→ owned process tree
-→ persistent result
+human intent
+→ Agent reasoning and operation
+→ Ordivon durable execution
+→ observable result
 → recovery or continuation
 ```
 
-In `trusted-local`, the Agent inherits the host user's delegated authority, including network, credentials, Git remotes, Docker, systemd, and other accessible host tools. Ordivon preserves execution identity and recovery rather than pre-emptively reducing that authority. `isolated` remains an explicit opt-in sandbox.
+In `trusted-local`, the Agent inherits the service user's delegated host authority, including network, credentials, Git, Docker, systemd, cloud CLIs, files, and executables. `isolated` is an explicit reduced-authority mode for untrusted input.
+
+Ordivon follows three engineering defaults:
+
+- **thin context:** source, tests, Git, live state, and a few current documents;
+- **thin recovery:** Git plus only the execution facts that cannot be reconstructed;
+- **reallocated responsibility:** the user owns intent, the Agent owns implementation and operation, and the Runtime owns durable execution truth.
 
 ## Current surface
 
-- one `ordivon-mcp` Streamable HTTP server;
+- one `ordivon-mcp` server and nine MCP tools;
 - one `ordivon-exec` Runtime;
-- SQLite Job, Attempt, idempotency, and concurrency truth;
-- systemd and cgroup process ownership;
-- timeout, bounded output, cancellation, restart recovery, and Artifact verification;
-- `trusted-local` by default and `isolated` on demand.
+- SQLite Job and Attempt truth;
+- systemd/cgroup process ownership;
+- cancellation, timeout, bounded output, Artifacts, and restart recovery.
 
-## Current truth
+Read [`AGENTS.md`](AGENTS.md), then [`docs/current-state.md`](docs/current-state.md). The complete active document set contains only four files and is listed in [`docs/README.md`](docs/README.md).
 
-Read [docs/current-state.md](docs/current-state.md) first. It distinguishes repository `main`, the simplification candidate, and the live remote Desktop Commander bridge. These are not yet the same system.
-
-The complete active document set is listed in [docs/README.md](docs/README.md). Dated audits, acceptance reports, closure notes, and retrospectives are records rather than current architecture.
-
-## Development checks
+## Default checks
 
 ```bash
 cargo fmt --check
@@ -38,8 +36,4 @@ cargo test --workspace
 ruff check scripts/
 ```
 
-Use stronger checks when the changed boundary makes them relevant.
-
-## Recovery point
-
-The complete M0–M7 tree remains available through Git tag `m-series-closed-2026-07-22`. Historical code is not retained as parallel current architecture.
+The complete M0–M7 tree remains recoverable at Git tag `m-series-closed-2026-07-22`.
