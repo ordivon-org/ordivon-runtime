@@ -18,10 +18,13 @@ impl Sandbox {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = PathBuf::from("/root/.local/share").join(format!(
-            "ordivon-mcp-{label}-{}-{unique}",
-            std::process::id()
-        ));
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target/ordivon-tests")
+            .join(format!(
+                "ordivon-mcp-{label}-{}-{unique}",
+                std::process::id()
+            ));
         fs::create_dir_all(&root).unwrap();
         Self { root }
     }
@@ -60,6 +63,10 @@ impl Drop for Sandbox {
 }
 
 fn submit(server: &OrdivonServer, client_request_id: &str) -> ordivon_exec::CreatedAdmission {
+    let workspace = std::env::current_dir()
+        .unwrap()
+        .join("target/ordivon-tests/ordivon-mcp-workspace");
+    let workspace = workspace.to_string_lossy().into_owned();
     let outcome = server
         .state
         .runtime
@@ -71,12 +78,12 @@ fn submit(server: &OrdivonServer, client_request_id: &str) -> ordivon_exec::Crea
                 schema_version: RUNTIME_SCHEMA_VERSION,
                 plan_kind: PlanKind::UniversalSandbox,
                 workspace_id: "workspace:mcp-test".to_string(),
-                workspace_path: "/root/.local/share/ordivon-mcp-workspace".to_string(),
+                workspace_path: workspace.clone(),
                 source_revision: "revision:test".to_string(),
                 executable: "/usr/bin/true".to_string(),
                 executable_digest: format!("sha256:{}", "a".repeat(64)),
                 args: Vec::new(),
-                cwd: "/root/.local/share/ordivon-mcp-workspace".to_string(),
+                cwd: workspace,
                 env: Default::default(),
                 timeout_ms: 1000,
                 stdout_limit_bytes: 1024,
