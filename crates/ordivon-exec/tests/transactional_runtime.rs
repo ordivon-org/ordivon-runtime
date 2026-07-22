@@ -118,6 +118,16 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
     let first = runtime.run_task(&request).unwrap();
     assert_eq!(first.status, "succeeded");
     assert!(first.stdout_tail.contains("RUNTIME_OK"));
+    let stdout_descriptor = first
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "stdout")
+        .unwrap();
+    assert_eq!(
+        stdout_descriptor.artifact_id,
+        format!("{}.stdout", first.attempt_id.as_deref().unwrap())
+    );
+    assert_eq!(stdout_descriptor.dropped_bytes, Some(0));
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 
     let replay = runtime.run_task(&request).unwrap();
@@ -132,6 +142,13 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
         .unwrap();
     assert_eq!(listed.jobs.len(), 1);
     assert_eq!(listed.jobs[0].job_id, first.job_id);
+    let listed_stdout = listed.jobs[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "stdout")
+        .unwrap();
+    assert_eq!(listed_stdout.artifact_id, stdout_descriptor.artifact_id);
+    assert_eq!(listed_stdout.dropped_bytes, None);
     let artifacts = runtime.registry().list_artifacts(&first.job_id).unwrap();
     assert_eq!(artifacts.len(), 3);
     let stdout = artifacts

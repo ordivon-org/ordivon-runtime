@@ -1,7 +1,8 @@
 use super::tasks::task_from_job;
 use super::*;
 use ordivon_exec::{
-    AdmissionOutcome, RegistryConfig, RuntimeExecutionPlan, SubmitRequest, RUNTIME_SCHEMA_VERSION,
+    AdmissionOutcome, ArtifactDescriptor, RegistryConfig, RuntimeExecutionPlan, SubmitRequest,
+    TaskObservation, RUNTIME_SCHEMA_VERSION,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -141,6 +142,54 @@ fn tool_catalog_uses_transactional_job_contract() {
             "schema exposes {server_owned}"
         );
     }
+
+    let mutate = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "workspace.mutate")
+        .unwrap();
+    let mutate_schema = serde_json::to_value(&mutate.input_schema).unwrap();
+    assert_eq!(
+        mutate_schema.pointer("/$defs/WorkspaceMutation/properties/mode/enum"),
+        Some(&serde_json::json!(["WRITE", "APPEND", "REPLACE_EXACT"]))
+    );
+}
+
+#[test]
+fn task_observation_serializes_discoverable_artifacts() {
+    let observation = TaskObservation {
+        job_id: "job-test".to_string(),
+        status: "succeeded".to_string(),
+        attempt_id: Some("attempt-test".to_string()),
+        exit_code: Some(0),
+        stdout_tail: "ok\n".to_string(),
+        stderr_tail: String::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+        artifacts_available: true,
+        artifacts: vec![ArtifactDescriptor {
+            artifact_id: "attempt-test.stdout".to_string(),
+            kind: "stdout".to_string(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            retained_bytes: 3,
+            dropped_bytes: Some(0),
+            truncated: false,
+        }],
+        poll_after_ms: None,
+        error_summary: None,
+    };
+    let value = serde_json::to_value(observation).unwrap();
+    assert_eq!(
+        value
+            .pointer("/artifacts/0/artifactId")
+            .and_then(Value::as_str),
+        Some("attempt-test.stdout")
+    );
+    assert_eq!(
+        value
+            .pointer("/artifacts/0/droppedBytes")
+            .and_then(Value::as_u64),
+        Some(0)
+    );
 }
 
 #[test]

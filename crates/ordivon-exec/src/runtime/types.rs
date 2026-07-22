@@ -387,6 +387,18 @@ pub struct ArtifactRegistration {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactDescriptor {
+    pub artifact_id: String,
+    pub kind: String,
+    pub digest: String,
+    pub retained_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dropped_bytes: Option<u64>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeArtifactRecord {
     pub artifact_id: String,
     pub job_id: String,
@@ -427,6 +439,8 @@ pub struct JobProjection {
     pub exit_code: Option<i32>,
     pub result_available: bool,
     pub artifacts_available: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub poll_after_ms: Option<u64>,
 }
@@ -552,6 +566,8 @@ pub struct TaskObservation {
     pub stderr_truncated: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub artifacts_available: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub poll_after_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

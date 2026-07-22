@@ -22,7 +22,7 @@ impl ServerHandler for OrdivonServer {
                 .with_title("Ordivon MCP"),
         )
         .with_instructions(
-            "Local transactional Ordivon runtime. In trusted-local mode, workspace.exec inherits the host user's delegated authority; isolated mode is explicit. The server owns execution identity, durable Job and Attempt state, cancellation, and recovery.",
+            "Local transactional Ordivon runtime. workspace.open isolates the code tree and Git state; it is not a hermetic sandbox. workspace.exec authority comes from the configured Runtime mode: trusted-local inherits the host user's delegated authority, while isolated mode is explicit. The server owns execution identity, durable Job and Attempt state, cancellation, and recovery.",
         )
     }
 

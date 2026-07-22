@@ -189,6 +189,7 @@ pub struct CompactWorkspaceDiffResult {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[schemars(inline)]
 pub enum WorkspaceMutationMode {
     Write,
     Append,

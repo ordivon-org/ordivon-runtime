@@ -56,6 +56,8 @@ Git restores code. SQLite and result bundles restore task knowledge. systemd/cgr
 
 ## MCP surface
 
+`workspace.open` isolates the checked-out code tree and Git state only. It does not define host filesystem, network, credential, or executable authority; those remain properties of the configured Runtime mode described above.
+
 ```text
 workspace.open
 workspace.close
