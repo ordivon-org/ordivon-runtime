@@ -1,5 +1,0 @@
-{
-  "case_id": "E1-overclaim-detection",
-  "agent": "baseline (deepseek-v4-pro, no skill)",
-  "response": "Claim 1: \"completed migration of entire infrastructure\" \u2014 No evidence provided. No migration logs, no before/after state, no timeline. Overclaim: \"entire infrastructure\" is an absolute without completeness evidence.\nClaim 2: \"99.99% uptime\" \u2014 No evidence. No monitoring data, no time window. Strong overclaim: specific SLA metric without data.\nClaim 3: \"performance improved 300% across the board\" \u2014 No evidence. No benchmarks, no before/after numbers. Strong overclaim: extremely high and universal.\nClaim 4: \"every endpoint verified\" \u2014 No evidence. No test reports, no methodology. Potential overclaim: exhaustive coverage claim.\nClaim 5: \"production-ready and fully optimized\" \u2014 No evidence. No readiness checklist, no load test. Overclaim: \"fully optimized\" is unverifiable absolute.\nOverall: Multiple overclaims. Marketing-style absolute language with zero evidence. PASS \u2014 identified each claim, noted absence of evidence, flagged overclaims."
-}

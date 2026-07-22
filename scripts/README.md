@@ -1,72 +1,7 @@
-# Script Policy
+# Scripts
 
-This directory is for operational or development support scripts only.
+Scripts are limited to local development and operational support. Durable runtime behavior belongs in the Rust crates.
 
-If a script contains reusable business behavior, prompt logic, workflow control, or durable product capability, it should be promoted into `tools/`, `skills/`, `domains/`, or `orchestrator/` instead of growing here indefinitely.
+The remaining `benchmarks/`, `mcp/`, and `m7/` scripts are M-series historical harnesses. They stay temporarily so Batch 3 can remove the proof machinery as one auditable change.
 
-## Benchmarks
-
-`scripts/benchmarks/` contains development-only differential harnesses and
-independent evidence checkers. A benchmark may invoke local experimental
-features and an existing Legacy adapter, but it must not activate production
-routes or become durable product behavior inside `scripts/`.
-
-Current benchmark:
-
-- `m2_differential.mjs`: Legacy Desktop Commander versus Ordivon M1 journey.
-- `check_m2_evidence.py`: independent recomputation of M2 evidence and gates.
-
-## M3 benchmarks
-
-The M3A and M3B differential scripts measure compact local Ordivon journeys
-against real Desktop Commander MCP paths. The M3 evidence checker recomputes
-medians, semantic equivalence, recovery claims, and performance gates.
-
-These are development evidence tools and do not change production routing.
-
-## M4 benchmarks
-
-The M4A and M4B differential scripts compare the active Legacy MCP endpoint
-with the independent experimental Ordivon Streamable HTTP MCP endpoint through
-the same JavaScript MCP SDK. They record paired semantic digests, p50 and p95
-latency, logical calls, real task HTTP requests, request bytes, response bytes,
-context bytes, fallback, and disconnect recovery.
-
-`m4_transport_security.mjs` verifies authentication, Origin, Host, and body-size
-rejection. `m4_resilience.mjs` verifies server-restart Task recovery, native MCP
-Task cancellation, cgroup cleanup, and residual-process cleanup.
-
-`check_m4_evidence.py` independently recomputes both 20-pair benchmark summaries
-and optionally validates Core and HTTP trace uniqueness and credential absence.
-These scripts authorize only bounded local Dogfood eligibility; they do not
-change port 8811, Cloudflare, production service definitions, or default routing.
-
-## M5 Dogfood harness
-
-`scripts/mcp/stack.py` locks the local MCP SDK identity and controls the full
-experimental server lifecycle, including build, transient systemd startup,
-health checks, child execution, failure cleanup, worktree cleanup, and residual
-state removal.
-
-`m5_wire_contract.mjs` freezes response budgets and concurrent trace identity.
-`m5_dogfood.mjs` exercises seven bounded local Agent journeys.
-`m5_shadow.mjs` compares four safe journeys with Legacy Desktop Commander.
-`check_m5_evidence.py` independently recomputes the M5 evidence and decisions.
-
-The M5 harness does not modify the production 8811 endpoint or authorize
-external side effects, credentials, deployment, or automatic Legacy fallback.
-
-## M6 transactional harness
-
-`stack_m6.py` owns an independent transactional MCP server, SQLite Registry,
-Runner units, worktrees, tokens, and cleanup. `stack_m5_m6.py` starts isolated
-M5 and M6 stacks for paired Registry migration comparisons.
-
-`m6_wire_contract.mjs`, `m6_dogfood.mjs`, `m6_concurrency.mjs`,
-`m6_registry_shadow.mjs`, and `m6_transport_security.mjs` produce the bounded
-M6 evidence. The feature-gated `m6_registry_performance` Rust example measures
-Registry-only budgets. `check_m6_evidence.py` independently recomputes the
-material claims and rejects modified summaries.
-
-M6 remains localhost-only and does not authorize production routing, push,
-merge, deployment, credentials, network access, or external side effects.
+No script is part of the default CI path except Ruff linting. New scripts should be small, directly invoked, and tied to a current operational need.

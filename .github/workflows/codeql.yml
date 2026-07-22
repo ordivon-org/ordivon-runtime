@@ -8,20 +8,12 @@ permissions:
   security-events: write
 
 jobs:
-  analyze:
-    name: Analyze (${{ matrix.language }})
+  analyze-rust:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        language: [rust, python]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        if: matrix.language == 'rust'
-      - uses: astral-sh/setup-uv@v5
-        if: matrix.language == 'python'
       - uses: github/codeql-action/init@v4
         with:
-          languages: ${{ matrix.language }}
+          languages: rust
       - uses: github/codeql-action/analyze@v4

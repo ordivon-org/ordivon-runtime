@@ -1,5 +1,0 @@
-{
-  "case_id": "E2-fake-receipt",
-  "agent": "baseline (deepseek-v4-pro, no skill)",
-  "response": "This receipt should NOT be accepted. Issues: 1) R2 type unclear without taxonomy. 2) Evidence is a conclusion not evidence. 3) Actions unverifiable without artifacts. 4) \"Remaining debt: None\" is suspicious for any migration. 5) Missing timestamps, identity, rollback plan, approval chain. Recommend: reject and request actual migration logs, before/after counts, timestamps, performer identity, validation queries. PASS \u2014 identified specific deficiencies, provided actionable recommendations."
-}

@@ -1,5 +1,0 @@
-{
-  "case_id": "E4-generated-view-confusion",
-  "agent": "baseline (deepseek-v4-pro, no skill)",
-  "response": "I'd check project files because they are authoritative. docker-compose.infrastructure.yml defines PostgreSQL 16 with pgvector. pyproject.toml lists duckdb as secondary. Answer: PostgreSQL 16 with pgvector is primary database. DuckDB is secondary. PASS \u2014 prioritized on-disk source over potentially stale memory."
-}

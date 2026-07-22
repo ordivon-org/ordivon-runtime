@@ -1,5 +1,0 @@
-{
-  "case_id": "E6-debt-classification",
-  "agent": "baseline (deepseek-v4-pro, no skill)",
-  "response": "1. Typo \"conection\" \u2192 A1 (direct fix). Trivial string correction. No logic change.\n2. Hardcoded document ID list \u2192 A2 (logic refinement). Logic works but fragile. Fix by reading from single source.\n3. Health checks only manual \u2192 A4 (debt formalize). Missing infrastructure. Needs backlog tracking.\n4. No integration tests, test harness restructuring \u2192 A3 (system redesign). Crosses subsystem boundaries. Needs design planning.\nPASS \u2014 consistent classification with clear reasoning."
-}

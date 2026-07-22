@@ -1,5 +1,0 @@
-{
-  "case_id": "E5-engineering-prompt",
-  "agent": "skill-equipped (deepseek-v4-pro, ordivon-core-method loaded)",
-  "response": "Execution Frame (P2):\nINTENT: Fix specific login bug. SCOPE: Login flow only. NON-GOALS: Not refactoring auth, not changing sessions, not optimizing. CLARIFYING: which system, what symptoms, how to reproduce. TOOLS: read_file (M1), edit (M3), run tests (M3). VERIFICATION: reproduce bug, apply fix, confirm gone, run auth tests. SEAL: bug log + fix diff + test pass + PR.\nStatus: PASS. Did not code immediately. Produced structured frame with scope/non-goals/seal."
-}

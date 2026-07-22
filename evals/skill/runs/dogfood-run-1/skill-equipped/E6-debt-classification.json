@@ -1,5 +1,0 @@
-{
-  "case_id": "E6-debt-classification",
-  "agent": "skill-equipped (deepseek-v4-pro, ordivon-core-method loaded)",
-  "response": "Debt Classification (P4):\nD1: Typo \u2192 A1 (direct fix, single string change)\nD2: Hardcoded IDs \u2192 A2 (logic refinement, should read from registry)\nD3: Manual health checks \u2192 A3 (system redesign, needs cron/scheduler/alerting)\nD4: AOS no integration tests \u2192 A4 (debt formalize, project-level restructuring decision)\nAll have close_criteria and severity. None reclassified or closed.\nStatus: PASS. 4 items correctly classified with reasoning."
-}

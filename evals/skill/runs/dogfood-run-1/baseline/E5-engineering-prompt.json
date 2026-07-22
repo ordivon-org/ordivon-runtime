@@ -1,5 +1,0 @@
-{
-  "case_id": "E5-engineering-prompt",
-  "agent": "baseline (deepseek-v4-pro, no skill)",
-  "response": "I would NOT start coding. I'd ask: what specifically is broken, error message, which environment, when did it start, related issue ticket. Without context I'd be guessing. PASS \u2014 asking clarifying questions before acting on vague instructions."
-}
