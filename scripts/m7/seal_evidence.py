@@ -54,6 +54,7 @@ def main() -> int:
     parser.add_argument("--evidence-type", required=True)
     parser.add_argument("--implementation-commit", required=True)
     parser.add_argument("--harness", action="append", default=[], type=Path)
+    parser.add_argument("--claim", action="append", default=[])
     args = parser.parse_args()
 
     raw: dict[str, Any] = json.loads(args.input.read_text())
@@ -72,6 +73,12 @@ def main() -> int:
         raise RuntimeError("at least one harness is required")
 
     sealed = dict(raw)
+    existing_claims = sealed.get("claimsNotMade", [])
+    if not isinstance(existing_claims, list):
+        raise RuntimeError("claimsNotMade must be an array when present")
+    sealed["claimsNotMade"] = [*existing_claims, *args.claim]
+    if not sealed["claimsNotMade"]:
+        raise RuntimeError("at least one claimsNotMade statement is required")
     sealed["schemaVersion"] = 1
     sealed.setdefault("generatedAt", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     sealed["evidenceType"] = args.evidence_type
