@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "branch": "agent/m7-runtime-hardening-lifecycle",
+  "head": "279ad80d3c2b6aee325fbd892ed96f9a451e69a7",
+  "worktreeStatus": [],
+  "units": [],
+  "processes": [],
+  "listeners": [],
+  "matchingWorktrees": [],
+  "existingStateRoots": [],
+  "receipt": {
+    "path": "receipts/governance/ordivon-m7-runtime-hardening-lifecycle-2026-07-22.json",
+    "stageId": "ORDIVON-M7-RUNTIME-HARDENING-LIFECYCLE-2026-07-22",
+    "status": "LOCAL_HARDENED_DOGFOOD_GATES_PASS_NO_PRODUCTION_CUTOVER",
+    "measuredImplementationCommit": "c62f4f0a90a0c1866cc336fc819f2e860d457d41"
+  },
+  "clean": true,
+  "phase": "ORDIVON-M0-M7-SERIES-CLOSEOUT-2026-07-22",
+  "sourceRevision": "279ad80d3c2b6aee325fbd892ed96f9a451e69a7",
+  "mSeriesProcesses": [],
+  "productionRouteObservation": {
+    "port8811Listening": true,
+    "modifiedByMSeriesCloseout": false
+  },
+  "intendedPersistentRuntime": {
+    "worker": {
+      "user": "ordivon-worker",
+      "uid": 952,
+      "gid": 952,
+      "home": "/var/lib/ordivon/worker",
+      "shell": "/usr/bin/nologin"
+    },
+    "runner": {
+      "path": "/usr/lib/ordivon/ordivon-task-runner",
+      "uid": 0,
+      "gid": 0,
+      "mode": "0o555"
+    }
+  },
+  "claimsNotMade": [
+    "Closing the M0-M7 series does not authorize production cutover or removal of the existing production WSL operator route.",
+    "One full WSL kernel-restart matrix and bounded local Dogfood do not establish production reliability.",
+    "The closeout does not authorize credentials, network delegation, deployment, Git push or merge, external side effects, or multi-host scheduling.",
+    "The installed local worker and Runner do not constitute a remote or multi-user production service."
+  ],
+  "generatedAt": "2026-07-22T10:02:08Z",
+  "evidenceType": "m0-m7-series-final-closeout",
+  "implementationCommit": "279ad80d3c2b6aee325fbd892ed96f9a451e69a7",
+  "harnesses": [
+    {
+      "path": "scripts/governance/stage_closeout.py",
+      "sha256": "sha256:4fd3b8a92dbedfdb61290ae9fa7b0d21280dbe73ededb158c80b7d5273ed3199"
+    }
+  ],
+  "environment": {
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "architecture": "x86_64",
+    "bootId": "5bf2c022-d27d-4b84-96c6-85094a0faca3",
+    "systemdVersion": "systemd 261 (261.1-1-arch)",
+    "virtualization": "wsl"
+  },
+  "observationsDigest": "sha256:6e195e2f4facfd133acc7e36d49f3015141fdf1292b223ef5b6e6767f0eb5d15"
+}
