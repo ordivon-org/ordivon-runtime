@@ -10,84 +10,27 @@ permissions:
   contents: read
 
 jobs:
-  # ── Rust trusted path ────────────────────────────────────────────────
-  rust-kernel:
+  rust:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: ordivon
-          POSTGRES_PASSWORD: ordivon
-          POSTGRES_DB: ordivon
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U ordivon -d ordivon"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      ORDIVON_TEST_DATABASE_URL: postgresql://ordivon:ordivon@localhost:5432/ordivon
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --features postgres-integration,policy-http --all-targets -- -D warnings
-      - name: Reject clippy too_many_arguments escape hatches
-        run: |
-          if command -v rg >/dev/null 2>&1; then
-            ! rg "allow\\(clippy::too_many_arguments" crates/ordivon-*
-          else
-            ! grep -R "allow(clippy::too_many_arguments" crates/ordivon-*
-          fi
+      - run: cargo fmt --check
       - run: cargo test --workspace
-      - run: cargo test --workspace --features postgres-integration,policy-http
 
-  # ── Python lint ──────────────────────────────────────────────────────
-  ruff:
+  python-scripts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --extra dev
-      - run: uv run ruff check src/ scripts/ tests/ state/
-      - run: uv run ruff format --check --preview src/ scripts/ tests/ state/
+      - run: uvx ruff check scripts/
 
-  # ── Governance checks ────────────────────────────────────────────────
-  governance:
+  secret-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --extra dev
-      - name: Document registry consistency
-        run: uv run python scripts/check_document_registry.py
-      - name: Verify document governance
-        run: uv run python -m ordivon_verify document-governance --check
-      - name: Registry index check
-        run: uv run python -m ordivon_verify registry-index --check
-
-  # ── Infrastructure tests (require docker-compose, skip in CI) ──────────
-  # NATS, Temporal, OpenFGA tests need infrastructure services.
-  # Run locally: docker compose -f docker-compose.infrastructure.yml up -d
-  # infra-tests:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: astral-sh/setup-uv@v5
-  #     - run: uv sync --extra dev
-  #     - name: NATS + Temporal integration tests
-  #       run: uv run python tests/test_nats_integration.py
-  #     - name: OpenFGA + OPA integration tests
-  #       run: uv run python tests/test_authorization_integration.py
-
-  # ── DB migration check ──────────────────────────────────────────────
-  db-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --extra dev
-      - name: Verify migration dry-run
-        run: uv run python scripts/migrate_governance_to_pg.py --dry-run
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

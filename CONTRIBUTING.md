@@ -1,57 +1,29 @@
 # Contributing to Ordivon
 
-Ordivon is a governance system, not a general-purpose framework.
-Contributions must respect the boundaries defined in [AGENTS.md](AGENTS.md).
+Ordivon optimizes for a small, understandable execution runtime rather than a large governance platform.
 
-## Setup
-
-```bash
-git clone <repo-url> ordivon
-cd ordivon
-uv sync --extra dev
-docker compose -f docker-compose.infrastructure.yml up -d
-PYTHONPATH=.:src .venv/bin/python scripts/verify_infrastructure.py
-```
-
-## Infrastructure
-
-| Service | Port |
-|---------|------|
-| PostgreSQL | 5432 |
-| NATS | 4222 |
-| Temporal | 7233 |
-
-OpenFGA and MinIO are stopped (zero production consumers).
-
-## Before Committing
+## Before committing
 
 ```bash
-# Lint
-uv run ruff check src/ scripts/ tests/ state/
-uv run ruff format --check --preview src/ scripts/ tests/ state/
-
-# Governance
-PYTHONPATH=.:src .venv/bin/python scripts/check_document_registry.py
-PYTHONPATH=.:src .venv/bin/python -m ordivon_verify all --check
-
-# Tests
-PYTHONPATH=.:src .venv/bin/python -m pytest -q tests/
+cargo fmt --check
 cargo test --workspace
+ruff check scripts/
 ```
 
-## Document Governance
+Use additional checks only when relevant:
 
-New documents must be registered in `docs/governance/document-registry.jsonl`.
-Run `check_document_registry.py` to validate.
+- strict Clippy for final Rust runtime changes;
+- systemd and cgroup integration for supervisor changes;
+- reboot recovery for startup or reconciliation semantics;
+- dependency and CodeQL audits for dependency or release work;
+- isolated-worker tests for untrusted execution paths.
 
-## Architecture Rules
+## Change boundaries
 
-- Core never imports from Pack/Adapter
-- PostgreSQL is the canonical data store
-- JSONL files are exports, not truth sources
-- Receipts are created once, never modified
-- All outputs carry `draft: true` — status requires evidence + authority
+Preserve unrelated user changes. Prefer an isolated worktree and small commits with ordinary Git rollback. Do not add generated governance registries, receipts, evidence envelopes, or wording gates.
 
-## Debt
+Hard controls are justified for irreversible external effects, credentials, ambiguous dispatch, concurrency ownership, and persistent state that cannot be reconstructed.
 
-Register unresolved issues in `docs/governance/dependency-audit-debts.jsonl`.
+## Documentation
+
+Keep the current document index in `docs/README.md`. Historical material belongs in Git history rather than a permanent archive directory.
