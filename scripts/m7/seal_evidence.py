@@ -39,7 +39,7 @@ def host_environment() -> dict[str, Any]:
         "kernel": platform.release(),
         "architecture": platform.machine(),
         "bootId": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
-        "systemdVersion": subprocess.check_output(["systemd", "--version"], text=True)
+        "systemdVersion": subprocess.check_output(["systemctl", "--version"], text=True)
         .splitlines()[0],
         "virtualization": subprocess.run(
             ["systemd-detect-virt"], text=True, capture_output=True, check=False
