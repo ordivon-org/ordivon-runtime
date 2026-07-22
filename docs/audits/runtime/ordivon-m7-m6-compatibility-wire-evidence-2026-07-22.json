@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "phase": "ORDIVON-M6-WIRE-CONTRACT",
+  "sourceRevision": "c62f4f0a90a0c1866cc336fc819f2e860d457d41",
+  "workspaceId": "m6-wire-workspace-31390-1784713435894",
+  "replayJobId": "job-019f8935-dbb4-71a1-a12a-7385b8d96b35",
+  "nativeJobId": "job-019f8935-dda4-7360-91e0-27b43bb96e3e",
+  "cancelJobId": "job-019f8935-e3d5-7043-90e7-d85a0aa75c7d",
+  "observations": [
+    {
+      "name": "workspace.open",
+      "bytes": 166
+    },
+    {
+      "name": "workspace.read",
+      "bytes": 252
+    },
+    {
+      "name": "workspace.mutate",
+      "bytes": 200
+    },
+    {
+      "name": "workspace.exec",
+      "bytes": 250
+    },
+    {
+      "name": "workspace.exec",
+      "bytes": 250
+    },
+    {
+      "name": "task.list",
+      "bytes": 256
+    },
+    {
+      "name": "artifact.read",
+      "bytes": 316
+    },
+    {
+      "name": "workspace.diff",
+      "bytes": 94
+    },
+    {
+      "name": "workspace.mutate",
+      "bytes": 339
+    }
+  ],
+  "concurrentReads": 64,
+  "coreTraceRows": 73,
+  "httpTraceRows": 87,
+  "clientTraceIds": 86,
+  "passed": true,
+  "claimsNotMade": [
+    "The M6 compatibility wire run does not establish production reliability.",
+    "The result does not authorize rollback from M7 or production routing."
+  ],
+  "generatedAt": "2026-07-22T09:48:53Z",
+  "evidenceType": "m6-compatibility-wire",
+  "implementationCommit": "c62f4f0a90a0c1866cc336fc819f2e860d457d41",
+  "harnesses": [
+    {
+      "path": "scripts/mcp/m6_wire_contract.mjs",
+      "sha256": "sha256:ad826b86d55d7a0b069a5c4492c814b26147ef0263fc6333982a2fd1a16ded7c"
+    },
+    {
+      "path": "scripts/mcp/stack_m6.py",
+      "sha256": "sha256:13f2ca690d163ada6a58c89fd328c7073fcbc3c9e1259b76448f3a2357b3d8d0"
+    }
+  ],
+  "environment": {
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "architecture": "x86_64",
+    "bootId": "5bf2c022-d27d-4b84-96c6-85094a0faca3",
+    "systemdVersion": "systemd 261 (261.1-1-arch)",
+    "virtualization": "wsl"
+  },
+  "observationsDigest": "sha256:1aebb4c41b8e6bc0f6aa873d535ef0476469529b5de4da4b6691197773d69c44"
+}

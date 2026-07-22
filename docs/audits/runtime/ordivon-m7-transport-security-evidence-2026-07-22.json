@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "phase": "ORDIVON-MIGRATION-M7-TRANSPORT-SECURITY-2026-07-22",
+  "generatedAt": "2026-07-22T09:43:01.922Z",
+  "sourceRevision": "c62f4f0a90a0c1866cc336fc819f2e860d457d41",
+  "endpoint": "http://127.0.0.1:46549/mcp",
+  "results": {
+    "missingAuthorization": 401,
+    "invalidAuthorization": 401,
+    "disallowedOrigin": 403,
+    "disallowedHost": 403,
+    "oversizedBody": 413
+  },
+  "claimsNotMade": [
+    "Loopback bearer, Host, Origin, and body-limit checks do not establish Internet-facing authentication or authorization.",
+    "The transport result does not authorize Cloudflare routing or production port changes."
+  ],
+  "evidenceType": "m7-transport-security",
+  "implementationCommit": "c62f4f0a90a0c1866cc336fc819f2e860d457d41",
+  "harnesses": [
+    {
+      "path": "scripts/mcp/m7_transport_security.mjs",
+      "sha256": "sha256:3a690271af9d045cb29c7d15ad67cff13fc98803561c1400ffed0972dd5f60c6"
+    },
+    {
+      "path": "scripts/mcp/stack_m7.py",
+      "sha256": "sha256:575587f281bb21ede147e592098ecfbad8145fbdc584b5cb3863da7425878277"
+    }
+  ],
+  "environment": {
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "architecture": "x86_64",
+    "bootId": "5bf2c022-d27d-4b84-96c6-85094a0faca3",
+    "systemdVersion": "systemd 261 (261.1-1-arch)",
+    "virtualization": "wsl"
+  },
+  "observationsDigest": "sha256:44e296929239042e00a93b6d85e7f77016c4ccf6ecc935a10d261f483ed17998"
+}

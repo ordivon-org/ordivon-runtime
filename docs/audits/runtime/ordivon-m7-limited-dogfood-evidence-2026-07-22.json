@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "phase": "ORDIVON-MIGRATION-M7-LIMITED-DOGFOOD-2026-07-22",
+  "generatedAt": "2026-07-22T09:43:09.258Z",
+  "sourceRevision": "c62f4f0a90a0c1866cc336fc819f2e860d457d41",
+  "routePolicy": {
+    "primaryBackend": "ORDIVON_M7_HARDENED_WORKER_MCP",
+    "sourceRepo": "/root/projects/ordivon-m7-measure-c62f4f0",
+    "sourceRevision": "c62f4f0a90a0c1866cc336fc819f2e860d457d41",
+    "jobIdentity": "server-generated UUIDv7",
+    "idempotencyScope": "(principal, clientRequestId)",
+    "automaticLegacyFallback": false,
+    "allowedCapabilities": [
+      "isolated workspace read",
+      "isolated workspace mutation",
+      "sandboxed transactional Job execution under ordivon-worker",
+      "Job observation, listing, recovery, and cancellation",
+      "bounded digest-verified Artifact read"
+    ],
+    "forbiddenCapabilities": [
+      "git push",
+      "merge",
+      "production worktree mutation",
+      "system service modification",
+      "Cloudflare modification",
+      "credential access",
+      "network delegation",
+      "deployment"
+    ]
+  },
+  "journeys": [
+    {
+      "name": "readonly-audit",
+      "succeeded": true,
+      "elapsedMs": 669,
+      "toolCalls": 4,
+      "contextBytes": 1347,
+      "outputBytes": 104,
+      "fallbackCount": 0,
+      "workspaceId": "m7-readonly-29737-1784713382716",
+      "jobId": "job-019f8935-0c39-7762-8213-6a47cd6c0012",
+      "semanticDigest": "sha256:9c4e2534191debf3a5546f26c96eb51d4b2a9e22022c36e836af1a4e586310fe",
+      "repairRounds": 0
+    },
+    {
+      "name": "single-file-edit",
+      "succeeded": true,
+      "elapsedMs": 493,
+      "toolCalls": 5,
+      "contextBytes": 4798,
+      "outputBytes": 0,
+      "fallbackCount": 0,
+      "workspaceId": "m7-single-29737-1784713382716",
+      "jobId": "job-019f8935-0e97-7c10-b56b-731d305194db",
+      "semanticDigest": "sha256:78e2338e6145e019e5433642791cb2fc98bf7a0ae70130e6a6958cdfdaaf1c12",
+      "repairRounds": 0
+    },
+    {
+      "name": "multi-file-test",
+      "succeeded": true,
+      "elapsedMs": 539,
+      "toolCalls": 4,
+      "contextBytes": 1004,
+      "outputBytes": 155,
+      "fallbackCount": 0,
+      "workspaceId": "m7-multi-29737-1784713382716",
+      "jobId": "job-019f8935-108f-7793-a17d-031866f58879",
+      "semanticDigest": "sha256:180e7eb7b63e7116d87e6ebb65bad87f92cc11a456e228b44d6da185cd45ad83",
+      "repairRounds": 0
+    },
+    {
+      "name": "failure-repair-loop",
+      "succeeded": true,
+      "elapsedMs": 800,
+      "toolCalls": 6,
+      "contextBytes": 2153,
+      "outputBytes": 766,
+      "fallbackCount": 0,
+      "workspaceId": "m7-repair-29737-1784713382716",
+      "failedJobId": "job-019f8935-12bc-77d2-9e02-ad049e0a00e4",
+      "repairedJobId": "job-019f8935-1418-7a33-951b-489dba255437",
+      "semanticDigest": "sha256:b9083bfa89f72d28142ba4986c919faf655c52983f76cdf9ce943f9762e5850c",
+      "repairRounds": 1,
+      "failureObserved": true
+    },
+    {
+      "name": "python-package-validation",
+      "succeeded": true,
+      "elapsedMs": 495,
+      "toolCalls": 3,
+      "contextBytes": 1129,
+      "outputBytes": 240,
+      "fallbackCount": 0,
+      "workspaceId": "m7-package-29737-1784713382716",
+      "jobId": "job-019f8935-15f2-7e23-8610-054b4db459ca",
+      "semanticDigest": "sha256:877a175f6a3a21f89c924b539cd8dfc8da9edcd2247291b2fae2bf0fe786fe32",
+      "repairRounds": 0,
+      "workerPackageValidation": true
+    },
+    {
+      "name": "bounded-log-artifact",
+      "succeeded": true,
+      "elapsedMs": 438,
+      "toolCalls": 4,
+      "contextBytes": 2492,
+      "outputBytes": 512,
+      "fallbackCount": 0,
+      "workspaceId": "m7-log-29737-1784713382716",
+      "jobId": "job-019f8935-17cc-7cc0-a2cf-71c702edc071",
+      "semanticDigest": "sha256:a28becdce78608d5ce4d7ae1f00e839f5bcc5a2e9323f19c18af195e09d12da1",
+      "repairRounds": 0,
+      "truncatedOutput": true,
+      "artifactDigest": "sha256:adfbf07300bb48c42c0491d8a4d2eb2dcd78ee619d0fc979d2d52099afe676dd"
+    },
+    {
+      "name": "durable-recovery-cancel",
+      "succeeded": true,
+      "elapsedMs": 2533,
+      "toolCalls": 8,
+      "contextBytes": 1879,
+      "outputBytes": 33,
+      "fallbackCount": 0,
+      "workspaceId": "m7-durable-29737-1784713382716",
+      "recoverJobId": "job-019f8935-19a1-7561-88de-49af29e739b1",
+      "cancelJobId": "job-019f8935-20d6-7b43-925e-3e96297a4890",
+      "semanticDigest": "sha256:2d090c65e8dbed278edc39a1c9ffb699275a35cbe1dce51a08402a797d2ddd60",
+      "repairRounds": 0,
+      "recoveredAfterDisconnect": true,
+      "cancellationClean": true
+    },
+    {
+      "name": "idempotency-and-list",
+      "succeeded": true,
+      "elapsedMs": 443,
+      "toolCalls": 6,
+      "contextBytes": 3163,
+      "outputBytes": 0,
+      "fallbackCount": 0,
+      "workspaceId": "m7-idempotency-29737-1784713382716",
+      "jobId": "job-019f8935-2399-7200-954d-d78c0bba0fd8",
+      "semanticDigest": "sha256:fdd3195354b9dc9958b704f0c32e6e3af5fb1b19113b7ccee6327188d22044c4",
+      "repairRounds": 0,
+      "idempotentReplay": true,
+      "idempotencyConflictCode": "IDEMPOTENCY_CONFLICT",
+      "listIdentityUnique": true
+    }
+  ],
+  "summary": {
+    "journeyCount": 8,
+    "succeeded": true,
+    "totalToolCalls": 40,
+    "totalContextBytes": 17965,
+    "totalOutputBytes": 1810,
+    "totalRepairRounds": 1,
+    "fallbackCount": 0,
+    "recoveredAfterDisconnect": true,
+    "cancellationClean": true,
+    "idempotentReplay": true
+  },
+  "claimsNotMade": [
+    "The scripted Dogfood harness is not an autonomous model-planning evaluation.",
+    "Eight local journeys do not establish production reliability or broad workload coverage.",
+    "The result does not authorize production routing, remote exposure, credentials, or external side effects.",
+    "M7 Worker isolation is local-only and does not establish remote or production authority."
+  ],
+  "evidenceType": "m7-limited-dogfood",
+  "implementationCommit": "c62f4f0a90a0c1866cc336fc819f2e860d457d41",
+  "harnesses": [
+    {
+      "path": "scripts/mcp/m7_dogfood.mjs",
+      "sha256": "sha256:4db0ef67a0d81a4e09bc99147a89fa02418be07d849cf8ca7e1c0e4415eb4db2"
+    },
+    {
+      "path": "scripts/mcp/stack_m7.py",
+      "sha256": "sha256:575587f281bb21ede147e592098ecfbad8145fbdc584b5cb3863da7425878277"
+    }
+  ],
+  "environment": {
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "architecture": "x86_64",
+    "bootId": "5bf2c022-d27d-4b84-96c6-85094a0faca3",
+    "systemdVersion": "systemd 261 (261.1-1-arch)",
+    "virtualization": "wsl"
+  },
+  "observationsDigest": "sha256:aacc770f6caa7ecb9c99905199b721bd51740a6e824adbe2e53359cb82207ff1"
+}

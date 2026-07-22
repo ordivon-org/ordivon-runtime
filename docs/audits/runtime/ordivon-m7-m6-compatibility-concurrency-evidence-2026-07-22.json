@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "phase": "ORDIVON-MIGRATION-M6-CONCURRENCY-2026-07-22",
+  "generatedAt": "2026-07-22T09:44:35.942Z",
+  "sourceRevision": "c62f4f0a90a0c1866cc336fc819f2e860d457d41",
+  "levels": [
+    {
+      "level": 2,
+      "jobs": 2,
+      "uniqueJobs": 2,
+      "admissionWallMs": 309,
+      "admissionP50Ms": 286,
+      "admissionP95Ms": 308,
+      "completionWallMs": 2954,
+      "overflowCode": "CONCURRENCY_LIMIT",
+      "activeAfterAdmission": 2,
+      "activeAfterCompletion": 0,
+      "releasedAfterCompletion": 2,
+      "semanticDigest": "sha256:f181c9fa3d9eb749caf7123c1c63080743a6570b05d0d7a9869e363fb2a1872f"
+    },
+    {
+      "level": 4,
+      "jobs": 4,
+      "uniqueJobs": 4,
+      "admissionWallMs": 408,
+      "admissionP50Ms": 347,
+      "admissionP95Ms": 407,
+      "completionWallMs": 2994,
+      "overflowCode": "CONCURRENCY_LIMIT",
+      "activeAfterAdmission": 4,
+      "activeAfterCompletion": 0,
+      "releasedAfterCompletion": 6,
+      "semanticDigest": "sha256:4b43cd4bd8a14be2e8bb8694c5cf7b47d4ef8cbf3a0a7988a44a9efcca135a64"
+    },
+    {
+      "level": 8,
+      "jobs": 8,
+      "uniqueJobs": 8,
+      "admissionWallMs": 789,
+      "admissionP50Ms": 413,
+      "admissionP95Ms": 789,
+      "completionWallMs": 2966,
+      "overflowCode": "CONCURRENCY_LIMIT",
+      "activeAfterAdmission": 8,
+      "activeAfterCompletion": 0,
+      "releasedAfterCompletion": 14,
+      "semanticDigest": "sha256:0f3e860f0a8602a9acd2f8daf7641d01acdffd09e847295efd47780a920736fd"
+    }
+  ],
+  "totals": {
+    "toolCalls": 33,
+    "contextBytes": 8167,
+    "finalRegistry": {
+      "jobs": 14,
+      "attempts": 14,
+      "active": 0,
+      "released": 14
+    }
+  },
+  "gates": {
+    "allJobsCompleted": true,
+    "uniqueJobIdentity": true,
+    "lastSlotProtected": true,
+    "noResidualCapacity": true
+  },
+  "claimsNotMade": [
+    "The 2/4/8 local matrix does not establish production throughput or multi-host scheduling.",
+    "The test uses one WSL instance and one SQLite database.",
+    "The result does not authorize production routing."
+  ],
+  "evidenceType": "m6-compatibility-concurrency",
+  "implementationCommit": "c62f4f0a90a0c1866cc336fc819f2e860d457d41",
+  "harnesses": [
+    {
+      "path": "scripts/mcp/m6_concurrency.mjs",
+      "sha256": "sha256:943e209f6b07605a1f14d528eb712e5a772f1596fe0268b48cbf12f2ed0ac610"
+    },
+    {
+      "path": "scripts/mcp/stack_m6.py",
+      "sha256": "sha256:13f2ca690d163ada6a58c89fd328c7073fcbc3c9e1259b76448f3a2357b3d8d0"
+    }
+  ],
+  "environment": {
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "architecture": "x86_64",
+    "bootId": "5bf2c022-d27d-4b84-96c6-85094a0faca3",
+    "systemdVersion": "systemd 261 (261.1-1-arch)",
+    "virtualization": "wsl"
+  },
+  "observationsDigest": "sha256:a951fcf9747972e67f0314168f49f04a7c012832f3eb69f6c73ada2117bb8289"
+}
