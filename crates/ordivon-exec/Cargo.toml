@@ -40,3 +40,8 @@ uuid = { workspace = true, optional = true }
 name = "m6_registry_performance"
 path = "examples/m6_registry_performance.rs"
 required-features = ["transactional-registry-m6"]
+
+[[example]]
+name = "m7_reboot_harness"
+path = "examples/m7_reboot_harness.rs"
+required-features = ["runtime-hardening-m7"]
