@@ -1,5 +1,58 @@
 # Post-Simplification Acceptance Report — 2026-07-22
 
+## 2026-07-23 ten-tool protocol dogfood addendum
+
+This addendum records direct production MCP calls after PR #33 entered `main` at `85b1327732a79e0dd2a493455fb84455587db30e`. It supersedes the older nine-tool and pre-migration statements below where they conflict with current state.
+
+Test workspace:
+
+```text
+workspaceId: ordivon-tool-matrix-dogfood-20260723
+sourceRepo: /root/projects/Ordivon
+sourceRevision: 85b1327732a79e0dd2a493455fb84455587db30e
+```
+
+### Simple test matrix
+
+| Tool | Actual call | Observed result | Result |
+|---|---|---|---:|
+| `workspace.open` | Opened the exact `main` revision above | Returned the requested workspace ID and exact resolved SHA | passed |
+| `workspace.read` | `README.md`: `FULL` with 8192 bytes; `SLICE` at offset 10 with 96 bytes | Full digest `sha256:89427807...`; slice returned `eof=false`, file length 1444, and the same file digest | passed |
+| `workspace.mutate` | `WRITE alpha`, `APPEND beta`, then `REPLACE_EXACT beta → gamma` | Digests advanced `b6a98d9c... → e49c81e2... → 17cbbec0...`; final content was `alpha\ngamma\n` | passed |
+| `workspace.diff` | Read diff after creating the probe file | Empty tracked diff and `.tool-matrix-probe.txt` in `untrackedPaths` | passed |
+| `workspace.exec` | `/usr/bin/printf MATRIX_SYNC_OK` with a stable `clientRequestId` | Succeeded with exit 0 and returned Artifact descriptors directly | passed |
+| `task.observe` | Observed a running `/usr/bin/sleep 30`, then observed it after cancellation | Stable transition from `working` to `cancelled` | passed |
+| `task.cancel` | Cancelled Job `job-019f8b86-6249-7111-92ad-6af7aac2e09c` | Process-tree cancellation reconciled to `cancelled` and returned control/stdout/stderr Artifacts | passed |
+| `task.list` | Listed 3 Jobs, then continued with the returned stable cursor for 2 more | Pagination advanced without offset paging and each terminal Job included compact Artifact descriptors | passed |
+| `artifact.read` | Read stdout in two ranges: bytes `0..6`, then from offset 6 | Returned `MATRIX`, then `_SYNC_OK`; digest stayed `sha256:342a39da...`; second read ended with `eof=true` | passed |
+| `workspace.close` | Closed the test workspace | Returned `removed=true`; a later diff returned `WORKSPACE_NOT_FOUND` | passed |
+
+### Actual execution identities
+
+```text
+sync job:      job-019f8b86-26a8-7481-9089-ed3af828afd0
+sync attempt:  attempt-019f8b86-26a8-7481-9089-ed43e5cb2245
+stdout artifact:
+  attempt-019f8b86-26a8-7481-9089-ed43e5cb2245.stdout
+
+cancel job:    job-019f8b86-6249-7111-92ad-6af7aac2e09c
+cancel attempt:
+  attempt-019f8b86-6249-7111-92ad-6b07deb5e1cf
+```
+
+The same synchronous `clientRequestId` and identical execution request returned the same Job and Attempt instead of dispatching again.
+
+### Negative contract checks
+
+| Boundary | Actual result | Result |
+|---|---|---:|
+| Stale mutation digest | `REVISION_MISMATCH`; probe content remained `alpha\ngamma\n` | passed |
+| Same `clientRequestId`, different command | `IDEMPOTENCY_CONFLICT`; no second operation was admitted | passed |
+| Artifact ID paired with the wrong Job | `ARTIFACT_IDENTITY_CONFLICT` | passed |
+| Access after workspace closure | `WORKSPACE_NOT_FOUND` | passed |
+
+**Observed:** all ten public tools completed their intended positive path, all four tested negative boundaries failed closed, and workspace-level cleanup left no test workspace behind.
+
 ## Status
 
 The post-simplification implementation reached a locally validated acceptance candidate at commit `1253524fa90950cf6dea139bf0fc89ff8dd1b802`.
