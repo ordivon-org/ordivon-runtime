@@ -13,6 +13,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -51,6 +52,25 @@ def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         return int(listener.getsockname()[1])
+
+
+def host_network_probe() -> tuple[int, threading.Thread]:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = int(listener.getsockname()[1])
+
+    def serve() -> None:
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.sendall(b"ORDIVON_HOST_NETWORK_OK")
+        finally:
+            listener.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return port, thread
 
 
 def parse_http_response(content_type: str, body: bytes) -> dict[str, Any]:
@@ -168,7 +188,6 @@ def start_server(repo: Path, root: Path, port: int, token: str) -> ServerProcess
             "ORDIVON_STORE_ROOT": str(root / "store"),
             "ORDIVON_REGISTRY_ROOT": str(root / "registry"),
             "ORDIVON_RUNNER_PATH": str(repo / "target/debug/ordivon-task-runner"),
-            "ORDIVON_ALLOWED_EXECUTABLE_ROOTS": "/usr/bin:/usr/local/bin",
             "ORDIVON_EXECUTION_MODE": "trusted-local",
             "ORDIVON_TRACE_PATH": str(root / "registry/runtime-trace.jsonl"),
         }
@@ -330,11 +349,13 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         check("workspace-diff", "hello accepted" in diff.get("diff", ""), diff)
         check("workspace-untracked", "generated.txt" in diff.get("untrackedPaths", []), diff)
 
-        policy_digest = digest_bytes(b"ordivon-acceptance-policy-v1")
         execution = {
             "workspaceId": workspace_id,
-            "executable": "/usr/bin/python3.14",
-            "args": ["-c", "import sys; print('MCP_E2E_OK', flush=True); print('stderr-e2e', file=sys.stderr, flush=True)"],
+            "executable": "/usr/bin/python3",
+            "args": [
+                "-c",
+                "import sys; print('MCP_E2E_OK', flush=True); print('stderr-e2e', file=sys.stderr, flush=True)",
+            ],
             "cwdRelative": ".",
             "env": {},
             "timeoutMs": 10_000,
@@ -346,12 +367,6 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             {
                 "schemaVersion": SCHEMA_VERSION,
                 "clientRequestId": f"request:{uuid.uuid4()}",
-                "principal": "principal:acceptance",
-                "authorityRef": "authority:local-acceptance",
-                "policyId": "policy:acceptance",
-                "policyVersion": "1",
-                "policyDigest": policy_digest,
-                "globalLimit": 2,
                 "execution": execution,
                 "waitMs": 30_000,
                 "stdoutTailBytes": 8192,
@@ -363,6 +378,85 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         attempt_id = str(submitted["attemptId"])
         attempt_ids.append(attempt_id)
         check("exec-stdout", "MCP_E2E_OK" in submitted.get("stdoutTail", ""), submitted)
+
+        probe_port, probe_thread = host_network_probe()
+        docker_socket = next(
+            (path for path in (Path("/run/docker.sock"), Path("/var/run/docker.sock")) if path.exists()),
+            None,
+        )
+        probe_script = "\n".join(
+            [
+                "import json, os, pathlib, socket, subprocess",
+                f"connection = socket.create_connection(('127.0.0.1', {probe_port}), timeout=3)",
+                "network = connection.recv(128).decode('utf-8')",
+                "connection.close()",
+                f"docker_path = {str(docker_socket)!r}",
+                "docker_ping = None",
+                "if docker_path:",
+                "    docker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
+                "    docker.settimeout(3)",
+                "    docker.connect(docker_path)",
+                r"    docker.sendall(b'GET /_ping HTTP/1.0\r\n\r\n')",
+                "    docker_ping = b'OK' in docker.recv(4096)",
+                "    docker.close()",
+                "systemd = subprocess.run(['/usr/bin/systemctl', 'show', '--property=Version', '--value'], text=True, capture_output=True)",
+                r"pathlib.Path('job-created.txt').write_text('created-by-trusted-job\n')",
+                "print(json.dumps({",
+                "    'network': network,",
+                "    'home': os.environ.get('HOME'),",
+                "    'pathPresent': bool(os.environ.get('PATH')),",
+                "    'sshVisible': pathlib.Path('/root/.ssh').exists(),",
+                "    'configVisible': pathlib.Path('/root/.config').exists(),",
+                "    'dockerSocket': docker_path,",
+                "    'dockerPing': docker_ping,",
+                "    'systemdExit': systemd.returncode,",
+                "    'systemdVersion': systemd.stdout.strip(),",
+                "}, sort_keys=True))",
+            ]
+        )
+        host_probe = client.tool(
+            "workspace.exec",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "clientRequestId": f"request:{uuid.uuid4()}",
+                "execution": {
+                    **execution,
+                    "args": ["-c", probe_script],
+                },
+                "waitMs": 30_000,
+                "stdoutTailBytes": 16_384,
+                "stderrTailBytes": 16_384,
+            },
+        )
+        probe_thread.join(timeout=5)
+        check("trusted-host-job", host_probe.get("status") == "succeeded", host_probe)
+        probe = json.loads(host_probe.get("stdoutTail", "").strip())
+        check("trusted-host-network", probe.get("network") == "ORDIVON_HOST_NETWORK_OK", probe)
+        check(
+            "trusted-host-environment",
+            probe.get("home") == os.environ.get("HOME") and probe.get("pathPresent") is True,
+            probe,
+        )
+        check("trusted-host-config", probe.get("sshVisible") is True and probe.get("configVisible") is True, probe)
+        if docker_socket is not None:
+            check("trusted-host-docker", probe.get("dockerPing") is True, probe)
+        check(
+            "trusted-host-systemd",
+            probe.get("systemdExit") == 0 and bool(probe.get("systemdVersion")),
+            probe,
+        )
+        created = client.tool(
+            "workspace.read",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "workspaceId": workspace_id,
+                "relativePath": "job-created.txt",
+                "mode": "FULL",
+                "offset": 0,
+                "maxBytes": 4096,
+            },
+        )
+        check("trusted-host-workspace-write", created.get("content") == "created-by-trusted-job\n", created)
 
         observed = client.tool(
             "task.observe",
@@ -379,7 +473,9 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         task_list = client.tool("task.list", {"limit": 100})
         check("task-list", any(job.get("jobId") == job_id for job in task_list.get("jobs", [])), task_list)
         native_list = client.request("tasks/list", {})
-        check("native-task-list", any(task.get("taskId") == job_id for task in native_list.get("tasks", [])), native_list)
+        check(
+            "native-task-list", any(task.get("taskId") == job_id for task in native_list.get("tasks", [])), native_list
+        )
 
         artifact_id = f"{attempt_id}.stdout"
         artifact = client.tool(
@@ -400,12 +496,6 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             {
                 "schemaVersion": SCHEMA_VERSION,
                 "clientRequestId": f"request:{uuid.uuid4()}",
-                "principal": "principal:acceptance",
-                "authorityRef": "authority:local-acceptance",
-                "policyId": "policy:acceptance",
-                "policyVersion": "1",
-                "policyDigest": policy_digest,
-                "globalLimit": 2,
                 "execution": {
                     **execution,
                     "args": ["-c", "import time; print('CANCEL_READY', flush=True); time.sleep(30)"],

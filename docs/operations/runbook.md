@@ -24,13 +24,13 @@ cargo run -p ordivon-mcp
 ```
 
 Required environment variables are listed in `.env.example`. The server binds to loopback, requires a random bearer token, bounds request bodies, and exposes `/mcp`.
-Registry and Store roots must be persistent paths visible inside the systemd service boundary; do not place them under `/tmp` when the Runner uses `PrivateTmp`.
+Registry and Store roots must be persistent paths visible to systemd transient units. Do not place them under a private or ephemeral `/tmp` boundary.
 
 ## Execution modes
 
-The runtime defaults to `trusted-local`. Only the common store, Registry, runner, executable roots, loopback bind, and bearer token are required.
+The Runtime defaults to `trusted-local`. It inherits the service user's host authority and environment. `ORDIVON_ALLOWED_EXECUTABLE_ROOTS` is optional; when omitted, trusted mode accepts any canonical executable path. `ORDIVON_PRINCIPAL` and `ORDIVON_GLOBAL_MAX_CONCURRENCY` configure server-owned execution identity and capacity.
 
-Set `ORDIVON_EXECUTION_MODE=isolated` for untrusted repositories or scripts. The static `ordivon-worker` identity and systemd directory definitions remain under `packaging/systemd/`; worker UID/GID and isolated roots are required only in this mode.
+Set `ORDIVON_EXECUTION_MODE=isolated` only when reduced authority is desired. The static `ordivon-worker` identity and isolated roots are required only in that mode.
 
 ## Inspect repository state
 

@@ -163,7 +163,7 @@ fn runner_executes_model_authored_script_and_bounds_output() {
     fs::create_dir_all(&task_dir).unwrap();
     fs::write(
         workspace.join("tool.py"),
-        "from pathlib import Path\nimport sys\nPath('result.txt').write_text('created-by-tool')\nprint('stdout-0123456789')\nprint('stderr-0123456789', file=sys.stderr)\n",
+        "from pathlib import Path\nimport os\nimport sys\nPath('result.txt').write_text('created-by-tool')\nPath('home.txt').write_text(os.environ.get('HOME', ''))\nprint('stdout-0123456789')\nprint('stderr-0123456789', file=sys.stderr)\n",
     )
     .unwrap();
     let executable = real_executable("/usr/bin/python3");
@@ -174,6 +174,7 @@ fn runner_executes_model_authored_script_and_bounds_output() {
         launch_token: None,
         unit_name: None,
         payload: None,
+        inherit_host_environment: true,
         task_id: "task-runner".to_string(),
         workspace_id: "workspace-runner".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
@@ -200,6 +201,10 @@ fn runner_executes_model_authored_script_and_bounds_output() {
         fs::read_to_string(workspace.join("result.txt")).unwrap(),
         "created-by-tool"
     );
+    assert_eq!(
+        fs::read_to_string(workspace.join("home.txt")).unwrap(),
+        std::env::var("HOME").unwrap()
+    );
 }
 
 #[test]
@@ -218,6 +223,7 @@ fn runner_timeout_is_a_durable_failed_result() {
         launch_token: None,
         unit_name: None,
         payload: None,
+        inherit_host_environment: true,
         task_id: "task-timeout".to_string(),
         workspace_id: "workspace-timeout".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),

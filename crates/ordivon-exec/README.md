@@ -22,9 +22,9 @@ cargo build -p ordivon-exec --bin ordivon-task-runner
 
 ## Execution modes
 
-`trusted-local` is selected by the MCP layer by leaving `IsolationConfig` absent. It runs user-owned Git-backed work as the current user while retaining cgroup ownership, timeout, output bounds, durable Registry truth, and recovery.
+`trusted-local` is selected by leaving `IsolationConfig` absent. The transient unit inherits the host user's environment and authority: network, credentials, host filesystem, Git remotes, Docker, systemd, cloud CLIs, and accessible executables remain available. The Runtime adds cgroup ownership, timeout, bounded output, durable Registry truth, cancellation, and recovery without imposing a sandbox.
 
-The optional `isolated-execution` feature adds the non-root `ordivon-worker`, isolated filesystem views, ownership checks, and minimal orphan remediation for untrusted code. `ordivon-mcp` compiles this capability but activates it only when `ORDIVON_EXECUTION_MODE=isolated`.
+The optional `isolated-execution` feature adds the non-root `ordivon-worker`, hidden host control paths, private network/filesystem views, ownership checks, and orphan remediation. `ordivon-mcp` activates it only when `ORDIVON_EXECUTION_MODE=isolated`.
 
 ## On-demand OS tests
 

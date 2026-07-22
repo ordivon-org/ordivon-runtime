@@ -214,6 +214,17 @@ impl Runtime {
         }
     }
 
+    fn inherit_host_environment(&self) -> bool {
+        #[cfg(feature = "isolated-execution")]
+        {
+            self.hardening.is_none()
+        }
+        #[cfg(not(feature = "isolated-execution"))]
+        {
+            true
+        }
+    }
+
     fn materialize_bundle(&self, attempt: &AttemptRecord) -> RuntimeResult<AttemptRecord> {
         if attempt.state != AttemptState::Accepted {
             return Err(RuntimeError::new(
@@ -274,6 +285,7 @@ impl Runtime {
             launch_token: Some(launch_token.clone()),
             unit_name: Some(attempt.unit_name.clone()),
             payload: self.payload_config(&attempt.attempt_id, &plan)?,
+            inherit_host_environment: self.inherit_host_environment(),
             task_id: attempt.attempt_id.clone(),
             workspace_id: plan.workspace_id.clone(),
             workspace_path: plan.workspace_path.clone(),
@@ -403,8 +415,24 @@ impl Runtime {
                 .join(RUNNER_START_FILE)
                 .exists()
             {
-                self.bind_runner_start(attempt)?;
-                return Ok(());
+                match self.bind_runner_start(attempt) {
+                    Ok(_) => return Ok(()),
+                    Err(error) if error.code == RuntimeErrorCode::LaunchIdentityMismatch => {
+                        // A very short-lived unit can write valid start evidence, finish, and be
+                        // collected between the filesystem check and systemctl_show. A complete
+                        // identity-bound Runner result is stronger terminal evidence than the
+                        // already-disappeared transient unit.
+                        if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
+                            return self.reconcile_runner_result(attempt);
+                        }
+                        thread::sleep(Duration::from_millis(20));
+                        if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
+                            return self.reconcile_runner_result(attempt);
+                        }
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             if Instant::now() >= deadline {
                 break;
@@ -1345,19 +1373,16 @@ fn validate_observe_request(request: &TaskObserveRequest) -> RuntimeResult<()> {
 
 fn validate_executable(config: &UniversalExecutorConfig, value: &str) -> RuntimeResult<PathBuf> {
     let path = Path::new(value);
+    let canonical =
+        fs::canonicalize(path).map_err(|error| io_error("canonicalize executable", error))?;
     let metadata =
-        fs::symlink_metadata(path).map_err(|error| io_error("inspect executable", error))?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.permissions().mode() & 0o111 == 0
-    {
+        fs::metadata(&canonical).map_err(|error| io_error("inspect executable", error))?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
         return Err(RuntimeError::invalid(
-            "executable must be a non-symlink executable file",
+            "executable must resolve to an executable file",
             "execution.executable",
         ));
     }
-    let canonical =
-        fs::canonicalize(path).map_err(|error| io_error("canonicalize executable", error))?;
     let allowed = config.allowed_executable_roots.iter().any(|root| {
         fs::canonicalize(root)
             .map(|root| canonical.starts_with(root))
@@ -1388,14 +1413,14 @@ fn validate_runner(path: &Path) -> RuntimeResult<PathBuf> {
     fs::canonicalize(path).map_err(|error| io_error("canonicalize Runner", error))
 }
 
-fn systemd_run(
+fn build_systemd_run_command(
     unit_name: &str,
     runner: &Path,
     bundle_path: &Path,
     _workspace_path: &Path,
     runtime_ceiling_ms: u64,
     #[cfg(feature = "isolated-execution")] hardening: Option<&crate::IsolationConfig>,
-) -> RuntimeResult<std::process::Output> {
+) -> RuntimeResult<Command> {
     let mut command = Command::new("systemd-run");
     command
         .arg(format!("--unit={unit_name}"))
@@ -1405,37 +1430,19 @@ fn systemd_run(
             "--property=KillMode=control-group",
             "--property=TimeoutStopSec=2s",
             "--property=SendSIGKILL=yes",
-            "--property=NoNewPrivileges=yes",
-            "--property=AmbientCapabilities=",
-            "--property=ProtectSystem=strict",
-            "--property=PrivateTmp=yes",
-            "--property=PrivateNetwork=yes",
-            "--property=PrivateDevices=yes",
-            "--property=PrivateIPC=yes",
-            "--property=PrivatePIDs=yes",
-            "--property=ProtectProc=invisible",
-            "--property=ProcSubset=pid",
-            "--property=RestrictNamespaces=yes",
-            "--property=RestrictAddressFamilies=AF_UNIX",
-            "--property=ProtectKernelTunables=yes",
-            "--property=ProtectKernelModules=yes",
-            "--property=ProtectControlGroups=yes",
-            "--property=ProtectHostname=yes",
-            "--property=ProtectClock=yes",
-            "--property=RestrictSUIDSGID=yes",
-            "--property=LockPersonality=yes",
-            "--property=SystemCallArchitectures=native",
-            "--property=InaccessiblePaths=-/run/systemd/private -/run/dbus/system_bus_socket -/run/docker.sock -/var/run/docker.sock -/run/credentials -/root/.ssh -/root/.cloudflared -/root/.config -/root/.aws -/root/.kube -/root/.docker -/root/.git-credentials -/root/.netrc",
-            "--property=UMask=0077",
-            "--property=TasksMax=128",
-            "--property=MemoryMax=1073741824",
             "--property=StandardOutput=journal",
             "--property=StandardError=journal",
         ])
-        .arg(format!(
-            "--property=RuntimeMaxSec={runtime_ceiling_ms}ms"
-        ))
-        .arg(format!("--property=ReadWritePaths={}", bundle_path.display()));
+        .arg(format!("--property=RuntimeMaxSec={runtime_ceiling_ms}ms"));
+
+    #[cfg(feature = "isolated-execution")]
+    let trusted = hardening.is_none();
+    #[cfg(not(feature = "isolated-execution"))]
+    let trusted = true;
+    if trusted {
+        append_trusted_environment(&mut command);
+    }
+
     #[cfg(feature = "isolated-execution")]
     if let Some(hardening) = hardening {
         let attempt_id = bundle_path
@@ -1447,8 +1454,35 @@ fn systemd_run(
         let runtime_dir = hardening.payload_runtime_dir(attempt_id);
         let view_root = hardening.payload_view_root(attempt_id);
         command
-            .arg("--property=CapabilityBoundingSet=CAP_SETUID CAP_SETGID")
-            .arg("--property=ProtectHome=yes")
+            .args([
+                "--property=NoNewPrivileges=yes",
+                "--property=AmbientCapabilities=",
+                "--property=ProtectSystem=strict",
+                "--property=PrivateTmp=yes",
+                "--property=PrivateNetwork=yes",
+                "--property=PrivateDevices=yes",
+                "--property=PrivateIPC=yes",
+                "--property=PrivatePIDs=yes",
+                "--property=ProtectProc=invisible",
+                "--property=ProcSubset=pid",
+                "--property=RestrictNamespaces=yes",
+                "--property=RestrictAddressFamilies=AF_UNIX",
+                "--property=ProtectKernelTunables=yes",
+                "--property=ProtectKernelModules=yes",
+                "--property=ProtectControlGroups=yes",
+                "--property=ProtectHostname=yes",
+                "--property=ProtectClock=yes",
+                "--property=RestrictSUIDSGID=yes",
+                "--property=LockPersonality=yes",
+                "--property=SystemCallArchitectures=native",
+                "--property=InaccessiblePaths=-/run/systemd/private -/run/dbus/system_bus_socket -/run/docker.sock -/var/run/docker.sock -/run/credentials -/root/.ssh -/root/.cloudflared -/root/.config -/root/.aws -/root/.kube -/root/.docker -/root/.git-credentials -/root/.netrc",
+                "--property=UMask=0077",
+                "--property=TasksMax=128",
+                "--property=MemoryMax=1073741824",
+                "--property=CapabilityBoundingSet=CAP_SETUID CAP_SETGID",
+                "--property=ProtectHome=yes",
+            ])
+            .arg(format!("--property=ReadWritePaths={}", bundle_path.display()))
             .arg(format!(
                 "--property=InaccessiblePaths={}",
                 hardening.worker_root.display()
@@ -1476,17 +1510,65 @@ fn systemd_run(
                 "--property=InaccessiblePaths={}/workspace/.git",
                 view_root.display()
             ));
-    } else {
-        command.arg("--property=CapabilityBoundingSet=");
     }
-    #[cfg(not(feature = "isolated-execution"))]
-    command.arg("--property=CapabilityBoundingSet=");
-    command
-        .arg(runner)
-        .arg("--task-dir")
-        .arg(bundle_path)
-        .output()
-        .map_err(|error| tool_error("cannot execute systemd-run", error))
+
+    command.arg(runner).arg("--task-dir").arg(bundle_path);
+    Ok(command)
+}
+
+fn append_trusted_environment(command: &mut Command) {
+    for (name, value) in std::env::vars_os() {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !valid_environment_name(name)
+            || name.starts_with("ORDIVON_")
+            || matches!(
+                name,
+                "INVOCATION_ID"
+                    | "JOURNAL_STREAM"
+                    | "LISTEN_FDS"
+                    | "LISTEN_FDNAMES"
+                    | "LISTEN_PID"
+                    | "NOTIFY_SOCKET"
+                    | "WATCHDOG_PID"
+                    | "WATCHDOG_USEC"
+            )
+        {
+            continue;
+        }
+        command.arg(format!("--setenv={name}={}", value.to_string_lossy()));
+    }
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first == b'_' || first.is_ascii_alphabetic())
+        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+}
+
+fn systemd_run(
+    unit_name: &str,
+    runner: &Path,
+    bundle_path: &Path,
+    workspace_path: &Path,
+    runtime_ceiling_ms: u64,
+    #[cfg(feature = "isolated-execution")] hardening: Option<&crate::IsolationConfig>,
+) -> RuntimeResult<std::process::Output> {
+    build_systemd_run_command(
+        unit_name,
+        runner,
+        bundle_path,
+        workspace_path,
+        runtime_ceiling_ms,
+        #[cfg(feature = "isolated-execution")]
+        hardening,
+    )?
+    .output()
+    .map_err(|error| tool_error("cannot execute systemd-run", error))
 }
 
 fn systemctl_show(unit_name: &str) -> RuntimeResult<BTreeMap<String, String>> {
@@ -1796,4 +1878,94 @@ fn ensure_systemd_visible(path: &Path, field: &str) -> RuntimeResult<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod trusted_systemd_command_tests {
+    use super::*;
+
+    #[test]
+    fn trusted_command_keeps_only_process_ownership_and_lifecycle_properties() {
+        let command = build_systemd_run_command(
+            "ordivon-test.service",
+            Path::new("/usr/bin/true"),
+            Path::new("/var/lib/ordivon/attempts/attempt-test"),
+            Path::new("/root/projects/Ordivon"),
+            10_000,
+            #[cfg(feature = "isolated-execution")]
+            None,
+        )
+        .unwrap();
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for forbidden in [
+            "PrivateNetwork",
+            "ProtectSystem",
+            "InaccessiblePaths",
+            "CapabilityBoundingSet",
+            "NoNewPrivileges",
+            "ReadWritePaths",
+            "MemoryMax",
+            "TasksMax",
+            "UMask",
+        ] {
+            assert!(
+                !args.contains(forbidden),
+                "trusted command contains {forbidden}"
+            );
+        }
+        assert!(args.contains("KillMode=control-group"));
+        assert!(args.contains("RuntimeMaxSec=10000ms"));
+        assert!(valid_environment_name("GITHUB_TOKEN"));
+        assert!(valid_environment_name("CARGO_BIN_EXE_ordivon_job_fixture"));
+        assert!(!valid_environment_name("CARGO_BIN_EXE_ordivon-job-fixture"));
+    }
+
+    #[cfg(feature = "isolated-execution")]
+    #[test]
+    fn isolated_command_keeps_the_explicit_sandbox() {
+        let hardening = crate::IsolationConfig {
+            worker: crate::WorkerIdentity {
+                user: "ordivon-worker".to_string(),
+                group: "ordivon-worker".to_string(),
+                uid: 1001,
+                gid: 1001,
+            },
+            control_root: PathBuf::from("/var/lib/ordivon/control"),
+            worker_root: PathBuf::from("/var/lib/ordivon/worker"),
+            cache_root: PathBuf::from("/var/cache/ordivon-worker"),
+            runtime_view_root: PathBuf::from("/run/ordivon"),
+        };
+        let command = build_systemd_run_command(
+            "ordivon-test.service",
+            Path::new("/usr/bin/true"),
+            Path::new("/var/lib/ordivon/control/attempts/attempt-test"),
+            Path::new("/var/lib/ordivon/worker/workspaces/workspace-test"),
+            10_000,
+            Some(&hardening),
+        )
+        .unwrap();
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for required in [
+            "PrivateNetwork=yes",
+            "ProtectSystem=strict",
+            "NoNewPrivileges=yes",
+            "CapabilityBoundingSet=CAP_SETUID CAP_SETGID",
+            "ProtectHome=yes",
+            "ReadWritePaths=",
+        ] {
+            assert!(
+                args.contains(required),
+                "isolated command omitted {required}"
+            );
+        }
+        assert!(!args.contains("--setenv=HOME="));
+    }
 }

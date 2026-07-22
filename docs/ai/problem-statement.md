@@ -47,14 +47,18 @@ A summary may explain these facts, but it does not replace them.
 
 ## Design consequence
 
-Reversible repository work should be easy to attempt, inspect, correct, and roll back. Hard blocking is reserved for failures whose cost cannot be repaired by another ordinary iteration:
+The user is the Principal and the Agent is the delegated Operator. In `trusted-local`, Ordivon inherits the host user's authority instead of deciding that network, credentials, Git, Docker, systemd, cloud CLIs, or other host capabilities are categorically forbidden.
 
-- credential exposure;
-- irreversible external effects;
-- ambiguous dispatch that could be duplicated;
-- real concurrency ownership violations;
-- corruption of persistent execution truth;
-- untrusted code crossing the selected isolation boundary.
+The Runtime still protects facts that authority alone cannot reconstruct:
+
+- duplicate client retries remain idempotent;
+- ambiguous dispatch is never guessed or automatically repeated;
+- real concurrency ownership is transactional;
+- the complete process tree remains observable and cancellable;
+- results and Artifacts remain identity-bound;
+- restart reconciliation preserves what actually happened.
+
+Reduced authority is an explicit `isolated` choice, not the default product philosophy.
 
 ## Non-goals
 

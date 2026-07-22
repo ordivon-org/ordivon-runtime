@@ -37,6 +37,6 @@ Cloudflare Tunnel and Access authenticate and transport remote requests. They do
 
 ## Mode selection
 
-- `trusted-local`: user-owned Git repositories and reversible local commands.
-- `isolated`: downloaded repositories, unknown scripts, dependency experiments, parser/fuzzer inputs, and security work.
-- remote exposure: allowed only after the proxy/Tunnel checks above are recorded for the exact deployment.
+- `trusted-local`: the authenticated Agent inherits the Ordivon service user's host authority, including network, credentials, Git, Docker, systemd, and cloud tooling.
+- `isolated`: the user or Agent explicitly requests a reduced-authority non-root sandbox.
+- remote exposure: authenticate the caller and verify the exact proxy/Tunnel path; do not silently convert trusted authority into a sandbox merely because transport is remote.

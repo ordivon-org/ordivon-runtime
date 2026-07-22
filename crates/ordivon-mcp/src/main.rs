@@ -16,7 +16,7 @@ use ordivon_exec::{
     IsolationConfig, RegistryConfig, Runtime, RuntimeConfig, UniversalExecutorConfig,
     WorkerIdentity,
 };
-use ordivon_mcp::server::{OrdivonServer, ServerConfig};
+use ordivon_mcp::server::{ExecutionContext, OrdivonServer, ServerConfig};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -212,12 +212,22 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     let store_root = PathBuf::from(required_env("ORDIVON_STORE_ROOT")?);
     let registry_root = PathBuf::from(required_env("ORDIVON_REGISTRY_ROOT")?);
     let runner_path = PathBuf::from(required_env("ORDIVON_RUNNER_PATH")?);
-    let roots = required_env("ORDIVON_ALLOWED_EXECUTABLE_ROOTS")?;
-    let allowed_executable_roots = roots
-        .split(':')
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .collect();
+    let allowed_executable_roots = std::env::var("ORDIVON_ALLOWED_EXECUTABLE_ROOTS")
+        .ok()
+        .map(|roots| {
+            roots
+                .split(':')
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        })
+        .filter(|roots| !roots.is_empty())
+        .unwrap_or_else(|| match execution_mode {
+            ExecutionMode::TrustedLocal => vec![PathBuf::from("/")],
+            ExecutionMode::Isolated => {
+                vec![PathBuf::from("/usr/bin"), PathBuf::from("/usr/local/bin")]
+            }
+        });
     let trace_path = std::env::var("ORDIVON_TRACE_PATH")
         .ok()
         .map(PathBuf::from)
@@ -237,6 +247,29 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         .map(|value| value.parse())
         .transpose()?
         .unwrap_or(2_000);
+
+    let global_limit = std::env::var("ORDIVON_GLOBAL_MAX_CONCURRENCY")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(4);
+    if global_limit == 0 {
+        return Err("ORDIVON_GLOBAL_MAX_CONCURRENCY must be positive".into());
+    }
+    let principal =
+        std::env::var("ORDIVON_PRINCIPAL").unwrap_or_else(|_| "principal:local-owner".to_string());
+    let (authority_ref, policy_id, policy_digest) = match execution_mode {
+        ExecutionMode::TrustedLocal => (
+            "authority:trusted-local",
+            "ordivon.runtime.trusted.v1",
+            "sha256:3609e7bd56a9b54f560f5905787a90e64c0b178510163b1d2c0b954cd05f8c59",
+        ),
+        ExecutionMode::Isolated => (
+            "authority:isolated",
+            "ordivon.runtime.isolated.v1",
+            "sha256:bee653e0cc6304f41739c38fc9675da02a5092134b28d5d8c7a7f0b3c38474ce",
+        ),
+    };
 
     let (workspace_root, workspace_uid, workspace_gid, hardening) = match execution_mode {
         ExecutionMode::TrustedLocal => (None, None, None, None),
@@ -292,6 +325,14 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                 },
                 startup_grace_ms,
                 hardening,
+            },
+            execution: ExecutionContext {
+                principal,
+                authority_ref: authority_ref.to_string(),
+                policy_id: policy_id.to_string(),
+                policy_version: "1".to_string(),
+                policy_digest: policy_digest.to_string(),
+                global_limit,
             },
             trace_path,
         },

@@ -22,7 +22,7 @@ impl ServerHandler for OrdivonServer {
                 .with_title("Ordivon MCP"),
         )
         .with_instructions(
-            "Local transactional Ordivon runtime. workspace.exec creates a durable server-generated Job and Attempt; MCP Tasks project SQLite truth. Reversible repository work is permitted, while irreversible external effects require explicit authority.",
+            "Local transactional Ordivon runtime. In trusted-local mode, workspace.exec inherits the host user's delegated authority; isolated mode is explicit. The server owns execution identity, durable Job and Attempt state, cancellation, and recovery.",
         )
     }
 
@@ -37,7 +37,10 @@ impl ServerHandler for OrdivonServer {
                 None,
             ));
         }
-        let mut run_request = parse_task_run(request.arguments)?;
+        let mut run_request = self
+            .state
+            .execution
+            .bind(parse_workspace_exec(request.arguments)?);
         run_request.wait_ms = 0;
         let runtime = self.state.runtime.clone();
         let observation = tokio::task::spawn_blocking(move || runtime.run_task(&run_request))

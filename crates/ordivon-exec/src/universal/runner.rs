@@ -88,7 +88,11 @@ fn execute_request(
     }
     let executable = validate_executable(request)?;
     let mut command = Command::new(&executable);
-    command.args(&request.args).env_clear().envs(&request.env);
+    command.args(&request.args);
+    if !request.inherit_host_environment {
+        command.env_clear();
+    }
+    command.envs(&request.env);
     if let Some(payload) = &request.payload {
         command
             .env("HOME", &payload.runtime_view)
@@ -361,22 +365,6 @@ fn configure_payload_drop(
 
 fn validate_executable(request: &RunnerTaskRequest) -> Result<PathBuf, UniversalExecError> {
     let path = Path::new(&request.executable);
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        UniversalExecError::new(
-            UniversalExecErrorCode::InvalidRequest,
-            format!("cannot inspect target executable: {error}"),
-            Some("executable"),
-            false,
-        )
-    })?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.permissions().mode() & 0o111 == 0
-    {
-        return Err(runner_error(
-            "target executable must remain a non-symlink executable file",
-        ));
-    }
     let canonical = fs::canonicalize(path).map_err(|error| {
         UniversalExecError::new(
             UniversalExecErrorCode::InvalidRequest,
@@ -385,6 +373,17 @@ fn validate_executable(request: &RunnerTaskRequest) -> Result<PathBuf, Universal
             false,
         )
     })?;
+    let metadata = fs::metadata(&canonical).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::InvalidRequest,
+            format!("cannot inspect target executable: {error}"),
+            Some("executable"),
+            false,
+        )
+    })?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(runner_error("target must resolve to an executable file"));
+    }
     let digest = sha256_file(&canonical)?;
     if digest != request.executable_digest {
         return Err(runner_error(

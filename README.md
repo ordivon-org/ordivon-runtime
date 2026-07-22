@@ -13,7 +13,7 @@ agent intent
 → recovery or continuation
 ```
 
-Ordivon treats ordinary repository edits as reversible through Git. Strong controls remain for credentials, irreversible external effects, ambiguous dispatch, concurrency ownership, persistent-state integrity, and untrusted execution.
+In `trusted-local`, the Agent inherits the host user's delegated authority, including network, credentials, Git remotes, Docker, systemd, and other accessible host tools. Ordivon preserves execution identity and recovery rather than pre-emptively reducing that authority. `isolated` remains an explicit opt-in sandbox.
 
 ## Current surface
 

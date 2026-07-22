@@ -379,6 +379,8 @@ pub(crate) struct RunnerTaskRequest {
     pub unit_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<RunnerPayloadConfig>,
+    #[serde(default)]
+    pub inherit_host_environment: bool,
     pub task_id: String,
     pub workspace_id: String,
     pub workspace_path: String,

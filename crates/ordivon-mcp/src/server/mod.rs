@@ -12,9 +12,10 @@ use ordivon_exec::{
     CompactWorkspaceDiffResult, CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, Runtime,
     RuntimeConfig, RuntimeError, RuntimeJobListRequest, RuntimeJobListResult, TaskCancelRequest,
     TaskObservation, TaskObserveRequest, TaskRunRequest, UniversalExecError,
-    UniversalExecutorConfig, WorkspaceDiffRequest as ExecWorkspaceDiffRequest,
-    WorkspaceMutateRequest, WorkspaceMutateResult,
-    WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
+    UniversalExecutionRequest, UniversalExecutorConfig,
+    WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceMutateRequest,
+    WorkspaceMutateResult, WorkspaceReadRequest as ExecWorkspaceReadRequest,
+    WorkspaceReadSliceRequest,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::IntoCallToolResult;
@@ -67,9 +68,63 @@ pub struct WorkspaceDiffRequest {
     pub max_bytes: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceExecRequest {
+    pub schema_version: u32,
+    pub client_request_id: String,
+    pub execution: UniversalExecutionRequest,
+    #[serde(default = "default_exec_wait_ms")]
+    pub wait_ms: u64,
+    #[serde(default = "default_exec_tail_bytes")]
+    pub stdout_tail_bytes: u64,
+    #[serde(default = "default_exec_tail_bytes")]
+    pub stderr_tail_bytes: u64,
+}
+
+#[derive(Clone)]
+pub struct ExecutionContext {
+    pub principal: String,
+    pub authority_ref: String,
+    pub policy_id: String,
+    pub policy_version: String,
+    pub policy_digest: String,
+    pub global_limit: u32,
+}
+
+impl ExecutionContext {
+    fn bind(&self, request: WorkspaceExecRequest) -> TaskRunRequest {
+        TaskRunRequest {
+            schema_version: request.schema_version,
+            client_request_id: request.client_request_id,
+            principal: self.principal.clone(),
+            authority_ref: self.authority_ref.clone(),
+            policy_id: self.policy_id.clone(),
+            policy_version: self.policy_version.clone(),
+            policy_digest: self.policy_digest.clone(),
+            profile_id: None,
+            global_limit: self.global_limit,
+            profile_limit: None,
+            execution: request.execution,
+            wait_ms: request.wait_ms,
+            stdout_tail_bytes: request.stdout_tail_bytes,
+            stderr_tail_bytes: request.stderr_tail_bytes,
+        }
+    }
+}
+
+fn default_exec_wait_ms() -> u64 {
+    30_000
+}
+
+fn default_exec_tail_bytes() -> u64 {
+    4096
+}
+
 #[derive(Clone)]
 pub struct ServerConfig {
     pub runtime: RuntimeConfig,
+    pub execution: ExecutionContext,
     pub trace_path: Option<PathBuf>,
 }
 
@@ -83,6 +138,7 @@ pub struct OrdivonServer {
 struct ServerState {
     runtime: Runtime,
     executor: UniversalExecutorConfig,
+    execution: ExecutionContext,
     trace_path: Option<PathBuf>,
 }
 
@@ -94,6 +150,7 @@ impl OrdivonServer {
         let state = Arc::new(ServerState {
             runtime,
             executor,
+            execution: config.execution,
             trace_path: config.trace_path,
         });
         Ok(Self {
@@ -304,7 +361,7 @@ fn unix_ms() -> u128 {
         .as_millis()
 }
 
-fn parse_task_run(arguments: Option<JsonObject>) -> Result<TaskRunRequest, McpError> {
+fn parse_workspace_exec(arguments: Option<JsonObject>) -> Result<WorkspaceExecRequest, McpError> {
     serde_json::from_value(Value::Object(arguments.unwrap_or_default())).map_err(|error| {
         McpError::invalid_params(
             format!("invalid workspace.exec task arguments: {error}"),

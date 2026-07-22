@@ -142,7 +142,7 @@ impl OrdivonServer {
 
     #[tool(
         name = "workspace.exec",
-        description = "Submit one transactional Job. The server generates the durable Job and Attempt IDs; duplicate clientRequestId values are idempotent.",
+        description = "Run one command with the server's configured authority. The server owns identity, policy metadata, concurrency, Job IDs, and Attempt IDs; duplicate clientRequestId values are idempotent.",
         execution(task_support = "optional"),
         annotations(
             title = "Execute transactional workspace job",
@@ -154,9 +154,10 @@ impl OrdivonServer {
     )]
     async fn workspace_exec(
         &self,
-        Parameters(request): Parameters<TaskRunRequest>,
+        Parameters(request): Parameters<WorkspaceExecRequest>,
     ) -> ToolOutcome<TaskObservation> {
         let runtime = self.state.runtime.clone();
+        let request = self.state.execution.bind(request);
         self.run_core("workspace.exec", move || {
             runtime.run_task(&request).map_err(ToolError::from)
         })

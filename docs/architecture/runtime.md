@@ -34,9 +34,13 @@ The filesystem stores immutable execution bundles, bounded output, runner-start 
 
 ## Execution ownership
 
-A task runs as a systemd transient unit. The runtime records the unit, invocation, cgroup, PID, process-start identity, boot identity, and launch-token evidence. Cancellation persists intent before stopping the unit and reconciling the complete process tree.
+A task runs as a systemd transient unit. The Runtime records the unit, invocation, cgroup, PID, process-start identity, boot identity, and launch-token evidence. Cancellation persists intent before stopping the unit and reconciling the complete process tree.
 
-Timeout and output bounds remain runtime controls because they protect machine resources rather than police code style.
+In `trusted-local`, the transient unit retains host network, filesystem, credentials, capabilities, Docker/systemd access, and the service environment. The target executable may be any executable reachable by the service user; symlinks are resolved to a canonical file and bound by Digest before launch. An optional executable-root configuration can deliberately reduce this surface.
+
+In `isolated`, the same lifecycle machinery additionally activates the non-root worker and strong systemd sandbox.
+
+Timeout and output bounds remain lifecycle controls, not permission gates.
 
 ## Recovery semantics
 
@@ -52,6 +56,8 @@ At startup and observation time, Ordivon reconciles nonterminal Attempts against
 A dispatch whose outcome cannot be proven is not automatically retried. It becomes `lost` or `orphaned` so an external side effect cannot be duplicated by speculation.
 
 ## MCP surface
+
+The MCP server binds its configured Principal, authority, policy identity, and concurrency limit to every execution. Those values are not supplied by the Agent.
 
 The transactional surface is:
 

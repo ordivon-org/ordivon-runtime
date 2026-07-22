@@ -17,8 +17,9 @@ Do not derive current architecture from dated reports, retrospectives, old Issue
 - Preserve user changes and use isolated worktrees for substantial work.
 - Record exact revisions, commands, results, and terminal state.
 - Recover from reversible failures instead of adding speculative gates.
-- Hard-block irreversible external effects, credential exposure, ambiguous dispatch, real concurrency conflicts, persistent-truth corruption, and selected isolation boundaries.
-- Use `trusted-local` for user-owned Git repositories and `isolated` for untrusted inputs.
+- In `trusted-local`, inherit the user's host authority instead of inventing per-tool approval or allowlist systems.
+- Preserve ambiguous-dispatch, idempotency, concurrency, process ownership, cancellation, and persistent-truth invariants without restricting what the Agent may operate.
+- Use `isolated` only when the user or Agent explicitly chooses reduced authority for untrusted inputs.
 
 ## Active engineering surface
 

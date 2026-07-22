@@ -2,42 +2,34 @@
 
 ## Default mode: trusted-local
 
-Use `trusted-local` for user-owned, Git-backed repositories where ordinary rollback is available. It does not require a dedicated worker identity, ownership transfer, mount namespace, or isolated filesystem view.
+`trusted-local` runs with the same host identity and authority as the Ordivon service. It inherits the host environment and may use any repository, executable, network route, credential store, Git remote, Docker socket, systemd interface, cloud CLI, or filesystem path available to that user.
 
-The Runtime still preserves:
+The Runtime does not create per-repository, per-executable, per-credential, or per-tool approval systems. It preserves:
 
-- isolated worktree ownership;
-- command timeout and bounded output;
-- cgroup process ownership and cancellation;
+- exact Git workspaces and digest-guarded mutation;
 - Job, Attempt, result, and Artifact truth;
-- idempotency and concurrency reservations.
+- idempotent admission and concurrency reservations;
+- systemd/cgroup process ownership;
+- timeout, bounded output, cancellation, and restart recovery;
+- fail-closed treatment of ambiguous dispatch.
 
-It must not impose document governance, wording checks, stage Receipts, or a mandatory non-root sandbox on ordinary reversible edits.
+The MCP client supplies the command and resource bounds. The server owns Principal, authority identity, policy metadata, and concurrency ceilings; an Agent does not self-certify those fields.
 
 ## Explicit mode: isolated
 
-Use `isolated` for unknown repositories, downloaded code, untrusted scripts, dependency experiments, parser or fuzzer inputs, and security work. This activates the non-root `ordivon-worker`, private roots, ownership transfer, and systemd filesystem restrictions.
+`isolated` is an opt-in reduced-authority mode for unknown repositories, downloaded code, hostile samples, parser/fuzzer inputs, or any task where the user or Agent deliberately wants a sandbox.
 
-Isolation is selected by input risk, not applied as a universal proof of engineering quality.
+It activates the non-root worker, private filesystem views, hidden credentials and host control paths, network isolation, capability reduction, and systemd hardening. These controls belong only to this explicit mode.
 
-## Hard-blocking boundary
+## Permission boundary
 
-A hard block is justified only when an action can:
+Authentication answers who may use Ordivon. Once a trusted caller is authenticated, `trusted-local` grants the authority configured for the host service rather than reconstructing classical least-privilege gates inside every command.
 
-- expose credentials or protected host state;
-- create an irreversible external side effect;
-- duplicate an ambiguously dispatched operation;
-- violate a real concurrency reservation;
-- corrupt persistent execution truth;
-- cross an explicitly selected isolation boundary.
-
-A hard block is not justified solely because code may fail, tests may be incomplete, wording may be imprecise, or a Git-backed file may need restoration.
+A task may therefore perform Git Push, create a GitHub PR, manage Docker or systemd, use Cloudflare/AWS/Kubernetes tooling, or access credentials when the service user can do so. Ordivon records and supervises the action; it does not require a bespoke Adapter for every mature CLI.
 
 ## Network boundary
 
-Local HTTP binds to loopback, requires a random bearer token, and bounds request bodies. Browser Host and Origin controls belong only on transports that are actually exposed through a browser or remote network.
-
-Cloudflare Tunnel and Access protect the remote transport. They do not replace Runtime idempotency, execution bounds, or Job and Attempt truth.
+The MCP HTTP server remains loopback-bound, bearer-authenticated, and request-size bounded. Cloudflare Tunnel and Access may authenticate and transport a remote trusted caller. Transport authentication does not imply that the resulting Agent execution must be sandboxed.
 
 ## Component admission test
 

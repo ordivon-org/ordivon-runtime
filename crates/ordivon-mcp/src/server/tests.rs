@@ -50,6 +50,14 @@ impl Sandbox {
                 startup_grace_ms: 1000,
                 hardening: None,
             },
+            execution: ExecutionContext {
+                principal: "principal:mcp-test".to_string(),
+                authority_ref: "authority:mcp-test".to_string(),
+                policy_id: "policy:mcp-test".to_string(),
+                policy_version: "1".to_string(),
+                policy_digest: format!("sha256:{}", "b".repeat(64)),
+                global_limit: 4,
+            },
             trace_path: None,
         })
         .unwrap()
@@ -138,6 +146,20 @@ fn tool_catalog_uses_transactional_job_contract() {
     let schema = serde_json::to_string(&exec.input_schema).unwrap();
     assert!(schema.contains("clientRequestId"));
     assert!(!schema.contains("taskId"));
+    for server_owned in [
+        "principal",
+        "authorityRef",
+        "policyId",
+        "policyVersion",
+        "policyDigest",
+        "globalLimit",
+        "profileLimit",
+    ] {
+        assert!(
+            !schema.contains(server_owned),
+            "schema exposes {server_owned}"
+        );
+    }
 }
 
 #[test]
