@@ -52,6 +52,9 @@ fn m6_transactional_runtime_executes_replays_and_releases_capacity() {
     let store = root.join("store");
     let executor = UniversalExecutorConfig {
         store_root: store.clone(),
+        workspace_root: None,
+        workspace_uid: None,
+        workspace_gid: None,
         runner_path,
         allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
         max_runtime_ms: MAX_UNIVERSAL_RUNTIME_MS,
@@ -89,6 +92,8 @@ fn m6_transactional_runtime_executes_replays_and_releases_capacity() {
         },
         executor: executor.clone(),
         startup_grace_ms: 2000,
+        #[cfg(feature = "runtime-hardening-m7")]
+        hardening: None,
     })
     .unwrap();
     let request = M6TaskRunRequest {
@@ -181,6 +186,9 @@ impl IntegrationContext {
             .join(format!("{label}-{}", Uuid::now_v7()));
         let executor = UniversalExecutorConfig {
             store_root: root.join("store"),
+            workspace_root: None,
+            workspace_uid: None,
+            workspace_gid: None,
             runner_path,
             allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
             max_runtime_ms: MAX_UNIVERSAL_RUNTIME_MS,
@@ -217,6 +225,8 @@ impl IntegrationContext {
             registry: self.registry.clone(),
             executor: self.executor.clone(),
             startup_grace_ms,
+            #[cfg(feature = "runtime-hardening-m7")]
+            hardening: None,
         })
         .unwrap()
     }

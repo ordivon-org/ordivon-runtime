@@ -36,12 +36,17 @@ impl Sandbox {
                 },
                 executor: UniversalExecutorConfig {
                     store_root: self.root.join("store"),
+                    workspace_root: None,
+                    workspace_uid: None,
+                    workspace_gid: None,
                     runner_path: PathBuf::from("/usr/bin/true"),
                     allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
                     max_runtime_ms: 10_000,
                     max_output_bytes: 1024 * 1024,
                 },
                 startup_grace_ms: 1000,
+                #[cfg(feature = "experimental-http-m7")]
+                hardening: None,
             },
             trace_path: None,
             dogfood_policy: None,

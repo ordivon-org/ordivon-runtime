@@ -128,6 +128,8 @@ pub fn cancel_universal_task(
         job_id: None,
         attempt_id: None,
         launch_token_digest: None,
+        payload_uid: None,
+        payload_gid: None,
         status: TaskTerminalStatus::Cancelled,
         exit_code: None,
         timed_out: false,

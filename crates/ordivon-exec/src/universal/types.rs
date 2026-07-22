@@ -608,6 +608,17 @@ fn is_false(value: &bool) -> bool {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RunnerPayloadConfig {
+    pub uid: u32,
+    pub gid: u32,
+    pub workspace_view: String,
+    pub cwd_view: String,
+    pub runtime_view: String,
+    pub cache_view: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RunnerTaskRequest {
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -618,6 +629,8 @@ pub(crate) struct RunnerTaskRequest {
     pub launch_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<RunnerPayloadConfig>,
     pub task_id: String,
     pub workspace_id: String,
     pub workspace_path: String,
@@ -643,6 +656,10 @@ pub(crate) struct RunnerStartEvidence {
     pub control_group: String,
     pub namespace_pid: u32,
     pub namespace_process_start_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_gid: Option<u32>,
     pub observed_unix_ms: u128,
 }
 
@@ -688,6 +705,10 @@ pub(crate) struct RunnerTaskResult {
     pub attempt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_token_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_gid: Option<u32>,
     pub status: TaskTerminalStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,

@@ -12,8 +12,12 @@ use axum::http::{header, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use ordivon_exec::UniversalExecutorConfig;
-use ordivon_mcp::m4::{M4Server, M4ServerConfig, M5DogfoodPolicy};
+use ordivon_exec::{
+    M6RegistryConfig, M6Runtime, M6RuntimeConfig, M7RuntimeHardeningConfig, M7WorkerIdentity,
+    UniversalExecutorConfig,
+};
+use ordivon_mcp::m4::M5DogfoodPolicy;
+use ordivon_mcp::m6::{M6Server, M6ServerConfig};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -36,7 +40,7 @@ struct AppConfig {
     token: String,
     allowed_origins: Vec<String>,
     body_limit_bytes: usize,
-    server: M4ServerConfig,
+    server: M6ServerConfig,
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -49,16 +53,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init();
 
     let app = load_config()?;
+    let startup_runtime = M6Runtime::new(app.server.runtime.clone())?;
+    startup_runtime.reconcile_all()?;
+    drop(startup_runtime);
     if !app.bind.ip().is_loopback() {
-        return Err("ORDIVON_M4_BIND must use a loopback address".into());
+        return Err("ORDIVON_M7_BIND must use a loopback address".into());
     }
     let listener = tokio::net::TcpListener::bind(app.bind).await?;
     let address = listener.local_addr()?;
     let cancellation = CancellationToken::new();
     let server_config = app.server.clone();
-    let service: StreamableHttpService<M4Server, LocalSessionManager> = StreamableHttpService::new(
+    let service: StreamableHttpService<M6Server, LocalSessionManager> = StreamableHttpService::new(
         move || {
-            M4Server::new(server_config.clone())
+            M6Server::new(server_config.clone())
                 .map_err(|error| std::io::Error::other(error.message))
         },
         Default::default(),
@@ -85,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         bind = %address,
         endpoint = %format!("http://{address}/mcp"),
-        "Ordivon M4 experimental MCP listening"
+        "Ordivon M6 experimental MCP listening"
     );
 
     let shutdown = cancellation.clone();
@@ -107,7 +114,7 @@ async fn authenticate_and_trace(
 ) -> Response {
     let started = Instant::now();
     let trace_id = format!(
-        "m4-http-{}-{}-{}",
+        "m6-http-{}-{}-{}",
         std::process::id(),
         unix_ms(),
         HTTP_TRACE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
@@ -175,52 +182,90 @@ fn transport_config(
 }
 
 fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
-    let bind: SocketAddr = std::env::var("ORDIVON_M4_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:8894".to_string())
+    let bind: SocketAddr = std::env::var("ORDIVON_M7_BIND")
+        .unwrap_or_else(|_| "127.0.0.1:8897".to_string())
         .parse()?;
-    let token = required_env("ORDIVON_M4_BEARER_TOKEN")?;
+    let token = required_env("ORDIVON_M7_BEARER_TOKEN")?;
     if token.len() < 32 {
-        return Err("ORDIVON_M4_BEARER_TOKEN must be at least 32 characters".into());
+        return Err("ORDIVON_M7_BEARER_TOKEN must be at least 32 characters".into());
     }
-    let store_root = PathBuf::from(required_env("ORDIVON_M4_STORE_ROOT")?);
-    let runner_path = PathBuf::from(required_env("ORDIVON_M4_RUNNER_PATH")?);
-    let roots = required_env("ORDIVON_M4_ALLOWED_EXECUTABLE_ROOTS")?;
+    let store_root = PathBuf::from(required_env("ORDIVON_M7_STORE_ROOT")?);
+    let registry_root = PathBuf::from(required_env("ORDIVON_M7_REGISTRY_ROOT")?);
+    let runner_path = PathBuf::from(required_env("ORDIVON_M7_RUNNER_PATH")?);
+    let roots = required_env("ORDIVON_M7_ALLOWED_EXECUTABLE_ROOTS")?;
     let allowed_executable_roots = roots
         .split(':')
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .collect();
-    let trace_path = std::env::var("ORDIVON_M4_TRACE_PATH")
+    let trace_path = std::env::var("ORDIVON_M7_TRACE_PATH")
         .ok()
         .map(PathBuf::from)
-        .or_else(|| Some(store_root.join("m4-trace.jsonl")));
-    let allowed_origins = std::env::var("ORDIVON_M4_ALLOWED_ORIGINS")
+        .or_else(|| Some(registry_root.join("m7-trace.jsonl")));
+    let allowed_origins = std::env::var("ORDIVON_M7_ALLOWED_ORIGINS")
         .unwrap_or_else(|_| "http://localhost,http://127.0.0.1".to_string())
         .split(',')
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
         .collect();
-    let body_limit_bytes = std::env::var("ORDIVON_M4_BODY_LIMIT_BYTES")
+    let body_limit_bytes = std::env::var("ORDIVON_M7_BODY_LIMIT_BYTES")
         .ok()
         .map(|value| value.parse())
         .transpose()?
         .unwrap_or(1_048_576);
+    let busy_timeout_ms = std::env::var("ORDIVON_M7_BUSY_TIMEOUT_MS")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(5_000);
+    let startup_grace_ms = std::env::var("ORDIVON_M7_STARTUP_GRACE_MS")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(2_000);
+    let control_root = PathBuf::from(required_env("ORDIVON_M7_CONTROL_ROOT")?);
+    let worker_root = PathBuf::from(required_env("ORDIVON_M7_WORKER_ROOT")?);
+    let cache_root = PathBuf::from(required_env("ORDIVON_M7_CACHE_ROOT")?);
+    let runtime_view_root = PathBuf::from(required_env("ORDIVON_M7_RUNTIME_VIEW_ROOT")?);
+    let worker_uid: u32 = required_env("ORDIVON_M7_WORKER_UID")?.parse()?;
+    let worker_gid: u32 = required_env("ORDIVON_M7_WORKER_GID")?.parse()?;
+    let hardening = M7RuntimeHardeningConfig {
+        worker: M7WorkerIdentity {
+            user: "ordivon-worker".to_string(),
+            group: "ordivon-worker".to_string(),
+            uid: worker_uid,
+            gid: worker_gid,
+        },
+        control_root: control_root.clone(),
+        worker_root: worker_root.clone(),
+        cache_root,
+        runtime_view_root,
+    };
 
     Ok(AppConfig {
         bind,
         token,
         allowed_origins,
         body_limit_bytes,
-        server: M4ServerConfig {
-            executor: UniversalExecutorConfig {
-                store_root,
-                workspace_root: None,
-                workspace_uid: None,
-                workspace_gid: None,
-                runner_path,
-                allowed_executable_roots,
-                max_runtime_ms: 900_000,
-                max_output_bytes: 16 * 1024 * 1024,
+        server: M6ServerConfig {
+            runtime: M6RuntimeConfig {
+                registry: M6RegistryConfig {
+                    db_path: registry_root.join("registry.sqlite3"),
+                    store_root: registry_root,
+                    busy_timeout_ms,
+                },
+                executor: UniversalExecutorConfig {
+                    store_root,
+                    workspace_root: Some(hardening.workspaces_root()),
+                    workspace_uid: Some(worker_uid),
+                    workspace_gid: Some(worker_gid),
+                    runner_path,
+                    allowed_executable_roots,
+                    max_runtime_ms: 900_000,
+                    max_output_bytes: 16 * 1024 * 1024,
+                },
+                startup_grace_ms,
+                hardening: Some(hardening),
             },
             trace_path,
             dogfood_policy: load_dogfood_policy()?,
@@ -229,8 +274,8 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
 }
 
 fn load_dogfood_policy() -> Result<Option<M5DogfoodPolicy>, Box<dyn std::error::Error>> {
-    let repos = std::env::var("ORDIVON_M5_ALLOWED_SOURCE_REPOS").ok();
-    let revisions = std::env::var("ORDIVON_M5_ALLOWED_SOURCE_REVISIONS").ok();
+    let repos = std::env::var("ORDIVON_M7_ALLOWED_SOURCE_REPOS").ok();
+    let revisions = std::env::var("ORDIVON_M7_ALLOWED_SOURCE_REVISIONS").ok();
     match (repos, revisions) {
         (None, None) => Ok(None),
         (Some(repos), Some(revisions)) => Ok(Some(M5DogfoodPolicy {
@@ -246,7 +291,7 @@ fn load_dogfood_policy() -> Result<Option<M5DogfoodPolicy>, Box<dyn std::error::
                 .collect(),
         })),
         _ => Err(
-            "ORDIVON_M5_ALLOWED_SOURCE_REPOS and ORDIVON_M5_ALLOWED_SOURCE_REVISIONS must be set together"
+            "ORDIVON_M7_ALLOWED_SOURCE_REPOS and ORDIVON_M7_ALLOWED_SOURCE_REVISIONS must be set together"
                 .into(),
         ),
     }
@@ -293,7 +338,7 @@ fn append_http_trace(
     let guard = match HTTP_TRACE_LOCK.lock() {
         Ok(guard) => guard,
         Err(error) => {
-            tracing::warn!("M4 HTTP trace lock poisoned: {error}");
+            tracing::warn!("M6 HTTP trace lock poisoned: {error}");
             return;
         }
     };
@@ -307,7 +352,7 @@ fn append_http_trace(
         });
     drop(guard);
     if let Err(error) = result {
-        tracing::warn!("cannot append M4 HTTP trace {}: {error}", path.display());
+        tracing::warn!("cannot append M6 HTTP trace {}: {error}", path.display());
     }
 }
 

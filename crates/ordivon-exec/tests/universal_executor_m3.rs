@@ -241,6 +241,9 @@ fn cli_raw(command: &str, request: Value, store_root: &Path, cli_calls: &mut u64
 fn executor_config(store_root: &Path) -> UniversalExecutorConfig {
     UniversalExecutorConfig {
         store_root: store_root.to_path_buf(),
+        workspace_root: None,
+        workspace_uid: None,
+        workspace_gid: None,
         runner_path: PathBuf::from(env!("CARGO_BIN_EXE_ordivon-task-runner")),
         allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
         max_runtime_ms: 900_000,

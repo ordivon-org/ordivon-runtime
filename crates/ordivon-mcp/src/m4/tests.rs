@@ -24,6 +24,9 @@ impl Sandbox {
         M4Server::new(M4ServerConfig {
             executor: UniversalExecutorConfig {
                 store_root: self.root.join("store"),
+                workspace_root: None,
+                workspace_uid: None,
+                workspace_gid: None,
                 runner_path: PathBuf::from("/usr/bin/true"),
                 allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
                 max_runtime_ms: 10_000,

@@ -3,6 +3,8 @@ mod file;
 mod job;
 #[cfg(feature = "transactional-registry-m6")]
 mod m6;
+#[cfg(feature = "runtime-hardening-m7")]
+mod m7;
 mod migration;
 mod repo;
 mod search;
@@ -76,3 +78,6 @@ pub use m6::{
     PlanKind, ReservationRecordM6, ReservationState, RunnerIdentityM6, TerminalCommitM6,
     M6_MIGRATION_CHECKSUM, M6_SCHEMA_VERSION, MAX_M6_LIST_LIMIT,
 };
+
+#[cfg(feature = "runtime-hardening-m7")]
+pub use m7::{M7RuntimeHardeningConfig, M7WorkerIdentity, M7_SCHEMA_VERSION};

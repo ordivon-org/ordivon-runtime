@@ -2,6 +2,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -38,6 +39,8 @@ pub fn run_task_runner(task_dir: &Path) -> Result<(), UniversalExecError> {
                 job_id: request.job_id.clone(),
                 attempt_id: request.attempt_id.clone(),
                 launch_token_digest: request.launch_token.as_deref().map(sha256_text),
+                payload_uid: request.payload.as_ref().map(|payload| payload.uid),
+                payload_gid: request.payload.as_ref().map(|payload| payload.gid),
                 status: TaskTerminalStatus::Failed,
                 exit_code: None,
                 timed_out: false,
@@ -60,18 +63,44 @@ fn execute_request(
     started_unix_ms: u128,
 ) -> Result<RunnerTaskResult, UniversalExecError> {
     validate_request_identity(request)?;
-    let workspace = canonical_directory(Path::new(&request.workspace_path), "workspacePath")?;
-    let cwd = canonical_directory(Path::new(&request.cwd), "cwd")?;
+    let workspace = canonical_directory(
+        Path::new(
+            request
+                .payload
+                .as_ref()
+                .map(|payload| payload.workspace_view.as_str())
+                .unwrap_or(request.workspace_path.as_str()),
+        ),
+        "workspacePath",
+    )?;
+    let cwd = canonical_directory(
+        Path::new(
+            request
+                .payload
+                .as_ref()
+                .map(|payload| payload.cwd_view.as_str())
+                .unwrap_or(request.cwd.as_str()),
+        ),
+        "cwd",
+    )?;
     if !cwd.starts_with(&workspace) {
         return Err(runner_error("runner cwd escaped workspace"));
     }
     let executable = validate_executable(request)?;
     let mut command = Command::new(&executable);
+    command.args(&request.args).env_clear().envs(&request.env);
+    if let Some(payload) = &request.payload {
+        command
+            .env("HOME", &payload.runtime_view)
+            .env("XDG_CACHE_HOME", &payload.cache_view)
+            .env("TMPDIR", &payload.runtime_view)
+            .env("ORDIVON_PAYLOAD_UID", payload.uid.to_string())
+            .env("ORDIVON_PAYLOAD_GID", payload.gid.to_string());
+        configure_payload_drop(&mut command, payload, &cwd)?;
+    } else {
+        command.current_dir(&cwd);
+    }
     command
-        .args(&request.args)
-        .current_dir(&cwd)
-        .env_clear()
-        .envs(&request.env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -170,6 +199,8 @@ fn execute_request(
         job_id: request.job_id.clone(),
         attempt_id: request.attempt_id.clone(),
         launch_token_digest: request.launch_token.as_deref().map(sha256_text),
+        payload_uid: request.payload.as_ref().map(|payload| payload.uid),
+        payload_gid: request.payload.as_ref().map(|payload| payload.gid),
         status: terminal_status,
         exit_code: status.code(),
         timed_out,
@@ -277,7 +308,55 @@ fn validate_request_identity(request: &RunnerTaskRequest) -> Result<(), Universa
     super::validate_id(&request.task_id, "taskId")?;
     super::validate_id(&request.workspace_id, "workspaceId")?;
     super::validate_args(&request.args)?;
-    super::validate_env(&request.env)
+    super::validate_env(&request.env)?;
+    if let Some(payload) = &request.payload {
+        if payload.uid == 0 || payload.gid == 0 {
+            return Err(runner_error("payload identity must be non-root"));
+        }
+        for (field, value) in [
+            ("payload.workspaceView", &payload.workspace_view),
+            ("payload.cwdView", &payload.cwd_view),
+            ("payload.runtimeView", &payload.runtime_view),
+            ("payload.cacheView", &payload.cache_view),
+        ] {
+            if !Path::new(value).is_absolute() || value.as_bytes().contains(&0) {
+                return Err(runner_error(format!(
+                    "{field} must be an absolute NUL-free path"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn configure_payload_drop(
+    command: &mut Command,
+    payload: &super::RunnerPayloadConfig,
+    cwd: &Path,
+) -> Result<(), UniversalExecError> {
+    let cwd = std::ffi::CString::new(cwd.as_os_str().as_encoded_bytes())
+        .map_err(|_| runner_error("payload cwd contains NUL"))?;
+    let uid = payload.uid;
+    let gid = payload.gid;
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setgroups(0, std::ptr::null()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::setgid(gid) != 0 || libc::setuid(uid) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::umask(0o077);
+            if libc::chdir(cwd.as_ptr()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(())
 }
 
 fn validate_executable(request: &RunnerTaskRequest) -> Result<PathBuf, UniversalExecError> {
@@ -327,6 +406,8 @@ fn failure_result(
         job_id: request.job_id.clone(),
         attempt_id: request.attempt_id.clone(),
         launch_token_digest: request.launch_token.as_deref().map(sha256_text),
+        payload_uid: request.payload.as_ref().map(|payload| payload.uid),
+        payload_gid: request.payload.as_ref().map(|payload| payload.gid),
         status: TaskTerminalStatus::Failed,
         exit_code: None,
         timed_out: false,
@@ -443,6 +524,8 @@ fn write_runner_start_if_m6(
                 control_group: read_self_cgroup()?,
                 namespace_pid: std::process::id(),
                 namespace_process_start_identity: read_process_start_identity(std::process::id())?,
+                payload_uid: request.payload.as_ref().map(|payload| payload.uid),
+                payload_gid: request.payload.as_ref().map(|payload| payload.gid),
                 observed_unix_ms,
             }
         }

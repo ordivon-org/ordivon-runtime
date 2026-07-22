@@ -52,6 +52,25 @@ export function m5Config() {
 
 
 
+export function m7Config() {
+  return {
+    endpoint: new URL(requiredEnvironment('ORDIVON_M7_MCP_URL')),
+    token: requiredEnvironment('ORDIVON_M7_BEARER_TOKEN'),
+    repoRoot: requiredEnvironment('ORDIVON_M7_REPO_ROOT'),
+    sourceRevision: requiredEnvironment('ORDIVON_M7_SOURCE_REVISION'),
+    storeRoot: requiredEnvironment('ORDIVON_M7_STORE_ROOT'),
+    registryRoot: requiredEnvironment('ORDIVON_M7_REGISTRY_ROOT'),
+    registryDb: requiredEnvironment('ORDIVON_M7_REGISTRY_DB'),
+    controlRoot: requiredEnvironment('ORDIVON_M7_CONTROL_ROOT'),
+    workerRoot: requiredEnvironment('ORDIVON_M7_WORKER_ROOT'),
+    workspaceRoot: requiredEnvironment('ORDIVON_M7_WORKSPACE_ROOT'),
+    cacheRoot: requiredEnvironment('ORDIVON_M7_CACHE_ROOT'),
+    runtimeViewRoot: requiredEnvironment('ORDIVON_M7_RUNTIME_VIEW_ROOT'),
+    tracePath: requiredEnvironment('ORDIVON_M7_TRACE_PATH'),
+    httpTracePath: requiredEnvironment('ORDIVON_M7_HTTP_TRACE_PATH')
+  };
+}
+
 export function m6Config() {
   return {
     endpoint: new URL(requiredEnvironment('ORDIVON_M6_MCP_URL')),
@@ -98,6 +117,24 @@ export async function connectM5(name, measuredFetch = fetch) {
   return { client, transport, traceIds, config };
 }
 
+
+export async function connectM7(name, measuredFetch = fetch) {
+  const config = m7Config();
+  const client = new Client({ name, version: '1.0.0' });
+  const traceIds = [];
+  const wrappedFetch = async (input, init = {}) => {
+    const response = await measuredFetch(input, init);
+    const traceId = response.headers.get('x-ordivon-trace-id');
+    if (traceId) traceIds.push(traceId);
+    return response;
+  };
+  const transport = new StreamableHTTPClientTransport(config.endpoint, {
+    requestInit: { headers: { Authorization: `Bearer ${config.token}` } },
+    fetch: wrappedFetch
+  });
+  await client.connect(transport);
+  return { client, transport, traceIds, config };
+}
 
 export async function connectM6(name, measuredFetch = fetch) {
   const config = m6Config();

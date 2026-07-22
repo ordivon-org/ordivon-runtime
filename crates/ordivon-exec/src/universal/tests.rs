@@ -28,6 +28,9 @@ impl Sandbox {
     fn config(&self) -> UniversalExecutorConfig {
         UniversalExecutorConfig {
             store_root: self.root.join("store"),
+            workspace_root: None,
+            workspace_uid: None,
+            workspace_gid: None,
             runner_path: real_executable("/usr/bin/true"),
             allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
             max_runtime_ms: 10_000,
@@ -206,6 +209,7 @@ fn runner_executes_model_authored_script_and_bounds_output() {
         attempt_id: None,
         launch_token: None,
         unit_name: None,
+        payload: None,
         task_id: "task-runner".to_string(),
         workspace_id: "workspace-runner".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
@@ -249,6 +253,7 @@ fn runner_timeout_is_a_durable_failed_result() {
         attempt_id: None,
         launch_token: None,
         unit_name: None,
+        payload: None,
         task_id: "task-timeout".to_string(),
         workspace_id: "workspace-timeout".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
@@ -294,6 +299,8 @@ fn terminal_result_rebuilds_task_and_artifact_handles_without_systemd() {
         job_id: None,
         attempt_id: None,
         launch_token_digest: None,
+        payload_uid: None,
+        payload_gid: None,
         status: TaskTerminalStatus::Completed,
         exit_code: Some(0),
         timed_out: false,
@@ -519,6 +526,8 @@ fn compact_terminal_observation_inlines_bounded_tails() {
         job_id: None,
         attempt_id: None,
         launch_token_digest: None,
+        payload_uid: None,
+        payload_gid: None,
         status: TaskTerminalStatus::Completed,
         exit_code: Some(0),
         timed_out: false,
@@ -599,6 +608,7 @@ fn legacy_runner_wire_omits_m6_identity_fields() {
         attempt_id: None,
         launch_token: None,
         unit_name: None,
+        payload: None,
         task_id: "task-wire".to_string(),
         workspace_id: "workspace-wire".to_string(),
         workspace_path: "/tmp".to_string(),
@@ -612,7 +622,7 @@ fn legacy_runner_wire_omits_m6_identity_fields() {
         stderr_limit_bytes: 1024,
     };
     let encoded = serde_json::to_value(&request).unwrap();
-    for field in ["jobId", "attemptId", "launchToken", "unitName"] {
+    for field in ["jobId", "attemptId", "launchToken", "unitName", "payload"] {
         assert!(
             encoded.get(field).is_none(),
             "legacy request leaked {field}"
@@ -637,5 +647,8 @@ fn legacy_runner_wire_omits_m6_identity_fields() {
         .infrastructure_error
         .as_deref()
         .is_some_and(|message| message.contains("must appear together")));
+    let encoded_result = serde_json::to_value(&result).unwrap();
+    assert!(encoded_result.get("payloadUid").is_none());
+    assert!(encoded_result.get("payloadGid").is_none());
     assert!(!task_dir.join("runner-start.json").exists());
 }

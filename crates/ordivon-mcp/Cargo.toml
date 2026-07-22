@@ -6,6 +6,10 @@ license.workspace = true
 
 [features]
 default = []
+experimental-http-m7 = [
+    "experimental-http-m6",
+    "ordivon-exec/runtime-hardening-m7",
+]
 experimental-http-m6 = [
     "experimental-http-m4",
     "ordivon-exec/transactional-registry-m6",
@@ -22,6 +26,11 @@ experimental-http-m4 = [
     "tokio/signal",
     "tokio/time",
 ]
+
+[[bin]]
+name = "ordivon-m7-http"
+path = "src/bin/ordivon-m7-http.rs"
+required-features = ["experimental-http-m7"]
 
 [[bin]]
 name = "ordivon-m6-http"

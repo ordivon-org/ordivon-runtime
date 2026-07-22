@@ -10,8 +10,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::universal::{
     canonical_directory, load_workspace_record, resolve_workspace_cwd, sha256_bytes, sha256_file,
-    write_json_atomic, CapturedOutput, RunnerStartEvidence, RunnerTaskRequest, RunnerTaskResult,
-    TaskTerminalStatus, UniversalExecutorConfig, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    write_json_atomic, CapturedOutput, RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskRequest,
+    RunnerTaskResult, TaskTerminalStatus, UniversalExecutorConfig, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use crate::{
     classify_supervisor_recovery, JobInternalState, RunnerResultObservation, SupervisorIdentity,
@@ -45,6 +45,8 @@ pub struct M6RuntimeConfig {
     pub registry: M6RegistryConfig,
     pub executor: UniversalExecutorConfig,
     pub startup_grace_ms: u64,
+    #[cfg(feature = "runtime-hardening-m7")]
+    pub hardening: Option<crate::M7RuntimeHardeningConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +54,8 @@ pub struct M6Runtime {
     registry: M6Registry,
     executor: UniversalExecutorConfig,
     startup_grace_ms: u64,
+    #[cfg(feature = "runtime-hardening-m7")]
+    hardening: Option<crate::M7RuntimeHardeningConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -90,11 +94,39 @@ impl M6Runtime {
         }
         ensure_systemd_visible(&config.registry.store_root, "registry.storeRoot")?;
         ensure_systemd_visible(&config.executor.store_root, "executor.storeRoot")?;
+        #[cfg(feature = "runtime-hardening-m7")]
+        if let Some(hardening) = &config.hardening {
+            hardening.validate()?;
+            validate_hardening_roots(&config, hardening)?;
+            crate::m7::ensure_traversal_directory(
+                &hardening.workspaces_root(),
+                hardening.worker.gid,
+                0o710,
+            )?;
+            crate::m7::ensure_traversal_directory(
+                &hardening.attempts_root(),
+                hardening.worker.gid,
+                0o710,
+            )?;
+            crate::m7::ensure_traversal_directory(
+                &hardening.runtime_view_root,
+                hardening.worker.gid,
+                0o750,
+            )?;
+            crate::m7::ensure_owned_directory(
+                &hardening.cache_root,
+                hardening.worker.uid,
+                hardening.worker.gid,
+                0o750,
+            )?;
+        }
         let registry = M6Registry::initialize(config.registry)?;
         Ok(Self {
             registry,
             executor: config.executor,
             startup_grace_ms: config.startup_grace_ms,
+            #[cfg(feature = "runtime-hardening-m7")]
+            hardening: config.hardening,
         })
     }
 
@@ -241,6 +273,7 @@ impl M6Runtime {
             attempt_id: Some(attempt.attempt_id.clone()),
             launch_token: Some(launch_token.clone()),
             unit_name: Some(attempt.unit_name.clone()),
+            payload: self.payload_config(&attempt.attempt_id, &plan)?,
             task_id: attempt.attempt_id.clone(),
             workspace_id: plan.workspace_id.clone(),
             workspace_path: plan.workspace_path.clone(),
@@ -341,6 +374,8 @@ impl M6Runtime {
             &bundle_path,
             Path::new(&plan.workspace_path),
             runtime_ceiling,
+            #[cfg(feature = "runtime-hardening-m7")]
+            self.hardening.as_ref(),
         )?;
         if !output.status.success() {
             let detail = format!(
@@ -395,6 +430,7 @@ impl M6Runtime {
             || evidence.attempt_id != attempt.attempt_id
             || evidence.unit_name != attempt.unit_name
             || evidence.launch_token_digest != attempt.launch_token_digest
+            || !self.payload_evidence_matches(evidence.payload_uid, evidence.payload_gid)
         {
             return Err(M6Error::new(
                 M6ErrorCode::LaunchIdentityMismatch,
@@ -496,6 +532,7 @@ impl M6Runtime {
             || result.job_id.as_deref() != Some(current.job_id.as_str())
             || result.attempt_id.as_deref() != Some(current.attempt_id.as_str())
             || result.launch_token_digest.as_deref() != Some(current.launch_token_digest.as_str())
+            || !self.payload_evidence_matches(result.payload_uid, result.payload_gid)
         {
             return Err(M6Error::new(
                 M6ErrorCode::ResultIdentityConflict,
@@ -540,6 +577,7 @@ impl M6Runtime {
             artifacts,
             reason_code: reason_code.to_string(),
         })?;
+        self.cleanup_payload_view(&current.attempt_id)?;
         self.observation_from_parts(projection, Some(current), 4096, 4096)
     }
 
@@ -932,6 +970,9 @@ impl M6Runtime {
             artifacts,
             reason_code: reason_code.to_string(),
         })?;
+        if state != AttemptState::Orphaned {
+            self.cleanup_payload_view(&current.attempt_id)?;
+        }
         self.observation_from_parts(projection, Some(current), 4096, 4096)
     }
 
@@ -1075,6 +1116,125 @@ impl M6Runtime {
             digest: artifact.digest,
         })
     }
+
+    #[cfg(feature = "runtime-hardening-m7")]
+    fn cleanup_payload_view(&self, attempt_id: &str) -> M6Result<()> {
+        let Some(hardening) = &self.hardening else {
+            return Ok(());
+        };
+        let view_root = hardening.payload_view_root(attempt_id);
+        if view_root.exists() {
+            fs::remove_dir_all(&view_root)
+                .map_err(|error| io_error("remove M7 payload view", error))?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "runtime-hardening-m7"))]
+    fn cleanup_payload_view(&self, _attempt_id: &str) -> M6Result<()> {
+        Ok(())
+    }
+
+    #[cfg(feature = "runtime-hardening-m7")]
+    fn payload_config(
+        &self,
+        attempt_id: &str,
+        plan: &M6ExecutionPlan,
+    ) -> M6Result<Option<RunnerPayloadConfig>> {
+        let Some(hardening) = &self.hardening else {
+            return Ok(None);
+        };
+        let runtime_dir = hardening.payload_runtime_dir(attempt_id);
+        crate::m7::ensure_owned_directory(
+            &runtime_dir,
+            hardening.worker.uid,
+            hardening.worker.gid,
+            0o700,
+        )?;
+        let view_root = hardening.payload_view_root(attempt_id);
+        for path in [
+            view_root.clone(),
+            view_root.join("workspace"),
+            view_root.join("runtime"),
+            view_root.join("cache"),
+        ] {
+            crate::m7::ensure_traversal_directory(&path, hardening.worker.gid, 0o750)?;
+        }
+        let workspace = Path::new(&plan.workspace_path);
+        let cwd = Path::new(&plan.cwd);
+        let relative_cwd = cwd
+            .strip_prefix(workspace)
+            .map_err(|_| M6Error::invalid("M7 cwd escaped workspace", "cwd"))?;
+        let workspace_view = view_root.join("workspace");
+        Ok(Some(RunnerPayloadConfig {
+            uid: hardening.worker.uid,
+            gid: hardening.worker.gid,
+            workspace_view: workspace_view.to_string_lossy().into_owned(),
+            cwd_view: workspace_view
+                .join(relative_cwd)
+                .to_string_lossy()
+                .into_owned(),
+            runtime_view: view_root.join("runtime").to_string_lossy().into_owned(),
+            cache_view: view_root.join("cache").to_string_lossy().into_owned(),
+        }))
+    }
+
+    #[cfg(not(feature = "runtime-hardening-m7"))]
+    fn payload_config(
+        &self,
+        _attempt_id: &str,
+        _plan: &M6ExecutionPlan,
+    ) -> M6Result<Option<RunnerPayloadConfig>> {
+        Ok(None)
+    }
+
+    fn payload_evidence_matches(&self, uid: Option<u32>, gid: Option<u32>) -> bool {
+        #[cfg(feature = "runtime-hardening-m7")]
+        {
+            match &self.hardening {
+                Some(hardening) => {
+                    uid == Some(hardening.worker.uid) && gid == Some(hardening.worker.gid)
+                }
+                None => uid.is_none() && gid.is_none(),
+            }
+        }
+        #[cfg(not(feature = "runtime-hardening-m7"))]
+        {
+            uid.is_none() && gid.is_none()
+        }
+    }
+}
+
+#[cfg(feature = "runtime-hardening-m7")]
+fn validate_hardening_roots(
+    config: &M6RuntimeConfig,
+    hardening: &crate::M7RuntimeHardeningConfig,
+) -> M6Result<()> {
+    if !config
+        .registry
+        .store_root
+        .starts_with(&hardening.control_root)
+        || !config.registry.db_path.starts_with(&hardening.control_root)
+        || !config
+            .executor
+            .store_root
+            .starts_with(&hardening.control_root)
+    {
+        return Err(M6Error::invalid(
+            "Registry and executor metadata must remain under M7 controlRoot",
+            "controlRoot",
+        ));
+    }
+    if config.executor.workspace_root.as_ref() != Some(&hardening.workspaces_root())
+        || config.executor.workspace_uid != Some(hardening.worker.uid)
+        || config.executor.workspace_gid != Some(hardening.worker.gid)
+    {
+        return Err(M6Error::invalid(
+            "executor workspace root and owner must match M7 worker configuration",
+            "workspaceRoot",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_run_request(request: &M6TaskRunRequest) -> M6Result<()> {
@@ -1224,10 +1384,12 @@ fn systemd_run(
     unit_name: &str,
     runner: &Path,
     bundle_path: &Path,
-    workspace_path: &Path,
+    _workspace_path: &Path,
     runtime_ceiling_ms: u64,
+    #[cfg(feature = "runtime-hardening-m7")] hardening: Option<&crate::M7RuntimeHardeningConfig>,
 ) -> M6Result<std::process::Output> {
-    Command::new("systemd-run")
+    let mut command = Command::new("systemd-run");
+    command
         .arg(format!("--unit={unit_name}"))
         .arg("--collect")
         .args([
@@ -1236,7 +1398,6 @@ fn systemd_run(
             "--property=TimeoutStopSec=2s",
             "--property=SendSIGKILL=yes",
             "--property=NoNewPrivileges=yes",
-            "--property=CapabilityBoundingSet=",
             "--property=AmbientCapabilities=",
             "--property=ProtectSystem=strict",
             "--property=PrivateTmp=yes",
@@ -1266,11 +1427,53 @@ fn systemd_run(
         .arg(format!(
             "--property=RuntimeMaxSec={runtime_ceiling_ms}ms"
         ))
-        .arg(format!(
-            "--property=ReadWritePaths={} {}",
-            workspace_path.display(),
-            bundle_path.display()
-        ))
+        .arg(format!("--property=ReadWritePaths={}", bundle_path.display()));
+    #[cfg(feature = "runtime-hardening-m7")]
+    if let Some(hardening) = hardening {
+        let attempt_id = bundle_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                M6Error::invalid("bundle path omitted Attempt identity", "bundlePath")
+            })?;
+        let runtime_dir = hardening.payload_runtime_dir(attempt_id);
+        let view_root = hardening.payload_view_root(attempt_id);
+        command
+            .arg("--property=CapabilityBoundingSet=CAP_SETUID CAP_SETGID")
+            .arg("--property=ProtectHome=yes")
+            .arg(format!(
+                "--property=InaccessiblePaths={}",
+                hardening.worker_root.display()
+            ))
+            .arg(format!(
+                "--property=InaccessiblePaths={}",
+                hardening.cache_root.display()
+            ))
+            .arg(format!(
+                "--property=BindPaths={}:{}",
+                _workspace_path.display(),
+                view_root.join("workspace").display()
+            ))
+            .arg(format!(
+                "--property=BindPaths={}:{}",
+                runtime_dir.display(),
+                view_root.join("runtime").display()
+            ))
+            .arg(format!(
+                "--property=BindPaths={}:{}",
+                hardening.cache_root.display(),
+                view_root.join("cache").display()
+            ))
+            .arg(format!(
+                "--property=InaccessiblePaths={}/workspace/.git",
+                view_root.display()
+            ));
+    } else {
+        command.arg("--property=CapabilityBoundingSet=");
+    }
+    #[cfg(not(feature = "runtime-hardening-m7"))]
+    command.arg("--property=CapabilityBoundingSet=");
+    command
         .arg(runner)
         .arg("--task-dir")
         .arg(bundle_path)

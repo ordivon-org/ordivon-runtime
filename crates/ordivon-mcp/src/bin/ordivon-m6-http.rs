@@ -235,12 +235,17 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                 },
                 executor: UniversalExecutorConfig {
                     store_root,
+                    workspace_root: None,
+                    workspace_uid: None,
+                    workspace_gid: None,
                     runner_path,
                     allowed_executable_roots,
                     max_runtime_ms: 900_000,
                     max_output_bytes: 16 * 1024 * 1024,
                 },
                 startup_grace_ms,
+                #[cfg(feature = "experimental-http-m7")]
+                hardening: None,
             },
             trace_path,
             dogfood_policy: load_dogfood_policy()?,

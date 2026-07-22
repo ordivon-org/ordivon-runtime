@@ -1,5 +1,5 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -67,6 +67,12 @@ pub fn create_git_workspace(
             Some("sourceRevision"),
             false,
         ));
+    }
+    if let (Some(uid), Some(gid)) = (config.workspace_uid, config.workspace_gid) {
+        if let Err(error) = transfer_workspace_ownership(&canonical_target, uid, gid) {
+            let _ = remove_git_worktree(&source_repo, &canonical_target);
+            return Err(error);
+        }
     }
     let record = WorkspaceRecord {
         schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
@@ -510,4 +516,67 @@ fn tool_failed(operation: &str, stderr: &[u8]) -> UniversalExecError {
         None,
         false,
     )
+}
+
+fn transfer_workspace_ownership(root: &Path, uid: u32, gid: u32) -> Result<(), UniversalExecError> {
+    fn chown_nofollow(path: &Path, uid: u32, gid: u32) -> Result<(), UniversalExecError> {
+        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
+            UniversalExecError::new(
+                UniversalExecErrorCode::WorkspacePathDenied,
+                "workspace ownership path contains NUL",
+                Some("workspacePath"),
+                false,
+            )
+        })?;
+        let result = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
+        if result != 0 {
+            return Err(io_error(
+                path,
+                "change workspace ownership",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn visit(path: &Path, uid: u32, gid: u32) -> Result<(), UniversalExecError> {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| io_error(path, "inspect ownership target", error))?;
+        if metadata.is_dir() {
+            chown_nofollow(path, 0, gid)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o770))
+                .map_err(|error| io_error(path, "set workspace directory mode", error))?;
+            for entry in fs::read_dir(path)
+                .map_err(|error| io_error(path, "read ownership directory", error))?
+            {
+                let entry = entry.map_err(|error| io_error(path, "read ownership entry", error))?;
+                visit(&entry.path(), uid, gid)?;
+            }
+        } else if path.file_name().is_some_and(|name| name == ".git") {
+            chown_nofollow(path, 0, 0)?;
+            if metadata.is_file() {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o400))
+                    .map_err(|error| io_error(path, "protect Git worktree identity", error))?;
+            }
+        } else {
+            chown_nofollow(path, uid, gid)?;
+        }
+        Ok(())
+    }
+
+    visit(root, uid, gid)?;
+    let metadata =
+        fs::metadata(root).map_err(|error| io_error(root, "verify workspace ownership", error))?;
+    if metadata.uid() != 0
+        || metadata.gid() != gid
+        || metadata.permissions().mode() & 0o7777 != 0o770
+    {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::WorkspacePathDenied,
+            "workspace trust-root ownership did not persist",
+            Some("workspacePath"),
+            false,
+        ));
+    }
+    Ok(())
 }

@@ -9,6 +9,7 @@ default = []
 supervisor-spike = ["dep:libc"]
 universal-executor-m1 = ["dep:libc"]
 transactional-registry-m6 = ["universal-executor-m1", "dep:rusqlite", "dep:uuid"]
+runtime-hardening-m7 = ["transactional-registry-m6"]
 
 [[bin]]
 name = "ordivon-job-fixture"

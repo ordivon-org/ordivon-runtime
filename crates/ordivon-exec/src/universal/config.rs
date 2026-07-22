@@ -19,6 +19,9 @@ pub const MAX_WORKSPACE_IO_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub struct UniversalExecutorConfig {
     pub store_root: PathBuf,
+    pub workspace_root: Option<PathBuf>,
+    pub workspace_uid: Option<u32>,
+    pub workspace_gid: Option<u32>,
     pub runner_path: PathBuf,
     pub allowed_executable_roots: Vec<PathBuf>,
     pub max_runtime_ms: u64,
@@ -29,6 +32,22 @@ impl UniversalExecutorConfig {
     pub fn validate(&self) -> Result<(), UniversalExecError> {
         if !self.store_root.is_absolute() {
             return Err(invalid("store root must be absolute", "storeRoot"));
+        }
+        if self
+            .workspace_root
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return Err(invalid("workspace root must be absolute", "workspaceRoot"));
+        }
+        if self.workspace_uid.is_some() != self.workspace_gid.is_some() {
+            return Err(invalid(
+                "workspaceUid and workspaceGid must appear together",
+                "workspaceUid",
+            ));
+        }
+        if self.workspace_uid == Some(0) || self.workspace_gid == Some(0) {
+            return Err(invalid("workspace owner must be non-root", "workspaceUid"));
         }
         if !self.runner_path.is_absolute() {
             return Err(invalid("runner path must be absolute", "runnerPath"));
@@ -85,7 +104,9 @@ impl UniversalExecutorConfig {
     }
 
     pub fn workspaces_root(&self) -> PathBuf {
-        self.store_root.join("workspaces")
+        self.workspace_root
+            .clone()
+            .unwrap_or_else(|| self.store_root.join("workspaces"))
     }
 
     pub fn workspace_records_root(&self) -> PathBuf {

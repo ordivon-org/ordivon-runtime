@@ -128,6 +128,9 @@ fn config_from_env() -> Result<UniversalExecutorConfig, UniversalExecError> {
         .collect();
     let config = UniversalExecutorConfig {
         store_root: PathBuf::from(store_root),
+        workspace_root: None,
+        workspace_uid: None,
+        workspace_gid: None,
         runner_path: PathBuf::from(runner_path),
         allowed_executable_roots,
         max_runtime_ms: 900_000,
