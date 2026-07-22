@@ -5,8 +5,11 @@ mod supervisor;
 mod types;
 
 pub use engine::{Runtime, RuntimeConfig};
-pub use error::{RuntimeError, RuntimeErrorCode, RuntimeResult};
-pub use registry::{Registry, RegistryConfig, RUNTIME_MIGRATION_CHECKSUM};
+pub use error::{RuntimeCapacity, RuntimeError, RuntimeErrorCode, RuntimeResult};
+pub use registry::{
+    Registry, RegistryConfig, RUNTIME_MIGRATION_CHECKSUM,
+    RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM,
+};
 pub use types::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,

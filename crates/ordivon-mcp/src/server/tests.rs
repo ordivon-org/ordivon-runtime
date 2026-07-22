@@ -270,3 +270,35 @@ fn cancelled_job_projects_to_cancelled_native_task() {
     assert_eq!(task.status, TaskStatus::Cancelled);
     assert_eq!(task.poll_interval, None);
 }
+
+#[test]
+fn capacity_failure_preserves_retry_and_scope_metadata() {
+    let error = RuntimeError::concurrency(
+        "global execution concurrency limit reached (active=4, limit=4)",
+        "globalLimit",
+        RuntimeCapacity {
+            scope: "global".to_string(),
+            active: 4,
+            limit: 4,
+            workspace_id: None,
+        },
+    );
+    let tool_error = ToolError::from(error);
+    let value = serde_json::to_value(tool_error).unwrap();
+    assert_eq!(
+        value.pointer("/retryAfterMs").and_then(Value::as_u64),
+        Some(1_000)
+    );
+    assert_eq!(
+        value.pointer("/capacity/scope").and_then(Value::as_str),
+        Some("global")
+    );
+    assert_eq!(
+        value.pointer("/capacity/active").and_then(Value::as_u64),
+        Some(4)
+    );
+    assert_eq!(
+        value.pointer("/capacity/limit").and_then(Value::as_u64),
+        Some(4)
+    );
+}

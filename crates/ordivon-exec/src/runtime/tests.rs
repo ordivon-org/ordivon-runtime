@@ -185,12 +185,9 @@ fn busy_writer_fails_with_retryable_registry_busy() {
 fn list_is_bounded_and_cursor_stable() {
     let sandbox = Sandbox::new("list", 5000);
     for index in 0..3 {
-        let created = created(
-            sandbox
-                .registry
-                .submit(&request(&sandbox, &format!("request:list:{index}"), 8))
-                .unwrap(),
-        );
+        let mut list_request = request(&sandbox, &format!("request:list:{index}"), 8);
+        list_request.plan.workspace_id = format!("workspace:list:{index}");
+        let created = created(sandbox.registry.submit(&list_request).unwrap());
         assert!(created.job.job_id.starts_with("job-"));
     }
     let first = sandbox
@@ -353,7 +350,7 @@ fn newer_schema_and_checksum_drift_fail_closed() {
     connection
         .execute(
             "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,'future','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0)",
-            [if cfg!(feature = "isolated-execution") { 3 } else { 2 }],
+            [3],
         )
         .unwrap();
     drop(connection);
@@ -415,4 +412,169 @@ fn corrupt_database_fails_closed() {
         error.code,
         RuntimeErrorCode::RegistryCorrupt | RuntimeErrorCode::RegistryUnavailable
     ));
+}
+
+#[test]
+fn workspace_execution_is_serialized_with_retry_guidance() {
+    let sandbox = Sandbox::new("workspace-capacity", 5000);
+    let first = request(&sandbox, "request:workspace:first", 4);
+    sandbox.registry.submit(&first).unwrap();
+
+    let error = sandbox
+        .registry
+        .submit(&request(&sandbox, "request:workspace:second", 4))
+        .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::ConcurrencyLimit);
+    assert_eq!(error.field.as_deref(), Some("workspaceId"));
+    assert_eq!(error.retry_after_ms, Some(1_000));
+    let capacity = error.capacity.unwrap();
+    assert_eq!(capacity.scope, "workspace");
+    assert_eq!(capacity.active, 1);
+    assert_eq!(capacity.limit, 1);
+    assert_eq!(capacity.workspace_id.as_deref(), Some("workspace:test"));
+
+    let mut other = request(&sandbox, "request:workspace:other", 4);
+    other.plan.workspace_id = "workspace:other".to_string();
+    assert!(matches!(
+        sandbox.registry.submit(&other).unwrap(),
+        AdmissionOutcome::Created(_)
+    ));
+}
+
+#[test]
+fn global_execution_capacity_reports_cross_workspace_usage() {
+    let sandbox = Sandbox::new("global-capacity", 5000);
+    let first = request(&sandbox, "request:global:first", 1);
+    sandbox.registry.submit(&first).unwrap();
+
+    let mut second = request(&sandbox, "request:global:second", 1);
+    second.plan.workspace_id = "workspace:second".to_string();
+    let error = sandbox.registry.submit(&second).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::ConcurrencyLimit);
+    assert_eq!(error.field.as_deref(), Some("globalLimit"));
+    assert_eq!(error.retry_after_ms, Some(1_000));
+    let capacity = error.capacity.unwrap();
+    assert_eq!(capacity.scope, "global");
+    assert_eq!(capacity.active, 1);
+    assert_eq!(capacity.limit, 1);
+    assert_eq!(capacity.workspace_id, None);
+}
+
+#[test]
+fn late_identity_bound_result_corrects_orphan_and_releases_capacity() {
+    let sandbox = Sandbox::new("orphan-recovery", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:orphan-recovery", 1))
+            .unwrap(),
+    );
+    sandbox
+        .registry
+        .commit_terminal(&TerminalCommit {
+            attempt_id: created.attempt.attempt_id.clone(),
+            expected_row_version: created.attempt.row_version,
+            state: AttemptState::Orphaned,
+            result_digest: digest(b"control-orphan"),
+            exit_code: None,
+            infrastructure_error_digest: Some(digest(b"identity-uncertain")),
+            finished_at_ms: 20,
+            artifacts: Vec::new(),
+            reason_code: "SUPERVISOR_IDENTITY_ORPHANED".to_string(),
+        })
+        .unwrap();
+    assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 1);
+
+    let orphaned = sandbox
+        .registry
+        .get_attempt(&created.attempt.attempt_id)
+        .unwrap();
+    let recovered = sandbox
+        .registry
+        .recover_orphaned_terminal(&TerminalCommit {
+            attempt_id: orphaned.attempt_id.clone(),
+            expected_row_version: orphaned.row_version,
+            state: AttemptState::Succeeded,
+            result_digest: digest(b"late-runner-result"),
+            exit_code: Some(0),
+            infrastructure_error_digest: None,
+            finished_at_ms: 21,
+            artifacts: Vec::new(),
+            reason_code: "LATE_IDENTITY_BOUND_RUNNER_RESULT".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(recovered.status, "succeeded");
+    assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
+    assert_eq!(
+        sandbox
+            .registry
+            .get_reservation(&created.attempt.attempt_id)
+            .unwrap()
+            .state,
+        ReservationState::Released
+    );
+    assert_eq!(
+        sandbox
+            .registry
+            .get_attempt(&created.attempt.attempt_id)
+            .unwrap()
+            .state,
+        AttemptState::Succeeded
+    );
+    assert_eq!(
+        sandbox
+            .registry
+            .get_job(&created.job.job_id)
+            .unwrap()
+            .resolution,
+        Some(JobResolution::Succeeded)
+    );
+}
+
+#[test]
+fn existing_v1_registry_upgrades_to_orphan_recovery_schema() {
+    let root = std::env::temp_dir().join(format!(
+        "ordivon-v1-upgrade-{}-{}",
+        std::process::id(),
+        Uuid::now_v7()
+    ));
+    let store = root.join("store");
+    fs::create_dir_all(&store).unwrap();
+    let db_path = store.join("registry.sqlite3");
+    let connection = Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(include_str!("../../migrations/runtime/0001_runtime.sql"))
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(1,'0001_runtime',?1,0)",
+            [RUNTIME_MIGRATION_CHECKSUM],
+        )
+        .unwrap();
+    drop(connection);
+
+    let registry = Registry::initialize(RegistryConfig {
+        db_path: db_path.clone(),
+        store_root: store,
+        busy_timeout_ms: 5000,
+    })
+    .unwrap();
+    let connection = Connection::open(registry.config().db_path.clone()).unwrap();
+    let max_version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(max_version, 2);
+    let checksum: String = connection
+        .query_row(
+            "SELECT checksum FROM schema_migrations WHERE version=2",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(checksum, RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM);
+    drop(connection);
+    fs::remove_dir_all(root).unwrap();
 }

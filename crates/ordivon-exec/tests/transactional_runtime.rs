@@ -654,3 +654,34 @@ fn runtime_fast_failures_never_race_into_lost() {
     }
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_fast_successes_never_race_into_orphaned_capacity() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("fast-success-race");
+    context.write(
+        "runtime_fast_success.py",
+        "print('RUNTIME_FAST_SUCCESS', flush=True)\n",
+    );
+    let runtime = context.runtime(2000);
+    for index in 0..20 {
+        let mut request = context.request("runtime_fast_success.py", 10_000);
+        request.client_request_id = format!("request:fast-success:{index}:{}", Uuid::now_v7());
+        let observation = runtime.run_task(&request).unwrap();
+        assert_eq!(
+            observation.status, "succeeded",
+            "fast success {index} was misclassified as {}",
+            observation.status
+        );
+        assert!(observation.stdout_tail.contains("RUNTIME_FAST_SUCCESS"));
+        assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    }
+    assert!(runtime
+        .registry()
+        .list_held_orphaned_attempts()
+        .unwrap()
+        .is_empty());
+}

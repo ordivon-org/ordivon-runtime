@@ -15,8 +15,8 @@ use super::supervisor::{
 };
 use super::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
-    ArtifactRegistration, AttemptRecord, AttemptState, Registry, RegistryConfig, RunnerIdentity,
-    RuntimeArtifactRecord, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
+    ArtifactRegistration, AttemptRecord, AttemptState, JobResolution, Registry, RegistryConfig,
+    RunnerIdentity, RuntimeArtifactRecord, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
     RuntimeJobListRequest, RuntimeJobListResult, RuntimeResult, SubmitRequest, TaskCancelRequest,
     TaskObservation, TaskObserveRequest, TaskRunRequest, TerminalCommit, RUNTIME_SCHEMA_VERSION,
 };
@@ -120,13 +120,15 @@ impl Runtime {
             )?;
         }
         let registry = Registry::initialize(config.registry)?;
-        Ok(Self {
+        let runtime = Self {
             registry,
             executor: config.executor,
             startup_grace_ms: config.startup_grace_ms,
             #[cfg(feature = "isolated-execution")]
             hardening: config.hardening,
-        })
+        };
+        runtime.reconcile_recoverable_orphans()?;
+        Ok(runtime)
     }
 
     pub fn registry(&self) -> &Registry {
@@ -135,6 +137,7 @@ impl Runtime {
 
     pub fn run_task(&self, request: &TaskRunRequest) -> RuntimeResult<TaskObservation> {
         validate_run_request(request)?;
+        self.reconcile_recoverable_orphans()?;
         let plan = self.resolve_plan(request)?;
         let submit = SubmitRequest {
             schema_version: RUNTIME_SCHEMA_VERSION,
@@ -534,9 +537,21 @@ impl Runtime {
 
     fn commit_runner_result(&self, attempt: &AttemptRecord) -> RuntimeResult<TaskObservation> {
         let current = self.registry.get_attempt(&attempt.attempt_id)?;
+        if current.state == AttemptState::Orphaned
+            && self.recover_orphaned_runner_result(&current)?
+        {
+            return self.observation_from_registry(&current.job_id, 0, 0);
+        }
         if current.state.is_terminal() {
             return self.observation_from_registry(&current.job_id, 0, 0);
         }
+        let terminal = self.prepare_runner_terminal(&current)?;
+        let projection = self.registry.commit_terminal(&terminal)?;
+        self.cleanup_payload_view(&current.attempt_id)?;
+        self.observation_from_parts(projection, Some(current), 4096, 4096)
+    }
+
+    fn prepare_runner_terminal(&self, current: &AttemptRecord) -> RuntimeResult<TerminalCommit> {
         let result_path = Path::new(&current.bundle_path).join(RESULT_FILE);
         let bytes =
             fs::read(&result_path).map_err(|error| io_error("read Runner result", error))?;
@@ -562,8 +577,8 @@ impl Runtime {
             ));
         }
         let result_digest = sha256_bytes(&bytes);
-        let stdout = self.validate_captured_output(&current, &result.stdout, true)?;
-        let stderr = self.validate_captured_output(&current, &result.stderr, false)?;
+        let stdout = self.validate_captured_output(current, &result.stdout, true)?;
+        let stderr = self.validate_captured_output(current, &result.stderr, false)?;
         let (state, reason_code) = match result.status {
             TaskTerminalStatus::Completed => (AttemptState::Succeeded, "PROCESS_EXIT_ZERO"),
             TaskTerminalStatus::Failed if result.timed_out => {
@@ -586,7 +601,7 @@ impl Runtime {
             byte_length: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
             truncated: false,
         });
-        let projection = self.registry.commit_terminal(&TerminalCommit {
+        Ok(TerminalCommit {
             attempt_id: current.attempt_id.clone(),
             expected_row_version: current.row_version,
             state,
@@ -596,9 +611,7 @@ impl Runtime {
             finished_at_ms: u64::try_from(result.finished_unix_ms).unwrap_or(u64::MAX),
             artifacts,
             reason_code: reason_code.to_string(),
-        })?;
-        self.cleanup_payload_view(&current.attempt_id)?;
-        self.observation_from_parts(projection, Some(current), 4096, 4096)
+        })
     }
 
     fn validate_captured_output(
@@ -758,6 +771,11 @@ impl Runtime {
     fn reconcile_job(&self, job_id: &str) -> RuntimeResult<()> {
         let snapshot = self.registry.job_snapshot(job_id)?;
         if snapshot.job.resolution.is_some() {
+            if snapshot.job.resolution == Some(JobResolution::Orphaned) {
+                if let Some(attempt) = snapshot.attempt {
+                    let _ = self.recover_orphaned_runner_result(&attempt)?;
+                }
+            }
             return Ok(());
         }
         let attempt = snapshot.attempt.ok_or_else(|| {
@@ -775,6 +793,7 @@ impl Runtime {
     }
 
     pub fn reconcile_all(&self) -> RuntimeResult<Vec<TaskObservation>> {
+        self.reconcile_recoverable_orphans()?;
         let attempts = self.registry.list_nonterminal_attempts()?;
         let mut observations = Vec::with_capacity(attempts.len());
         for attempt in attempts {
@@ -786,6 +805,66 @@ impl Runtime {
             observations.push(self.observation_from_registry(&attempt.job_id, 0, 0)?);
         }
         Ok(observations)
+    }
+
+    pub fn reconcile_recoverable_orphans(&self) -> RuntimeResult<Vec<String>> {
+        let mut recovered = Vec::new();
+        for attempt in self.registry.list_held_orphaned_attempts()? {
+            if !Path::new(&attempt.bundle_path).join(RESULT_FILE).is_file() {
+                continue;
+            }
+            match self.recover_orphaned_runner_result(&attempt) {
+                Ok(true) => recovered.push(attempt.attempt_id),
+                Ok(false) => {}
+                Err(error)
+                    if matches!(
+                        error.code,
+                        RuntimeErrorCode::ResultIdentityConflict
+                            | RuntimeErrorCode::ArtifactIdentityConflict
+                    ) || (error.code == RuntimeErrorCode::RegistryCorrupt
+                        && error.field.as_deref() == Some("result")) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(recovered)
+    }
+
+    fn recover_orphaned_runner_result(&self, attempt: &AttemptRecord) -> RuntimeResult<bool> {
+        let current = self.registry.get_attempt(&attempt.attempt_id)?;
+        if current.state != AttemptState::Orphaned
+            || !Path::new(&current.bundle_path).join(RESULT_FILE).is_file()
+            || self.orphan_process_tree_alive(&current)?
+        {
+            return Ok(false);
+        }
+        let mut terminal = self.prepare_runner_terminal(&current)?;
+        terminal.reason_code = "LATE_IDENTITY_BOUND_RUNNER_RESULT".to_string();
+        self.registry.recover_orphaned_terminal(&terminal)?;
+        self.cleanup_payload_view(&current.attempt_id)?;
+        Ok(true)
+    }
+
+    fn orphan_process_tree_alive(&self, attempt: &AttemptRecord) -> RuntimeResult<bool> {
+        let properties = systemctl_show(&attempt.unit_name)?;
+        let matching_unit_active = unit_is_active(&properties)
+            && attempt
+                .invocation_id
+                .as_deref()
+                .zip(nonempty_property(&properties, "InvocationID").as_deref())
+                .is_some_and(|(expected, observed)| expected == observed);
+        let recorded_pid_alive = attempt.main_pid.is_some_and(|pid| {
+            process_identity(pid)
+                .as_deref()
+                .zip(attempt.process_start_identity.as_deref())
+                .is_some_and(|(observed, expected)| observed == expected)
+        });
+        let cgroup_alive = attempt
+            .control_group
+            .as_deref()
+            .map(cgroup_has_processes)
+            .transpose()?
+            .unwrap_or(false);
+        Ok(matching_unit_active || recorded_pid_alive || cgroup_alive)
     }
 
     pub fn reconcile_attempt(&self, attempt_id: &str) -> RuntimeResult<()> {
@@ -890,6 +969,9 @@ impl Runtime {
                 TerminationIntent::DeadlineExceeded
             }
         };
+        if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
+            return self.reconcile_runner_result(attempt);
+        }
         let disposition =
             classify_supervisor_recovery(&expected, &observation, intent).map_err(|error| {
                 RuntimeError::new(
@@ -921,6 +1003,10 @@ impl Runtime {
                     "SUPERVISOR_IDENTITY_ORPHANED",
                     Some(reason),
                 )?;
+                let current = self.registry.get_attempt(&attempt.attempt_id)?;
+                if Path::new(&current.bundle_path).join(RESULT_FILE).exists() {
+                    let _ = self.recover_orphaned_runner_result(&current)?;
+                }
                 Ok(())
             }
         }
@@ -1075,6 +1161,7 @@ impl Runtime {
         &self,
         request: &RuntimeJobListRequest,
     ) -> RuntimeResult<RuntimeJobListResult> {
+        self.reconcile_recoverable_orphans()?;
         let mut result = self.registry.list_jobs(request)?;
         for job in &mut result.jobs {
             job.artifacts = self
@@ -1704,6 +1791,32 @@ fn supervisor_identity(attempt: &AttemptRecord) -> RuntimeResult<SupervisorIdent
             )
         })?,
     })
+}
+
+fn cgroup_has_processes(control_group: &str) -> RuntimeResult<bool> {
+    if !control_group.starts_with('/')
+        || control_group
+            .split('/')
+            .any(|part| part == ".." || part.contains('\0'))
+    {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
+            "recorded cgroup path is invalid",
+            Some("controlGroup"),
+            false,
+        ));
+    }
+    let path = Path::new("/sys/fs/cgroup")
+        .join(control_group.trim_start_matches('/'))
+        .join("cgroup.procs");
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let content = fs::read_to_string(path)
+        .map_err(|error| io_error("read cgroup process membership", error))?;
+    Ok(content
+        .lines()
+        .any(|line| line.trim().parse::<u32>().is_ok()))
 }
 
 fn process_identity(pid: u32) -> Option<String> {

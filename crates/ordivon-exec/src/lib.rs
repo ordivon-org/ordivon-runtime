@@ -43,11 +43,11 @@ pub use runtime::{
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,
     CreatedAdmission, JobDesiredState, JobProjection, JobResolution, Registry, RegistryConfig,
     ReservationRecord, ReservationState, RunnerIdentity, Runtime, RuntimeArtifactRecord,
-    RuntimeConfig, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan, RuntimeJobListCursor,
-    RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord, RuntimeResult, SubmitRequest,
-    TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunRequest, TerminalCommit,
-    UniversalExecutionRequest, MAX_RUNTIME_LIST_LIMIT, RUNTIME_MIGRATION_CHECKSUM,
-    RUNTIME_SCHEMA_VERSION,
+    RuntimeCapacity, RuntimeConfig, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
+    RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord,
+    RuntimeResult, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
+    TaskRunRequest, TerminalCommit, UniversalExecutionRequest, MAX_RUNTIME_LIST_LIMIT,
+    RUNTIME_MIGRATION_CHECKSUM, RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM, RUNTIME_SCHEMA_VERSION,
 };
 
 #[cfg(feature = "isolated-execution")]

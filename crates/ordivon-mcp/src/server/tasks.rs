@@ -229,5 +229,7 @@ fn terminal_task_error(observation: &TaskObservation) -> ToolError {
             .unwrap_or_else(|| default_message.to_string()),
         field: Some("taskId".to_string()),
         retryable: false,
+        retry_after_ms: None,
+        capacity: None,
     }
 }

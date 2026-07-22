@@ -22,7 +22,13 @@ const MIGRATION_V1_NAME: &str = "0001_runtime";
 const MIGRATION_V1_SQL: &str = include_str!("../../migrations/runtime/0001_runtime.sql");
 pub const RUNTIME_MIGRATION_CHECKSUM: &str =
     "sha256:9c5e0ccf94b0c3efa9b671a9300cfe00e4539d0c880e6a8df8982df9fa8826ac";
-const MAX_MIGRATION_VERSION: i64 = 1;
+const MIGRATION_V2: i64 = 2;
+const MIGRATION_V2_NAME: &str = "0002_orphan_recovery";
+const MIGRATION_V2_SQL: &str = include_str!("../../migrations/runtime/0002_orphan_recovery.sql");
+pub const RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM: &str =
+    "sha256:08361881c9f589254e5e9fad089fcbf756bd8613352e995437fb7a616e9ce500";
+const MAX_MIGRATION_VERSION: i64 = 2;
+const WORKSPACE_EXECUTION_LIMIT: u32 = 1;
 
 #[derive(Clone, Debug)]
 pub struct RegistryConfig {
@@ -185,6 +191,34 @@ impl Registry {
             RUNTIME_MIGRATION_CHECKSUM,
             "initial migration",
         )?;
+        if max_version < MIGRATION_V2 {
+            let transaction = immediate(connection, "orphan-recovery migration")?;
+            transaction
+                .execute_batch(MIGRATION_V2_SQL)
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot apply orphan-recovery migration")
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,?2,?3,?4)",
+                    params![
+                        MIGRATION_V2,
+                        MIGRATION_V2_NAME,
+                        RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM,
+                        now_ms()?
+                    ],
+                )
+                .map_err(|error| RuntimeError::from_sql(error, "cannot record orphan-recovery migration"))?;
+            transaction.commit().map_err(|error| {
+                RuntimeError::from_sql(error, "cannot commit orphan-recovery migration")
+            })?;
+        }
+        validate_migration_checksum(
+            connection,
+            MIGRATION_V2,
+            RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM,
+            "orphan-recovery migration",
+        )?;
 
         Ok(())
     }
@@ -340,6 +374,28 @@ impl Registry {
             });
         }
 
+        let workspace_active: u32 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM concurrency_reservations r JOIN attempts a ON a.attempt_id=r.attempt_id JOIN jobs j ON j.job_id=a.job_id WHERE r.state IN ('active','held_orphaned') AND j.workspace_id=?1",
+                [&request.plan.workspace_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| RuntimeError::from_sql(error, "cannot count workspace reservations"))?;
+        if workspace_active >= WORKSPACE_EXECUTION_LIMIT {
+            return Err(RuntimeError::concurrency(
+                format!(
+                    "workspace execution concurrency limit reached (active={workspace_active}, limit={WORKSPACE_EXECUTION_LIMIT})"
+                ),
+                "workspaceId",
+                super::RuntimeCapacity {
+                    scope: "workspace".to_string(),
+                    active: workspace_active,
+                    limit: WORKSPACE_EXECUTION_LIMIT,
+                    workspace_id: Some(request.plan.workspace_id.clone()),
+                },
+            ));
+        }
+
         let global_active: u32 = transaction
             .query_row(
                 "SELECT COUNT(*) FROM concurrency_reservations WHERE state IN ('active','held_orphaned')",
@@ -348,11 +404,18 @@ impl Registry {
             )
             .map_err(|error| RuntimeError::from_sql(error, "cannot count global reservations"))?;
         if global_active >= request.global_limit {
-            return Err(RuntimeError::new(
-                RuntimeErrorCode::ConcurrencyLimit,
-                "global execution concurrency limit reached",
-                Some("globalLimit"),
-                true,
+            return Err(RuntimeError::concurrency(
+                format!(
+                    "global execution concurrency limit reached (active={global_active}, limit={})",
+                    request.global_limit
+                ),
+                "globalLimit",
+                super::RuntimeCapacity {
+                    scope: "global".to_string(),
+                    active: global_active,
+                    limit: request.global_limit,
+                    workspace_id: None,
+                },
             ));
         }
         transaction
@@ -1173,6 +1236,161 @@ impl Registry {
                 .into_record()
         })
         .collect()
+    }
+
+    pub fn list_held_orphaned_attempts(&self) -> RuntimeResult<Vec<AttemptRecord>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT a.attempt_id,a.job_id,a.attempt_number,a.state,a.termination_intent,a.launch_token_digest,a.bundle_path,a.bundle_digest,a.boot_id,a.unit_name,a.invocation_id,a.control_group,a.main_pid,a.process_start_identity,a.runner_start_digest,a.result_digest,a.exit_code,a.infrastructure_error_digest,a.created_at_ms,a.started_at_ms,a.finished_at_ms,a.row_version FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.state='orphaned' AND r.state='held_orphaned' ORDER BY a.created_at_ms,a.attempt_id",
+            )
+            .map_err(|error| RuntimeError::from_sql(error, "cannot prepare orphan reconciliation scan"))?;
+        let rows = statement
+            .query_map([], raw_attempt_from_row)
+            .map_err(|error| RuntimeError::from_sql(error, "cannot scan held orphaned Attempts"))?;
+        rows.map(|row| {
+            row.map_err(|error| {
+                RuntimeError::from_sql(error, "cannot decode orphaned Attempt row")
+            })?
+            .into_record()
+        })
+        .collect()
+    }
+
+    pub fn recover_orphaned_terminal(
+        &self,
+        request: &TerminalCommit,
+    ) -> RuntimeResult<JobProjection> {
+        if !matches!(
+            request.state,
+            AttemptState::Succeeded
+                | AttemptState::Failed
+                | AttemptState::TimedOut
+                | AttemptState::Cancelled
+        ) {
+            return Err(RuntimeError::invalid(
+                "orphan recovery requires a Runner terminal state",
+                "state",
+            ));
+        }
+        validate_digest(&request.result_digest, "resultDigest")?;
+        for artifact in &request.artifacts {
+            validate_artifact_registration(artifact)?;
+        }
+        let mut connection = self.open_connection()?;
+        let transaction = immediate(&mut connection, "orphan recovery transaction")?;
+        let attempt = load_attempt(&transaction, &request.attempt_id)?;
+        let job = load_job(&transaction, &attempt.job_id)?;
+        let reservation = load_reservation(&transaction, &attempt.attempt_id)?;
+        if attempt.state != AttemptState::Orphaned
+            || job.resolution != Some(JobResolution::Orphaned)
+            || reservation.state != ReservationState::HeldOrphaned
+        {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::OrphanRemediationDenied,
+                "Attempt, Job, or reservation changed before Runner-result recovery",
+                Some("attemptId"),
+                false,
+            ));
+        }
+        if attempt.row_version != request.expected_row_version {
+            return Err(state_conflict(
+                "Attempt row version changed before orphan recovery",
+            ));
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE attempts SET state=?1,result_digest=?2,exit_code=?3,infrastructure_error_digest=?4,finished_at_ms=?5,row_version=row_version+1 WHERE attempt_id=?6 AND row_version=?7 AND state='orphaned'",
+                params![
+                    request.state.as_db(),
+                    request.result_digest,
+                    request.exit_code,
+                    request.infrastructure_error_digest,
+                    request.finished_at_ms,
+                    request.attempt_id,
+                    request.expected_row_version,
+                ],
+            )
+            .map_err(|error| RuntimeError::from_sql(error, "cannot recover orphaned Attempt"))?;
+        if changed != 1 {
+            return Err(state_conflict("Attempt changed during orphan recovery"));
+        }
+        for artifact in &request.artifacts {
+            transaction
+                .execute(
+                    "INSERT INTO artifacts(artifact_id,job_id,attempt_id,kind,relative_path,digest,media_type,byte_length,truncated,created_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    params![
+                        artifact.artifact_id,
+                        attempt.job_id,
+                        attempt.attempt_id,
+                        artifact.kind,
+                        artifact.relative_path,
+                        artifact.digest,
+                        artifact.media_type,
+                        artifact.byte_length,
+                        i64::from(artifact.truncated),
+                        request.finished_at_ms,
+                    ],
+                )
+                .map_err(|error| RuntimeError::new(
+                    RuntimeErrorCode::ArtifactIdentityConflict,
+                    format!("cannot register recovered Artifact {}: {error}", artifact.artifact_id),
+                    Some("artifacts"),
+                    false,
+                ))?;
+        }
+        upsert_condition(
+            &transaction,
+            &attempt.attempt_id,
+            &ConditionUpdate {
+                condition_type: "result_available".to_string(),
+                status: "true".to_string(),
+                reason_code: request.reason_code.clone(),
+                evidence_digest: request.result_digest.clone(),
+                observed_at_ms: request.finished_at_ms,
+            },
+        )?;
+        release_reservation(
+            &transaction,
+            &attempt.attempt_id,
+            request.finished_at_ms,
+            &request.reason_code,
+        )?;
+        let resolution = resolution_for_state(request.state)?;
+        transaction
+            .execute(
+                "UPDATE jobs SET resolution=?1,row_version=row_version+1 WHERE job_id=?2 AND resolution='orphaned'",
+                params![resolution.as_db(), attempt.job_id],
+            )
+            .map_err(|error| RuntimeError::from_sql(error, "cannot correct orphaned Job resolution"))?;
+        append_event(
+            &transaction,
+            &attempt.job_id,
+            Some(&attempt.attempt_id),
+            "RUNNER_RESULT_RECOVERED",
+            "SYSTEM_OBSERVED",
+            Some(AttemptState::Orphaned),
+            Some(request.state),
+            &request.reason_code,
+            serde_json::json!({"resultDigest": request.result_digest, "exitCode": request.exit_code}),
+            request.finished_at_ms,
+        )?;
+        append_event(
+            &transaction,
+            &attempt.job_id,
+            Some(&attempt.attempt_id),
+            "JOB_RESOLUTION_CORRECTED",
+            "SYSTEM_DERIVED",
+            Some(AttemptState::Orphaned),
+            Some(request.state),
+            &request.reason_code,
+            serde_json::json!({"resolution": resolution.as_db()}),
+            request.finished_at_ms,
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| RuntimeError::from_sql(error, "cannot commit orphan recovery"))?;
+        Ok(load_job_snapshot(&connection, &attempt.job_id)?.projection)
     }
 
     pub fn active_reservation_count(&self) -> RuntimeResult<u32> {

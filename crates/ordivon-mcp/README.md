@@ -17,7 +17,7 @@ task.list
 artifact.read
 ```
 
-The adapter owns protocol schemas, MCP Task projection, transport authentication, and conversion between tool results and Runtime results. It binds the server-owned Principal and global concurrency limit; no policy or profile objects are part of the execution contract. Filesystem, Git, execution, idempotency, cancellation, result, and reconciliation semantics remain in `ordivon-exec`.
+The adapter owns protocol schemas, MCP Task projection, transport authentication, and conversion between tool results and Runtime results. It binds the server-owned Principal and one global concurrency limit shared by all clients; no policy or profile objects are part of the execution contract. `ordivon-exec` additionally serializes command execution within each Workspace while allowing different Workspaces to use the remaining global capacity. A capacity rejection is retryable and includes `retryAfterMs` plus the active, limit, scope, and optional Workspace identity. Filesystem, Git, execution, idempotency, cancellation, result, and reconciliation semantics remain in `ordivon-exec`.
 
 `workspace.open` isolates the checked-out code tree and Git state. It does not create a hermetic filesystem or security sandbox. `workspace.exec` authority comes from the Runtime mode: `trusted-local` is the default and inherits the service user's host authority, while `isolated` explicitly activates the reduced-authority non-root worker boundary.
 

@@ -64,7 +64,9 @@ Use ordinary Git status, diff, branches, worktrees, tags, and remote Push. The c
 
 ### Running tasks
 
-Use `task.list`, `task.observe`, and `task.cancel`. Restarting the MCP should reconcile nonterminal Attempts from SQLite, result bundles, and systemd state.
+Use `task.list`, `task.observe`, and `task.cancel`. Restarting the MCP reconciles nonterminal Attempts and held orphan reservations from SQLite, result bundles, and systemd/cgroup state. A complete identity-bound Runner result may correct an earlier orphan classification only after the original process tree is proven gone; malformed or identity-conflicting results remain quarantined and retain their reservation for explicit remediation.
+
+Execution capacity is shared across all MCP clients. Different Workspaces may run concurrently, but a second `workspace.exec` against the same Workspace receives a retryable `CONCURRENCY_LIMIT` with `retryAfterMs` and capacity details. Do not create a second Registry or MCP service merely to bypass this boundary.
 
 ### Persistent Runtime state
 

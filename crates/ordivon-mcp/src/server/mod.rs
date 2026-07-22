@@ -10,12 +10,12 @@ use ordivon_exec::{
     create_git_workspace_compact, mutate_workspace, read_workspace_slice_compact,
     read_workspace_text_compact, remove_git_workspace, workspace_diff_compact, ArtifactReadRequest,
     ArtifactReadResult, CompactWorkspaceDiffResult, CompactWorkspaceOpenResult,
-    GitWorkspaceCreateRequest, Runtime, RuntimeConfig, RuntimeError, RuntimeJobListRequest,
-    RuntimeJobListResult, TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunRequest,
-    UniversalExecError, UniversalExecutionRequest, UniversalExecutorConfig,
-    WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceMutateRequest,
-    WorkspaceMutateResult, WorkspaceReadRequest as ExecWorkspaceReadRequest,
-    WorkspaceReadSliceRequest,
+    GitWorkspaceCreateRequest, Runtime, RuntimeCapacity, RuntimeConfig, RuntimeError,
+    RuntimeJobListRequest, RuntimeJobListResult, TaskCancelRequest, TaskObservation,
+    TaskObserveRequest, TaskRunRequest, UniversalExecError, UniversalExecutionRequest,
+    UniversalExecutorConfig, WorkspaceDiffRequest as ExecWorkspaceDiffRequest,
+    WorkspaceMutateRequest, WorkspaceMutateResult,
+    WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::IntoCallToolResult;
@@ -180,6 +180,10 @@ pub struct ToolError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
     pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<Box<RuntimeCapacity>>,
 }
 
 impl ToolError {
@@ -189,6 +193,8 @@ impl ToolError {
             message: message.into(),
             field: None,
             retryable: true,
+            retry_after_ms: None,
+            capacity: None,
         }
     }
 
@@ -198,6 +204,8 @@ impl ToolError {
             message: message.into(),
             field: Some(field.to_string()),
             retryable: false,
+            retry_after_ms: None,
+            capacity: None,
         }
     }
 }
@@ -213,6 +221,8 @@ impl From<RuntimeError> for ToolError {
             message: error.message,
             field: error.field,
             retryable: error.retryable,
+            retry_after_ms: error.retry_after_ms,
+            capacity: error.capacity,
         }
     }
 }
@@ -228,6 +238,8 @@ impl From<UniversalExecError> for ToolError {
             message: error.message,
             field: error.field,
             retryable: error.retryable,
+            retry_after_ms: None,
+            capacity: None,
         }
     }
 }

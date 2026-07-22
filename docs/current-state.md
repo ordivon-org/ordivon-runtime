@@ -21,7 +21,7 @@ MCP client
 → reconciliation
 ```
 
-The public MCP surface contains ten tools: workspace open, close, read, mutate, diff, and exec; task observe, cancel, and list; and Artifact read.
+The public MCP surface contains ten tools: workspace open, close, read, mutate, diff, and exec; task observe, cancel, and list; and Artifact read. All clients share one transactional global execution limit; different Workspaces may execute concurrently, while each Workspace admits only one active command tree.
 
 ## Current deployment truth
 
