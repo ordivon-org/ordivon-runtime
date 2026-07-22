@@ -1,11 +1,6 @@
-mod lifecycle;
 mod remediation;
 
-pub use lifecycle::{
-    M7AdmissionQuota, M7BackupResult, M7GcPlan, M7LifecycleManager, M7LifecyclePolicy,
-    M7LifecycleUsage, M7RestoreResult,
-};
-pub use remediation::{M7OrphanEvidence, M7OrphanRemediator, M7RemediationResult};
+pub use remediation::{M7OrphanRemediator, M7RemediationResult};
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -32,7 +27,6 @@ pub struct M7RuntimeHardeningConfig {
     pub worker_root: PathBuf,
     pub cache_root: PathBuf,
     pub runtime_view_root: PathBuf,
-    pub lifecycle_policy: M7LifecyclePolicy,
 }
 
 impl M7RuntimeHardeningConfig {
@@ -44,12 +38,15 @@ impl M7RuntimeHardeningConfig {
     pub fn validate_layout(&self) -> M6Result<()> {
         if self.worker.user != "ordivon-worker" || self.worker.group != "ordivon-worker" {
             return Err(M6Error::invalid(
-                "M7 worker identity must be ordivon-worker",
+                "isolated worker identity must be ordivon-worker",
                 "worker",
             ));
         }
         if self.worker.uid == 0 || self.worker.gid == 0 {
-            return Err(M6Error::invalid("M7 worker must be non-root", "worker"));
+            return Err(M6Error::invalid(
+                "isolated worker must be non-root",
+                "worker",
+            ));
         }
         for (field, path) in [
             ("controlRoot", &self.control_root),
@@ -67,11 +64,10 @@ impl M7RuntimeHardeningConfig {
             || self.control_root.starts_with(&self.worker_root)
         {
             return Err(M6Error::invalid(
-                "M7 control, worker, and cache roots must not overlap",
+                "control, worker, cache, and runtime roots must not overlap",
                 "controlRoot",
             ));
         }
-        self.lifecycle_policy.validate()?;
         Ok(())
     }
 
@@ -101,7 +97,7 @@ impl M7RuntimeHardeningConfig {
         );
         if !passwd.lines().any(|line| line.starts_with(&expected)) {
             return Err(M6Error::invalid(
-                "configured M7 worker does not match /etc/passwd",
+                "configured isolated worker does not match /etc/passwd",
                 "worker",
             ));
         }
@@ -140,7 +136,7 @@ pub(crate) fn ensure_owned_directory(path: &Path, uid: u32, gid: u32, mode: u32)
         || metadata.permissions().mode() & 0o7777 != mode
     {
         return Err(M6Error::invalid(
-            "M7 directory ownership verification failed",
+            "isolated directory ownership verification failed",
             "path",
         ));
     }

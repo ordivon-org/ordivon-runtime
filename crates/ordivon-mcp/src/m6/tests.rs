@@ -92,8 +92,6 @@ fn submit(server: &M6Server, client_request_id: &str) -> ordivon_exec::CreatedAd
             },
             global_limit: 4,
             profile_limit: None,
-            #[cfg(feature = "experimental-http-m7")]
-            lifecycle_quota: None,
         })
         .unwrap();
     match outcome {

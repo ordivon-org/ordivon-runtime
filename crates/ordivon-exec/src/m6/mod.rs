@@ -4,8 +4,6 @@ mod runtime;
 mod types;
 
 pub use error::{M6Error, M6ErrorCode, M6Result};
-#[cfg(feature = "runtime-hardening-m7")]
-pub use registry::M7_MIGRATION_CHECKSUM;
 pub use registry::{M6Registry, M6RegistryConfig, M6_MIGRATION_CHECKSUM};
 pub use runtime::{M6Runtime, M6RuntimeConfig};
 pub use types::{

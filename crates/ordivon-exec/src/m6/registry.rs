@@ -21,18 +21,6 @@ const MIGRATION_V1_NAME: &str = "0001_initial";
 const MIGRATION_V1_SQL: &str = include_str!("../../migrations/m6/0001_initial.sql");
 pub const M6_MIGRATION_CHECKSUM: &str =
     "sha256:73b1462cdfe91640af266eb55c953a32149fccac53c0bada3b11c9e84fa1a78f";
-#[cfg(feature = "runtime-hardening-m7")]
-const MIGRATION_V2: i64 = 2;
-#[cfg(feature = "runtime-hardening-m7")]
-const MIGRATION_V2_NAME: &str = "0002_lifecycle";
-#[cfg(feature = "runtime-hardening-m7")]
-const MIGRATION_V2_SQL: &str = include_str!("../../migrations/m7/0002_lifecycle.sql");
-#[cfg(feature = "runtime-hardening-m7")]
-pub const M7_MIGRATION_CHECKSUM: &str =
-    "sha256:7ade836d83e9b2c3b636d2479a66724916adba8200ee1013bfd87a9327adf2b6";
-#[cfg(feature = "runtime-hardening-m7")]
-const MAX_MIGRATION_VERSION: i64 = 2;
-#[cfg(not(feature = "runtime-hardening-m7"))]
 const MAX_MIGRATION_VERSION: i64 = 1;
 
 #[derive(Clone, Debug)]
@@ -191,29 +179,6 @@ impl M6Registry {
             "initial migration",
         )?;
 
-        #[cfg(feature = "runtime-hardening-m7")]
-        if max_version < MIGRATION_V2 {
-            let transaction = immediate(connection, "M7 lifecycle migration")?;
-            transaction
-                .execute_batch(MIGRATION_V2_SQL)
-                .map_err(|error| M6Error::from_sql(error, "cannot apply M7 lifecycle migration"))?;
-            transaction
-                .execute(
-                    "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,?2,?3,?4)",
-                    params![MIGRATION_V2, MIGRATION_V2_NAME, M7_MIGRATION_CHECKSUM, now_ms()?],
-                )
-                .map_err(|error| M6Error::from_sql(error, "cannot record M7 lifecycle migration"))?;
-            transaction.commit().map_err(|error| {
-                M6Error::from_sql(error, "cannot commit M7 lifecycle migration")
-            })?;
-        }
-        #[cfg(feature = "runtime-hardening-m7")]
-        validate_migration_checksum(
-            connection,
-            MIGRATION_V2,
-            M7_MIGRATION_CHECKSUM,
-            "M7 lifecycle migration",
-        )?;
         Ok(())
     }
 
@@ -378,52 +343,6 @@ impl M6Registry {
             return Ok(AdmissionOutcomeM6::Existing {
                 job: Box::new(existing),
             });
-        }
-
-        #[cfg(feature = "runtime-hardening-m7")]
-        if let Some(quota) = &request.lifecycle_quota {
-            let retained: u64 = transaction
-                .query_row(
-                    "SELECT COALESCE(SUM(byte_length),0) FROM artifacts",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|error| M6Error::from_sql(error, "cannot evaluate M7 admission quota"))?;
-            let denied = quota.estimated_artifact_bytes > quota.max_single_job_artifact_bytes
-                || retained.saturating_add(quota.estimated_artifact_bytes)
-                    > quota.max_retained_artifact_bytes;
-            if denied {
-                let detail = serde_json::json!({
-                    "policyDigest": quota.policy_digest,
-                    "retainedBytes": retained,
-                    "estimatedBytes": quota.estimated_artifact_bytes,
-                    "maxRetainedBytes": quota.max_retained_artifact_bytes,
-                    "maxSingleJobBytes": quota.max_single_job_artifact_bytes,
-                    "principal": request.plan.principal,
-                    "clientRequestId": request.client_request_id,
-                });
-                let detail_json = detail.to_string();
-                transaction
-                    .execute(
-                        "INSERT INTO m7_lifecycle_events(event_id,event_type,operator_id,job_id,attempt_id,detail_json,detail_digest,observed_at_ms) VALUES(?1,'ADMISSION_QUOTA_REJECTED',NULL,NULL,NULL,?2,?3,?4)",
-                        params![
-                            format!("lifecycle-event-{}", Uuid::now_v7()),
-                            detail_json,
-                            sha256_bytes(detail_json.as_bytes()),
-                            created_at_ms,
-                        ],
-                    )
-                    .map_err(|error| M6Error::from_sql(error, "cannot record M7 quota rejection"))?;
-                transaction.commit().map_err(|error| {
-                    M6Error::from_sql(error, "cannot commit M7 quota rejection")
-                })?;
-                return Err(M6Error::new(
-                    M6ErrorCode::LifecycleQuotaExceeded,
-                    "M7 lifecycle quota rejected the Job before admission",
-                    Some("execution"),
-                    false,
-                ));
-            }
         }
 
         let global_active: u32 = transaction

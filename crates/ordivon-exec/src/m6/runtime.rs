@@ -137,34 +137,12 @@ impl M6Runtime {
     pub fn run_task(&self, request: &M6TaskRunRequest) -> M6Result<M6TaskObservation> {
         validate_run_request(request)?;
         let plan = self.resolve_plan(request)?;
-        #[cfg(feature = "runtime-hardening-m7")]
-        let lifecycle_quota = self
-            .hardening
-            .as_ref()
-            .map(|hardening| {
-                Ok(crate::M7AdmissionQuota {
-                    policy_digest: hardening.lifecycle_policy.digest()?,
-                    estimated_artifact_bytes: request
-                        .execution
-                        .stdout_limit_bytes
-                        .saturating_add(request.execution.stderr_limit_bytes),
-                    max_retained_artifact_bytes: hardening
-                        .lifecycle_policy
-                        .max_retained_artifact_bytes,
-                    max_single_job_artifact_bytes: hardening
-                        .lifecycle_policy
-                        .max_single_job_artifact_bytes,
-                })
-            })
-            .transpose()?;
         let submit = M6SubmitRequest {
             schema_version: M6_SCHEMA_VERSION,
             client_request_id: request.client_request_id.clone(),
             plan,
             global_limit: request.global_limit,
             profile_limit: request.profile_limit,
-            #[cfg(feature = "runtime-hardening-m7")]
-            lifecycle_quota,
         };
         let job_id = match self.registry.submit(&submit)? {
             AdmissionOutcomeM6::Created(created) => {

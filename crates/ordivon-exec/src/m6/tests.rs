@@ -79,8 +79,6 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> M6S
         },
         global_limit,
         profile_limit: None,
-        #[cfg(feature = "runtime-hardening-m7")]
-        lifecycle_quota: None,
     }
 }
 

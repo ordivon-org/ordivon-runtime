@@ -67,8 +67,6 @@ pub use universal::{
     MAX_WORKSPACE_MUTATIONS, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
-#[cfg(feature = "runtime-hardening-m7")]
-pub use m6::M7_MIGRATION_CHECKSUM;
 #[cfg(feature = "transactional-registry-m6")]
 pub use m6::{
     AdmissionOutcomeM6, ArtifactRecordM6, ArtifactRegistrationM6, AttemptRecordM6, AttemptState,
@@ -83,7 +81,6 @@ pub use m6::{
 
 #[cfg(feature = "runtime-hardening-m7")]
 pub use m7::{
-    M7AdmissionQuota, M7BackupResult, M7GcPlan, M7LifecycleManager, M7LifecyclePolicy,
-    M7LifecycleUsage, M7OrphanEvidence, M7OrphanRemediator, M7RemediationResult, M7RestoreResult,
-    M7RuntimeHardeningConfig, M7WorkerIdentity, M7_SCHEMA_VERSION,
+    M7OrphanRemediator, M7RemediationResult, M7RuntimeHardeningConfig, M7WorkerIdentity,
+    M7_SCHEMA_VERSION,
 };

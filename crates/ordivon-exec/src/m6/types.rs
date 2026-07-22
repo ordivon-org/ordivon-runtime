@@ -308,9 +308,6 @@ pub struct M6SubmitRequest {
     pub global_limit: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_limit: Option<u32>,
-    #[cfg(feature = "runtime-hardening-m7")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lifecycle_quota: Option<crate::M7AdmissionQuota>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
