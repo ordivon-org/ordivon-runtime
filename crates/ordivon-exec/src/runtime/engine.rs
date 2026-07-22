@@ -14,11 +14,11 @@ use super::supervisor::{
     SupervisorRecoveryDisposition, SupervisorUnitState, TerminationIntent,
 };
 use super::{
-    AdmissionOutcome, ArtifactReadRequest, ArtifactReadResult, ArtifactRegistration, AttemptRecord,
-    AttemptState, Registry, RegistryConfig, RunnerIdentity, RuntimeError, RuntimeErrorCode,
-    RuntimeExecutionPlan, RuntimeJobListRequest, RuntimeJobListResult, RuntimeResult,
-    SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunRequest,
-    TerminalCommit, RUNTIME_SCHEMA_VERSION,
+    AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
+    ArtifactRegistration, AttemptRecord, AttemptState, Registry, RegistryConfig, RunnerIdentity,
+    RuntimeArtifactRecord, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
+    RuntimeJobListRequest, RuntimeJobListResult, RuntimeResult, SubmitRequest, TaskCancelRequest,
+    TaskObservation, TaskObserveRequest, TaskRunRequest, TerminalCommit, RUNTIME_SCHEMA_VERSION,
 };
 use crate::universal::{
     canonical_directory, load_workspace_record, resolve_workspace_cwd, sha256_bytes, sha256_file,
@@ -691,41 +691,56 @@ impl Runtime {
         stdout_tail_bytes: u64,
         stderr_tail_bytes: u64,
     ) -> RuntimeResult<TaskObservation> {
-        let (stdout_tail, stderr_tail, stdout_truncated, stderr_truncated, error_summary) =
-            if let Some(attempt) = &attempt {
-                let stdout_tail = read_tail_text(
-                    &Path::new(&attempt.bundle_path).join(STDOUT_FILE),
-                    stdout_tail_bytes,
-                )?;
-                let stderr_tail = read_tail_text(
-                    &Path::new(&attempt.bundle_path).join(STDERR_FILE),
-                    stderr_tail_bytes,
-                )?;
-                let (result, result_error) = match load_runner_result_if_present(attempt) {
-                    Ok(result) => (result, None),
-                    Err(error) => (None, Some(error.to_string())),
-                };
-                let stdout_truncated = result
-                    .as_ref()
-                    .is_some_and(|result| result.stdout.truncated);
-                let stderr_truncated = result
-                    .as_ref()
-                    .is_some_and(|result| result.stderr.truncated);
-                let error_summary = result
-                    .and_then(|result| result.infrastructure_error)
-                    .or(result_error);
-                (
-                    stdout_tail,
-                    stderr_tail,
-                    stdout_truncated,
-                    stderr_truncated,
-                    error_summary,
-                )
-            } else {
-                (String::new(), String::new(), false, false, None)
+        let job_id = projection.job_id.clone();
+        let (
+            stdout_tail,
+            stderr_tail,
+            stdout_truncated,
+            stderr_truncated,
+            artifacts,
+            error_summary,
+        ) = if let Some(attempt) = &attempt {
+            let stdout_tail = read_tail_text(
+                &Path::new(&attempt.bundle_path).join(STDOUT_FILE),
+                stdout_tail_bytes,
+            )?;
+            let stderr_tail = read_tail_text(
+                &Path::new(&attempt.bundle_path).join(STDERR_FILE),
+                stderr_tail_bytes,
+            )?;
+            let (result, result_error) = match load_runner_result_if_present(attempt) {
+                Ok(result) => (result, None),
+                Err(error) => (None, Some(error.to_string())),
             };
+            let stdout_truncated = result
+                .as_ref()
+                .is_some_and(|result| result.stdout.truncated);
+            let stderr_truncated = result
+                .as_ref()
+                .is_some_and(|result| result.stderr.truncated);
+            let artifacts = self
+                .registry
+                .list_artifacts(&job_id)?
+                .into_iter()
+                .map(|artifact| artifact_descriptor(artifact, result.as_ref()))
+                .collect();
+            let error_summary = result
+                .as_ref()
+                .and_then(|result| result.infrastructure_error.clone())
+                .or(result_error);
+            (
+                stdout_tail,
+                stderr_tail,
+                stdout_truncated,
+                stderr_truncated,
+                artifacts,
+                error_summary,
+            )
+        } else {
+            (String::new(), String::new(), false, false, Vec::new(), None)
+        };
         Ok(TaskObservation {
-            job_id: projection.job_id,
+            job_id,
             status: projection.status,
             attempt_id: attempt.map(|attempt| attempt.attempt_id),
             exit_code: projection.exit_code,
@@ -734,6 +749,7 @@ impl Runtime {
             stdout_truncated,
             stderr_truncated,
             artifacts_available: projection.artifacts_available,
+            artifacts,
             poll_after_ms: projection.poll_after_ms,
             error_summary,
         })
@@ -1059,7 +1075,16 @@ impl Runtime {
         &self,
         request: &RuntimeJobListRequest,
     ) -> RuntimeResult<RuntimeJobListResult> {
-        self.registry.list_jobs(request)
+        let mut result = self.registry.list_jobs(request)?;
+        for job in &mut result.jobs {
+            job.artifacts = self
+                .registry
+                .list_artifacts(&job.job_id)?
+                .into_iter()
+                .map(|artifact| artifact_descriptor(artifact, None))
+                .collect();
+        }
+        Ok(result)
     }
 
     pub fn read_artifact(
@@ -1253,6 +1278,25 @@ fn validate_hardening_roots(
         ));
     }
     Ok(())
+}
+
+fn artifact_descriptor(
+    artifact: RuntimeArtifactRecord,
+    result: Option<&RunnerTaskResult>,
+) -> ArtifactDescriptor {
+    let dropped_bytes = match artifact.kind.as_str() {
+        "stdout" => result.map(|result| result.stdout.dropped_bytes),
+        "stderr" => result.map(|result| result.stderr.dropped_bytes),
+        _ => None,
+    };
+    ArtifactDescriptor {
+        artifact_id: artifact.artifact_id,
+        kind: artifact.kind,
+        digest: artifact.digest,
+        retained_bytes: artifact.byte_length,
+        dropped_bytes,
+        truncated: artifact.truncated,
+    }
 }
 
 fn validate_run_request(request: &TaskRunRequest) -> RuntimeResult<()> {

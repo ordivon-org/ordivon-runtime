@@ -1674,6 +1674,7 @@ fn project_job(job: &RuntimeJobRecord, attempt: Option<&AttemptRecord>) -> JobPr
         exit_code: attempt.and_then(|attempt| attempt.exit_code),
         result_available: job.resolution.is_some(),
         artifacts_available: attempt.is_some_and(|attempt| attempt.result_digest.is_some()),
+        artifacts: Vec::new(),
         poll_after_ms: job.resolution.is_none().then_some(250),
     }
 }
