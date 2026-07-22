@@ -1,0 +1,33 @@
+name: Release acceptance
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-merge-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - run: cargo fmt --check
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test -p ordivon-exec --no-default-features --features transactional-runtime
+      - run: cargo test -p ordivon-exec --features isolated-execution
+      - run: uvx ruff check scripts/
+      - run: python -m unittest discover -s scripts/tests -v
+      - run: python scripts/legacy_reference_scan.py --root .
+      - name: Explain local-only acceptance boundary
+        run: |
+          echo "Real systemd/cgroup tests and MCP execution E2E require the local WSL runner."
+          echo "Run: python scripts/acceptance.py release --release-opt-in"

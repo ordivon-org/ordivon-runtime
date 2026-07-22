@@ -1,0 +1,21 @@
+[Unit]
+Description=Ordivon local MCP runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/ordivon/ordivon-mcp.env
+ExecStart=/usr/local/libexec/ordivon/ordivon-mcp
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+KillMode=control-group
+UMask=0077
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

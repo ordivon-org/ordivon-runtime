@@ -10,6 +10,10 @@ cargo fmt --check
 cargo test --workspace
 ```
 
+## Installable systemd entry
+
+`packaging/systemd/ordivon-mcp.service` and `ordivon-mcp.env.example` define a loopback-only service without changing the currently active Desktop Commander bridge. Install and switch remote routing only during a separate rollback-capable maintenance window.
+
 ## Run the MCP server
 
 Build the task runner and start the single current MCP entry:
@@ -52,11 +56,16 @@ SQLite Registry and result files are the execution truth. Before manual maintena
 
 ```bash
 python scripts/smoke.py --token "$ORDIVON_BEARER_TOKEN"
+python scripts/mcp_e2e.py --repo "$PWD"
+python scripts/acceptance.py merge
 python scripts/cleanup.py --root /var/lib/ordivon/registry
 python scripts/backup.py \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --control-root /var/lib/ordivon/registry \
   --destination /var/backups/ordivon/<snapshot>
+python scripts/restore.py \
+  --snapshot /var/backups/ordivon/<snapshot> \
+  --destination /var/lib/ordivon-restored
 ```
 
 Cleanup is dry-run unless `--apply` is supplied and only removes temporary staging names. Backup uses SQLite's online backup API; stop new dispatches first when a complete control-root snapshot is required.
