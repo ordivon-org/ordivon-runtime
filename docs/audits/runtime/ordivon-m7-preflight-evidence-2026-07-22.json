@@ -1,0 +1,248 @@
+{
+  "schemaVersion": 1,
+  "phase": "ORDIVON-MIGRATION-M7-PREFLIGHT-2026-07-22",
+  "evidenceType": "runtime-hardening-preflight",
+  "generatedAt": "2026-07-22T00:46:01.007257+00:00",
+  "sourceRevision": "bd0ef3f23d5296bcda41e47bd61d2c5190f9f1aa",
+  "implementationCommit": "bd0ef3f23d5296bcda41e47bd61d2c5190f9f1aa",
+  "harnesses": [
+    {
+      "path": "scripts/m7/preflight.py",
+      "sha256": "sha256:785e349dfd2b34ee5e2d484c962ebcaa20c2749f9a9abc7e438a2c2f1771c52e"
+    },
+    {
+      "path": "packaging/systemd/sysusers.d/ordivon.conf",
+      "sha256": "sha256:465d9892ee23444077258f083fc2f477bbd97359839ff3d95dc73aa4430aff35"
+    },
+    {
+      "path": "packaging/systemd/tmpfiles.d/ordivon.conf",
+      "sha256": "sha256:bdc3d7c9780bb3ed2138f6c9d8ba7dc5ee348a888afa772f688d5d4eb0821046"
+    }
+  ],
+  "environment": {
+    "osId": "arch",
+    "osVersion": null,
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "architecture": "x86_64",
+    "systemdVersion": "systemd 261 (261.1-1-arch)",
+    "cgroupFilesystem": "cgroup2fs",
+    "bootId": "f51d3f64-44b8-4756-bb93-23fb5d52da82",
+    "virtualization": "wsl",
+    "wsl": {
+      "systemdEnabled": true,
+      "hostWslExecutable": "/mnt/c/Windows/System32/wsl.exe",
+      "distros": [
+        "archlinux"
+      ],
+      "externalRebootOrchestratorPossible": true
+    }
+  },
+  "observationsDigest": "sha256:ce4f1bf85612f4860d4fdc0d964a4b91323b08040fc34192172b90c36e167ed0",
+  "claimsNotMade": [
+    "The real ordivon-worker account was not created or enabled.",
+    "No M6 Runner or payload execution path was changed.",
+    "The surrogate nobody probe does not prove the final supervisor/payload identity split.",
+    "No real WSL reboot was executed.",
+    "The preflight does not authorize production routing or broader capabilities."
+  ],
+  "observations": {
+    "host": {
+      "osId": "arch",
+      "osVersion": null,
+      "kernel": "6.6.87.2-microsoft-standard-WSL2",
+      "architecture": "x86_64",
+      "systemdVersion": "systemd 261 (261.1-1-arch)",
+      "cgroupFilesystem": "cgroup2fs",
+      "bootId": "f51d3f64-44b8-4756-bb93-23fb5d52da82",
+      "virtualization": "wsl"
+    },
+    "wsl": {
+      "systemdEnabled": true,
+      "hostWslExecutable": "/mnt/c/Windows/System32/wsl.exe",
+      "distros": [
+        "archlinux"
+      ],
+      "externalRebootOrchestratorPossible": true
+    },
+    "packaging": {
+      "workerUid": 999,
+      "workerGid": 999,
+      "workerHome": "/var/lib/ordivon/worker",
+      "workerShell": "/usr/bin/nologin",
+      "directoryModes": {
+        "/var/lib/ordivon/control": "0o700",
+        "/var/lib/ordivon/control/registry": "0o700",
+        "/var/lib/ordivon/control/bundles": "0o700",
+        "/var/lib/ordivon/control/results": "0o700",
+        "/var/lib/ordivon/worker": "0o710",
+        "/var/cache/ordivon-worker": "0o750",
+        "/run/ordivon": "0o750"
+      },
+      "passed": true
+    },
+    "surrogateWorkerProbe": {
+      "bundleImmutable": true,
+      "bundleReadable": true,
+      "controlHidden": true,
+      "outputWritable": true,
+      "workspaceWritable": true,
+      "surrogateUid": 65534,
+      "passed": true
+    },
+    "supervisorPayloadProbe": {
+      "childExitedZero": true,
+      "payloadUid": 65534,
+      "resultProtected": true,
+      "supervisorUid": 0,
+      "workspaceWritable": true,
+      "passed": true
+    },
+    "currentWorkerExists": false,
+    "repository": {
+      "path": "/root/projects/ordivon-structured-exec-v0",
+      "mode": "0o700",
+      "ownerUid": 0,
+      "ownerGid": 0
+    },
+    "hardCodedRootPaths": {
+      "count": 24,
+      "matches": [
+        {
+          "path": "crates/ordivon-exec/examples/m6_registry_performance.rs",
+          "line": 81,
+          "textDigest": "sha256:f965e44ca95fdc113b8aada4ea2d9f802a22ab2969bfbb7456da8c7e536423f7"
+        },
+        {
+          "path": "crates/ordivon-exec/tests/m6_transactional_runtime.rs",
+          "line": 51,
+          "textDigest": "sha256:4db8f4141508dc1de4bde2360089157c462fc6c0260bed0613417dc25e9acf54"
+        },
+        {
+          "path": "crates/ordivon-exec/tests/m6_transactional_runtime.rs",
+          "line": 180,
+          "textDigest": "sha256:2d78bdb2455cf564748513505a578ddcbda67c3a68d94d9295d9231b8941b466"
+        },
+        {
+          "path": "crates/ordivon-exec/tests/universal_executor_m1.rs",
+          "line": 43,
+          "textDigest": "sha256:e74252900d054fa24bce991bbb03fc0929ecbb87e05aa311e5fff0d353de06d0"
+        },
+        {
+          "path": "crates/ordivon-exec/tests/universal_executor_m3.rs",
+          "line": 42,
+          "textDigest": "sha256:d8e5f164aa785c79816dcb05b5371775e07d3d22afe27a499c17478d12c033cf"
+        },
+        {
+          "path": "crates/ordivon-exec/src/m6/runtime.rs",
+          "line": 1259,
+          "textDigest": "sha256:e62b34d736a9987f3253261ccd06ef432d075258728a95b43c73c4df97e15c85"
+        },
+        {
+          "path": "crates/ordivon-exec/src/job/tests.rs",
+          "line": 17,
+          "textDigest": "sha256:ef243381c1270360ff1534ed18934b91093db6cd17795cfec58f145ba9b8fa5e"
+        },
+        {
+          "path": "crates/ordivon-exec/src/job/tests.rs",
+          "line": 30,
+          "textDigest": "sha256:0d3e473ac0967741ca58fbb15736b4a190ee7d6f8fb914d504179bb0751b4e74"
+        },
+        {
+          "path": "crates/ordivon-exec/src/job/tests.rs",
+          "line": 38,
+          "textDigest": "sha256:35a9b2323c91a9d2f342e88293030a6858f42c5a88563bec4badd1796f86d287"
+        },
+        {
+          "path": "crates/ordivon-exec/src/job/tests.rs",
+          "line": 157,
+          "textDigest": "sha256:f5ae375e6fd2ed22b48ee375b8e892c6f55f84a58f1c30d6b4e46d5842a4b4aa"
+        },
+        {
+          "path": "crates/ordivon-exec/src/job/tests.rs",
+          "line": 178,
+          "textDigest": "sha256:38dc684715a81b83d331bf127ee8c5ab412643c2e0a54d0bf5351fbf076e8dc5"
+        },
+        {
+          "path": "crates/ordivon-exec/src/universal/task/start.rs",
+          "line": 130,
+          "textDigest": "sha256:e62b34d736a9987f3253261ccd06ef432d075258728a95b43c73c4df97e15c85"
+        },
+        {
+          "path": "crates/ordivon-mcp/src/m6/tests.rs",
+          "line": 21,
+          "textDigest": "sha256:0ba7f3c64c9f97223e1f658114a0948a0c459a1a8597f344acc15b27326f8e15"
+        },
+        {
+          "path": "crates/ordivon-mcp/src/m6/tests.rs",
+          "line": 71,
+          "textDigest": "sha256:ac34f47a2d00e10620f90c5dc7b19d688761c3f40fd81cc92a05e8bf86949ef2"
+        },
+        {
+          "path": "crates/ordivon-mcp/src/m6/tests.rs",
+          "line": 76,
+          "textDigest": "sha256:e3791781436e04394cfe3899abd56c327ff3f6813458fa4c86382178350b494f"
+        },
+        {
+          "path": "scripts/mcp/stack_m5_m6.py",
+          "line": 15,
+          "textDigest": "sha256:4ca60ab75c6fe54d84880ffe1dd3f647349107ced606b139b0f0e8c90f835481"
+        },
+        {
+          "path": "scripts/mcp/stack_m5_m6.py",
+          "line": 16,
+          "textDigest": "sha256:5a0680dfade4bea249eb7a0a24c09c4b3301c8ee85c3aa4846df8847dbeea574"
+        },
+        {
+          "path": "scripts/mcp/stack_m6.py",
+          "line": 25,
+          "textDigest": "sha256:19d1bb3fd34670c616091cc4d1201f66498c8904f224b78460f7ab1e0d0a94c4"
+        },
+        {
+          "path": "scripts/mcp/stack_m6.py",
+          "line": 72,
+          "textDigest": "sha256:4ba62a581de378a35db4b3358b312f2dc1a714f745364169f9b4a029bfbcafb9"
+        },
+        {
+          "path": "scripts/mcp/stack.py",
+          "line": 24,
+          "textDigest": "sha256:cb1f1384c239a8b10ef6bf63f40b1376fc0ccefb8a745966a28b74bb714e4ddb"
+        },
+        {
+          "path": "scripts/mcp/stack.py",
+          "line": 71,
+          "textDigest": "sha256:4ba62a581de378a35db4b3358b312f2dc1a714f745364169f9b4a029bfbcafb9"
+        },
+        {
+          "path": "scripts/mcp/m6_dogfood.mjs",
+          "line": 334,
+          "textDigest": "sha256:e77a536dfb5acadd2c283d7dba1ab03653c8091d2b587782803b8125e234cd27"
+        },
+        {
+          "path": "scripts/mcp/m5_shadow.mjs",
+          "line": 29,
+          "textDigest": "sha256:200115b4aaaf30ef142a79cd397c7c143714e1707d291dcef14562a7bdc4492b"
+        },
+        {
+          "path": "scripts/mcp/m5_dogfood.mjs",
+          "line": 295,
+          "textDigest": "sha256:e77a536dfb5acadd2c283d7dba1ab03653c8091d2b587782803b8125e234cd27"
+        }
+      ]
+    },
+    "blockers": [
+      "The real ordivon-worker account has not been applied.",
+      "The trusted Runner and untrusted payload still share one runtime identity.",
+      "M6 control bundle and payload-writable output roots are not yet split.",
+      "Existing test and harness paths still contain root-specific locations.",
+      "A real WSL reboot recovery run has not been executed."
+    ],
+    "readiness": {
+      "designReady": true,
+      "packagingTemplatesValid": true,
+      "surrogateUidIsolationPassed": true,
+      "supervisorPayloadSplitProbePassed": true,
+      "hostRebootOrchestrationAvailable": true,
+      "runtimeChangeApplied": false
+    }
+  }
+}

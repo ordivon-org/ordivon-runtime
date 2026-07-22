@@ -1,0 +1,86 @@
+{
+  "stage_id": "ORDIVON-M7-RUNTIME-HARDENING-PREFLIGHT-2026-07-22",
+  "receipt_type": "R2",
+  "risk_class": "R2",
+  "draft": true,
+  "status": "M7_PREFLIGHT_GATES_PASS_NO_RUNTIME_CHANGE",
+  "task_type": "runtime_hardening_design_and_preflight",
+  "timestamp": "2026-07-22T00:00:00Z",
+  "branch": "agent/m7-runtime-hardening-lifecycle",
+  "base_commit": "c5c908280fdfdfb7699c7f1f2bbd17711be39cfd",
+  "measured_implementation_commit": "bd0ef3f23d5296bcda41e47bd61d2c5190f9f1aa",
+  "files_changed": [
+    "docs/architecture/ordivon-m7-runtime-hardening-lifecycle.md",
+    "docs/audits/runtime/ordivon-m7-preparation-audit-2026-07-22.md",
+    "docs/audits/runtime/ordivon-m7-preflight-evidence-2026-07-22.json",
+    "docs/governance/document-registry.jsonl",
+    "docs/governance/evidence-envelope-v1.schema.json",
+    "packaging/systemd/sysusers.d/ordivon.conf",
+    "packaging/systemd/tmpfiles.d/ordivon.conf",
+    "receipts/governance/ordivon-m7-runtime-hardening-preflight-2026-07-22.json",
+    "scripts/governance/check_evidence_envelope.py",
+    "scripts/governance/stage_closeout.py",
+    "scripts/m7/preflight.py"
+  ],
+  "implemented_contracts": [
+    "M7 runtime-hardening and lifecycle design freeze",
+    "static non-login worker packaging templates validated in an isolated root",
+    "root-owned control and worker-owned execution filesystem topology",
+    "Evidence Envelope v1 schema and fail-closed harness-digest checker",
+    "generic stage closeout state snapshot tool",
+    "surrogate worker isolation probe under real transient systemd",
+    "trusted supervisor and untrusted payload identity-split feasibility probe",
+    "Windows-side WSL reboot orchestration readiness audit"
+  ],
+  "evidence": "The host provides systemd 261, cgroup v2, WSL systemd boot, sysusers/tmpfiles alternate-root validation, transient UID execution, and Windows-side wsl.exe orchestration. The surrogate worker could read but not mutate a root-owned bundle, could not read root control data, and could write only assigned workspace/output roots. A root supervisor bounded to CAP_SETUID and CAP_SETGID dropped a child to the surrogate worker UID; the child could not forge the root-owned result. The measured implementation still contains 24 root-specific path references and applies no runtime change.",
+  "verification_result": "M7 design and preflight are ready for feature-gated M7.1 identity/filesystem work. The real worker account is absent, the M6 runtime path is unchanged, and no reboot, production route, credential, network, push, merge, or deployment action is authorized.",
+  "degraded_reasons": [
+    "The actual ordivon-worker account and filesystem roots have not been applied.",
+    "The current M6 trusted Runner and untrusted payload still share one runtime identity.",
+    "The current M6 bundle, payload output, and trusted result paths are not split.",
+    "Twenty-four root-specific path references remain at the measured commit.",
+    "A real WSL terminate/restart/reconcile matrix has not been executed.",
+    "Retention, quota, garbage collection, backup, restore, and orphan remediation remain designs only.",
+    "Repository document governance retains the exact three pre-existing violations from the M6 base."
+  ],
+  "remaining_debt": [
+    "Apply the static worker through reviewed packaging in M7.1.",
+    "Split root-owned control bundles/results from worker-owned workspace/output.",
+    "Implement Runner child privilege drop with descriptor closure and evidence-forgery tests.",
+    "Remove runtime dependencies on root-home toolchains and caches.",
+    "Implement and execute the externally orchestrated WSL reboot recovery matrix.",
+    "Implement lifecycle and held-orphaned remediation in later M7 subphases."
+  ],
+  "authorization": {
+    "status": "not_requested",
+    "rationale": "M7 preflight uses isolated temporary roots and surrogate identities only. It applies no production, account, route, credential, or external side-effect change."
+  },
+  "next_bounded_action": "Begin M7.1 as a feature-gated identity and filesystem split; do not execute a real reboot until the external orchestrator and recovery manifest receive independent review.",
+  "canonical_sources": [
+    "docs/postmortems/ordivon-m6-postmortem-2026-07-22.md",
+    "docs/architecture/ordivon-m7-runtime-hardening-lifecycle.md",
+    "docs/audits/runtime/ordivon-m7-preparation-audit-2026-07-22.md",
+    "docs/audits/runtime/ordivon-m7-preflight-evidence-2026-07-22.json",
+    "docs/governance/evidence-envelope-v1.schema.json"
+  ],
+  "verification_results": [
+    {
+      "id": "m7-preflight",
+      "command": "run scripts/m7/preflight.py at bd0ef3f",
+      "passed": true,
+      "summary": "Packaging, host, surrogate UID, supervisor/payload split, and WSL orchestration readiness checks passed."
+    },
+    {
+      "id": "evidence-envelope",
+      "command": "validate M7 preflight evidence with common envelope checker",
+      "passed": true,
+      "summary": "Exact revision and all harness digests matched."
+    },
+    {
+      "id": "runtime-change-boundary",
+      "command": "inspect account, repository, units, paths, and readiness flags",
+      "passed": true,
+      "summary": "The real worker is absent and runtimeChangeApplied is false."
+    }
+  ]
+}
