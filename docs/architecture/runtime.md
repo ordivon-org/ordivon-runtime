@@ -69,7 +69,3 @@ artifact.read
 ```
 
 Mature host CLIs remain the preferred extension mechanism. A bespoke Adapter is justified only when repeated real use proves that ordinary command execution cannot provide the required semantics.
-
-## Current deletion target
-
-The candidate still contains an older `job/` capability-policy contract, tracked execution-policy examples, and a `GovernedProfile` plan path with no current MCP caller. They are not current architecture and must leave before repository adoption.

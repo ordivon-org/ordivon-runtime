@@ -13,7 +13,7 @@ CREATE TABLE jobs (
     operation_digest TEXT NOT NULL,
     workspace_id TEXT NOT NULL,
     workspace_snapshot_json TEXT NOT NULL,
-    plan_kind TEXT NOT NULL CHECK (plan_kind IN ('governed_profile','universal_sandbox')),
+    plan_kind TEXT NOT NULL CHECK (plan_kind = 'universal_sandbox'),
     execution_plan_json TEXT NOT NULL,
     execution_plan_digest TEXT NOT NULL,
     policy_id TEXT NOT NULL,

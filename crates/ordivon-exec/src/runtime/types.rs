@@ -10,21 +10,18 @@ pub const MAX_RUNTIME_LIST_LIMIT: u32 = 100;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanKind {
-    GovernedProfile,
     UniversalSandbox,
 }
 
 impl PlanKind {
     pub(crate) fn as_db(self) -> &'static str {
         match self {
-            Self::GovernedProfile => "governed_profile",
             Self::UniversalSandbox => "universal_sandbox",
         }
     }
 
     pub(crate) fn parse(value: &str) -> RuntimeResult<Self> {
         match value {
-            "governed_profile" => Ok(Self::GovernedProfile),
             "universal_sandbox" => Ok(Self::UniversalSandbox),
             _ => Err(RuntimeError::invalid("unknown plan kind", "planKind")),
         }

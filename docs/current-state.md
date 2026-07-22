@@ -53,11 +53,9 @@ The user owns intent, preferences, risk posture, and final commitments. The Agen
 
 Before PR #26 becomes ready:
 
-1. compress the active document surface to `AGENTS.md`, this file, Runtime architecture, and the Runbook;
-2. remove the uncalled legacy `job/` policy contract, tracked execution-policy examples, and `GovernedProfile` path that are not used by the current MCP Runtime;
-3. review the complete `main..candidate` replacement diff for accidental capability loss;
-4. run exact-head Fast, Merge, and Release acceptance;
-5. merge without changing the live 8811 route.
+1. review the complete `main..candidate` replacement diff for accidental capability loss;
+2. run exact-head Fast, Merge, and Release acceptance;
+3. merge without changing the live 8811 route.
 
 Issue #25 remains the only open implementation Issue until this state change is complete.
 

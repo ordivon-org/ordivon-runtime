@@ -1,6 +1,7 @@
 mod engine;
 mod error;
 mod registry;
+mod supervisor;
 mod types;
 
 pub use engine::{Runtime, RuntimeConfig};

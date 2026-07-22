@@ -8,23 +8,22 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::universal::{
-    canonical_directory, load_workspace_record, resolve_workspace_cwd, sha256_bytes, sha256_file,
-    write_json_atomic, CapturedOutput, RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskRequest,
-    RunnerTaskResult, TaskTerminalStatus, UniversalExecutorConfig, UNIVERSAL_EXEC_SCHEMA_VERSION,
-};
-use crate::{
-    classify_supervisor_recovery, JobInternalState, RunnerResultObservation, SupervisorIdentity,
-    SupervisorObservation, SupervisorRecoveryDisposition, SupervisorUnitState, TerminationIntent,
-};
-
 use super::registry::JobSnapshot;
+use super::supervisor::{
+    classify_supervisor_recovery, SupervisorIdentity, SupervisorObservation,
+    SupervisorRecoveryDisposition, SupervisorUnitState, TerminationIntent,
+};
 use super::{
     AdmissionOutcome, ArtifactReadRequest, ArtifactReadResult, ArtifactRegistration, AttemptRecord,
     AttemptState, PlanKind, Registry, RegistryConfig, RunnerIdentity, RuntimeError,
     RuntimeErrorCode, RuntimeExecutionPlan, RuntimeJobListRequest, RuntimeJobListResult,
     RuntimeResult, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
     TaskRunRequest, TerminalCommit, RUNTIME_SCHEMA_VERSION,
+};
+use crate::universal::{
+    canonical_directory, load_workspace_record, resolve_workspace_cwd, sha256_bytes, sha256_file,
+    write_json_atomic, CapturedOutput, RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskRequest,
+    RunnerTaskResult, TaskTerminalStatus, UniversalExecutorConfig, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
 const RUNNER_REQUEST_FILE: &str = "request.json";
@@ -882,29 +881,19 @@ impl Runtime {
                 TerminationIntent::DeadlineExceeded
             }
         };
-        let disposition = classify_supervisor_recovery(
-            &expected,
-            &observation,
-            RunnerResultObservation::Missing,
-            intent,
-        )
-        .map_err(|error| {
-            RuntimeError::new(
-                RuntimeErrorCode::RegistryCorrupt,
-                format!("supervisor recovery classification failed: {error}"),
-                Some("attemptId"),
-                false,
-            )
-        })?;
+        let disposition =
+            classify_supervisor_recovery(&expected, &observation, intent).map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    format!("supervisor recovery classification failed: {error}"),
+                    Some("attemptId"),
+                    false,
+                )
+            })?;
         match disposition {
             SupervisorRecoveryDisposition::Running => Ok(()),
-            SupervisorRecoveryDisposition::Terminal { state, .. } => {
-                self.commit_control_terminal(
-                    attempt,
-                    map_job_state(state)?,
-                    "SUPERVISOR_TERMINAL_FALLBACK",
-                    None,
-                )?;
+            SupervisorRecoveryDisposition::Terminal(state) => {
+                self.commit_control_terminal(attempt, state, "SUPERVISOR_TERMINAL_FALLBACK", None)?;
                 Ok(())
             }
             SupervisorRecoveryDisposition::Lost => {
@@ -916,7 +905,7 @@ impl Runtime {
                 )?;
                 Ok(())
             }
-            SupervisorRecoveryDisposition::Orphaned { reason } => {
+            SupervisorRecoveryDisposition::Orphaned(reason) => {
                 self.commit_control_terminal(
                     attempt,
                     AttemptState::Orphaned,
@@ -1688,23 +1677,6 @@ fn supervisor_identity(attempt: &AttemptRecord) -> RuntimeResult<SupervisorIdent
             )
         })?,
     })
-}
-
-fn map_job_state(state: JobInternalState) -> RuntimeResult<AttemptState> {
-    match state {
-        JobInternalState::Succeeded => Ok(AttemptState::Succeeded),
-        JobInternalState::Failed => Ok(AttemptState::Failed),
-        JobInternalState::TimedOut => Ok(AttemptState::TimedOut),
-        JobInternalState::Cancelled => Ok(AttemptState::Cancelled),
-        JobInternalState::Lost => Ok(AttemptState::Lost),
-        JobInternalState::Orphaned => Ok(AttemptState::Orphaned),
-        _ => Err(RuntimeError::new(
-            RuntimeErrorCode::RegistryCorrupt,
-            "supervisor terminal classification returned a non-terminal state",
-            Some("state"),
-            false,
-        )),
-    }
 }
 
 fn process_identity(pid: u32) -> Option<String> {

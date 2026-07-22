@@ -21,7 +21,7 @@ const MIGRATION_V1: i64 = 1;
 const MIGRATION_V1_NAME: &str = "0001_runtime";
 const MIGRATION_V1_SQL: &str = include_str!("../../migrations/runtime/0001_runtime.sql");
 pub const RUNTIME_MIGRATION_CHECKSUM: &str =
-    "sha256:73b1462cdfe91640af266eb55c953a32149fccac53c0bada3b11c9e84fa1a78f";
+    "sha256:0711776bd2d2a6d50793971cbcde1c9a295991e32731f6a5db42024299ba898b";
 const MAX_MIGRATION_VERSION: i64 = 1;
 
 #[derive(Clone, Debug)]
