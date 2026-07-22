@@ -40,11 +40,11 @@ The installable unit and environment example are under `packaging/systemd/`. The
 mcp.ordivon.com
 → Cloudflare Tunnel
 → localhost:8811
-→ Supergateway
-→ Desktop Commander
+→ ordivon-mcp
+→ ordivon-exec
 ```
 
-This live route is not the Rust candidate.
+The former Supergateway/Desktop Commander unit is retained in a stopped state for immediate rollback, not as the normal execution path.
 
 ## Local adoption sequence
 

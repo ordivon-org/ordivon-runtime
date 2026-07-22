@@ -20,7 +20,7 @@ Ordivon follows three engineering defaults:
 
 ## Current surface
 
-- one `ordivon-mcp` server and nine MCP tools;
+- one `ordivon-mcp` server and ten MCP tools;
 - one `ordivon-exec` Runtime;
 - SQLite Job and Attempt truth;
 - systemd/cgroup process ownership;

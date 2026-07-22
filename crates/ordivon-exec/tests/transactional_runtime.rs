@@ -2,7 +2,7 @@
 
 use ordivon_exec::{
     create_git_workspace, remove_git_workspace, write_workspace_text, ArtifactReadRequest,
-    AttemptState, GitWorkspaceCreateRequest, PlanKind, RegistryConfig, Runtime, RuntimeConfig,
+    AttemptState, GitWorkspaceCreateRequest, RegistryConfig, Runtime, RuntimeConfig,
     RuntimeExecutionPlan, RuntimeJobListRequest, SubmitRequest, TaskCancelRequest,
     TaskObserveRequest, TaskRunRequest, UniversalExecutionRequest, UniversalExecutorConfig,
     WorkspaceWriteRequest, MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS,
@@ -100,13 +100,7 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
         schema_version: RUNTIME_SCHEMA_VERSION,
         client_request_id: format!("request:it:{}", Uuid::now_v7()),
         principal: "principal:integration".to_string(),
-        authority_ref: "authority:local-test".to_string(),
-        policy_id: "policy:runtime-local-test".to_string(),
-        policy_version: "1".to_string(),
-        policy_digest: digest(b"policy:runtime-local-test:1"),
-        profile_id: None,
         global_limit: 2,
-        profile_limit: None,
         execution: UniversalExecutionRequest {
             workspace_id: workspace_id.clone(),
             executable: "/usr/bin/python3.14".to_string(),
@@ -250,13 +244,7 @@ impl IntegrationContext {
             schema_version: RUNTIME_SCHEMA_VERSION,
             client_request_id: format!("request:{script}:{}", Uuid::now_v7()),
             principal: "principal:integration".to_string(),
-            authority_ref: "authority:local-test".to_string(),
-            policy_id: "policy:runtime-local-test".to_string(),
-            policy_version: "1".to_string(),
-            policy_digest: digest(b"policy:runtime-local-test:1"),
-            profile_id: None,
             global_limit: 8,
-            profile_limit: None,
             execution: UniversalExecutionRequest {
                 workspace_id: self.workspace_id.clone(),
                 executable: "/usr/bin/python3.14".to_string(),
@@ -415,7 +403,6 @@ impl IntegrationContext {
             client_request_id: client_request_id.to_string(),
             plan: RuntimeExecutionPlan {
                 schema_version: RUNTIME_SCHEMA_VERSION,
-                plan_kind: PlanKind::UniversalSandbox,
                 workspace_id: self.workspace_id.clone(),
                 workspace_path: workspace.to_string_lossy().into_owned(),
                 source_revision: self.revision.clone(),
@@ -427,15 +414,9 @@ impl IntegrationContext {
                 timeout_ms: 10_000,
                 stdout_limit_bytes: 65_536,
                 stderr_limit_bytes: 65_536,
-                policy_id: "policy:runtime-local-test".to_string(),
-                policy_version: "1".to_string(),
-                policy_digest: digest(b"policy:runtime-local-test:1"),
-                profile_id: None,
                 principal: "principal:integration".to_string(),
-                authority_ref: "authority:local-test".to_string(),
             },
             global_limit,
-            profile_limit: None,
         }
     }
 }

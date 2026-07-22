@@ -21,17 +21,11 @@ MCP client
 → reconciliation
 ```
 
-The public MCP surface contains nine tools: workspace open, read, mutate, diff, and exec; task observe, cancel, and list; and Artifact read.
+The public MCP surface contains ten tools: workspace open, close, read, mutate, diff, and exec; task observe, cancel, and list; and Artifact read.
 
-## Three distinct truths
+## Current deployment truth
 
-| Surface | Current truth |
-|---|---|
-| Repository `main` | Pre-adoption mainline; it does not contain the simplification candidate. |
-| Candidate | `agent/post-m-series-simplification`, Issue #25, Draft PR #26. |
-| Live remote service | `mcp.ordivon.com` still reaches Supergateway and Desktop Commander on port 8811. |
-
-Never present candidate code as merged code or local E2E evidence as proof of the live Cloudflare route.
+Repository `main` contains the simplified Runtime. The Rust service is installed locally and the production hostname is being moved from the retained Desktop Commander bridge to the Rust MCP. Exact truth remains observable through Git, systemd, listeners, and the Cloudflare origin.
 
 ## Three long-term shifts
 
@@ -47,17 +41,17 @@ Git owns code history and rollback. SQLite, systemd/cgroups, and bounded result 
 
 The user owns intent, preferences, risk posture, and final commitments. The Agent owns implementation, testing, repair, and ordinary operations. The Runtime owns durable execution identity and recovery. Classical engineering mechanisms remain where they produce causal feedback or preserve reality, not as ceremony.
 
-## Only active repository milestone
+## Current operational milestone
 
-**Adopt the simplified Runtime into `main` as the single current architecture.**
+**Complete production use of the merged Runtime without rebuilding a governance platform.**
 
-Before PR #26 becomes ready:
+Exit conditions:
 
-1. review the complete `main..candidate` replacement diff for accidental capability loss;
-2. run exact-head Fast, Merge, and Release acceptance;
-3. merge without changing the live 8811 route.
-
-Issue #25 remains the only open implementation Issue until this state change is complete.
+1. the minimal Registry and ten-tool MCP run on the installed Rust service;
+2. Ordivon, FinHarness, and research Dogfood tasks complete through the Runtime;
+3. completed workspaces can be closed and removed;
+4. backup and restore preserve the minimal Registry;
+5. the production Cloudflare origin reaches the Rust MCP while the old bridge remains available only for rollback.
 
 ## Post-adoption route
 

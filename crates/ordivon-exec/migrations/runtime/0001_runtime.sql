@@ -13,14 +13,8 @@ CREATE TABLE jobs (
     operation_digest TEXT NOT NULL,
     workspace_id TEXT NOT NULL,
     workspace_snapshot_json TEXT NOT NULL,
-    plan_kind TEXT NOT NULL CHECK (plan_kind = 'universal_sandbox'),
     execution_plan_json TEXT NOT NULL,
     execution_plan_digest TEXT NOT NULL,
-    policy_id TEXT NOT NULL,
-    policy_version TEXT NOT NULL,
-    policy_digest TEXT NOT NULL,
-    authority_ref TEXT NOT NULL,
-    profile_id TEXT,
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     desired_state TEXT NOT NULL CHECK (desired_state IN ('run','cancelled')),
     resolution TEXT CHECK (resolution IS NULL OR resolution IN ('succeeded','failed','timed_out','cancelled','lost','orphaned')),
@@ -67,9 +61,7 @@ CREATE TABLE idempotency_keys (
 CREATE TABLE concurrency_reservations (
     reservation_id TEXT PRIMARY KEY,
     attempt_id TEXT NOT NULL UNIQUE REFERENCES attempts(attempt_id) ON DELETE RESTRICT,
-    profile_id TEXT,
     global_limit INTEGER NOT NULL CHECK (global_limit > 0),
-    profile_limit INTEGER CHECK (profile_limit IS NULL OR profile_limit > 0),
     state TEXT NOT NULL CHECK (state IN ('active','held_orphaned','released')),
     acquired_at_ms INTEGER NOT NULL CHECK (acquired_at_ms >= 0),
     released_at_ms INTEGER CHECK (released_at_ms IS NULL OR released_at_ms >= 0),
@@ -120,7 +112,7 @@ CREATE TABLE attempt_conditions (
 CREATE INDEX idx_jobs_created ON jobs(created_at_ms, job_id);
 CREATE INDEX idx_attempts_nonterminal ON attempts(state, created_at_ms);
 CREATE INDEX idx_events_job_sequence ON job_events(job_id, event_sequence);
-CREATE INDEX idx_reservations_active ON concurrency_reservations(state, profile_id);
+CREATE INDEX idx_reservations_active ON concurrency_reservations(state);
 
 CREATE TRIGGER job_events_no_update
 BEFORE UPDATE ON job_events

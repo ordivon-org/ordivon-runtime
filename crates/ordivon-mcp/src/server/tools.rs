@@ -25,6 +25,39 @@ impl OrdivonServer {
     }
 
     #[tool(
+        name = "workspace.close",
+        description = "Remove one Git workspace and its workspace record after its work is complete.",
+        annotations(
+            title = "Close workspace",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_close(
+        &self,
+        Parameters(request): Parameters<WorkspaceCloseRequest>,
+    ) -> ToolOutcome<WorkspaceCloseResult> {
+        let config = self.state.executor.clone();
+        let workspace_id = request.workspace_id;
+        self.run_core("workspace.close", move || {
+            if request.schema_version != ordivon_exec::UNIVERSAL_EXEC_SCHEMA_VERSION {
+                return Err(ToolError::invalid(
+                    "unsupported workspace schema version",
+                    "schemaVersion",
+                ));
+            }
+            remove_git_workspace(&config, &workspace_id).map_err(ToolError::from)?;
+            Ok(WorkspaceCloseResult {
+                workspace_id,
+                removed: true,
+            })
+        })
+        .await
+    }
+
+    #[tool(
         name = "workspace.read",
         description = "Read bounded UTF-8 content from an isolated workspace in FULL or SLICE mode.",
         annotations(
@@ -142,7 +175,7 @@ impl OrdivonServer {
 
     #[tool(
         name = "workspace.exec",
-        description = "Run one command with the server's configured authority. The server owns identity, policy metadata, concurrency, Job IDs, and Attempt IDs; duplicate clientRequestId values are idempotent.",
+        description = "Run one command with the server's configured authority. The server owns identity, concurrency, Job IDs, and Attempt IDs; duplicate clientRequestId values are idempotent.",
         execution(task_support = "optional"),
         annotations(
             title = "Execute transactional workspace job",

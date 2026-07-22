@@ -30,6 +30,7 @@ EXPECTED_TOOLS = {
     "task.cancel",
     "task.list",
     "task.observe",
+    "workspace.close",
     "workspace.diff",
     "workspace.exec",
     "workspace.mutate",
@@ -528,6 +529,15 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             },
         )
         check("restart-observe", after_restart.get("status") == "succeeded", after_restart)
+        closed = client.tool(
+            "workspace.close",
+            {"schemaVersion": SCHEMA_VERSION, "workspaceId": workspace_id},
+        )
+        check(
+            "workspace-close",
+            closed.get("workspaceId") == workspace_id and closed.get("removed") is True,
+            closed,
+        )
         result["status"] = "passed"
     finally:
         server.stop()

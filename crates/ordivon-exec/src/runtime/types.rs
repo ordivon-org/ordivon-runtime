@@ -9,27 +9,6 @@ pub const MAX_RUNTIME_LIST_LIMIT: u32 = 100;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PlanKind {
-    UniversalSandbox,
-}
-
-impl PlanKind {
-    pub(crate) fn as_db(self) -> &'static str {
-        match self {
-            Self::UniversalSandbox => "universal_sandbox",
-        }
-    }
-
-    pub(crate) fn parse(value: &str) -> RuntimeResult<Self> {
-        match value {
-            "universal_sandbox" => Ok(Self::UniversalSandbox),
-            _ => Err(RuntimeError::invalid("unknown plan kind", "planKind")),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum JobDesiredState {
     Run,
     Cancelled,
@@ -279,7 +258,6 @@ impl ReservationState {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeExecutionPlan {
     pub schema_version: u32,
-    pub plan_kind: PlanKind,
     pub workspace_id: String,
     pub workspace_path: String,
     pub source_revision: String,
@@ -293,13 +271,7 @@ pub struct RuntimeExecutionPlan {
     pub timeout_ms: u64,
     pub stdout_limit_bytes: u64,
     pub stderr_limit_bytes: u64,
-    pub policy_id: String,
-    pub policy_version: String,
-    pub policy_digest: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
     pub principal: String,
-    pub authority_ref: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
@@ -309,8 +281,6 @@ pub struct SubmitRequest {
     pub client_request_id: String,
     pub plan: RuntimeExecutionPlan,
     pub global_limit: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
@@ -323,15 +293,8 @@ pub struct RuntimeJobRecord {
     pub operation_digest: String,
     pub workspace_id: String,
     pub workspace_snapshot_json: String,
-    pub plan_kind: PlanKind,
     pub execution_plan_json: String,
     pub execution_plan_digest: String,
-    pub policy_id: String,
-    pub policy_version: String,
-    pub policy_digest: String,
-    pub authority_ref: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
     pub created_at_ms: u64,
     pub desired_state: JobDesiredState,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -385,11 +348,7 @@ pub struct AttemptRecord {
 pub struct ReservationRecord {
     pub reservation_id: String,
     pub attempt_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
     pub global_limit: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_limit: Option<u32>,
     pub state: ReservationState,
     pub acquired_at_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -544,15 +503,7 @@ pub struct TaskRunRequest {
     pub schema_version: u32,
     pub client_request_id: String,
     pub principal: String,
-    pub authority_ref: String,
-    pub policy_id: String,
-    pub policy_version: String,
-    pub policy_digest: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
     pub global_limit: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_limit: Option<u32>,
     pub execution: UniversalExecutionRequest,
     #[serde(default = "default_task_wait_ms")]
     pub wait_ms: u64,

@@ -6,6 +6,7 @@ It serves Streamable HTTP on a loopback address, requires a random bearer token,
 
 ```text
 workspace.open
+workspace.close
 workspace.read
 workspace.mutate
 workspace.diff
@@ -16,6 +17,6 @@ task.list
 artifact.read
 ```
 
-The adapter owns protocol schemas, MCP Task projection, transport authentication, and conversion between tool results and Runtime results. It also binds server-owned Principal, authority, policy identity, and concurrency limits so the Agent does not submit self-asserted governance metadata. Filesystem, Git, execution, idempotency, cancellation, result, and reconciliation semantics remain in `ordivon-exec`.
+The adapter owns protocol schemas, MCP Task projection, transport authentication, and conversion between tool results and Runtime results. It binds the server-owned Principal and global concurrency limit; no policy or profile objects are part of the execution contract. Filesystem, Git, execution, idempotency, cancellation, result, and reconciliation semantics remain in `ordivon-exec`.
 
 `trusted-local` is the default and inherits the service user's host authority. `isolated` explicitly activates the reduced-authority non-root worker boundary.

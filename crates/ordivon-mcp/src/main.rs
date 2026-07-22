@@ -258,19 +258,6 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     }
     let principal =
         std::env::var("ORDIVON_PRINCIPAL").unwrap_or_else(|_| "principal:local-owner".to_string());
-    let (authority_ref, policy_id, policy_digest) = match execution_mode {
-        ExecutionMode::TrustedLocal => (
-            "authority:trusted-local",
-            "ordivon.runtime.trusted.v1",
-            "sha256:3609e7bd56a9b54f560f5905787a90e64c0b178510163b1d2c0b954cd05f8c59",
-        ),
-        ExecutionMode::Isolated => (
-            "authority:isolated",
-            "ordivon.runtime.isolated.v1",
-            "sha256:bee653e0cc6304f41739c38fc9675da02a5092134b28d5d8c7a7f0b3c38474ce",
-        ),
-    };
-
     let (workspace_root, workspace_uid, workspace_gid, hardening) = match execution_mode {
         ExecutionMode::TrustedLocal => (None, None, None, None),
         ExecutionMode::Isolated => {
@@ -328,10 +315,6 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
             },
             execution: ExecutionContext {
                 principal,
-                authority_ref: authority_ref.to_string(),
-                policy_id: policy_id.to_string(),
-                policy_version: "1".to_string(),
-                policy_digest: policy_digest.to_string(),
                 global_limit,
             },
             trace_path,
