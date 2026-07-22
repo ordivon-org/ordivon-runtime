@@ -32,7 +32,7 @@ Everything reconstructable from these sources should remain reconstructable rath
 
 ## Authority
 
-`trusted-local` is the default. A task inherits the Ordivon service user's network, environment, credentials, filesystem access, Git remotes, Docker, systemd, cloud tooling, and executable surface. The server binds the Principal and global concurrency limit once from deployment configuration. Policy, profile, authority-reference, and one-value plan-kind fields are not persisted because they do not contribute to recovery.
+`trusted-local` is the default. A task inherits the Ordivon service user's network, environment, credentials, filesystem access, Git remotes, Docker, systemd, cloud tooling, and executable surface. The server binds the Principal and global concurrency limit once from deployment configuration. Local HTTP uses a fixed Bearer token; an explicitly enabled Cloudflare Access path accepts the Access JWT assertion at the loopback origin. Policy, profile, authority-reference, and one-value plan-kind fields are not persisted because they do not contribute to recovery.
 
 `isolated` is an explicit reduced-authority mode for untrusted input. It activates the non-root worker, private network and filesystem views, hidden credentials and host-control paths, and systemd hardening.
 

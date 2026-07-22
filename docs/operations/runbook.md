@@ -32,7 +32,7 @@ ORDIVON_RUNNER_PATH
 
 `trusted-local` is the default. Executable roots default to `/`, so the service user may run any accessible executable. Set `ORDIVON_EXECUTION_MODE=isolated` only for an explicitly reduced-authority task and provide the isolated worker roots and UID/GID.
 
-The installable unit and environment example are under `packaging/systemd/`. The server remains loopback-bound and bearer-authenticated; Cloudflare Access and Tunnel authenticate and transport remote calls.
+The installable unit and environment example are under `packaging/systemd/`. The server remains loopback-bound. Local callers use the fixed Bearer token; set `ORDIVON_TRUST_CF_ACCESS=true` when Cloudflare Access protects the remote hostname so Access-authenticated requests may use its injected JWT assertion.
 
 ## Current live topology
 
@@ -44,7 +44,7 @@ mcp.ordivon.com
 → ordivon-exec
 ```
 
-The former Supergateway/Desktop Commander unit is retained in a stopped state for immediate rollback, not as the normal execution path.
+The former Supergateway/Desktop Commander unit remains on port 8811 outside the production Tunnel route for immediate rollback; it is not the normal execution path.
 
 ## Local adoption sequence
 

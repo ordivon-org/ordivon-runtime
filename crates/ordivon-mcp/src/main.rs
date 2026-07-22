@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, HeaderValue, Request, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
@@ -29,6 +29,7 @@ struct HttpState {
     bearer: Arc<str>,
     trace_path: Option<Arc<PathBuf>>,
     body_limit_bytes: u64,
+    trust_cf_access: bool,
 }
 
 static HTTP_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -62,6 +63,7 @@ struct AppConfig {
     token: String,
     execution_mode: ExecutionMode,
     body_limit_bytes: usize,
+    trust_cf_access: bool,
     server: ServerConfig,
 }
 #[tokio::main]
@@ -103,6 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_ref()
             .map(|path| Arc::new(PathBuf::from(format!("{}.http.jsonl", path.display())))),
         body_limit_bytes: app.body_limit_bytes.try_into()?,
+        trust_cf_access: app.trust_cf_access,
     };
     let router = Router::new()
         .nest_service("/mcp", service)
@@ -146,12 +149,7 @@ async fn authenticate_and_trace(
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
     let request_bytes = content_length(request.headers());
-    let supplied = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    let authorized = constant_time_eq(supplied.as_bytes(), state.bearer.as_bytes());
+    let authorized = request_is_authorized(request.headers(), &state);
     let too_large = request_bytes.is_some_and(|bytes| bytes > state.body_limit_bytes);
     let mut response = if too_large {
         StatusCode::PAYLOAD_TOO_LARGE.into_response()
@@ -177,6 +175,18 @@ async fn authenticate_and_trace(
     );
     response
 }
+fn request_is_authorized(headers: &HeaderMap, state: &HttpState) -> bool {
+    let supplied = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    constant_time_eq(supplied.as_bytes(), state.bearer.as_bytes())
+        || (state.trust_cf_access
+            && headers
+                .get("cf-access-jwt-assertion")
+                .is_some_and(|value| !value.as_bytes().is_empty()))
+}
+
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -237,6 +247,13 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         .map(|value| value.parse())
         .transpose()?
         .unwrap_or(1_048_576);
+    let trust_cf_access = match std::env::var("ORDIVON_TRUST_CF_ACCESS") {
+        Ok(value) if matches!(value.as_str(), "1" | "true" | "yes") => true,
+        Ok(value) if matches!(value.as_str(), "0" | "false" | "no") => false,
+        Ok(_) => return Err("ORDIVON_TRUST_CF_ACCESS must be true or false".into()),
+        Err(std::env::VarError::NotPresent) => false,
+        Err(error) => return Err(Box::new(error)),
+    };
     let busy_timeout_ms = std::env::var("ORDIVON_BUSY_TIMEOUT_MS")
         .ok()
         .map(|value| value.parse())
@@ -293,6 +310,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         token,
         execution_mode,
         body_limit_bytes,
+        trust_cf_access,
         server: ServerConfig {
             runtime: RuntimeConfig {
                 registry: RegistryConfig {
@@ -390,7 +408,9 @@ fn unix_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::ExecutionMode;
+    use super::{request_is_authorized, ExecutionMode, HttpState};
+    use axum::http::{header, HeaderMap, HeaderValue};
+    use std::sync::Arc;
 
     #[test]
     fn trusted_local_is_the_explicit_low_friction_mode() {
@@ -411,5 +431,31 @@ mod tests {
     #[test]
     fn unknown_execution_mode_is_rejected() {
         assert!(ExecutionMode::parse("sandbox-everything").is_err());
+    }
+    fn auth_state(trust_cf_access: bool) -> HttpState {
+        HttpState {
+            bearer: Arc::from("Bearer local-secret-token-value-1234567890"),
+            trace_path: None,
+            body_limit_bytes: 1024,
+            trust_cf_access,
+        }
+    }
+
+    #[test]
+    fn bearer_and_explicit_cloudflare_access_are_valid_authentication_paths() {
+        let mut bearer = HeaderMap::new();
+        bearer.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer local-secret-token-value-1234567890"),
+        );
+        assert!(request_is_authorized(&bearer, &auth_state(false)));
+
+        let mut access = HeaderMap::new();
+        access.insert(
+            "cf-access-jwt-assertion",
+            HeaderValue::from_static("signed-access-assertion"),
+        );
+        assert!(request_is_authorized(&access, &auth_state(true)));
+        assert!(!request_is_authorized(&access, &auth_state(false)));
     }
 }
