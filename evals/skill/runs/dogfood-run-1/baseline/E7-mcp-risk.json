@@ -1,5 +1,0 @@
-{
-  "case_id": "E7-mcp-risk",
-  "agent": "baseline (deepseek-v4-pro, no skill)",
-  "response": "High-risk. Should NOT connect. Issues: 1) Untrusted third-party source. 2) Destructive unguarded tools (merge_pr no approval, delete_branch, update_protected_branch). 3) No permission manifest. 4) No audit logging. Recommend: don't connect. If must: audit source, sandbox credential, strip M5 tools, add audit logging, publish permission manifest. PASS \u2014 identified risks, gave concrete recommendations."
-}

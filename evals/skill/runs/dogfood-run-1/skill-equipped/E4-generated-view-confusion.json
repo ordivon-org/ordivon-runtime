@@ -1,5 +1,0 @@
-{
-  "case_id": "E4-generated-view-confusion",
-  "agent": "skill-equipped (deepseek-v4-pro, ordivon-core-method loaded)",
-  "response": "Generated View vs Source (MEM3 boundary):\nMemory said \"15 active checkers.\" Verified source: checkers/ has 4 empty directories, 0 active checkers (no .py, .md, or .json files excluding .gitkeep).\nAnswer: 0 active checkers. 4 directories reserved. Memory marked as MEM5 (stale) from old monorepo era.\nStatus: PASS. Verified source, reported 0, flagged memory stale."
-}

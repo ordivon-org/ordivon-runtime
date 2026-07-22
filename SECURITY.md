@@ -1,43 +1,33 @@
 # Security Policy
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
-Do NOT open a public issue. Email the repository owner with `[SECURITY]` in subject.
-Include: affected component, steps to reproduce, impact assessment.
-Acknowledgment within 7 days.
+Do not open a public issue. Contact the repository owner with `[SECURITY]` in the subject and include the affected component, reproduction steps, and impact.
 
-## Supported Versions
+## Supported version
 
-Only `main` branch. No backports. No LTS.
+Only the current `main` branch is supported. There are no backports or LTS branches.
 
-## Design Principles
+## Active security boundary
 
-1. **Default-deny tool surface** — tools denied by default, explicitly granted
-2. **Adapter isolation** — external data flows through governance normalizer
-3. **No model-as-authority** — AI proposes, system decides
-4. **Evidence immutability** — receipts written once, never mutated
-5. **Graceful degradation** — DEGRADED ≠ BROKEN, every service has fallback
+Ordivon treats ordinary code and Git-backed file changes as reversible. Strong controls are reserved for boundaries that cannot be reconstructed safely:
 
-## Infrastructure Security
+- credentials and bearer tokens;
+- irreversible external side effects;
+- ambiguous dispatch after a Core or transport failure;
+- idempotency and concurrent reservation ownership;
+- process-tree ownership, timeout, cancellation, and bounded output;
+- persistent Job, Attempt, result, and artifact truth.
 
-| Component | Auth | Network |
-|-----------|------|---------|
-| PostgreSQL | scram-sha-256 | Local-only |
-| NATS | Token | Local-only |
-| Temporal | None (local dev) | Local-only |
-| OPA | CLI eval (not server) | N/A |
+The local HTTP surface must bind to loopback, use a random bearer token, and bound request bodies. Strong non-root isolation is available for untrusted repositories and scripts rather than imposed on every trusted-local task.
 
-## Known Security Gaps
+## Supply chain
 
-1. Temporal authentication disabled — local dev mode
-2. OPA runs as CLI, not server — no auth required
-3. No SAST in CI — Gitleaks covers secret detection
-4. No network-level container isolation — acceptable for local dev
-5. 4 Rust dependency vulns tracked by CI cargo-deny
+- Gitleaks runs on pull requests and pushes to `main`.
+- Dependabot covers Cargo and GitHub Actions weekly.
+- CodeQL, `cargo audit`, and `cargo deny` are on-demand checks for dependency, security, or release work.
+- The default CI does not publish packages, containers, or SBOMs.
 
-## Supply Chain
+## Recovery
 
-- Dependabot: weekly for GitHub Actions, uv
-- Gitleaks: CI hard gate
-- Docker images: pinned digests via `docker.m.daocloud.io` mirror
-- Python: uv.lock committed, pyproject.toml as source
+The complete pre-simplification tree is recoverable from Git tag `m-series-closed-2026-07-22`.

@@ -1,57 +1,44 @@
 # Contributing to Ordivon
 
-Ordivon is a governance system, not a general-purpose framework.
-Contributions must respect the boundaries defined in [AGENTS.md](AGENTS.md).
+Ordivon optimizes for one understandable execution path, minimal active context, and rapid recovery.
 
-## Setup
+## Start from current truth
 
-```bash
-git clone <repo-url> ordivon
-cd ordivon
-uv sync --extra dev
-docker compose -f docker-compose.infrastructure.yml up -d
-PYTHONPATH=.:src .venv/bin/python scripts/verify_infrastructure.py
+Read `AGENTS.md` and `docs/current-state.md`. Confirm the branch, exact HEAD, relevant source and tests, and live topology. Do not load historical reports by default.
+
+## Issue contract
+
+An implementation Issue describes one observable state change:
+
+```text
+current state
+→ one bounded change
+→ target state
+→ reproducible exit evidence
 ```
 
-## Infrastructure
+Keep only work that is ready for the active milestone open. Do not use Issues as product encyclopedias, capability catalogues, or permanent roadmaps.
 
-| Service | Port |
-|---------|------|
-| PostgreSQL | 5432 |
-| NATS | 4222 |
-| Temporal | 7233 |
+## Change contract
 
-OpenFGA and MinIO are stopped (zero production consumers).
+Every persistent addition must name:
 
-## Before Committing
+1. the observed failure or missing capability;
+2. why the current code, Git, tests, Runtime, or an existing CLI cannot solve it;
+3. the structure it replaces.
+
+Preserve unrelated user changes. Prefer isolated worktrees and ordinary Git rollback. Do not add parallel execution paths, document Registries, Receipt hierarchies, evidence envelopes, wording gates, per-tool approval systems, or speculative Adapters.
+
+`trusted-local` inherits the service user's authority. `isolated` is explicit. Preserve Runtime invariants such as idempotency, ambiguous-dispatch handling, cgroup ownership, cancellation, result identity, and reconciliation without treating them as restrictions on Agent capability.
+
+## Verification
+
+Run the smallest checks that can invalidate the changed boundary:
 
 ```bash
-# Lint
-uv run ruff check src/ scripts/ tests/ state/
-uv run ruff format --check --preview src/ scripts/ tests/ state/
-
-# Governance
-PYTHONPATH=.:src .venv/bin/python scripts/check_document_registry.py
-PYTHONPATH=.:src .venv/bin/python -m ordivon_verify all --check
-
-# Tests
-PYTHONPATH=.:src .venv/bin/python -m pytest -q tests/
+cargo fmt --check
 cargo test --workspace
+ruff check scripts/
 ```
 
-## Document Governance
-
-New documents must be registered in `docs/governance/document-registry.jsonl`.
-Run `check_document_registry.py` to validate.
-
-## Architecture Rules
-
-- Core never imports from Pack/Adapter
-- PostgreSQL is the canonical data store
-- JSONL files are exports, not truth sources
-- Receipts are created once, never modified
-- All outputs carry `draft: true` — status requires evidence + authority
-
-## Debt
-
-Register unresolved issues in `docs/governance/dependency-audit-debts.jsonl`.
+Use stronger integration or Release checks when systemd, cgroups, persistence, transport, isolation, or deployment behavior changes.

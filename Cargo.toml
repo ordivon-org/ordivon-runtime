@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "crates/ordivon-kernel",
-    "crates/ordivon-ledger",
+    "crates/ordivon-mcp",
+    "crates/ordivon-exec",
 ]
 resolver = "2"
 
@@ -11,12 +11,19 @@ license = "Proprietary"
 version = "0.1.0"
 
 [workspace.dependencies]
-base64 = "0.22"
-ed25519-dalek = "2"
+axum = { version = "0.8", features = ["http1", "tokio"] }
 hex = "0.4"
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = "1"
+rmcp = { version = "2.2.0", default-features = false, features = ["server", "macros"] }
+rusqlite = { version = "=0.32.1", features = ["bundled", "backup"] }
 sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "json"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tower-http = { version = "0.6", features = ["limit"] }
+uuid = { version = "=1.24.0", features = ["serde", "v7"] }

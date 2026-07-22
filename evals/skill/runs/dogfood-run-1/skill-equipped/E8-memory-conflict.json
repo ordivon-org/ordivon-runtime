@@ -1,5 +1,0 @@
-{
-  "case_id": "E8-memory-conflict",
-  "agent": "skill-equipped (deepseek-v4-pro, ordivon-core-method loaded)",
-  "response": "Memory Conflict (MEM2 vs Source):\nMemory claimed \"duckdb is primary.\" Verified source: PostgreSQL 16 with pgvector is primary (docker-compose service, psycopg2 driver). DuckDB is secondary dependency.\nAnswer: PostgreSQL 16 is primary. DuckDB is secondary (analytics). Memory marked MEM5 (stale).\nStatus: PASS. Verified source, reported conflict, source wins."
-}

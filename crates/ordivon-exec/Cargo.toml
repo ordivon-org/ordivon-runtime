@@ -1,0 +1,32 @@
+[package]
+name = "ordivon-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["transactional-runtime"]
+systemd-supervisor = ["dep:libc"]
+universal-executor = ["dep:libc"]
+transactional-runtime = ["universal-executor", "dep:rusqlite", "dep:uuid"]
+isolated-execution = ["transactional-runtime"]
+
+[[bin]]
+name = "ordivon-job-fixture"
+path = "src/bin/ordivon-job-fixture.rs"
+required-features = ["systemd-supervisor"]
+
+[[bin]]
+name = "ordivon-task-runner"
+path = "src/bin/ordivon-task-runner.rs"
+required-features = ["universal-executor"]
+
+[dependencies]
+hex.workspace = true
+libc = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+sha2.workspace = true
+uuid = { workspace = true, optional = true }

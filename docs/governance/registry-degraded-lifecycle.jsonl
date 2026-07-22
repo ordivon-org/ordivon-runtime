@@ -1,6 +1,0 @@
-# Ordivon Registry Control Plane — DEGRADED Finding Lifecycle Tracker (RG-18)
-# Tracks DEGRADED findings over time to prevent noise decay.
-# Each entry records one DEGRADED finding from a reconciler run.
-# Status: active | acknowledged | escalated | resolved | stale
-# review_days: max days before escalation; escalated if unresolved beyond review_days
-# owner_routing: who should handle this finding

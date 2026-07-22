@@ -1,19 +1,23 @@
-## Summary
-What this PR changes.
+## State change
 
-## Boundary Confirmation
-- [ ] No policy activation or schema standard claims
-- [ ] Phase boundaries respected (see `docs/architecture/ai-native-project-object-model.md`)
-- [ ] Import direction preserved
+What observable current state changes, and which user or Runtime failure does it address?
+
+## Surface change
+
+- What persistent component, state, tool, document, or dependency was added?
+- What existing structure does it replace or remove?
+- Why is the current Runtime, Git, tests, or operations path insufficient without it?
+
+## Runtime boundary
+
+- [ ] No irreversible external effect was introduced without an explicit control.
+- [ ] Idempotency, concurrency, process ownership, persistent truth, or recovery semantics were updated when applicable.
+- [ ] Unrelated user changes were preserved.
+- [ ] Active documents were updated only when current truth changed.
 
 ## Verification
-- [ ] `cargo test --workspace` passes
-- [ ] `PYTHONPATH=.:src .venv/bin/python -m pytest -q tests/` passes
-- [ ] `PYTHONPATH=.:src .venv/bin/python scripts/check_document_registry.py` passes
-- [ ] `PYTHONPATH=.:src .venv/bin/python -m ordivon_verify all --check` passes
-- [ ] New docs registered in `docs/governance/document-registry.jsonl`
-- [ ] Receipt generated in `receipts/governance/`
 
-## Debt Registration
-If this PR introduces known unresolved issues, register in
-`docs/governance/verification-debt-ledger.jsonl`.
+- [ ] `cargo fmt --check`
+- [ ] `cargo test --workspace`
+- [ ] `ruff check scripts/`
+- [ ] Additional checks were selected because they can invalidate this change.

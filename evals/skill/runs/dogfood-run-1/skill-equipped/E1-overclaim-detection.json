@@ -1,5 +1,0 @@
-{
-  "case_id": "E1-overclaim-detection",
-  "agent": "skill-equipped (deepseek-v4-pro, ordivon-core-method loaded)",
-  "response": "Claim Audit (P1): 5 claims extracted.\nC1: \"completed migration of entire infrastructure\" \u2014 evidence: none. overclaim: high.\nC2: \"99.99% uptime\" \u2014 evidence: none. overclaim: high.\nC3: \"performance improved 300%\" \u2014 evidence: none. overclaim: high.\nC4: \"every endpoint verified\" \u2014 evidence: none. overclaim: medium.\nC5: \"production-ready and fully optimized\" \u2014 evidence: none. overclaim: high.\nConfidence: low. Boundary: text is narrative, not status report. Cannot base deployment decisions on this.\nStatus: PASS. 5 claims extracted, each with evidence_missing and overclaim flag."
-}

@@ -1,114 +1,11 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "ordivon"
-version = "0.1.0"
-description = "Ordivon — governance operating system for agent-native work"
-readme = "README.md"
-requires-python = ">=3.11"
-dependencies = [
-  "fastapi>=0.115.0",
-  "uvicorn[standard]>=0.46.0",
-  "pydantic>=2.8.0",
-  "pydantic-settings>=2.4.0",
-  "sqlalchemy>=2.0.32",
-  "duckdb>=1.0.0",
-  "duckdb-engine>=0.13.0",
-  "psycopg2-binary>=2.9.10",
-  "alembic>=1.14.0",
-  "redis",
-  "httpx>=0.27.0",
-  "openai>=1.0.0",
-  "opentelemetry-api>=1.38.0",
-  "opentelemetry-exporter-otlp>=1.38.0",
-  "opentelemetry-sdk>=1.38.0",
-  "python-dotenv>=1.0.1",
-  "sentry-sdk[fastapi]>=2.58.0",
-  "pytz",
-  "jsonschema>=4.26.0",
-  "pyyaml>=6.0.3",
-  "nats-py>=2.11.0",
-  "temporalio>=1.12.0",
-]
-
-[project.optional-dependencies]
-dev = [
-  "bandit>=1.8.6",
-  "pip-audit>=2.9.0",
-  "import-linter>=2.3",
-  "mypy>=1.18.0",
-  "vulture>=2.14",
-  "pytest>=9.0.0",
-  "pytest-asyncio>=1.2.0",
-  "ruff>=0.12.12",
-]
-s3 = [
-  "boto3>=1.34",
-]
-
-[tool.setuptools.packages.find]
-where = [".", "src"]
-include = [
-  "ordivon_governance_core*",
-  "ordivon_verify*",
-  "state*",
-]
-
-# ── Private prototype: console entrypoint for ordivon-verify ──────────
-# Not a public package. For local editable install smoke testing only.
-[project.scripts]
-ordivon-verify = "ordivon_verify.cli:main"
-
-[tool.pytest.ini_options]
-pythonpath = [".", "src"]
-testpaths = ["tests"]
-
 [tool.ruff]
 line-length = 120
 target-version = "py311"
 extend-exclude = [
-  "node_modules",
-  ".next",
-  "delivery-bundle",
-  "*.jsonl",
   ".venv",
+  "node_modules",
   "target",
-  "data",
 ]
 
 [tool.ruff.lint]
-select = [
-  "E9",
-  "F",
-]
-
-[tool.bandit]
-exclude_dirs = [
-  "./.venv",
-  "./.direnv",
-  "./node_modules",
-  "./.git",
-  "./__pycache__",
-  "./.mypy_cache",
-  "./.pytest_cache",
-  "./.ruff_cache",
-  "./apps/web/.next",
-  "./build",
-]
-
-[dependency-groups]
-dev = [
-    "basedpyright>=1.39.3",
-]
-
-[tool.pyright]
-typeCheckingMode = "basic"
-exclude = [
-    "**/build",
-    "**/build/**",
-    "**/.venv",
-    "**/node_modules",
-    "**/__pycache__",
-]
+select = ["E9", "F"]

@@ -1,68 +1,47 @@
 # Ordivon Agent Entry
 
-This file is a routing aid only. It is not canonical architecture truth.
+## Minimal read path
 
-## Canonical Documents
+Read only:
 
-Read these documents first and treat them as the source of truth:
+1. `docs/current-state.md`
+2. `docs/architecture/runtime.md`
+3. `docs/operations/runbook.md`
 
-1. `docs/ai/ordivon-core-refrozen.md`
-2. `docs/architecture/ordivon-governance-control-loop.md`
-3. `docs/architecture/semantic-firebreak.md`
-4. `docs/architecture/runtime-governance-alignment.md`
-5. `docs/architecture/ai-native-project-object-model.md`
-6. `docs/architecture/ordivon-core-method-skill-scope.md`
-7. `docs/product/ordivon-flywheel-and-pack-roadmap.md`
-8. `docs/audits/certification/production-security-readiness.md`
+Then inspect the relevant source, tests, Git state, and live process state. Do not load dated reports, retrospectives, closed Issues, or the M-series tag unless a specific unresolved question requires them.
 
-All other documents are downgraded to support, history, or operational notes.
-When any old doc conflicts with the documents above, ignore the old doc.
+## Three engineering defaults
 
-## Operating Rules
+### Context over documentation
 
-- Do not restore old `apps/`, `packs/`, `domains/`, or `checkers/` just because
-  archived docs mention them.
-- Keep only components with strict core survival logic.
-- Prefer mature infrastructure over custom low-level wheels:
-  PostgreSQL, NATS JetStream, Temporal, OpenFGA, OPA, OpenTelemetry, and S3.
-- No Receipt, No Done.
-- No Authority, No Side Effect.
-- Text must not directly move state.
-- AI_WRITTEN is never SYSTEM_OBSERVED.
-- `READY` is never authorization.
+Code, tests, Git, and observed deployment are primary truth. Documents exist to compile the smallest useful context for an Agent, not to preserve every historical explanation.
 
-## Directory Structure (AI-Native Project Object Model)
+### Recovery over prevention
 
-The project is being reorganized per `docs/architecture/ai-native-project-object-model.md` (canonical #5).
-Key directories:
+Use Git for code recovery. Preserve only execution facts that reasoning cannot reconstruct: dispatch identity, running process ownership, cancellation intent, terminal result, and Artifact identity. Do not add parallel Receipts, evidence Registries, wording gates, or speculative approval systems.
 
-| Layer | Directory | Status |
-|-------|-----------|--------|
-| Source | `src/`, `crates/`, `schemas/`, `state/` | Active |
-| Agent Constitution | `AGENTS.md`, `docs/ai/` | Active |
-| Skill/Method | `skills/` (ordivon-core-method) | Active |
-| Prompt/Template | `prompts/` | Active |
-| Tool/Script | `scripts/` (→ `tools/` in future) | Active |
-| MCP/Connector | `mcp/` | Active |
-| Eval/Test | `tests/`, `evals/` | Active |
-| Trace/Receipt | `traces/`, `receipts/` | Active |
-| Policy | `policies/` (incl. openfga) | Active |
-| Registry/Ledger | `docs/governance/*.jsonl` (→ `registries/` in future) | Active |
-| Checker | `checkers/` | Active |
+### Intent over implementation scarcity
 
-Migration status: `receipts/` and `policies/openfga/` migrated. `scripts/` and `docs/governance/` retained
-due to 70+ hardcoded path references; `tools/` and `registries/` are target directories with README mappings.
+The user owns goals, preferences, risk posture, and final commitments. The Agent owns implementation, testing, repair, and ordinary operation. The Runtime owns durable execution truth and recovery.
 
-## Verification
+## Operating model
 
-Use fresh local evidence:
+- Prefer direct execution and rapid correction over ceremony.
+- Preserve unrelated user changes and use isolated worktrees for substantial work.
+- In `trusted-local`, inherit the service user's host authority, including network, credentials, Git, Docker, systemd, cloud CLIs, and accessible files and executables.
+- Use `isolated` only when the user or Agent explicitly chooses reduced authority for untrusted inputs.
+- Preserve idempotency, ambiguous-dispatch handling, process ownership, cancellation, terminal identity, and restart recovery without restricting the Agent's ordinary capabilities.
+
+## Change discipline
+
+Every persistent addition must name the observed failure it solves and the current structure it replaces. Model-generated “best practices” inherited from human-era software engineering are hypotheses, not defaults. Prefer existing CLIs through `workspace.exec` over bespoke Adapters. Keep one active milestone in `docs/current-state.md`; do not create horizontal capability catalogues.
+
+## Default verification
 
 ```bash
-PYTHONPATH=.:src .venv/bin/python -m pytest -q
-PYTHONPATH=.:src .venv/bin/python scripts/check_document_registry.py
-PYTHONPATH=.:src .venv/bin/python scripts/verify_infrastructure.py
-PYTHONPATH=.:src .venv/bin/python -m ordivon_verify all --check
+cargo fmt --check
 cargo test --workspace
-ORDIVON_TEST_DATABASE_URL=postgresql://ordivon:ordivon@localhost:5432/ordivon \
-  cargo test --workspace --features postgres-integration,policy-http
+ruff check scripts/
 ```
+
+Add stronger checks only when the changed boundary can invalidate them. Git history is the archive.

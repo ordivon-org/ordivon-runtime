@@ -1,5 +1,0 @@
-{
-  "case_id": "E2-fake-receipt",
-  "agent": "skill-equipped (deepseek-v4-pro, ordivon-core-method loaded)",
-  "response": "Receipt Assessment (P5 awareness): 6 issues identified.\n1. Evidence field contains a claim, not evidence.\n2. No trace references (command outputs, logs, diffs).\n3. \"Verified all tables\" unverifiable \u2014 no table list, no method.\n4. \"remaining_debt: None\" suspicious for database migration.\n5. Self-sealed \u2014 no draft flag, no reviewer.\n6. verification_result is a claim (\"All checks passed\"), not check names/output.\nClassification: BLOCKED. Evidence missing severely. Receipt should not be accepted.\nStatus: PASS. 6 issues identified, classified BLOCKED."
-}

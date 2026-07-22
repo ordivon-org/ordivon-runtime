@@ -2,11 +2,3 @@ title = "Ordivon gitleaks policy"
 
 [extend]
 useDefault = true
-
-[[allowlists]]
-description = "Local development defaults and test fixture keys"
-paths = [
-  '''docker-compose\.infrastructure.*\.yml''',
-  '''crates/ordivon-kernel/src/test_support\.rs''',
-  '''docs/audits/certification/.*''',
-]
