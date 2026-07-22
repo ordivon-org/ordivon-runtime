@@ -18,13 +18,13 @@ use crate::{
     SupervisorObservation, SupervisorRecoveryDisposition, SupervisorUnitState, TerminationIntent,
 };
 
-use super::registry::JobSnapshotM6;
+use super::registry::JobSnapshot;
 use super::{
-    AdmissionOutcomeM6, ArtifactRegistrationM6, AttemptRecordM6, AttemptState, JobListRequestM6,
-    JobListResultM6, M6ArtifactReadRequest, M6ArtifactReadResult, M6Error, M6ErrorCode,
-    M6ExecutionPlan, M6Registry, M6RegistryConfig, M6Result, M6SubmitRequest, M6TaskCancelRequest,
-    M6TaskObservation, M6TaskObserveRequest, M6TaskRunRequest, PlanKind, RunnerIdentityM6,
-    TerminalCommitM6, M6_SCHEMA_VERSION,
+    AdmissionOutcome, ArtifactReadRequest, ArtifactReadResult, ArtifactRegistration, AttemptRecord,
+    AttemptState, PlanKind, Registry, RegistryConfig, RunnerIdentity, RuntimeError,
+    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeJobListRequest, RuntimeJobListResult,
+    RuntimeResult, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
+    TaskRunRequest, TerminalCommit, RUNTIME_SCHEMA_VERSION,
 };
 
 const RUNNER_REQUEST_FILE: &str = "request.json";
@@ -36,26 +36,26 @@ const STDOUT_FILE: &str = "stdout.log";
 const STDERR_FILE: &str = "stderr.log";
 const CANCEL_FILE: &str = "cancel-requested.json";
 const CONTROL_RESULT_FILE: &str = "control-result.json";
-const MAX_M6_WAIT_MS: u64 = 30_000;
-const MAX_M6_TAIL_BYTES: u64 = 64 * 1024;
-const MAX_M6_ARTIFACT_READ_BYTES: u64 = 1024 * 1024;
+const MAX_TASK_WAIT_MS: u64 = 30_000;
+const MAX_TASK_TAIL_BYTES: u64 = 64 * 1024;
+const MAX_ARTIFACT_READ_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug)]
-pub struct M6RuntimeConfig {
-    pub registry: M6RegistryConfig,
+pub struct RuntimeConfig {
+    pub registry: RegistryConfig,
     pub executor: UniversalExecutorConfig,
     pub startup_grace_ms: u64,
-    #[cfg(feature = "runtime-hardening-m7")]
-    pub hardening: Option<crate::M7RuntimeHardeningConfig>,
+    #[cfg(feature = "isolated-execution")]
+    pub hardening: Option<crate::IsolationConfig>,
 }
 
 #[derive(Clone, Debug)]
-pub struct M6Runtime {
-    registry: M6Registry,
+pub struct Runtime {
+    registry: Registry,
     executor: UniversalExecutorConfig,
     startup_grace_ms: u64,
-    #[cfg(feature = "runtime-hardening-m7")]
-    hardening: Option<crate::M7RuntimeHardeningConfig>,
+    #[cfg(feature = "isolated-execution")]
+    hardening: Option<crate::IsolationConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -83,77 +83,77 @@ struct ControlTerminalEvidence {
     observed_at_ms: u64,
 }
 
-impl M6Runtime {
-    pub fn new(config: M6RuntimeConfig) -> M6Result<Self> {
+impl Runtime {
+    pub fn new(config: RuntimeConfig) -> RuntimeResult<Self> {
         config.executor.validate().map_err(map_universal_error)?;
         if config.startup_grace_ms == 0 || config.startup_grace_ms > 30_000 {
-            return Err(M6Error::invalid(
+            return Err(RuntimeError::invalid(
                 "startupGraceMs must be in 1..=30000",
                 "startupGraceMs",
             ));
         }
         ensure_systemd_visible(&config.registry.store_root, "registry.storeRoot")?;
         ensure_systemd_visible(&config.executor.store_root, "executor.storeRoot")?;
-        #[cfg(feature = "runtime-hardening-m7")]
+        #[cfg(feature = "isolated-execution")]
         if let Some(hardening) = &config.hardening {
             hardening.validate()?;
             validate_hardening_roots(&config, hardening)?;
-            crate::m7::ensure_traversal_directory(
+            crate::isolation::ensure_traversal_directory(
                 &hardening.workspaces_root(),
                 hardening.worker.gid,
                 0o710,
             )?;
-            crate::m7::ensure_traversal_directory(
+            crate::isolation::ensure_traversal_directory(
                 &hardening.attempts_root(),
                 hardening.worker.gid,
                 0o710,
             )?;
-            crate::m7::ensure_traversal_directory(
+            crate::isolation::ensure_traversal_directory(
                 &hardening.runtime_view_root,
                 hardening.worker.gid,
                 0o750,
             )?;
-            crate::m7::ensure_owned_directory(
+            crate::isolation::ensure_owned_directory(
                 &hardening.cache_root,
                 hardening.worker.uid,
                 hardening.worker.gid,
                 0o750,
             )?;
         }
-        let registry = M6Registry::initialize(config.registry)?;
+        let registry = Registry::initialize(config.registry)?;
         Ok(Self {
             registry,
             executor: config.executor,
             startup_grace_ms: config.startup_grace_ms,
-            #[cfg(feature = "runtime-hardening-m7")]
+            #[cfg(feature = "isolated-execution")]
             hardening: config.hardening,
         })
     }
 
-    pub fn registry(&self) -> &M6Registry {
+    pub fn registry(&self) -> &Registry {
         &self.registry
     }
 
-    pub fn run_task(&self, request: &M6TaskRunRequest) -> M6Result<M6TaskObservation> {
+    pub fn run_task(&self, request: &TaskRunRequest) -> RuntimeResult<TaskObservation> {
         validate_run_request(request)?;
         let plan = self.resolve_plan(request)?;
-        let submit = M6SubmitRequest {
-            schema_version: M6_SCHEMA_VERSION,
+        let submit = SubmitRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
             client_request_id: request.client_request_id.clone(),
             plan,
             global_limit: request.global_limit,
             profile_limit: request.profile_limit,
         };
         let job_id = match self.registry.submit(&submit)? {
-            AdmissionOutcomeM6::Created(created) => {
+            AdmissionOutcome::Created(created) => {
                 let job_id = created.job.job_id.clone();
                 self.ensure_attempt_dispatched(&created.attempt)?;
                 job_id
             }
-            AdmissionOutcomeM6::Existing { job } => job.job_id.clone(),
+            AdmissionOutcome::Existing { job } => job.job_id.clone(),
         };
-        self.observe_task(&M6TaskObserveRequest {
-            schema_version: M6_SCHEMA_VERSION,
+        self.observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
             job_id,
             wait_ms: request.wait_ms,
             stdout_tail_bytes: request.stdout_tail_bytes,
@@ -161,7 +161,7 @@ impl M6Runtime {
         })
     }
 
-    fn resolve_plan(&self, request: &M6TaskRunRequest) -> M6Result<M6ExecutionPlan> {
+    fn resolve_plan(&self, request: &TaskRunRequest) -> RuntimeResult<RuntimeExecutionPlan> {
         let record = load_workspace_record(&self.executor, &request.execution.workspace_id)
             .map_err(map_universal_error)?;
         let workspace_path =
@@ -172,8 +172,8 @@ impl M6Runtime {
         ensure_systemd_visible(&workspace_path, "workspacePath")?;
         ensure_systemd_visible(&cwd, "cwd")?;
         let executable = validate_executable(&self.executor, &request.execution.executable)?;
-        Ok(M6ExecutionPlan {
-            schema_version: M6_SCHEMA_VERSION,
+        Ok(RuntimeExecutionPlan {
+            schema_version: RUNTIME_SCHEMA_VERSION,
             plan_kind: PlanKind::UniversalSandbox,
             workspace_id: request.execution.workspace_id.clone(),
             workspace_path: workspace_path.to_string_lossy().into_owned(),
@@ -195,7 +195,7 @@ impl M6Runtime {
         })
     }
 
-    fn ensure_attempt_dispatched(&self, attempt: &AttemptRecordM6) -> M6Result<()> {
+    fn ensure_attempt_dispatched(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
         let attempt = if attempt.bundle_digest.is_none() {
             self.materialize_bundle(attempt)?
         } else {
@@ -214,10 +214,10 @@ impl M6Runtime {
         }
     }
 
-    fn materialize_bundle(&self, attempt: &AttemptRecordM6) -> M6Result<AttemptRecordM6> {
+    fn materialize_bundle(&self, attempt: &AttemptRecord) -> RuntimeResult<AttemptRecord> {
         if attempt.state != AttemptState::Accepted {
-            return Err(M6Error::new(
-                M6ErrorCode::AttemptStateConflict,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::AttemptStateConflict,
                 "only accepted Attempts may materialize a bundle",
                 Some("attemptId"),
                 false,
@@ -226,8 +226,8 @@ impl M6Runtime {
         let snapshot = self.registry.job_snapshot(&attempt.job_id)?;
         let job = snapshot.job;
         let stored_attempt = snapshot.attempt.ok_or_else(|| {
-            M6Error::new(
-                M6ErrorCode::RegistryCorrupt,
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
                 "Job has no Attempt while materializing bundle",
                 Some("attemptId"),
                 false,
@@ -236,17 +236,17 @@ impl M6Runtime {
         if stored_attempt.attempt_id != attempt.attempt_id
             || stored_attempt.row_version != attempt.row_version
         {
-            return Err(M6Error::new(
-                M6ErrorCode::AttemptStateConflict,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::AttemptStateConflict,
                 "Attempt changed before bundle materialization",
                 Some("attemptId"),
                 false,
             ));
         }
-        let plan: M6ExecutionPlan =
+        let plan: RuntimeExecutionPlan =
             serde_json::from_str(&job.execution_plan_json).map_err(|error| {
-                M6Error::new(
-                    M6ErrorCode::RegistryCorrupt,
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
                     format!("stored execution plan is invalid: {error}"),
                     Some("executionPlan"),
                     false,
@@ -254,14 +254,14 @@ impl M6Runtime {
             })?;
         let launch_token = sha256_bytes(
             format!(
-                "m6-launch-v1\0{}\0{}",
+                "runtime-launch-v1\0{}\0{}",
                 attempt.attempt_id, job.operation_digest
             )
             .as_bytes(),
         );
         if sha256_bytes(launch_token.as_bytes()) != attempt.launch_token_digest {
-            return Err(M6Error::new(
-                M6ErrorCode::RegistryCorrupt,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
                 "stored launch-token digest is inconsistent",
                 Some("launchTokenDigest"),
                 false,
@@ -289,7 +289,7 @@ impl M6Runtime {
         let request_bytes = serde_json::to_vec(&request).map_err(serialization_error)?;
         let plan_bytes = serde_json::to_vec(&plan).map_err(serialization_error)?;
         let manifest = BundleManifest {
-            schema_version: M6_SCHEMA_VERSION,
+            schema_version: RUNTIME_SCHEMA_VERSION,
             job_id: job.job_id.clone(),
             attempt_id: attempt.attempt_id.clone(),
             request_digest: sha256_bytes(&request_bytes),
@@ -302,8 +302,8 @@ impl M6Runtime {
         if manifest.launch_token_digest != attempt.launch_token_digest
             || manifest.plan_digest != job.execution_plan_digest
         {
-            return Err(M6Error::new(
-                M6ErrorCode::RegistryCorrupt,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
                 "reconstructed bundle identity does not match Registry",
                 Some("attemptId"),
                 false,
@@ -312,8 +312,8 @@ impl M6Runtime {
 
         let final_path = PathBuf::from(&attempt.bundle_path);
         let parent = final_path.parent().ok_or_else(|| {
-            M6Error::new(
-                M6ErrorCode::IoError,
+            RuntimeError::new(
+                RuntimeErrorCode::IoError,
                 "Attempt bundle has no parent directory",
                 Some("bundlePath"),
                 false,
@@ -357,7 +357,7 @@ impl M6Runtime {
         )
     }
 
-    fn dispatch_attempt(&self, attempt: &AttemptRecordM6) -> M6Result<()> {
+    fn dispatch_attempt(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
         let starting = self.registry.mark_dispatch_issued(
             &attempt.attempt_id,
             attempt.row_version,
@@ -374,7 +374,7 @@ impl M6Runtime {
             &bundle_path,
             Path::new(&plan.workspace_path),
             runtime_ceiling,
-            #[cfg(feature = "runtime-hardening-m7")]
+            #[cfg(feature = "isolated-execution")]
             self.hardening.as_ref(),
         )?;
         if !output.status.success() {
@@ -393,7 +393,7 @@ impl M6Runtime {
         self.await_launch_evidence(&starting)
     }
 
-    fn await_launch_evidence(&self, attempt: &AttemptRecordM6) -> M6Result<()> {
+    fn await_launch_evidence(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
         let deadline = Instant::now() + Duration::from_millis(self.startup_grace_ms);
         loop {
             if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
@@ -414,13 +414,13 @@ impl M6Runtime {
         self.reconcile_attempt(&attempt.attempt_id)
     }
 
-    fn bind_runner_start(&self, attempt: &AttemptRecordM6) -> M6Result<AttemptRecordM6> {
+    fn bind_runner_start(&self, attempt: &AttemptRecord) -> RuntimeResult<AttemptRecord> {
         let path = Path::new(&attempt.bundle_path).join(RUNNER_START_FILE);
         let bytes =
             fs::read(&path).map_err(|error| io_error("read runner-start evidence", error))?;
         let evidence: RunnerStartEvidence = serde_json::from_slice(&bytes).map_err(|error| {
-            M6Error::new(
-                M6ErrorCode::LaunchIdentityMismatch,
+            RuntimeError::new(
+                RuntimeErrorCode::LaunchIdentityMismatch,
                 format!("invalid runner-start evidence: {error}"),
                 Some("runnerStart"),
                 false,
@@ -432,8 +432,8 @@ impl M6Runtime {
             || evidence.launch_token_digest != attempt.launch_token_digest
             || !self.payload_evidence_matches(evidence.payload_uid, evidence.payload_gid)
         {
-            return Err(M6Error::new(
-                M6ErrorCode::LaunchIdentityMismatch,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::LaunchIdentityMismatch,
                 "runner-start identity does not match committed Attempt",
                 Some("runnerStart"),
                 false,
@@ -448,16 +448,16 @@ impl M6Runtime {
             .parse()
             .map_err(|_| missing_systemd_property("MainPID"))?;
         if evidence.namespace_pid == 0 || evidence.namespace_process_start_identity.is_empty() {
-            return Err(M6Error::new(
-                M6ErrorCode::LaunchIdentityMismatch,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::LaunchIdentityMismatch,
                 "runner-start omitted PID namespace identity",
                 Some("namespacePid"),
                 false,
             ));
         }
         let process_start_identity = process_identity(main_pid).ok_or_else(|| {
-            M6Error::new(
-                M6ErrorCode::LaunchIdentityMismatch,
+            RuntimeError::new(
+                RuntimeErrorCode::LaunchIdentityMismatch,
                 "systemd MainPID has no observable host process identity",
                 Some("mainPid"),
                 false,
@@ -465,8 +465,8 @@ impl M6Runtime {
         })?;
         let runner_start_digest = sha256_bytes(&bytes);
         if runner_start_digest != sha256_file(&path).map_err(map_universal_error)? {
-            return Err(M6Error::new(
-                M6ErrorCode::LaunchIdentityMismatch,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::LaunchIdentityMismatch,
                 "runner-start evidence digest changed while reading",
                 Some("runnerStart"),
                 false,
@@ -476,7 +476,7 @@ impl M6Runtime {
         self.registry.bind_running(
             &attempt.attempt_id,
             attempt.row_version,
-            &RunnerIdentityM6 {
+            &RunnerIdentity {
                 boot_id,
                 unit_name: evidence.unit_name,
                 invocation_id: evidence.invocation_id,
@@ -489,15 +489,15 @@ impl M6Runtime {
         )
     }
 
-    fn reconcile_runner_result(&self, attempt: &AttemptRecordM6) -> M6Result<()> {
+    fn reconcile_runner_result(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
         match self.commit_runner_result(attempt) {
             Ok(_) => Ok(()),
             Err(error)
                 if matches!(
                     error.code,
-                    M6ErrorCode::RegistryCorrupt
-                        | M6ErrorCode::ResultIdentityConflict
-                        | M6ErrorCode::ArtifactIdentityConflict
+                    RuntimeErrorCode::RegistryCorrupt
+                        | RuntimeErrorCode::ResultIdentityConflict
+                        | RuntimeErrorCode::ArtifactIdentityConflict
                 ) =>
             {
                 self.commit_control_terminal(
@@ -512,7 +512,7 @@ impl M6Runtime {
         }
     }
 
-    fn commit_runner_result(&self, attempt: &AttemptRecordM6) -> M6Result<M6TaskObservation> {
+    fn commit_runner_result(&self, attempt: &AttemptRecord) -> RuntimeResult<TaskObservation> {
         let current = self.registry.get_attempt(&attempt.attempt_id)?;
         if current.state.is_terminal() {
             return self.observation_from_registry(&current.job_id, 0, 0);
@@ -521,8 +521,8 @@ impl M6Runtime {
         let bytes =
             fs::read(&result_path).map_err(|error| io_error("read Runner result", error))?;
         let result: RunnerTaskResult = serde_json::from_slice(&bytes).map_err(|error| {
-            M6Error::new(
-                M6ErrorCode::RegistryCorrupt,
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
                 format!("invalid Runner result: {error}"),
                 Some("result"),
                 false,
@@ -534,8 +534,8 @@ impl M6Runtime {
             || result.launch_token_digest.as_deref() != Some(current.launch_token_digest.as_str())
             || !self.payload_evidence_matches(result.payload_uid, result.payload_gid)
         {
-            return Err(M6Error::new(
-                M6ErrorCode::ResultIdentityConflict,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ResultIdentityConflict,
                 "Runner result identity does not match committed Attempt",
                 Some("result"),
                 false,
@@ -557,7 +557,7 @@ impl M6Runtime {
             .as_deref()
             .map(|message| sha256_bytes(message.as_bytes()));
         let mut artifacts = vec![stdout, stderr];
-        artifacts.push(ArtifactRegistrationM6 {
+        artifacts.push(ArtifactRegistration {
             artifact_id: format!("{}.result", current.attempt_id),
             kind: "execution_result".to_string(),
             relative_path: RESULT_FILE.to_string(),
@@ -566,7 +566,7 @@ impl M6Runtime {
             byte_length: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
             truncated: false,
         });
-        let projection = self.registry.commit_terminal(&TerminalCommitM6 {
+        let projection = self.registry.commit_terminal(&TerminalCommit {
             attempt_id: current.attempt_id.clone(),
             expected_row_version: current.row_version,
             state,
@@ -583,16 +583,16 @@ impl M6Runtime {
 
     fn validate_captured_output(
         &self,
-        attempt: &AttemptRecordM6,
+        attempt: &AttemptRecord,
         output: &CapturedOutput,
         stdout: bool,
-    ) -> M6Result<ArtifactRegistrationM6> {
+    ) -> RuntimeResult<ArtifactRegistration> {
         let expected_file = if stdout { STDOUT_FILE } else { STDERR_FILE };
         let expected_kind = if stdout { "stdout" } else { "stderr" };
         let expected_id = format!("{}.{}", attempt.attempt_id, expected_kind);
         if output.file_name != expected_file || output.artifact_id != expected_id {
-            return Err(M6Error::new(
-                M6ErrorCode::ArtifactIdentityConflict,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ArtifactIdentityConflict,
                 "Runner output identity does not match Attempt",
                 Some("artifact"),
                 false,
@@ -602,14 +602,14 @@ impl M6Runtime {
         let metadata = fs::metadata(&path).map_err(|error| io_error("inspect output", error))?;
         let digest = sha256_file(&path).map_err(map_universal_error)?;
         if digest != output.digest || metadata.len() != output.retained_bytes {
-            return Err(M6Error::new(
-                M6ErrorCode::ArtifactIdentityConflict,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ArtifactIdentityConflict,
                 "Runner output digest or byte length changed",
                 Some("artifact"),
                 false,
             ));
         }
-        Ok(ArtifactRegistrationM6 {
+        Ok(ArtifactRegistration {
             artifact_id: expected_id,
             kind: expected_kind.to_string(),
             relative_path: expected_file.to_string(),
@@ -620,7 +620,7 @@ impl M6Runtime {
         })
     }
 
-    pub fn observe_task(&self, request: &M6TaskObserveRequest) -> M6Result<M6TaskObservation> {
+    pub fn observe_task(&self, request: &TaskObserveRequest) -> RuntimeResult<TaskObservation> {
         validate_observe_request(request)?;
         let deadline = Instant::now() + Duration::from_millis(request.wait_ms);
         loop {
@@ -645,17 +645,17 @@ impl M6Runtime {
         job_id: &str,
         stdout_tail_bytes: u64,
         stderr_tail_bytes: u64,
-    ) -> M6Result<M6TaskObservation> {
+    ) -> RuntimeResult<TaskObservation> {
         let snapshot = self.registry.job_snapshot(job_id)?;
         self.observation_from_snapshot(snapshot, stdout_tail_bytes, stderr_tail_bytes)
     }
 
     fn observation_from_snapshot(
         &self,
-        snapshot: JobSnapshotM6,
+        snapshot: JobSnapshot,
         stdout_tail_bytes: u64,
         stderr_tail_bytes: u64,
-    ) -> M6Result<M6TaskObservation> {
+    ) -> RuntimeResult<TaskObservation> {
         self.observation_from_parts(
             snapshot.projection,
             snapshot.attempt,
@@ -666,11 +666,11 @@ impl M6Runtime {
 
     fn observation_from_parts(
         &self,
-        projection: super::JobProjectionM6,
-        attempt: Option<AttemptRecordM6>,
+        projection: super::JobProjection,
+        attempt: Option<AttemptRecord>,
         stdout_tail_bytes: u64,
         stderr_tail_bytes: u64,
-    ) -> M6Result<M6TaskObservation> {
+    ) -> RuntimeResult<TaskObservation> {
         let (stdout_tail, stderr_tail, stdout_truncated, stderr_truncated, error_summary) =
             if let Some(attempt) = &attempt {
                 let stdout_tail = read_tail_text(
@@ -704,7 +704,7 @@ impl M6Runtime {
             } else {
                 (String::new(), String::new(), false, false, None)
             };
-        Ok(M6TaskObservation {
+        Ok(TaskObservation {
             job_id: projection.job_id,
             status: projection.status,
             attempt_id: attempt.map(|attempt| attempt.attempt_id),
@@ -719,14 +719,14 @@ impl M6Runtime {
         })
     }
 
-    fn reconcile_job(&self, job_id: &str) -> M6Result<()> {
+    fn reconcile_job(&self, job_id: &str) -> RuntimeResult<()> {
         let snapshot = self.registry.job_snapshot(job_id)?;
         if snapshot.job.resolution.is_some() {
             return Ok(());
         }
         let attempt = snapshot.attempt.ok_or_else(|| {
-            M6Error::new(
-                M6ErrorCode::RegistryCorrupt,
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
                 "unresolved Job has no Attempt",
                 Some("jobId"),
                 false,
@@ -738,7 +738,7 @@ impl M6Runtime {
         self.reconcile_attempt(&attempt.attempt_id)
     }
 
-    pub fn reconcile_all(&self) -> M6Result<Vec<M6TaskObservation>> {
+    pub fn reconcile_all(&self) -> RuntimeResult<Vec<TaskObservation>> {
         let attempts = self.registry.list_nonterminal_attempts()?;
         let mut observations = Vec::with_capacity(attempts.len());
         for attempt in attempts {
@@ -752,7 +752,7 @@ impl M6Runtime {
         Ok(observations)
     }
 
-    pub fn reconcile_attempt(&self, attempt_id: &str) -> M6Result<()> {
+    pub fn reconcile_attempt(&self, attempt_id: &str) -> RuntimeResult<()> {
         let attempt = self.registry.get_attempt(attempt_id)?;
         if attempt.state.is_terminal() {
             return Ok(());
@@ -775,7 +775,7 @@ impl M6Runtime {
         self.reconcile_bound_attempt(&attempt)
     }
 
-    fn reconcile_starting_without_token(&self, attempt: &AttemptRecordM6) -> M6Result<()> {
+    fn reconcile_starting_without_token(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
         let properties = systemctl_show(&attempt.unit_name)?;
         let active = unit_is_active(&properties);
         let age_ms = now_ms()?.saturating_sub(attempt.created_at_ms);
@@ -806,7 +806,7 @@ impl M6Runtime {
         Ok(())
     }
 
-    fn reconcile_bound_attempt(&self, attempt: &AttemptRecordM6) -> M6Result<()> {
+    fn reconcile_bound_attempt(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
         let expected = supervisor_identity(attempt)?;
         let properties = systemctl_show(&attempt.unit_name)?;
         let current_boot_id = read_trimmed("/proc/sys/kernel/random/boot_id")?;
@@ -848,9 +848,11 @@ impl M6Runtime {
                 .and_then(|value| value.parse().ok()),
         };
         let intent = match attempt.termination_intent {
-            super::M6TerminationIntent::Natural => TerminationIntent::Natural,
-            super::M6TerminationIntent::StopRequested => TerminationIntent::StopRequested,
-            super::M6TerminationIntent::DeadlineExceeded => TerminationIntent::DeadlineExceeded,
+            super::AttemptTerminationIntent::Natural => TerminationIntent::Natural,
+            super::AttemptTerminationIntent::StopRequested => TerminationIntent::StopRequested,
+            super::AttemptTerminationIntent::DeadlineExceeded => {
+                TerminationIntent::DeadlineExceeded
+            }
         };
         let disposition = classify_supervisor_recovery(
             &expected,
@@ -859,8 +861,8 @@ impl M6Runtime {
             intent,
         )
         .map_err(|error| {
-            M6Error::new(
-                M6ErrorCode::RegistryCorrupt,
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
                 format!("supervisor recovery classification failed: {error}"),
                 Some("attemptId"),
                 false,
@@ -900,18 +902,18 @@ impl M6Runtime {
 
     fn commit_control_terminal(
         &self,
-        attempt: &AttemptRecordM6,
+        attempt: &AttemptRecord,
         state: AttemptState,
         reason_code: &str,
         detail: Option<String>,
-    ) -> M6Result<M6TaskObservation> {
+    ) -> RuntimeResult<TaskObservation> {
         let current = self.registry.get_attempt(&attempt.attempt_id)?;
         if current.state.is_terminal() {
             return self.observation_from_registry(&current.job_id, 0, 0);
         }
         let observed_at_ms = now_ms()?;
         let evidence = ControlTerminalEvidence {
-            schema_version: M6_SCHEMA_VERSION,
+            schema_version: RUNTIME_SCHEMA_VERSION,
             job_id: current.job_id.clone(),
             attempt_id: current.attempt_id.clone(),
             status: state.as_db().to_string(),
@@ -928,7 +930,7 @@ impl M6Runtime {
         }
         write_json_atomic(&evidence_path, &evidence).map_err(map_universal_error)?;
         let result_digest = sha256_file(&evidence_path).map_err(map_universal_error)?;
-        let mut artifacts = vec![ArtifactRegistrationM6 {
+        let mut artifacts = vec![ArtifactRegistration {
             artifact_id: format!("{}.control-result", current.attempt_id),
             kind: "control_result".to_string(),
             relative_path: CONTROL_RESULT_FILE.to_string(),
@@ -943,7 +945,7 @@ impl M6Runtime {
             for (file_name, kind) in [(STDOUT_FILE, "stdout"), (STDERR_FILE, "stderr")] {
                 let path = Path::new(&current.bundle_path).join(file_name);
                 if path.is_file() {
-                    artifacts.push(ArtifactRegistrationM6 {
+                    artifacts.push(ArtifactRegistration {
                         artifact_id: format!("{}.{}", current.attempt_id, kind),
                         kind: kind.to_string(),
                         relative_path: file_name.to_string(),
@@ -957,7 +959,7 @@ impl M6Runtime {
                 }
             }
         }
-        let projection = self.registry.commit_terminal(&TerminalCommitM6 {
+        let projection = self.registry.commit_terminal(&TerminalCommit {
             attempt_id: current.attempt_id.clone(),
             expected_row_version: current.row_version,
             state,
@@ -976,10 +978,10 @@ impl M6Runtime {
         self.observation_from_parts(projection, Some(current), 4096, 4096)
     }
 
-    pub fn cancel_task(&self, request: &M6TaskCancelRequest) -> M6Result<M6TaskObservation> {
-        if request.schema_version != M6_SCHEMA_VERSION {
-            return Err(M6Error::invalid(
-                "unsupported M6 schema version",
+    pub fn cancel_task(&self, request: &TaskCancelRequest) -> RuntimeResult<TaskObservation> {
+        if request.schema_version != RUNTIME_SCHEMA_VERSION {
+            return Err(RuntimeError::invalid(
+                "unsupported runtime schema version",
                 "schemaVersion",
             ));
         }
@@ -991,8 +993,8 @@ impl M6Runtime {
             .registry
             .get_latest_attempt(&request.job_id)?
             .ok_or_else(|| {
-                M6Error::new(
-                    M6ErrorCode::RegistryCorrupt,
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
                     "cancelled Job has no Attempt",
                     Some("jobId"),
                     false,
@@ -1001,7 +1003,7 @@ impl M6Runtime {
         write_json_atomic(
             &Path::new(&attempt.bundle_path).join(CANCEL_FILE),
             &serde_json::json!({
-                "schemaVersion": M6_SCHEMA_VERSION,
+                "schemaVersion": RUNTIME_SCHEMA_VERSION,
                 "jobId": request.job_id,
                 "attemptId": attempt.attempt_id,
                 "requestedAtMs": now_ms()?,
@@ -1043,20 +1045,26 @@ impl M6Runtime {
         self.observation_from_registry(&request.job_id, 4096, 4096)
     }
 
-    pub fn list_jobs(&self, request: &JobListRequestM6) -> M6Result<JobListResultM6> {
+    pub fn list_jobs(
+        &self,
+        request: &RuntimeJobListRequest,
+    ) -> RuntimeResult<RuntimeJobListResult> {
         self.registry.list_jobs(request)
     }
 
-    pub fn read_artifact(&self, request: &M6ArtifactReadRequest) -> M6Result<M6ArtifactReadResult> {
-        if request.schema_version != M6_SCHEMA_VERSION {
-            return Err(M6Error::invalid(
-                "unsupported M6 schema version",
+    pub fn read_artifact(
+        &self,
+        request: &ArtifactReadRequest,
+    ) -> RuntimeResult<ArtifactReadResult> {
+        if request.schema_version != RUNTIME_SCHEMA_VERSION {
+            return Err(RuntimeError::invalid(
+                "unsupported runtime schema version",
                 "schemaVersion",
             ));
         }
-        if request.max_bytes == 0 || request.max_bytes > MAX_M6_ARTIFACT_READ_BYTES {
-            return Err(M6Error::invalid(
-                format!("maxBytes must be in 1..={MAX_M6_ARTIFACT_READ_BYTES}"),
+        if request.max_bytes == 0 || request.max_bytes > MAX_ARTIFACT_READ_BYTES {
+            return Err(RuntimeError::invalid(
+                format!("maxBytes must be in 1..={MAX_ARTIFACT_READ_BYTES}"),
                 "maxBytes",
             ));
         }
@@ -1070,8 +1078,8 @@ impl M6Runtime {
         let metadata =
             fs::symlink_metadata(&path).map_err(|error| io_error("inspect Artifact", error))?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(M6Error::new(
-                M6ErrorCode::ArtifactIdentityConflict,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ArtifactIdentityConflict,
                 "Artifact path is not a regular non-symlink file",
                 Some("artifactId"),
                 false,
@@ -1080,8 +1088,8 @@ impl M6Runtime {
         let canonical =
             fs::canonicalize(&path).map_err(|error| io_error("canonicalize Artifact", error))?;
         if !canonical.starts_with(&bundle) {
-            return Err(M6Error::new(
-                M6ErrorCode::ArtifactIdentityConflict,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ArtifactIdentityConflict,
                 "Artifact escaped Attempt bundle",
                 Some("artifactId"),
                 false,
@@ -1090,8 +1098,8 @@ impl M6Runtime {
         if sha256_file(&canonical).map_err(map_universal_error)? != artifact.digest
             || metadata.len() != artifact.byte_length
         {
-            return Err(M6Error::new(
-                M6ErrorCode::ArtifactIdentityConflict,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ArtifactIdentityConflict,
                 "Artifact digest or byte length changed",
                 Some("artifactId"),
                 false,
@@ -1106,7 +1114,7 @@ impl M6Runtime {
             .map_err(|error| io_error("read Artifact", error))?;
         bytes.truncate(read);
         let next_offset = request.offset.saturating_add(read as u64);
-        Ok(M6ArtifactReadResult {
+        Ok(ArtifactReadResult {
             job_id: request.job_id.clone(),
             artifact_id: request.artifact_id.clone(),
             content: String::from_utf8_lossy(&bytes).into_owned(),
@@ -1117,35 +1125,35 @@ impl M6Runtime {
         })
     }
 
-    #[cfg(feature = "runtime-hardening-m7")]
-    fn cleanup_payload_view(&self, attempt_id: &str) -> M6Result<()> {
+    #[cfg(feature = "isolated-execution")]
+    fn cleanup_payload_view(&self, attempt_id: &str) -> RuntimeResult<()> {
         let Some(hardening) = &self.hardening else {
             return Ok(());
         };
         let view_root = hardening.payload_view_root(attempt_id);
         if view_root.exists() {
             fs::remove_dir_all(&view_root)
-                .map_err(|error| io_error("remove M7 payload view", error))?;
+                .map_err(|error| io_error("remove isolated payload view", error))?;
         }
         Ok(())
     }
 
-    #[cfg(not(feature = "runtime-hardening-m7"))]
-    fn cleanup_payload_view(&self, _attempt_id: &str) -> M6Result<()> {
+    #[cfg(not(feature = "isolated-execution"))]
+    fn cleanup_payload_view(&self, _attempt_id: &str) -> RuntimeResult<()> {
         Ok(())
     }
 
-    #[cfg(feature = "runtime-hardening-m7")]
+    #[cfg(feature = "isolated-execution")]
     fn payload_config(
         &self,
         attempt_id: &str,
-        plan: &M6ExecutionPlan,
-    ) -> M6Result<Option<RunnerPayloadConfig>> {
+        plan: &RuntimeExecutionPlan,
+    ) -> RuntimeResult<Option<RunnerPayloadConfig>> {
         let Some(hardening) = &self.hardening else {
             return Ok(None);
         };
         let runtime_dir = hardening.payload_runtime_dir(attempt_id);
-        crate::m7::ensure_owned_directory(
+        crate::isolation::ensure_owned_directory(
             &runtime_dir,
             hardening.worker.uid,
             hardening.worker.gid,
@@ -1158,13 +1166,13 @@ impl M6Runtime {
             view_root.join("runtime"),
             view_root.join("cache"),
         ] {
-            crate::m7::ensure_traversal_directory(&path, hardening.worker.gid, 0o750)?;
+            crate::isolation::ensure_traversal_directory(&path, hardening.worker.gid, 0o750)?;
         }
         let workspace = Path::new(&plan.workspace_path);
         let cwd = Path::new(&plan.cwd);
         let relative_cwd = cwd
             .strip_prefix(workspace)
-            .map_err(|_| M6Error::invalid("M7 cwd escaped workspace", "cwd"))?;
+            .map_err(|_| RuntimeError::invalid("isolated cwd escaped workspace", "cwd"))?;
         let workspace_view = view_root.join("workspace");
         Ok(Some(RunnerPayloadConfig {
             uid: hardening.worker.uid,
@@ -1179,17 +1187,17 @@ impl M6Runtime {
         }))
     }
 
-    #[cfg(not(feature = "runtime-hardening-m7"))]
+    #[cfg(not(feature = "isolated-execution"))]
     fn payload_config(
         &self,
         _attempt_id: &str,
-        _plan: &M6ExecutionPlan,
-    ) -> M6Result<Option<RunnerPayloadConfig>> {
+        _plan: &RuntimeExecutionPlan,
+    ) -> RuntimeResult<Option<RunnerPayloadConfig>> {
         Ok(None)
     }
 
     fn payload_evidence_matches(&self, uid: Option<u32>, gid: Option<u32>) -> bool {
-        #[cfg(feature = "runtime-hardening-m7")]
+        #[cfg(feature = "isolated-execution")]
         {
             match &self.hardening {
                 Some(hardening) => {
@@ -1198,18 +1206,18 @@ impl M6Runtime {
                 None => uid.is_none() && gid.is_none(),
             }
         }
-        #[cfg(not(feature = "runtime-hardening-m7"))]
+        #[cfg(not(feature = "isolated-execution"))]
         {
             uid.is_none() && gid.is_none()
         }
     }
 }
 
-#[cfg(feature = "runtime-hardening-m7")]
+#[cfg(feature = "isolated-execution")]
 fn validate_hardening_roots(
-    config: &M6RuntimeConfig,
-    hardening: &crate::M7RuntimeHardeningConfig,
-) -> M6Result<()> {
+    config: &RuntimeConfig,
+    hardening: &crate::IsolationConfig,
+) -> RuntimeResult<()> {
     if !config
         .registry
         .store_root
@@ -1220,8 +1228,8 @@ fn validate_hardening_roots(
             .store_root
             .starts_with(&hardening.control_root)
     {
-        return Err(M6Error::invalid(
-            "Registry and executor metadata must remain under M7 controlRoot",
+        return Err(RuntimeError::invalid(
+            "Registry and executor metadata must remain under isolated controlRoot",
             "controlRoot",
         ));
     }
@@ -1229,18 +1237,18 @@ fn validate_hardening_roots(
         || config.executor.workspace_uid != Some(hardening.worker.uid)
         || config.executor.workspace_gid != Some(hardening.worker.gid)
     {
-        return Err(M6Error::invalid(
-            "executor workspace root and owner must match M7 worker configuration",
+        return Err(RuntimeError::invalid(
+            "executor workspace root and owner must match isolated worker configuration",
             "workspaceRoot",
         ));
     }
     Ok(())
 }
 
-fn validate_run_request(request: &M6TaskRunRequest) -> M6Result<()> {
-    if request.schema_version != M6_SCHEMA_VERSION {
-        return Err(M6Error::invalid(
-            "unsupported M6 schema version",
+fn validate_run_request(request: &TaskRunRequest) -> RuntimeResult<()> {
+    if request.schema_version != RUNTIME_SCHEMA_VERSION {
+        return Err(RuntimeError::invalid(
+            "unsupported runtime schema version",
             "schemaVersion",
         ));
     }
@@ -1256,23 +1264,23 @@ fn validate_run_request(request: &M6TaskRunRequest) -> M6Result<()> {
     }
     validate_sha256(&request.policy_digest, "policyDigest")?;
     if request.profile_id.is_some() != request.profile_limit.is_some() {
-        return Err(M6Error::invalid(
+        return Err(RuntimeError::invalid(
             "profileId and profileLimit must appear together",
             "profileLimit",
         ));
     }
     if request.global_limit == 0 || request.profile_limit == Some(0) {
-        return Err(M6Error::invalid(
+        return Err(RuntimeError::invalid(
             "concurrency limits must be positive",
             "globalLimit",
         ));
     }
-    if request.wait_ms > MAX_M6_WAIT_MS
-        || request.stdout_tail_bytes > MAX_M6_TAIL_BYTES
-        || request.stderr_tail_bytes > MAX_M6_TAIL_BYTES
+    if request.wait_ms > MAX_TASK_WAIT_MS
+        || request.stdout_tail_bytes > MAX_TASK_TAIL_BYTES
+        || request.stderr_tail_bytes > MAX_TASK_TAIL_BYTES
     {
-        return Err(M6Error::invalid(
-            "wait or tail bounds exceed the M6 compact limit",
+        return Err(RuntimeError::invalid(
+            "wait or tail bounds exceed the runtime compact limit",
             "waitMs",
         ));
     }
@@ -1281,7 +1289,7 @@ fn validate_run_request(request: &M6TaskRunRequest) -> M6Result<()> {
         || request.execution.cwd_relative.is_empty()
         || Path::new(&request.execution.cwd_relative).is_absolute()
     {
-        return Err(M6Error::invalid(
+        return Err(RuntimeError::invalid(
             "executable must be absolute and cwdRelative must be relative",
             "execution",
         ));
@@ -1292,7 +1300,7 @@ fn validate_run_request(request: &M6TaskRunRequest) -> M6Result<()> {
         .split('/')
         .any(|part| part == "..")
     {
-        return Err(M6Error::invalid(
+        return Err(RuntimeError::invalid(
             "cwdRelative cannot contain parent traversal",
             "execution.cwdRelative",
         ));
@@ -1301,41 +1309,41 @@ fn validate_run_request(request: &M6TaskRunRequest) -> M6Result<()> {
         || request.execution.stdout_limit_bytes == 0
         || request.execution.stderr_limit_bytes == 0
     {
-        return Err(M6Error::invalid(
+        return Err(RuntimeError::invalid(
             "runtime and output limits must be positive",
             "execution",
         ));
     }
     if request.execution.args.len() > 128 || request.execution.env.len() > 64 {
-        return Err(M6Error::invalid(
-            "args or environment exceed M6 bounds",
+        return Err(RuntimeError::invalid(
+            "args or environment exceed runtime bounds",
             "execution",
         ));
     }
     Ok(())
 }
 
-fn validate_observe_request(request: &M6TaskObserveRequest) -> M6Result<()> {
-    if request.schema_version != M6_SCHEMA_VERSION {
-        return Err(M6Error::invalid(
-            "unsupported M6 schema version",
+fn validate_observe_request(request: &TaskObserveRequest) -> RuntimeResult<()> {
+    if request.schema_version != RUNTIME_SCHEMA_VERSION {
+        return Err(RuntimeError::invalid(
+            "unsupported runtime schema version",
             "schemaVersion",
         ));
     }
     validate_text_id(&request.job_id, "jobId")?;
-    if request.wait_ms > MAX_M6_WAIT_MS
-        || request.stdout_tail_bytes > MAX_M6_TAIL_BYTES
-        || request.stderr_tail_bytes > MAX_M6_TAIL_BYTES
+    if request.wait_ms > MAX_TASK_WAIT_MS
+        || request.stdout_tail_bytes > MAX_TASK_TAIL_BYTES
+        || request.stderr_tail_bytes > MAX_TASK_TAIL_BYTES
     {
-        return Err(M6Error::invalid(
-            "observe bounds exceed M6 limits",
+        return Err(RuntimeError::invalid(
+            "observe bounds exceed runtime limits",
             "waitMs",
         ));
     }
     Ok(())
 }
 
-fn validate_executable(config: &UniversalExecutorConfig, value: &str) -> M6Result<PathBuf> {
+fn validate_executable(config: &UniversalExecutorConfig, value: &str) -> RuntimeResult<PathBuf> {
     let path = Path::new(value);
     let metadata =
         fs::symlink_metadata(path).map_err(|error| io_error("inspect executable", error))?;
@@ -1343,7 +1351,7 @@ fn validate_executable(config: &UniversalExecutorConfig, value: &str) -> M6Resul
         || !metadata.is_file()
         || metadata.permissions().mode() & 0o111 == 0
     {
-        return Err(M6Error::invalid(
+        return Err(RuntimeError::invalid(
             "executable must be a non-symlink executable file",
             "execution.executable",
         ));
@@ -1356,8 +1364,8 @@ fn validate_executable(config: &UniversalExecutorConfig, value: &str) -> M6Resul
             .unwrap_or(false)
     });
     if !allowed {
-        return Err(M6Error::new(
-            M6ErrorCode::InvalidRequest,
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::InvalidRequest,
             "executable is outside configured roots",
             Some("execution.executable"),
             false,
@@ -1366,13 +1374,13 @@ fn validate_executable(config: &UniversalExecutorConfig, value: &str) -> M6Resul
     Ok(canonical)
 }
 
-fn validate_runner(path: &Path) -> M6Result<PathBuf> {
+fn validate_runner(path: &Path) -> RuntimeResult<PathBuf> {
     let metadata = fs::symlink_metadata(path).map_err(|error| io_error("inspect Runner", error))?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.permissions().mode() & 0o111 == 0
     {
-        return Err(M6Error::invalid(
+        return Err(RuntimeError::invalid(
             "Runner must be a non-symlink executable file",
             "runnerPath",
         ));
@@ -1386,8 +1394,8 @@ fn systemd_run(
     bundle_path: &Path,
     _workspace_path: &Path,
     runtime_ceiling_ms: u64,
-    #[cfg(feature = "runtime-hardening-m7")] hardening: Option<&crate::M7RuntimeHardeningConfig>,
-) -> M6Result<std::process::Output> {
+    #[cfg(feature = "isolated-execution")] hardening: Option<&crate::IsolationConfig>,
+) -> RuntimeResult<std::process::Output> {
     let mut command = Command::new("systemd-run");
     command
         .arg(format!("--unit={unit_name}"))
@@ -1428,13 +1436,13 @@ fn systemd_run(
             "--property=RuntimeMaxSec={runtime_ceiling_ms}ms"
         ))
         .arg(format!("--property=ReadWritePaths={}", bundle_path.display()));
-    #[cfg(feature = "runtime-hardening-m7")]
+    #[cfg(feature = "isolated-execution")]
     if let Some(hardening) = hardening {
         let attempt_id = bundle_path
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| {
-                M6Error::invalid("bundle path omitted Attempt identity", "bundlePath")
+                RuntimeError::invalid("bundle path omitted Attempt identity", "bundlePath")
             })?;
         let runtime_dir = hardening.payload_runtime_dir(attempt_id);
         let view_root = hardening.payload_view_root(attempt_id);
@@ -1471,7 +1479,7 @@ fn systemd_run(
     } else {
         command.arg("--property=CapabilityBoundingSet=");
     }
-    #[cfg(not(feature = "runtime-hardening-m7"))]
+    #[cfg(not(feature = "isolated-execution"))]
     command.arg("--property=CapabilityBoundingSet=");
     command
         .arg(runner)
@@ -1481,7 +1489,7 @@ fn systemd_run(
         .map_err(|error| tool_error("cannot execute systemd-run", error))
 }
 
-fn systemctl_show(unit_name: &str) -> M6Result<BTreeMap<String, String>> {
+fn systemctl_show(unit_name: &str) -> RuntimeResult<BTreeMap<String, String>> {
     let output = Command::new("systemctl")
         .args([
             "show",
@@ -1491,8 +1499,8 @@ fn systemctl_show(unit_name: &str) -> M6Result<BTreeMap<String, String>> {
         .output()
         .map_err(|error| tool_error("cannot execute systemctl show", error))?;
     if !output.status.success() && output.stdout.is_empty() {
-        return Err(M6Error::new(
-            M6ErrorCode::ToolFailed,
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::ToolFailed,
             format!(
                 "systemctl show failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
@@ -1533,10 +1541,10 @@ fn require_property(
     properties: &BTreeMap<String, String>,
     key: &str,
     expected: &str,
-) -> M6Result<()> {
+) -> RuntimeResult<()> {
     if properties.get(key).map(String::as_str) != Some(expected) {
-        return Err(M6Error::new(
-            M6ErrorCode::LaunchIdentityMismatch,
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::LaunchIdentityMismatch,
             format!("systemd {key} does not match runner-start evidence"),
             Some(key),
             false,
@@ -1545,20 +1553,20 @@ fn require_property(
     Ok(())
 }
 
-fn missing_systemd_property(key: &str) -> M6Error {
-    M6Error::new(
-        M6ErrorCode::LaunchIdentityMismatch,
+fn missing_systemd_property(key: &str) -> RuntimeError {
+    RuntimeError::new(
+        RuntimeErrorCode::LaunchIdentityMismatch,
         format!("systemd omitted {key}"),
         Some(key),
         false,
     )
 }
 
-fn supervisor_identity(attempt: &AttemptRecordM6) -> M6Result<SupervisorIdentity> {
+fn supervisor_identity(attempt: &AttemptRecord) -> RuntimeResult<SupervisorIdentity> {
     Ok(SupervisorIdentity {
         boot_id: attempt.boot_id.clone().ok_or_else(|| {
-            M6Error::new(
-                M6ErrorCode::RegistryCorrupt,
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
                 "bound Attempt has no bootId",
                 Some("bootId"),
                 false,
@@ -1566,32 +1574,32 @@ fn supervisor_identity(attempt: &AttemptRecordM6) -> M6Result<SupervisorIdentity
         })?,
         unit_name: attempt.unit_name.clone(),
         invocation_id: attempt.invocation_id.clone().ok_or_else(|| {
-            M6Error::new(
-                M6ErrorCode::RegistryCorrupt,
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
                 "bound Attempt has no invocationId",
                 Some("invocationId"),
                 false,
             )
         })?,
         control_group: attempt.control_group.clone().ok_or_else(|| {
-            M6Error::new(
-                M6ErrorCode::RegistryCorrupt,
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
                 "bound Attempt has no controlGroup",
                 Some("controlGroup"),
                 false,
             )
         })?,
         main_pid: attempt.main_pid.ok_or_else(|| {
-            M6Error::new(
-                M6ErrorCode::RegistryCorrupt,
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
                 "bound Attempt has no mainPid",
                 Some("mainPid"),
                 false,
             )
         })?,
         main_process_start_identity: attempt.process_start_identity.clone().ok_or_else(|| {
-            M6Error::new(
-                M6ErrorCode::RegistryCorrupt,
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
                 "bound Attempt has no process start identity",
                 Some("processStartIdentity"),
                 false,
@@ -1600,7 +1608,7 @@ fn supervisor_identity(attempt: &AttemptRecordM6) -> M6Result<SupervisorIdentity
     })
 }
 
-fn map_job_state(state: JobInternalState) -> M6Result<AttemptState> {
+fn map_job_state(state: JobInternalState) -> RuntimeResult<AttemptState> {
     match state {
         JobInternalState::Succeeded => Ok(AttemptState::Succeeded),
         JobInternalState::Failed => Ok(AttemptState::Failed),
@@ -1608,8 +1616,8 @@ fn map_job_state(state: JobInternalState) -> M6Result<AttemptState> {
         JobInternalState::Cancelled => Ok(AttemptState::Cancelled),
         JobInternalState::Lost => Ok(AttemptState::Lost),
         JobInternalState::Orphaned => Ok(AttemptState::Orphaned),
-        _ => Err(M6Error::new(
-            M6ErrorCode::RegistryCorrupt,
+        _ => Err(RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
             "supervisor terminal classification returned a non-terminal state",
             Some("state"),
             false,
@@ -1629,21 +1637,23 @@ fn process_identity(pid: u32) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn read_trimmed(path: &str) -> M6Result<String> {
+fn read_trimmed(path: &str) -> RuntimeResult<String> {
     fs::read_to_string(path)
         .map(|value| value.trim().to_string())
         .map_err(|error| io_error(&format!("read {path}"), error))
 }
 
-fn load_runner_result_if_present(attempt: &AttemptRecordM6) -> M6Result<Option<RunnerTaskResult>> {
+fn load_runner_result_if_present(
+    attempt: &AttemptRecord,
+) -> RuntimeResult<Option<RunnerTaskResult>> {
     let path = Path::new(&attempt.bundle_path).join(RESULT_FILE);
     if !path.exists() {
         return Ok(None);
     }
     let bytes = fs::read(&path).map_err(|error| io_error("read Runner result", error))?;
     serde_json::from_slice(&bytes).map(Some).map_err(|error| {
-        M6Error::new(
-            M6ErrorCode::RegistryCorrupt,
+        RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
             format!("invalid Runner result: {error}"),
             Some("result"),
             false,
@@ -1651,7 +1661,7 @@ fn load_runner_result_if_present(attempt: &AttemptRecordM6) -> M6Result<Option<R
     })
 }
 
-fn read_tail_text(path: &Path, max_bytes: u64) -> M6Result<String> {
+fn read_tail_text(path: &Path, max_bytes: u64) -> RuntimeResult<String> {
     if max_bytes == 0 || !path.exists() {
         return Ok(String::new());
     }
@@ -1672,7 +1682,7 @@ fn read_tail_text(path: &Path, max_bytes: u64) -> M6Result<String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn write_bytes_synced(path: &Path, bytes: &[u8]) -> M6Result<()> {
+fn write_bytes_synced(path: &Path, bytes: &[u8]) -> RuntimeResult<()> {
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -1684,18 +1694,18 @@ fn write_bytes_synced(path: &Path, bytes: &[u8]) -> M6Result<()> {
         .map_err(|error| io_error("sync bundle file", error))
 }
 
-fn sync_directory(path: &Path) -> M6Result<()> {
+fn sync_directory(path: &Path) -> RuntimeResult<()> {
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|error| io_error("sync directory", error))
 }
 
-fn now_ms() -> M6Result<u64> {
+fn now_ms() -> RuntimeResult<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| {
-            M6Error::new(
-                M6ErrorCode::RegistryUnavailable,
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryUnavailable,
                 format!("system clock precedes Unix epoch: {error}"),
                 None,
                 false,
@@ -1704,8 +1714,8 @@ fn now_ms() -> M6Result<u64> {
         .as_millis()
         .try_into()
         .map_err(|_| {
-            M6Error::new(
-                M6ErrorCode::RegistryUnavailable,
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryUnavailable,
                 "current time does not fit u64 milliseconds",
                 None,
                 false,
@@ -1713,13 +1723,13 @@ fn now_ms() -> M6Result<u64> {
         })
 }
 
-fn validate_text_id(value: &str, field: &str) -> M6Result<()> {
+fn validate_text_id(value: &str, field: &str) -> RuntimeResult<()> {
     if value.trim().is_empty()
         || value.len() > 256
         || value.as_bytes().contains(&0)
         || value.chars().any(char::is_control)
     {
-        return Err(M6Error::invalid(
+        return Err(RuntimeError::invalid(
             format!("{field} must be non-empty, bounded, and control-free"),
             field,
         ));
@@ -1727,12 +1737,12 @@ fn validate_text_id(value: &str, field: &str) -> M6Result<()> {
     Ok(())
 }
 
-fn validate_sha256(value: &str, field: &str) -> M6Result<()> {
+fn validate_sha256(value: &str, field: &str) -> RuntimeResult<()> {
     let valid = value
         .strip_prefix("sha256:")
         .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
     if !valid {
-        return Err(M6Error::invalid(
+        return Err(RuntimeError::invalid(
             format!("{field} must be a SHA-256 digest"),
             field,
         ));
@@ -1740,46 +1750,46 @@ fn validate_sha256(value: &str, field: &str) -> M6Result<()> {
     Ok(())
 }
 
-fn serialization_error(error: serde_json::Error) -> M6Error {
-    M6Error::new(
-        M6ErrorCode::RegistryUnavailable,
-        format!("cannot serialize M6 bundle: {error}"),
+fn serialization_error(error: serde_json::Error) -> RuntimeError {
+    RuntimeError::new(
+        RuntimeErrorCode::RegistryUnavailable,
+        format!("cannot serialize runtime bundle: {error}"),
         None,
         false,
     )
 }
 
-fn map_universal_error(error: crate::UniversalExecError) -> M6Error {
-    M6Error::new(
-        M6ErrorCode::InvalidRequest,
+fn map_universal_error(error: crate::UniversalExecError) -> RuntimeError {
+    RuntimeError::new(
+        RuntimeErrorCode::InvalidRequest,
         error.message,
         error.field.as_deref(),
         error.retryable,
     )
 }
 
-fn io_error(context: &str, error: std::io::Error) -> M6Error {
-    M6Error::new(
-        M6ErrorCode::IoError,
+fn io_error(context: &str, error: std::io::Error) -> RuntimeError {
+    RuntimeError::new(
+        RuntimeErrorCode::IoError,
         format!("{context}: {error}"),
         None,
         false,
     )
 }
 
-fn tool_error(context: &str, error: std::io::Error) -> M6Error {
-    M6Error::new(
-        M6ErrorCode::ToolUnavailable,
+fn tool_error(context: &str, error: std::io::Error) -> RuntimeError {
+    RuntimeError::new(
+        RuntimeErrorCode::ToolUnavailable,
         format!("{context}: {error}"),
         None,
         true,
     )
 }
 
-fn ensure_systemd_visible(path: &Path, field: &str) -> M6Result<()> {
+fn ensure_systemd_visible(path: &Path, field: &str) -> RuntimeResult<()> {
     for private_root in ["/tmp", "/var/tmp", "/dev/shm"] {
         if path.starts_with(private_root) {
-            return Err(M6Error::invalid(
+            return Err(RuntimeError::invalid(
                 format!("{field} is hidden by the Runner PrivateTmp boundary"),
                 field,
             ));

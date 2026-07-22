@@ -1,9 +1,9 @@
 use super::*;
 use std::path::PathBuf;
 
-fn config() -> M7RuntimeHardeningConfig {
-    M7RuntimeHardeningConfig {
-        worker: M7WorkerIdentity {
+fn config() -> IsolationConfig {
+    IsolationConfig {
+        worker: WorkerIdentity {
             user: "ordivon-worker".to_string(),
             group: "ordivon-worker".to_string(),
             uid: 65_534,

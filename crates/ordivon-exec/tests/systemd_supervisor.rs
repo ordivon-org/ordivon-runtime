@@ -1,4 +1,4 @@
-#![cfg(feature = "supervisor-spike")]
+#![cfg(feature = "systemd-supervisor")]
 
 use serde::Deserialize;
 use std::collections::BTreeMap;

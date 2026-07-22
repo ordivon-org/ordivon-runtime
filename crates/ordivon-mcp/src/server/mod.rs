@@ -8,11 +8,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ordivon_exec::{
     create_git_workspace_compact, mutate_workspace, read_workspace_slice_compact,
-    read_workspace_text_compact, workspace_diff_compact, CompactWorkspaceDiffResult,
-    CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, JobListRequestM6, JobListResultM6,
-    M6ArtifactReadRequest, M6ArtifactReadResult, M6Error, M6Runtime, M6RuntimeConfig,
-    M6TaskCancelRequest, M6TaskObservation, M6TaskObserveRequest, M6TaskRunRequest,
-    UniversalExecError, UniversalExecutorConfig, WorkspaceDiffRequest as ExecWorkspaceDiffRequest,
+    read_workspace_text_compact, workspace_diff_compact, ArtifactReadRequest, ArtifactReadResult,
+    CompactWorkspaceDiffResult, CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, Runtime,
+    RuntimeConfig, RuntimeError, RuntimeJobListRequest, RuntimeJobListResult, TaskCancelRequest,
+    TaskObservation, TaskObserveRequest, TaskRunRequest, UniversalExecError,
+    UniversalExecutorConfig, WorkspaceDiffRequest as ExecWorkspaceDiffRequest,
     WorkspaceMutateRequest, WorkspaceMutateResult,
     WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
 };
@@ -69,7 +69,7 @@ pub struct WorkspaceDiffRequest {
 
 #[derive(Clone)]
 pub struct ServerConfig {
-    pub runtime: M6RuntimeConfig,
+    pub runtime: RuntimeConfig,
     pub trace_path: Option<PathBuf>,
 }
 
@@ -81,7 +81,7 @@ pub struct OrdivonServer {
 }
 
 struct ServerState {
-    runtime: M6Runtime,
+    runtime: Runtime,
     executor: UniversalExecutorConfig,
     trace_path: Option<PathBuf>,
 }
@@ -90,7 +90,7 @@ impl OrdivonServer {
     pub fn new(config: ServerConfig) -> Result<Self, ToolError> {
         let executor = config.runtime.executor.clone();
         executor.ensure_store().map_err(ToolError::from)?;
-        let runtime = M6Runtime::new(config.runtime).map_err(ToolError::from)?;
+        let runtime = Runtime::new(config.runtime).map_err(ToolError::from)?;
         let state = Arc::new(ServerState {
             runtime,
             executor,
@@ -141,8 +141,8 @@ impl ToolError {
     }
 }
 
-impl From<M6Error> for ToolError {
-    fn from(error: M6Error) -> Self {
+impl From<RuntimeError> for ToolError {
+    fn from(error: RuntimeError) -> Self {
         let code = serde_json::to_value(&error.code)
             .ok()
             .and_then(|value| value.as_str().map(ToString::to_string))
@@ -304,7 +304,7 @@ fn unix_ms() -> u128 {
         .as_millis()
 }
 
-fn parse_task_run(arguments: Option<JsonObject>) -> Result<M6TaskRunRequest, McpError> {
+fn parse_task_run(arguments: Option<JsonObject>) -> Result<TaskRunRequest, McpError> {
     serde_json::from_value(Value::Object(arguments.unwrap_or_default())).map_err(|error| {
         McpError::invalid_params(
             format!("invalid workspace.exec task arguments: {error}"),
@@ -336,11 +336,13 @@ fn format_unix_ms(value: u64) -> Result<String, McpError> {
         })
 }
 
-fn encode_cursor(cursor: &ordivon_exec::JobListCursorM6) -> String {
+fn encode_cursor(cursor: &ordivon_exec::RuntimeJobListCursor) -> String {
     format!("{}:{}", cursor.created_at_ms, cursor.job_id)
 }
 
-fn decode_cursor(value: Option<String>) -> Result<Option<ordivon_exec::JobListCursorM6>, McpError> {
+fn decode_cursor(
+    value: Option<String>,
+) -> Result<Option<ordivon_exec::RuntimeJobListCursor>, McpError> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -350,7 +352,7 @@ fn decode_cursor(value: Option<String>) -> Result<Option<ordivon_exec::JobListCu
     let created_at_ms = created
         .parse()
         .map_err(|_| McpError::invalid_params("invalid task cursor timestamp", None))?;
-    Ok(Some(ordivon_exec::JobListCursorM6 {
+    Ok(Some(ordivon_exec::RuntimeJobListCursor {
         created_at_ms,
         job_id: job_id.to_string(),
     }))

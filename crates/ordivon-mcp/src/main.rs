@@ -13,8 +13,8 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use ordivon_exec::{
-    M6RegistryConfig, M6Runtime, M6RuntimeConfig, M7RuntimeHardeningConfig, M7WorkerIdentity,
-    UniversalExecutorConfig,
+    IsolationConfig, RegistryConfig, Runtime, RuntimeConfig, UniversalExecutorConfig,
+    WorkerIdentity,
 };
 use ordivon_mcp::server::{OrdivonServer, ServerConfig};
 use rmcp::transport::streamable_http_server::{
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init();
 
     let app = load_config()?;
-    let startup_runtime = M6Runtime::new(app.server.runtime.clone())?;
+    let startup_runtime = Runtime::new(app.server.runtime.clone())?;
     startup_runtime.reconcile_all()?;
     drop(startup_runtime);
     if !app.bind.ip().is_loopback() {
@@ -247,8 +247,8 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
             let runtime_view_root = PathBuf::from(required_env("ORDIVON_RUNTIME_VIEW_ROOT")?);
             let worker_uid: u32 = required_env("ORDIVON_WORKER_UID")?.parse()?;
             let worker_gid: u32 = required_env("ORDIVON_WORKER_GID")?.parse()?;
-            let hardening = M7RuntimeHardeningConfig {
-                worker: M7WorkerIdentity {
+            let hardening = IsolationConfig {
+                worker: WorkerIdentity {
                     user: "ordivon-worker".to_string(),
                     group: "ordivon-worker".to_string(),
                     uid: worker_uid,
@@ -274,8 +274,8 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         execution_mode,
         body_limit_bytes,
         server: ServerConfig {
-            runtime: M6RuntimeConfig {
-                registry: M6RegistryConfig {
+            runtime: RuntimeConfig {
+                registry: RegistryConfig {
                     db_path: registry_root.join("registry.sqlite3"),
                     store_root: registry_root,
                     busy_timeout_ms,

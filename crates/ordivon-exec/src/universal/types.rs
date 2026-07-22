@@ -2,12 +2,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::migration::MigrationTaskStatus;
-
 use super::{
-    invalid, validate_args, validate_artifact_id, validate_env, validate_id,
-    validate_relative_path, UniversalExecError, MAX_ARTIFACT_READ_BYTES, MAX_COMPACT_TAIL_BYTES,
-    MAX_TASK_WAIT_MS, MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS, MAX_WORKSPACE_IO_BYTES,
+    invalid, validate_id, validate_relative_path, UniversalExecError, MAX_WORKSPACE_IO_BYTES,
     MAX_WORKSPACE_MUTATIONS, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
@@ -192,221 +188,6 @@ pub struct CompactWorkspaceDiffResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct UniversalExecRequest {
-    pub schema_version: u32,
-    pub task_id: String,
-    pub workspace_id: String,
-    pub executable: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    pub cwd_relative: String,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    pub timeout_ms: u64,
-    pub stdout_limit_bytes: u64,
-    pub stderr_limit_bytes: u64,
-}
-
-impl UniversalExecRequest {
-    pub fn validate_shape(&self) -> Result<(), UniversalExecError> {
-        require_schema(self.schema_version)?;
-        validate_id(&self.task_id, "taskId")?;
-        validate_id(&self.workspace_id, "workspaceId")?;
-        if self.executable.is_empty()
-            || !std::path::Path::new(&self.executable).is_absolute()
-            || self.executable.as_bytes().contains(&0)
-        {
-            return Err(invalid(
-                "executable must be an absolute NUL-free path",
-                "executable",
-            ));
-        }
-        validate_args(&self.args)?;
-        validate_relative_path(&self.cwd_relative, "cwdRelative")?;
-        validate_env(&self.env)?;
-        if self.timeout_ms == 0 || self.timeout_ms > MAX_UNIVERSAL_RUNTIME_MS {
-            return Err(invalid(
-                format!("timeoutMs must be in 1..={MAX_UNIVERSAL_RUNTIME_MS}"),
-                "timeoutMs",
-            ));
-        }
-        for (value, field) in [
-            (self.stdout_limit_bytes, "stdoutLimitBytes"),
-            (self.stderr_limit_bytes, "stderrLimitBytes"),
-        ] {
-            if value == 0 || value > MAX_UNIVERSAL_OUTPUT_BYTES {
-                return Err(invalid(
-                    format!("{field} must be in 1..={MAX_UNIVERSAL_OUTPUT_BYTES}"),
-                    field,
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TaskGetRequest {
-    pub schema_version: u32,
-    pub task_id: String,
-    #[serde(default)]
-    pub wait_ms: u64,
-}
-
-impl TaskGetRequest {
-    pub fn validate_shape(&self) -> Result<(), UniversalExecError> {
-        require_schema(self.schema_version)?;
-        validate_id(&self.task_id, "taskId")?;
-        if self.wait_ms > MAX_TASK_WAIT_MS {
-            return Err(invalid(
-                format!("waitMs must be in 0..={MAX_TASK_WAIT_MS}"),
-                "waitMs",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TaskCancelRequest {
-    pub schema_version: u32,
-    pub task_id: String,
-}
-
-impl TaskCancelRequest {
-    pub fn validate_shape(&self) -> Result<(), UniversalExecError> {
-        require_schema(self.schema_version)?;
-        validate_id(&self.task_id, "taskId")
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ArtifactReadRequest {
-    pub schema_version: u32,
-    pub task_id: String,
-    pub artifact_id: String,
-    pub offset: u64,
-    pub max_bytes: u64,
-}
-
-impl ArtifactReadRequest {
-    pub fn validate_shape(&self) -> Result<(), UniversalExecError> {
-        require_schema(self.schema_version)?;
-        validate_id(&self.task_id, "taskId")?;
-        validate_artifact_id(&self.artifact_id, "artifactId")?;
-        if self.max_bytes == 0 || self.max_bytes > MAX_ARTIFACT_READ_BYTES {
-            return Err(invalid(
-                format!("maxBytes must be in 1..={MAX_ARTIFACT_READ_BYTES}"),
-                "maxBytes",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ArtifactReadResult {
-    pub task_id: String,
-    pub artifact_id: String,
-    pub content: String,
-    pub offset: u64,
-    pub next_offset: u64,
-    pub eof: bool,
-    pub digest: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TaskAwaitRequest {
-    pub schema_version: u32,
-    pub task_id: String,
-    #[serde(default)]
-    pub wait_ms: u64,
-    #[serde(default = "default_tail_bytes")]
-    pub stdout_tail_bytes: u64,
-    #[serde(default = "default_tail_bytes")]
-    pub stderr_tail_bytes: u64,
-}
-
-impl TaskAwaitRequest {
-    pub fn validate_shape(&self) -> Result<(), UniversalExecError> {
-        require_schema(self.schema_version)?;
-        validate_id(&self.task_id, "taskId")?;
-        validate_wait_and_tails(self.wait_ms, self.stdout_tail_bytes, self.stderr_tail_bytes)
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TaskRunRequest {
-    pub schema_version: u32,
-    pub execution: UniversalExecRequest,
-    #[serde(default = "default_task_run_wait_ms")]
-    pub wait_ms: u64,
-    #[serde(default = "default_tail_bytes")]
-    pub stdout_tail_bytes: u64,
-    #[serde(default = "default_tail_bytes")]
-    pub stderr_tail_bytes: u64,
-}
-
-impl TaskRunRequest {
-    pub fn validate_shape(&self) -> Result<(), UniversalExecError> {
-        require_schema(self.schema_version)?;
-        self.execution.validate_shape()?;
-        if self.execution.schema_version != self.schema_version {
-            return Err(invalid(
-                "execution schemaVersion must match the outer request",
-                "execution.schemaVersion",
-            ));
-        }
-        validate_wait_and_tails(self.wait_ms, self.stdout_tail_bytes, self.stderr_tail_bytes)
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DurableTaskSnapshot {
-    pub task_id: String,
-    pub status: MigrationTaskStatus,
-    pub status_message: String,
-    pub created_unix_ms: u128,
-    pub updated_unix_ms: u128,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub poll_after_ms: Option<u64>,
-    pub result_available: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CompactTaskObservation {
-    pub task_id: String,
-    pub status: MigrationTaskStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub timed_out: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub poll_after_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub stdout_tail: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub stderr_tail: String,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub stdout_truncated: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub stderr_truncated: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub artifacts_available: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_summary: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkspaceMutationMode {
     Write,
@@ -569,39 +350,6 @@ pub struct CompactWorkspaceSliceResult {
     pub eof: bool,
 }
 
-fn validate_wait_and_tails(
-    wait_ms: u64,
-    stdout_tail_bytes: u64,
-    stderr_tail_bytes: u64,
-) -> Result<(), UniversalExecError> {
-    if wait_ms > MAX_TASK_WAIT_MS {
-        return Err(invalid(
-            format!("waitMs must be in 0..={MAX_TASK_WAIT_MS}"),
-            "waitMs",
-        ));
-    }
-    for (value, field) in [
-        (stdout_tail_bytes, "stdoutTailBytes"),
-        (stderr_tail_bytes, "stderrTailBytes"),
-    ] {
-        if value > MAX_COMPACT_TAIL_BYTES {
-            return Err(invalid(
-                format!("{field} must be in 0..={MAX_COMPACT_TAIL_BYTES}"),
-                field,
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn default_tail_bytes() -> u64 {
-    4096
-}
-
-fn default_task_run_wait_ms() -> u64 {
-    MAX_TASK_WAIT_MS
-}
-
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -661,18 +409,6 @@ pub(crate) struct RunnerStartEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_gid: Option<u32>,
     pub observed_unix_ms: u128,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct TaskMetadata {
-    pub schema_version: u32,
-    pub task_id: String,
-    pub workspace_id: String,
-    pub unit_name: String,
-    pub request_digest: String,
-    pub boot_id: String,
-    pub created_unix_ms: u128,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

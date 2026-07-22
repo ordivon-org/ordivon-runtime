@@ -1,12 +1,12 @@
-#![cfg(feature = "transactional-registry-m6")]
+#![cfg(feature = "transactional-runtime")]
 
 use ordivon_exec::{
-    create_git_workspace, remove_git_workspace, write_workspace_text, AttemptState,
-    GitWorkspaceCreateRequest, JobListRequestM6, M6ArtifactReadRequest, M6ExecutionPlan,
-    M6RegistryConfig, M6Runtime, M6RuntimeConfig, M6SubmitRequest, M6TaskCancelRequest,
-    M6TaskObserveRequest, M6TaskRunRequest, M6UniversalExecutionRequest, PlanKind,
-    UniversalExecutorConfig, WorkspaceWriteRequest, M6_SCHEMA_VERSION, MAX_UNIVERSAL_OUTPUT_BYTES,
-    MAX_UNIVERSAL_RUNTIME_MS, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    create_git_workspace, remove_git_workspace, write_workspace_text, ArtifactReadRequest,
+    AttemptState, GitWorkspaceCreateRequest, PlanKind, RegistryConfig, Runtime, RuntimeConfig,
+    RuntimeExecutionPlan, RuntimeJobListRequest, SubmitRequest, TaskCancelRequest,
+    TaskObserveRequest, TaskRunRequest, UniversalExecutionRequest, UniversalExecutorConfig,
+    WorkspaceWriteRequest, MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS,
+    RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -38,17 +38,17 @@ fn command_output(program: &str, args: &[&str], cwd: &Path) -> String {
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
-fn m6_transactional_runtime_executes_replays_and_releases_capacity() {
-    if std::env::var("ORDIVON_RUN_M6_INTEGRATION").as_deref() != Ok("1") {
+fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
     let runner_path =
-        PathBuf::from(std::env::var("ORDIVON_M6_RUNNER_PATH").expect("ORDIVON_M6_RUNNER_PATH"));
+        PathBuf::from(std::env::var("ORDIVON_RUNNER_PATH").expect("ORDIVON_RUNNER_PATH"));
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let repo = fs::canonicalize(repo).unwrap();
     let revision = command_output("git", &["rev-parse", "HEAD"], &repo);
     let root =
-        PathBuf::from("/root/.local/share/ordivon-m6-integration").join(Uuid::now_v7().to_string());
+        PathBuf::from("/root/.local/share/ordivon-integration").join(Uuid::now_v7().to_string());
     let store = root.join("store");
     let executor = UniversalExecutorConfig {
         store_root: store.clone(),
@@ -61,7 +61,7 @@ fn m6_transactional_runtime_executes_replays_and_releases_capacity() {
         max_output_bytes: MAX_UNIVERSAL_OUTPUT_BYTES,
     };
     executor.ensure_store().unwrap();
-    let workspace_id = format!("m6-it-{}", Uuid::now_v7());
+    let workspace_id = format!("runtime-it-{}", Uuid::now_v7());
     create_git_workspace(
         &executor,
         &GitWorkspaceCreateRequest {
@@ -78,39 +78,39 @@ fn m6_transactional_runtime_executes_replays_and_releases_capacity() {
         &WorkspaceWriteRequest {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: workspace_id.clone(),
-            relative_path: "m6_it.py".to_string(),
-            content: "print('M6_RUNTIME_OK', flush=True)\n".to_string(),
+            relative_path: "runtime_it.py".to_string(),
+            content: "print('RUNTIME_OK', flush=True)\n".to_string(),
             expected_digest: None,
         },
     )
     .unwrap();
-    let runtime = M6Runtime::new(M6RuntimeConfig {
-        registry: ordivon_exec::M6RegistryConfig {
+    let runtime = Runtime::new(RuntimeConfig {
+        registry: ordivon_exec::RegistryConfig {
             db_path: root.join("registry/registry.sqlite3"),
             store_root: root.join("registry"),
             busy_timeout_ms: 5000,
         },
         executor: executor.clone(),
         startup_grace_ms: 2000,
-        #[cfg(feature = "runtime-hardening-m7")]
+        #[cfg(feature = "isolated-execution")]
         hardening: None,
     })
     .unwrap();
-    let request = M6TaskRunRequest {
-        schema_version: M6_SCHEMA_VERSION,
+    let request = TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
         client_request_id: format!("request:it:{}", Uuid::now_v7()),
         principal: "principal:integration".to_string(),
         authority_ref: "authority:local-test".to_string(),
-        policy_id: "policy:m6-local-test".to_string(),
+        policy_id: "policy:runtime-local-test".to_string(),
         policy_version: "1".to_string(),
-        policy_digest: digest(b"policy:m6-local-test:1"),
+        policy_digest: digest(b"policy:runtime-local-test:1"),
         profile_id: None,
         global_limit: 2,
         profile_limit: None,
-        execution: M6UniversalExecutionRequest {
+        execution: UniversalExecutionRequest {
             workspace_id: workspace_id.clone(),
             executable: "/usr/bin/python3.14".to_string(),
-            args: vec!["m6_it.py".to_string()],
+            args: vec!["runtime_it.py".to_string()],
             cwd_relative: ".".to_string(),
             env: Default::default(),
             timeout_ms: 10_000,
@@ -123,7 +123,7 @@ fn m6_transactional_runtime_executes_replays_and_releases_capacity() {
     };
     let first = runtime.run_task(&request).unwrap();
     assert_eq!(first.status, "succeeded");
-    assert!(first.stdout_tail.contains("M6_RUNTIME_OK"));
+    assert!(first.stdout_tail.contains("RUNTIME_OK"));
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 
     let replay = runtime.run_task(&request).unwrap();
@@ -131,7 +131,7 @@ fn m6_transactional_runtime_executes_replays_and_releases_capacity() {
     assert_eq!(replay.status, "succeeded");
 
     let listed = runtime
-        .list_jobs(&JobListRequestM6 {
+        .list_jobs(&RuntimeJobListRequest {
             limit: 10,
             cursor: None,
         })
@@ -145,19 +145,19 @@ fn m6_transactional_runtime_executes_replays_and_releases_capacity() {
         .find(|artifact| artifact.kind == "stdout")
         .unwrap();
     let read = runtime
-        .read_artifact(&M6ArtifactReadRequest {
-            schema_version: M6_SCHEMA_VERSION,
+        .read_artifact(&ArtifactReadRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
             job_id: first.job_id.clone(),
             artifact_id: stdout.artifact_id.clone(),
             offset: 0,
             max_bytes: 4096,
         })
         .unwrap();
-    assert!(read.content.contains("M6_RUNTIME_OK"));
+    assert!(read.content.contains("RUNTIME_OK"));
     assert!(read.eof);
 
     let attempt_id = first.attempt_id.unwrap();
-    let unit = format!("ordivon-m6-{attempt_id}.service");
+    let unit = format!("ordivon-{attempt_id}.service");
     let _ = Command::new("systemctl").args(["stop", &unit]).output();
     let _ = Command::new("systemctl")
         .args(["reset-failed", &unit])
@@ -171,18 +171,18 @@ struct IntegrationContext {
     repo: PathBuf,
     revision: String,
     executor: UniversalExecutorConfig,
-    registry: M6RegistryConfig,
+    registry: RegistryConfig,
     workspace_id: String,
 }
 
 impl IntegrationContext {
     fn new(label: &str) -> Self {
         let runner_path =
-            PathBuf::from(std::env::var("ORDIVON_M6_RUNNER_PATH").expect("ORDIVON_M6_RUNNER_PATH"));
+            PathBuf::from(std::env::var("ORDIVON_RUNNER_PATH").expect("ORDIVON_RUNNER_PATH"));
         let repo =
             fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
         let revision = command_output("git", &["rev-parse", "HEAD"], &repo);
-        let root = PathBuf::from("/root/.local/share/ordivon-m6-integration")
+        let root = PathBuf::from("/root/.local/share/ordivon-integration")
             .join(format!("{label}-{}", Uuid::now_v7()));
         let executor = UniversalExecutorConfig {
             store_root: root.join("store"),
@@ -195,7 +195,7 @@ impl IntegrationContext {
             max_output_bytes: MAX_UNIVERSAL_OUTPUT_BYTES,
         };
         executor.ensure_store().unwrap();
-        let workspace_id = format!("m6-{label}-{}", Uuid::now_v7());
+        let workspace_id = format!("runtime-{label}-{}", Uuid::now_v7());
         create_git_workspace(
             &executor,
             &GitWorkspaceCreateRequest {
@@ -207,7 +207,7 @@ impl IntegrationContext {
         )
         .unwrap();
         Self {
-            registry: M6RegistryConfig {
+            registry: RegistryConfig {
                 db_path: root.join("registry/registry.sqlite3"),
                 store_root: root.join("registry"),
                 busy_timeout_ms: 5000,
@@ -220,12 +220,12 @@ impl IntegrationContext {
         }
     }
 
-    fn runtime(&self, startup_grace_ms: u64) -> M6Runtime {
-        M6Runtime::new(M6RuntimeConfig {
+    fn runtime(&self, startup_grace_ms: u64) -> Runtime {
+        Runtime::new(RuntimeConfig {
             registry: self.registry.clone(),
             executor: self.executor.clone(),
             startup_grace_ms,
-            #[cfg(feature = "runtime-hardening-m7")]
+            #[cfg(feature = "isolated-execution")]
             hardening: None,
         })
         .unwrap()
@@ -245,19 +245,19 @@ impl IntegrationContext {
         .unwrap();
     }
 
-    fn request(&self, script: &str, wait_ms: u64) -> M6TaskRunRequest {
-        M6TaskRunRequest {
-            schema_version: M6_SCHEMA_VERSION,
+    fn request(&self, script: &str, wait_ms: u64) -> TaskRunRequest {
+        TaskRunRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
             client_request_id: format!("request:{script}:{}", Uuid::now_v7()),
             principal: "principal:integration".to_string(),
             authority_ref: "authority:local-test".to_string(),
-            policy_id: "policy:m6-local-test".to_string(),
+            policy_id: "policy:runtime-local-test".to_string(),
             policy_version: "1".to_string(),
-            policy_digest: digest(b"policy:m6-local-test:1"),
+            policy_digest: digest(b"policy:runtime-local-test:1"),
             profile_id: None,
             global_limit: 8,
             profile_limit: None,
-            execution: M6UniversalExecutionRequest {
+            execution: UniversalExecutionRequest {
                 workspace_id: self.workspace_id.clone(),
                 executable: "/usr/bin/python3.14".to_string(),
                 args: vec![script.to_string()],
@@ -279,7 +279,7 @@ impl Drop for IntegrationContext {
         if let Ok(entries) = fs::read_dir(self.root.join("registry/attempts")) {
             for entry in entries.flatten() {
                 if let Some(attempt_id) = entry.file_name().to_str() {
-                    let unit = format!("ordivon-m6-{attempt_id}.service");
+                    let unit = format!("ordivon-{attempt_id}.service");
                     let _ = Command::new("systemctl").args(["stop", &unit]).output();
                     let _ = Command::new("systemctl")
                         .args(["reset-failed", &unit])
@@ -311,18 +311,18 @@ impl Drop for IntegrationContext {
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
-fn m6_core_restart_recovers_running_attempt_and_terminal_result() {
-    if std::env::var("ORDIVON_RUN_M6_INTEGRATION").as_deref() != Ok("1") {
+fn runtime_core_restart_recovers_running_attempt_and_terminal_result() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
     let context = IntegrationContext::new("recovery");
     context.write(
-        "m6_recover.py",
-        "import time\nprint('M6_RECOVER_START', flush=True)\ntime.sleep(1.5)\nprint('M6_RECOVER_DONE', flush=True)\n",
+        "runtime_recover.py",
+        "import time\nprint('RUNTIME_RECOVER_START', flush=True)\ntime.sleep(1.5)\nprint('RUNTIME_RECOVER_DONE', flush=True)\n",
     );
     let first_runtime = context.runtime(2000);
     let started = first_runtime
-        .run_task(&context.request("m6_recover.py", 0))
+        .run_task(&context.request("runtime_recover.py", 0))
         .unwrap();
     assert!(matches!(started.status.as_str(), "queued" | "working"));
     let attempt = first_runtime
@@ -335,8 +335,8 @@ fn m6_core_restart_recovers_running_attempt_and_terminal_result() {
 
     let recovered_runtime = context.runtime(2000);
     let completed = recovered_runtime
-        .observe_task(&M6TaskObserveRequest {
-            schema_version: M6_SCHEMA_VERSION,
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
             job_id: started.job_id,
             wait_ms: 10_000,
             stdout_tail_bytes: 8192,
@@ -344,8 +344,8 @@ fn m6_core_restart_recovers_running_attempt_and_terminal_result() {
         })
         .unwrap();
     assert_eq!(completed.status, "succeeded");
-    assert!(completed.stdout_tail.contains("M6_RECOVER_START"));
-    assert!(completed.stdout_tail.contains("M6_RECOVER_DONE"));
+    assert!(completed.stdout_tail.contains("RUNTIME_RECOVER_START"));
+    assert!(completed.stdout_tail.contains("RUNTIME_RECOVER_DONE"));
     assert_eq!(
         recovered_runtime
             .registry()
@@ -357,26 +357,26 @@ fn m6_core_restart_recovers_running_attempt_and_terminal_result() {
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
-fn m6_cancel_intent_survives_runtime_reconstruction_and_cleans_cgroup() {
-    if std::env::var("ORDIVON_RUN_M6_INTEGRATION").as_deref() != Ok("1") {
+fn runtime_cancel_intent_survives_runtime_reconstruction_and_cleans_cgroup() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
     let context = IntegrationContext::new("cancel");
     context.write(
-        "m6_cancel.py",
-        "import signal,subprocess,sys,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nchild=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])\nprint(f'M6_CANCEL_CHILD={child.pid}', flush=True)\ntime.sleep(30)\n",
+        "runtime_cancel.py",
+        "import signal,subprocess,sys,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nchild=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])\nprint(f'RUNTIME_CANCEL_CHILD={child.pid}', flush=True)\ntime.sleep(30)\n",
     );
     let first_runtime = context.runtime(2000);
     let started = first_runtime
-        .run_task(&context.request("m6_cancel.py", 0))
+        .run_task(&context.request("runtime_cancel.py", 0))
         .unwrap();
     assert_eq!(started.status, "working");
     drop(first_runtime);
 
     let cancelling_runtime = context.runtime(2000);
     let cancelled = cancelling_runtime
-        .cancel_task(&M6TaskCancelRequest {
-            schema_version: M6_SCHEMA_VERSION,
+        .cancel_task(&TaskCancelRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
             job_id: started.job_id.clone(),
         })
         .unwrap();
@@ -401,7 +401,7 @@ fn m6_cancel_intent_survives_runtime_reconstruction_and_cleans_cgroup() {
 }
 
 impl IntegrationContext {
-    fn direct_submit(&self, client_request_id: &str, global_limit: u32) -> M6SubmitRequest {
+    fn direct_submit(&self, client_request_id: &str, global_limit: u32) -> SubmitRequest {
         let workspace = fs::canonicalize(
             self.executor
                 .store_root
@@ -410,11 +410,11 @@ impl IntegrationContext {
         )
         .unwrap();
         let executable = fs::canonicalize("/usr/bin/true").unwrap();
-        M6SubmitRequest {
-            schema_version: M6_SCHEMA_VERSION,
+        SubmitRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
             client_request_id: client_request_id.to_string(),
-            plan: M6ExecutionPlan {
-                schema_version: M6_SCHEMA_VERSION,
+            plan: RuntimeExecutionPlan {
+                schema_version: RUNTIME_SCHEMA_VERSION,
                 plan_kind: PlanKind::UniversalSandbox,
                 workspace_id: self.workspace_id.clone(),
                 workspace_path: workspace.to_string_lossy().into_owned(),
@@ -427,9 +427,9 @@ impl IntegrationContext {
                 timeout_ms: 10_000,
                 stdout_limit_bytes: 65_536,
                 stderr_limit_bytes: 65_536,
-                policy_id: "policy:m6-local-test".to_string(),
+                policy_id: "policy:runtime-local-test".to_string(),
                 policy_version: "1".to_string(),
-                policy_digest: digest(b"policy:m6-local-test:1"),
+                policy_digest: digest(b"policy:runtime-local-test:1"),
                 profile_id: None,
                 principal: "principal:integration".to_string(),
                 authority_ref: "authority:local-test".to_string(),
@@ -440,12 +440,10 @@ impl IntegrationContext {
     }
 }
 
-fn created_admission(
-    outcome: ordivon_exec::AdmissionOutcomeM6,
-) -> ordivon_exec::CreatedAdmissionM6 {
+fn created_admission(outcome: ordivon_exec::AdmissionOutcome) -> ordivon_exec::CreatedAdmission {
     match outcome {
-        ordivon_exec::AdmissionOutcomeM6::Created(created) => *created,
-        ordivon_exec::AdmissionOutcomeM6::Existing { .. } => {
+        ordivon_exec::AdmissionOutcome::Created(created) => *created,
+        ordivon_exec::AdmissionOutcome::Existing { .. } => {
             panic!("expected a new admission")
         }
     }
@@ -453,8 +451,8 @@ fn created_admission(
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
-fn m6_ambiguous_dispatch_is_lost_without_automatic_redispatch() {
-    if std::env::var("ORDIVON_RUN_M6_INTEGRATION").as_deref() != Ok("1") {
+fn runtime_ambiguous_dispatch_is_lost_without_automatic_redispatch() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
     let context = IntegrationContext::new("ambiguous");
@@ -492,8 +490,8 @@ fn m6_ambiguous_dispatch_is_lost_without_automatic_redispatch() {
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
-fn m6_live_unit_without_launch_token_is_orphaned_and_holds_capacity() {
-    if std::env::var("ORDIVON_RUN_M6_INTEGRATION").as_deref() != Ok("1") {
+fn runtime_live_unit_without_launch_token_is_orphaned_and_holds_capacity() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
     let context = IntegrationContext::new("orphaned");
@@ -546,8 +544,8 @@ fn m6_live_unit_without_launch_token_is_orphaned_and_holds_capacity() {
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
-fn m6_reconciler_rebuilds_bundle_after_admission_commit() {
-    if std::env::var("ORDIVON_RUN_M6_INTEGRATION").as_deref() != Ok("1") {
+fn runtime_reconciler_rebuilds_bundle_after_admission_commit() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
     let context = IntegrationContext::new("bundle-rebuild");
@@ -568,8 +566,8 @@ fn m6_reconciler_rebuilds_bundle_after_admission_commit() {
 
     runtime.reconcile_all().unwrap();
     let completed = runtime
-        .observe_task(&M6TaskObserveRequest {
-            schema_version: M6_SCHEMA_VERSION,
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
             job_id: created.job.job_id,
             wait_ms: 10_000,
             stdout_tail_bytes: 1024,
@@ -583,18 +581,18 @@ fn m6_reconciler_rebuilds_bundle_after_admission_commit() {
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
-fn m6_corrupt_runner_result_is_orphaned_and_quarantined() {
-    if std::env::var("ORDIVON_RUN_M6_INTEGRATION").as_deref() != Ok("1") {
+fn runtime_corrupt_runner_result_is_orphaned_and_quarantined() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
     let context = IntegrationContext::new("corrupt-result");
     context.write(
-        "m6_corrupt.py",
-        "import time\nprint('M6_CORRUPT_RUNNING', flush=True)\ntime.sleep(30)\n",
+        "runtime_corrupt.py",
+        "import time\nprint('RUNTIME_CORRUPT_RUNNING', flush=True)\ntime.sleep(30)\n",
     );
     let runtime = context.runtime(2000);
     let started = runtime
-        .run_task(&context.request("m6_corrupt.py", 0))
+        .run_task(&context.request("runtime_corrupt.py", 0))
         .unwrap();
     assert_eq!(started.status, "working");
     let attempt = runtime
@@ -609,8 +607,8 @@ fn m6_corrupt_runner_result_is_orphaned_and_quarantined() {
     .unwrap();
     runtime.reconcile_attempt(&attempt.attempt_id).unwrap();
     let observation = runtime
-        .observe_task(&M6TaskObserveRequest {
-            schema_version: M6_SCHEMA_VERSION,
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
             job_id: started.job_id,
             wait_ms: 0,
             stdout_tail_bytes: 1024,
@@ -635,18 +633,18 @@ fn m6_corrupt_runner_result_is_orphaned_and_quarantined() {
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
-fn m6_fast_failures_never_race_into_lost() {
-    if std::env::var("ORDIVON_RUN_M6_INTEGRATION").as_deref() != Ok("1") {
+fn runtime_fast_failures_never_race_into_lost() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
     let context = IntegrationContext::new("fast-failure-race");
     context.write(
-        "m6_fast_fail.py",
-        "import sys\nprint('M6_FAST_FAILURE', flush=True)\nsys.exit(7)\n",
+        "runtime_fast_fail.py",
+        "import sys\nprint('RUNTIME_FAST_FAILURE', flush=True)\nsys.exit(7)\n",
     );
     let runtime = context.runtime(2000);
     for index in 0..10 {
-        let mut request = context.request("m6_fast_fail.py", 10_000);
+        let mut request = context.request("runtime_fast_fail.py", 10_000);
         request.client_request_id = format!("request:fast-failure:{index}:{}", Uuid::now_v7());
         let observation = runtime.run_task(&request).unwrap();
         assert_eq!(
@@ -654,7 +652,7 @@ fn m6_fast_failures_never_race_into_lost() {
             "fast failure {index} was misclassified as {}",
             observation.status
         );
-        assert!(observation.stdout_tail.contains("M6_FAST_FAILURE"));
+        assert!(observation.stdout_tail.contains("RUNTIME_FAST_FAILURE"));
     }
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }

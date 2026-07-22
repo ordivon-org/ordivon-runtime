@@ -1,5 +1,4 @@
 use super::*;
-use crate::migration::MigrationTaskStatus;
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -65,41 +64,6 @@ fn public_requests_reject_unknown_fields_and_path_escape() {
     assert_eq!(
         request.validate_shape().unwrap_err().code,
         UniversalExecErrorCode::WorkspacePathDenied
-    );
-}
-
-#[test]
-fn exec_request_is_program_and_argv_not_a_shell_command() {
-    let request = UniversalExecRequest {
-        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-        task_id: "task-1".to_string(),
-        workspace_id: "workspace-1".to_string(),
-        executable: "/usr/bin/python3.14".to_string(),
-        args: vec!["tool.py".to_string()],
-        cwd_relative: ".".to_string(),
-        env: BTreeMap::new(),
-        timeout_ms: 1000,
-        stdout_limit_bytes: 1024,
-        stderr_limit_bytes: 1024,
-    };
-    request.validate_shape().unwrap();
-    let value = serde_json::to_value(request).unwrap();
-    assert!(value.get("executable").is_some());
-    assert!(value.get("args").is_some());
-    assert!(value.get("command").is_none());
-    assert!(value.get("shell").is_none());
-}
-
-#[test]
-fn task_wait_is_bounded() {
-    let request = TaskGetRequest {
-        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-        task_id: "task-wait".to_string(),
-        wait_ms: MAX_TASK_WAIT_MS + 1,
-    };
-    assert_eq!(
-        request.validate_shape().unwrap_err().code,
-        UniversalExecErrorCode::InvalidRequest
     );
 }
 
@@ -275,110 +239,6 @@ fn runner_timeout_is_a_durable_failed_result() {
 }
 
 #[test]
-fn terminal_result_rebuilds_task_and_artifact_handles_without_systemd() {
-    let sandbox = Sandbox::new("recovery");
-    let config = sandbox.config();
-    config.ensure_store().unwrap();
-    let task_id = "task-recovery";
-    let task_dir = config.task_path(task_id);
-    fs::create_dir(&task_dir).unwrap();
-    let metadata = TaskMetadata {
-        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-        task_id: task_id.to_string(),
-        workspace_id: "workspace-recovery".to_string(),
-        unit_name: format!("ordivon-m1-{task_id}.service"),
-        request_digest: format!("sha256:{}", "1".repeat(64)),
-        boot_id: "boot".to_string(),
-        created_unix_ms: 1,
-    };
-    fs::write(task_dir.join("stdout.log"), "hello stdout").unwrap();
-    fs::write(task_dir.join("stderr.log"), "hello stderr").unwrap();
-    let result = RunnerTaskResult {
-        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-        task_id: task_id.to_string(),
-        job_id: None,
-        attempt_id: None,
-        launch_token_digest: None,
-        payload_uid: None,
-        payload_gid: None,
-        status: TaskTerminalStatus::Completed,
-        exit_code: Some(0),
-        timed_out: false,
-        infrastructure_error: None,
-        started_unix_ms: 1,
-        finished_unix_ms: 2,
-        stdout: CapturedOutput {
-            artifact_id: format!("{task_id}.stdout"),
-            file_name: "stdout.log".to_string(),
-            digest: sha256_file(&task_dir.join("stdout.log")).unwrap(),
-            retained_bytes: 12,
-            dropped_bytes: 0,
-            truncated: false,
-        },
-        stderr: CapturedOutput {
-            artifact_id: format!("{task_id}.stderr"),
-            file_name: "stderr.log".to_string(),
-            digest: sha256_file(&task_dir.join("stderr.log")).unwrap(),
-            retained_bytes: 12,
-            dropped_bytes: 0,
-            truncated: false,
-        },
-    };
-    write_json_atomic(&task_dir.join("metadata.json"), &metadata).unwrap();
-    write_json_atomic(&task_dir.join("result.json"), &result).unwrap();
-
-    let handle = get_universal_task(
-        &config,
-        &TaskGetRequest {
-            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-            task_id: task_id.to_string(),
-            wait_ms: 0,
-        },
-    )
-    .unwrap();
-    assert_eq!(handle.status, MigrationTaskStatus::Completed);
-    assert_eq!(handle.artifacts.len(), 3);
-
-    let artifact = read_task_artifact(
-        &config,
-        &ArtifactReadRequest {
-            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-            task_id: task_id.to_string(),
-            artifact_id: format!("{task_id}.stdout"),
-            offset: 0,
-            max_bytes: 5,
-        },
-    )
-    .unwrap();
-    assert_eq!(artifact.content, "hello");
-    assert!(!artifact.eof);
-}
-
-#[test]
-fn compact_requests_bound_wait_and_tails() {
-    let request = TaskAwaitRequest {
-        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-        task_id: "task-compact".to_string(),
-        wait_ms: MAX_TASK_WAIT_MS + 1,
-        stdout_tail_bytes: 1,
-        stderr_tail_bytes: 1,
-    };
-    assert_eq!(
-        request.validate_shape().unwrap_err().code,
-        UniversalExecErrorCode::InvalidRequest
-    );
-    let oversized = TaskAwaitRequest {
-        wait_ms: 0,
-        stdout_tail_bytes: MAX_COMPACT_TAIL_BYTES + 1,
-        ..request
-    };
-    assert_eq!(
-        oversized.validate_shape().unwrap_err().code,
-        UniversalExecErrorCode::InvalidRequest
-    );
-}
-
-#[test]
 fn workspace_batch_mutation_preflights_before_writing() {
     let sandbox = Sandbox::new("batch");
     let source = sandbox.root.join("source");
@@ -501,76 +361,6 @@ fn workspace_slice_returns_full_digest_and_utf8_safe_range() {
     assert!(slice.file_digest.starts_with("sha256:"));
 }
 
-#[test]
-fn compact_terminal_observation_inlines_bounded_tails() {
-    let sandbox = Sandbox::new("compact-result");
-    let config = sandbox.config();
-    config.ensure_store().unwrap();
-    let task_id = "task-compact-result";
-    let task_dir = config.task_path(task_id);
-    fs::create_dir(&task_dir).unwrap();
-    let metadata = TaskMetadata {
-        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-        task_id: task_id.to_string(),
-        workspace_id: "workspace-compact".to_string(),
-        unit_name: format!("ordivon-m1-{task_id}.service"),
-        request_digest: format!("sha256:{}", "1".repeat(64)),
-        boot_id: "boot".to_string(),
-        created_unix_ms: 1,
-    };
-    fs::write(task_dir.join("stdout.log"), "0123456789").unwrap();
-    fs::write(task_dir.join("stderr.log"), "error").unwrap();
-    let result = RunnerTaskResult {
-        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-        task_id: task_id.to_string(),
-        job_id: None,
-        attempt_id: None,
-        launch_token_digest: None,
-        payload_uid: None,
-        payload_gid: None,
-        status: TaskTerminalStatus::Completed,
-        exit_code: Some(0),
-        timed_out: false,
-        infrastructure_error: None,
-        started_unix_ms: 1,
-        finished_unix_ms: 2,
-        stdout: CapturedOutput {
-            artifact_id: format!("{task_id}.stdout"),
-            file_name: "stdout.log".to_string(),
-            digest: sha256_file(&task_dir.join("stdout.log")).unwrap(),
-            retained_bytes: 10,
-            dropped_bytes: 0,
-            truncated: false,
-        },
-        stderr: CapturedOutput {
-            artifact_id: format!("{task_id}.stderr"),
-            file_name: "stderr.log".to_string(),
-            digest: sha256_file(&task_dir.join("stderr.log")).unwrap(),
-            retained_bytes: 5,
-            dropped_bytes: 0,
-            truncated: false,
-        },
-    };
-    write_json_atomic(&task_dir.join("metadata.json"), &metadata).unwrap();
-    write_json_atomic(&task_dir.join("result.json"), &result).unwrap();
-    let compact = await_universal_task_compact(
-        &config,
-        &TaskAwaitRequest {
-            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-            task_id: task_id.to_string(),
-            wait_ms: 0,
-            stdout_tail_bytes: 4,
-            stderr_tail_bytes: 16,
-        },
-    )
-    .unwrap();
-    assert_eq!(compact.status, MigrationTaskStatus::Completed);
-    assert_eq!(compact.stdout_tail, "6789");
-    assert!(compact.stdout_truncated);
-    assert_eq!(compact.stderr_tail, "error");
-    assert!(compact.artifacts_available);
-}
-
 fn init_git_repo(path: &Path) {
     fs::create_dir_all(path).unwrap();
     run_git(path, ["init", "-q"]);
@@ -597,58 +387,4 @@ fn run_git<'a>(path: &Path, args: impl IntoIterator<Item = &'a str>) {
 
 fn real_executable(path: &str) -> PathBuf {
     fs::canonicalize(path).unwrap()
-}
-
-#[test]
-fn legacy_runner_wire_omits_m6_identity_fields() {
-    let executable = real_executable("/usr/bin/true");
-    let request = RunnerTaskRequest {
-        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-        job_id: None,
-        attempt_id: None,
-        launch_token: None,
-        unit_name: None,
-        payload: None,
-        task_id: "task-wire".to_string(),
-        workspace_id: "workspace-wire".to_string(),
-        workspace_path: "/tmp".to_string(),
-        executable: executable.to_string_lossy().into_owned(),
-        executable_digest: sha256_file(&executable).unwrap(),
-        args: Vec::new(),
-        cwd: "/tmp".to_string(),
-        env: BTreeMap::new(),
-        timeout_ms: 1000,
-        stdout_limit_bytes: 1024,
-        stderr_limit_bytes: 1024,
-    };
-    let encoded = serde_json::to_value(&request).unwrap();
-    for field in ["jobId", "attemptId", "launchToken", "unitName", "payload"] {
-        assert!(
-            encoded.get(field).is_none(),
-            "legacy request leaked {field}"
-        );
-    }
-
-    let sandbox = Sandbox::new("partial-m6-identity");
-    let workspace = sandbox.root.join("workspace");
-    let task_dir = sandbox.root.join("task");
-    fs::create_dir_all(&workspace).unwrap();
-    fs::create_dir_all(&task_dir).unwrap();
-    let mut partial = request;
-    partial.workspace_path = workspace.to_string_lossy().into_owned();
-    partial.cwd = partial.workspace_path.clone();
-    partial.job_id = Some("job-partial".to_string());
-    write_json_atomic(&task_dir.join("request.json"), &partial).unwrap();
-    run_task_runner(&task_dir).unwrap();
-    let result: RunnerTaskResult =
-        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
-    assert_eq!(result.status, TaskTerminalStatus::Failed);
-    assert!(result
-        .infrastructure_error
-        .as_deref()
-        .is_some_and(|message| message.contains("must appear together")));
-    let encoded_result = serde_json::to_value(&result).unwrap();
-    assert!(encoded_result.get("payloadUid").is_none());
-    assert!(encoded_result.get("payloadGid").is_none());
-    assert!(!task_dir.join("runner-start.json").exists());
 }

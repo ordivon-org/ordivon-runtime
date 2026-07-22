@@ -29,25 +29,6 @@ pub(crate) fn validate_id(value: &str, field: &str) -> Result<(), UniversalExecE
     Ok(())
 }
 
-pub(crate) fn validate_artifact_id(value: &str, field: &str) -> Result<(), UniversalExecError> {
-    let mut chars = value.chars();
-    let valid_first = chars
-        .next()
-        .is_some_and(|character| character.is_ascii_alphanumeric());
-    if !valid_first
-        || value.len() > 128
-        || !chars.all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
-        })
-    {
-        return Err(invalid(
-            format!("{field} must match [A-Za-z0-9][A-Za-z0-9._-]{{0,127}}"),
-            field,
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_relative_path(
     value: &str,
     field: &str,

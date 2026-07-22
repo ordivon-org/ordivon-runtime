@@ -7,19 +7,21 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::{AttemptState, M6Error, M6ErrorCode, M6Registry, M6Result, ReservationState};
+use crate::{
+    AttemptState, Registry, ReservationState, RuntimeError, RuntimeErrorCode, RuntimeResult,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct M7RemediationResult {
+pub struct RemediationResult {
     pub attempt_id: String,
     pub reservation_released: bool,
     pub termination_requested: bool,
 }
 
 #[derive(Clone)]
-pub struct M7OrphanRemediator {
-    registry: M6Registry,
+pub struct OrphanRemediator {
+    registry: Registry,
 }
 
 #[derive(Debug)]
@@ -37,8 +39,8 @@ impl OrphanObservation {
     }
 }
 
-impl M7OrphanRemediator {
-    pub fn new(registry: M6Registry) -> Self {
+impl OrphanRemediator {
+    pub fn new(registry: Registry) -> Self {
         Self { registry }
     }
 
@@ -47,11 +49,11 @@ impl M7OrphanRemediator {
         attempt_id: &str,
         terminate_matching_unit: bool,
         observed_at_ms: u64,
-    ) -> M6Result<M7RemediationResult> {
+    ) -> RuntimeResult<RemediationResult> {
         let attempt = self.registry.get_attempt(attempt_id)?;
         if attempt.state != AttemptState::Orphaned {
-            return Err(M6Error::new(
-                M6ErrorCode::OrphanRemediationDenied,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::OrphanRemediationDenied,
                 "only orphaned Attempts may be remediated",
                 Some("attemptId"),
                 false,
@@ -59,8 +61,8 @@ impl M7OrphanRemediator {
         }
         let reservation = self.registry.get_reservation(attempt_id)?;
         if reservation.state != ReservationState::HeldOrphaned {
-            return Err(M6Error::new(
-                M6ErrorCode::ReservationStateConflict,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ReservationStateConflict,
                 "orphaned Attempt does not hold a reservation",
                 Some("attemptId"),
                 false,
@@ -75,8 +77,8 @@ impl M7OrphanRemediator {
                 .output()
                 .map_err(|error| tool_error("cannot stop orphaned unit", error))?;
             if !output.status.success() {
-                return Err(M6Error::new(
-                    M6ErrorCode::OrphanRemediationDenied,
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::OrphanRemediationDenied,
                     format!(
                         "systemd refused orphan termination: {}",
                         String::from_utf8_lossy(&output.stderr).trim()
@@ -95,8 +97,8 @@ impl M7OrphanRemediator {
                 break;
             }
             if Instant::now() >= deadline {
-                return Err(M6Error::new(
-                    M6ErrorCode::OrphanRemediationDenied,
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::OrphanRemediationDenied,
                     "original orphan process tree is still live",
                     Some("attemptId"),
                     true,
@@ -108,7 +110,7 @@ impl M7OrphanRemediator {
         let mut connection = self.registry.open_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| M6Error::from_sql(error, "cannot begin orphan release"))?;
+            .map_err(|error| RuntimeError::from_sql(error, "cannot begin orphan release"))?;
         let state: String = transaction
             .query_row(
                 "SELECT state FROM attempts WHERE attempt_id=?1",
@@ -116,18 +118,18 @@ impl M7OrphanRemediator {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|error| M6Error::from_sql(error, "cannot verify orphan state"))?
+            .map_err(|error| RuntimeError::from_sql(error, "cannot verify orphan state"))?
             .ok_or_else(|| {
-                M6Error::new(
-                    M6ErrorCode::AttemptNotFound,
+                RuntimeError::new(
+                    RuntimeErrorCode::AttemptNotFound,
                     "Attempt was not found during orphan release",
                     Some("attemptId"),
                     false,
                 )
             })?;
         if state != "orphaned" {
-            return Err(M6Error::new(
-                M6ErrorCode::OrphanRemediationDenied,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::OrphanRemediationDenied,
                 "Attempt changed before reservation release",
                 Some("attemptId"),
                 false,
@@ -138,10 +140,10 @@ impl M7OrphanRemediator {
                 "UPDATE concurrency_reservations SET state='released',released_at_ms=?1,release_reason='OPERATOR_ORPHAN_REMEDIATED' WHERE attempt_id=?2 AND state='held_orphaned'",
                 params![observed_at_ms, attempt_id],
             )
-            .map_err(|error| M6Error::from_sql(error, "cannot release orphan reservation"))?;
+            .map_err(|error| RuntimeError::from_sql(error, "cannot release orphan reservation"))?;
         if updated != 1 {
-            return Err(M6Error::new(
-                M6ErrorCode::ReservationStateConflict,
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ReservationStateConflict,
                 "orphan reservation was not held",
                 Some("attemptId"),
                 false,
@@ -149,9 +151,9 @@ impl M7OrphanRemediator {
         }
         transaction
             .commit()
-            .map_err(|error| M6Error::from_sql(error, "cannot commit orphan release"))?;
+            .map_err(|error| RuntimeError::from_sql(error, "cannot commit orphan release"))?;
 
-        Ok(M7RemediationResult {
+        Ok(RemediationResult {
             attempt_id: attempt_id.to_string(),
             reservation_released: true,
             termination_requested,
@@ -159,7 +161,9 @@ impl M7OrphanRemediator {
     }
 }
 
-fn observe_original_process_tree(attempt: &crate::AttemptRecordM6) -> M6Result<OrphanObservation> {
+fn observe_original_process_tree(
+    attempt: &crate::AttemptRecord,
+) -> RuntimeResult<OrphanObservation> {
     let properties = systemd_properties(&attempt.unit_name)?;
     let active = properties.get("ActiveState").is_some_and(|state| {
         matches!(
@@ -192,7 +196,7 @@ fn observe_original_process_tree(attempt: &crate::AttemptRecordM6) -> M6Result<O
     })
 }
 
-fn systemd_properties(unit_name: &str) -> M6Result<BTreeMap<String, String>> {
+fn systemd_properties(unit_name: &str) -> RuntimeResult<BTreeMap<String, String>> {
     let output = Command::new("systemctl")
         .args([
             "show",
@@ -219,14 +223,14 @@ fn nonempty(properties: &BTreeMap<String, String>, key: &str) -> Option<String> 
         .map(ToString::to_string)
 }
 
-fn cgroup_processes(control_group: &str) -> M6Result<Vec<u32>> {
+fn cgroup_processes(control_group: &str) -> RuntimeResult<Vec<u32>> {
     if !control_group.starts_with('/')
         || control_group
             .split('/')
             .any(|part| part == ".." || part.contains('\0'))
     {
-        return Err(M6Error::new(
-            M6ErrorCode::RegistryCorrupt,
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
             "recorded cgroup path is invalid",
             Some("attemptId"),
             false,
@@ -256,9 +260,9 @@ fn process_identity(pid: u32) -> Option<String> {
     Some(format!("pid:{pid}:start:{start_time}"))
 }
 
-fn tool_error(context: &str, error: std::io::Error) -> M6Error {
-    M6Error::new(
-        M6ErrorCode::ToolFailed,
+fn tool_error(context: &str, error: std::io::Error) -> RuntimeError {
+    RuntimeError::new(
+        RuntimeErrorCode::ToolFailed,
         format!("{context}: {error}"),
         None,
         true,

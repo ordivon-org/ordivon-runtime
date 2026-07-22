@@ -29,7 +29,7 @@ pub fn run_task_runner(task_dir: &Path) -> Result<(), UniversalExecError> {
     let request = load_request(&task_dir)?;
     let started_unix_ms = now_unix_ms()?;
     let execution = validate_request_identity(&request)
-        .and_then(|()| write_runner_start_if_m6(&task_dir, &request, started_unix_ms))
+        .and_then(|()| write_runner_start(&task_dir, &request, started_unix_ms))
         .and_then(|()| execute_request(&task_dir, &request, started_unix_ms));
     let result = execution.unwrap_or_else(|error| {
         failure_result(&task_dir, &request, started_unix_ms, error.to_string()).unwrap_or_else(
@@ -491,7 +491,7 @@ fn sha256_text(value: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(value.as_bytes())))
 }
 
-fn write_runner_start_if_m6(
+fn write_runner_start(
     task_dir: &Path,
     request: &RunnerTaskRequest,
     observed_unix_ms: u128,
@@ -505,12 +505,12 @@ fn write_runner_start_if_m6(
         (None, None, None, None) => return Ok(()),
         (Some(job_id), Some(attempt_id), Some(launch_token), Some(unit_name)) => {
             if request.task_id != attempt_id {
-                return Err(runner_error("M6 taskId must equal attemptId"));
+                return Err(runner_error("runtime taskId must equal attemptId"));
             }
             super::validate_id(job_id, "jobId")?;
             super::validate_id(attempt_id, "attemptId")?;
             if !unit_name.ends_with(".service") {
-                return Err(runner_error("M6 unitName must identify a service"));
+                return Err(runner_error("runtime unitName must identify a service"));
             }
             let invocation_id = std::env::var("INVOCATION_ID")
                 .map_err(|_| runner_error("systemd INVOCATION_ID is unavailable"))?;
@@ -529,11 +529,7 @@ fn write_runner_start_if_m6(
                 observed_unix_ms,
             }
         }
-        _ => {
-            return Err(runner_error(
-                "M6 Runner identity fields must appear together",
-            ))
-        }
+        _ => return Err(runner_error("Runner identity fields must appear together")),
     };
     write_json_atomic(&task_dir.join(RUNNER_START_FILE), &identity)
 }

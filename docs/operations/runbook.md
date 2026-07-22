@@ -15,7 +15,7 @@ cargo test --workspace
 Build the task runner and start the single current MCP entry:
 
 ```bash
-cargo build -p ordivon-exec --bin ordivon-task-runner --features universal-executor-m1
+cargo build -p ordivon-exec --bin ordivon-task-runner
 cargo run -p ordivon-mcp
 ```
 

@@ -1,8 +1,8 @@
 use super::tasks::task_from_job;
 use super::*;
 use ordivon_exec::{
-    AdmissionOutcomeM6, M6ExecutionPlan, M6RegistryConfig, M6SubmitRequest, PlanKind,
-    M6_SCHEMA_VERSION,
+    AdmissionOutcome, PlanKind, RegistryConfig, RuntimeExecutionPlan, SubmitRequest,
+    RUNTIME_SCHEMA_VERSION,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -28,8 +28,8 @@ impl Sandbox {
 
     fn server(&self) -> OrdivonServer {
         OrdivonServer::new(ServerConfig {
-            runtime: M6RuntimeConfig {
-                registry: M6RegistryConfig {
+            runtime: RuntimeConfig {
+                registry: RegistryConfig {
                     db_path: self.root.join("registry/registry.sqlite3"),
                     store_root: self.root.join("registry"),
                     busy_timeout_ms: 5000,
@@ -59,16 +59,16 @@ impl Drop for Sandbox {
     }
 }
 
-fn submit(server: &OrdivonServer, client_request_id: &str) -> ordivon_exec::CreatedAdmissionM6 {
+fn submit(server: &OrdivonServer, client_request_id: &str) -> ordivon_exec::CreatedAdmission {
     let outcome = server
         .state
         .runtime
         .registry()
-        .submit(&M6SubmitRequest {
-            schema_version: M6_SCHEMA_VERSION,
+        .submit(&SubmitRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
             client_request_id: client_request_id.to_string(),
-            plan: M6ExecutionPlan {
-                schema_version: M6_SCHEMA_VERSION,
+            plan: RuntimeExecutionPlan {
+                schema_version: RUNTIME_SCHEMA_VERSION,
                 plan_kind: PlanKind::UniversalSandbox,
                 workspace_id: "workspace:mcp-test".to_string(),
                 workspace_path: "/root/.local/share/ordivon-mcp-workspace".to_string(),
@@ -93,8 +93,8 @@ fn submit(server: &OrdivonServer, client_request_id: &str) -> ordivon_exec::Crea
         })
         .unwrap();
     match outcome {
-        AdmissionOutcomeM6::Created(created) => *created,
-        AdmissionOutcomeM6::Existing { .. } => panic!("expected a new Job"),
+        AdmissionOutcome::Created(created) => *created,
+        AdmissionOutcome::Existing { .. } => panic!("expected a new Job"),
     }
 }
 

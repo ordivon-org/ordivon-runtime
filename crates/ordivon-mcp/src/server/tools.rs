@@ -154,8 +154,8 @@ impl OrdivonServer {
     )]
     async fn workspace_exec(
         &self,
-        Parameters(request): Parameters<M6TaskRunRequest>,
-    ) -> ToolOutcome<M6TaskObservation> {
+        Parameters(request): Parameters<TaskRunRequest>,
+    ) -> ToolOutcome<TaskObservation> {
         let runtime = self.state.runtime.clone();
         self.run_core("workspace.exec", move || {
             runtime.run_task(&request).map_err(ToolError::from)
@@ -176,8 +176,8 @@ impl OrdivonServer {
     )]
     async fn task_observe(
         &self,
-        Parameters(request): Parameters<M6TaskObserveRequest>,
-    ) -> ToolOutcome<M6TaskObservation> {
+        Parameters(request): Parameters<TaskObserveRequest>,
+    ) -> ToolOutcome<TaskObservation> {
         let runtime = self.state.runtime.clone();
         self.run_core("task.observe", move || {
             runtime.observe_task(&request).map_err(ToolError::from)
@@ -198,8 +198,8 @@ impl OrdivonServer {
     )]
     async fn task_cancel(
         &self,
-        Parameters(request): Parameters<M6TaskCancelRequest>,
-    ) -> ToolOutcome<M6TaskObservation> {
+        Parameters(request): Parameters<TaskCancelRequest>,
+    ) -> ToolOutcome<TaskObservation> {
         let runtime = self.state.runtime.clone();
         self.run_core("task.cancel", move || {
             runtime.cancel_task(&request).map_err(ToolError::from)
@@ -220,8 +220,8 @@ impl OrdivonServer {
     )]
     async fn task_list(
         &self,
-        Parameters(request): Parameters<JobListRequestM6>,
-    ) -> ToolOutcome<JobListResultM6> {
+        Parameters(request): Parameters<RuntimeJobListRequest>,
+    ) -> ToolOutcome<RuntimeJobListResult> {
         let runtime = self.state.runtime.clone();
         self.run_core("task.list", move || {
             runtime.list_jobs(&request).map_err(ToolError::from)
@@ -242,8 +242,8 @@ impl OrdivonServer {
     )]
     async fn artifact_read(
         &self,
-        Parameters(request): Parameters<M6ArtifactReadRequest>,
-    ) -> ToolOutcome<M6ArtifactReadResult> {
+        Parameters(request): Parameters<ArtifactReadRequest>,
+    ) -> ToolOutcome<ArtifactReadResult> {
         let runtime = self.state.runtime.clone();
         self.run_core("artifact.read", move || {
             runtime.read_artifact(&request).map_err(ToolError::from)

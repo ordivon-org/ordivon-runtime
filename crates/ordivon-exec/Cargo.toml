@@ -5,26 +5,21 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = []
-supervisor-spike = ["dep:libc"]
-universal-executor-m1 = ["dep:libc"]
-transactional-registry-m6 = ["universal-executor-m1", "dep:rusqlite", "dep:uuid"]
-runtime-hardening-m7 = ["transactional-registry-m6"]
+default = ["transactional-runtime"]
+systemd-supervisor = ["dep:libc"]
+universal-executor = ["dep:libc"]
+transactional-runtime = ["universal-executor", "dep:rusqlite", "dep:uuid"]
+isolated-execution = ["transactional-runtime"]
 
 [[bin]]
 name = "ordivon-job-fixture"
 path = "src/bin/ordivon-job-fixture.rs"
-required-features = ["supervisor-spike"]
+required-features = ["systemd-supervisor"]
 
 [[bin]]
 name = "ordivon-task-runner"
 path = "src/bin/ordivon-task-runner.rs"
-required-features = ["universal-executor-m1"]
-
-[[bin]]
-name = "ordivon-m1-cli"
-path = "src/bin/ordivon-m1-cli.rs"
-required-features = ["universal-executor-m1"]
+required-features = ["universal-executor"]
 
 [dependencies]
 hex.workspace = true

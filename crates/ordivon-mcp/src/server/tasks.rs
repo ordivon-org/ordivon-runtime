@@ -69,8 +69,8 @@ impl ServerHandler for OrdivonServer {
         let runtime = self.state.runtime.clone();
         let job_id = request.task_id.clone();
         let observation = tokio::task::spawn_blocking(move || {
-            runtime.observe_task(&M6TaskObserveRequest {
-                schema_version: ordivon_exec::M6_SCHEMA_VERSION,
+            runtime.observe_task(&TaskObserveRequest {
+                schema_version: ordivon_exec::RUNTIME_SCHEMA_VERSION,
                 job_id,
                 wait_ms: 0,
                 stdout_tail_bytes: 4096,
@@ -94,7 +94,7 @@ impl ServerHandler for OrdivonServer {
         };
         let tool_result = outcome.into_call_tool_result()?;
         let value = serde_json::to_value(tool_result).map_err(|error| {
-            McpError::internal_error(format!("cannot encode M6 task result: {error}"), None)
+            McpError::internal_error(format!("cannot encode task result: {error}"), None)
         })?;
         Ok(GetTaskPayloadResult::new(value))
     }
@@ -107,8 +107,8 @@ impl ServerHandler for OrdivonServer {
         let runtime = self.state.runtime.clone();
         let job_id = request.task_id.clone();
         tokio::task::spawn_blocking(move || {
-            runtime.cancel_task(&M6TaskCancelRequest {
-                schema_version: ordivon_exec::M6_SCHEMA_VERSION,
+            runtime.cancel_task(&TaskCancelRequest {
+                schema_version: ordivon_exec::RUNTIME_SCHEMA_VERSION,
                 job_id,
             })
         })
@@ -131,7 +131,7 @@ impl ServerHandler for OrdivonServer {
         let cursor = decode_cursor(request.and_then(|params| params.cursor))?;
         let runtime = self.state.runtime.clone();
         let page = tokio::task::spawn_blocking(move || {
-            runtime.list_jobs(&JobListRequestM6 { limit: 100, cursor })
+            runtime.list_jobs(&RuntimeJobListRequest { limit: 100, cursor })
         })
         .await
         .map_err(|error| {
@@ -154,8 +154,8 @@ impl OrdivonServer {
         let runtime = self.state.runtime.clone();
         let job_id_owned = job_id.to_string();
         let (job, attempt, projection) = tokio::task::spawn_blocking(move || {
-            runtime.observe_task(&M6TaskObserveRequest {
-                schema_version: ordivon_exec::M6_SCHEMA_VERSION,
+            runtime.observe_task(&TaskObserveRequest {
+                schema_version: ordivon_exec::RUNTIME_SCHEMA_VERSION,
                 job_id: job_id_owned.clone(),
                 wait_ms: 0,
                 stdout_tail_bytes: 0,
@@ -164,7 +164,7 @@ impl OrdivonServer {
             let job = runtime.registry().get_job(&job_id_owned)?;
             let attempt = runtime.registry().get_latest_attempt(&job_id_owned)?;
             let projection = runtime.registry().project_job(&job_id_owned)?;
-            Ok::<_, M6Error>((job, attempt, projection))
+            Ok::<_, RuntimeError>((job, attempt, projection))
         })
         .await
         .map_err(|error| {
@@ -177,9 +177,9 @@ impl OrdivonServer {
 }
 
 pub(super) fn task_from_job(
-    job: ordivon_exec::JobRecordM6,
-    attempt: Option<&ordivon_exec::AttemptRecordM6>,
-    projection: ordivon_exec::JobProjectionM6,
+    job: ordivon_exec::RuntimeJobRecord,
+    attempt: Option<&ordivon_exec::AttemptRecord>,
+    projection: ordivon_exec::JobProjection,
 ) -> Result<Task, McpError> {
     let updated_at_ms = attempt
         .and_then(|attempt| attempt.finished_at_ms.or(attempt.started_at_ms))
@@ -210,7 +210,7 @@ pub(super) fn task_from_job(
     Ok(task)
 }
 
-fn terminal_task_error(observation: &M6TaskObservation) -> ToolError {
+fn terminal_task_error(observation: &TaskObservation) -> ToolError {
     let (code, default_message) = match observation.status.as_str() {
         "cancelled" => ("TASK_CANCELLED", "task was cancelled"),
         "timed_out" => ("TASK_TIMED_OUT", "task exceeded its runtime limit"),

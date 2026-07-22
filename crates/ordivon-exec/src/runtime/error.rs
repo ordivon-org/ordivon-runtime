@@ -5,7 +5,7 @@ use std::fmt::{Display, Formatter};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum M6ErrorCode {
+pub enum RuntimeErrorCode {
     InvalidRequest,
     RegistryUnavailable,
     RegistryBusy,
@@ -32,16 +32,16 @@ pub enum M6ErrorCode {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct M6Error {
-    pub code: M6ErrorCode,
+pub struct RuntimeError {
+    pub code: RuntimeErrorCode,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
     pub retryable: bool,
 }
-impl M6Error {
+impl RuntimeError {
     pub fn new(
-        code: M6ErrorCode,
+        code: RuntimeErrorCode,
         message: impl Into<String>,
         field: Option<&str>,
         retryable: bool,
@@ -55,32 +55,37 @@ impl M6Error {
     }
 
     pub fn invalid(message: impl Into<String>, field: &str) -> Self {
-        Self::new(M6ErrorCode::InvalidRequest, message, Some(field), false)
+        Self::new(
+            RuntimeErrorCode::InvalidRequest,
+            message,
+            Some(field),
+            false,
+        )
     }
 
     pub(crate) fn from_sql(error: SqlError, context: &str) -> Self {
         let (code, retryable) = match &error {
             SqlError::SqliteFailure(failure, _) => match failure.code {
                 SqlErrorCode::DatabaseBusy | SqlErrorCode::DatabaseLocked => {
-                    (M6ErrorCode::RegistryBusy, true)
+                    (RuntimeErrorCode::RegistryBusy, true)
                 }
                 SqlErrorCode::DatabaseCorrupt | SqlErrorCode::NotADatabase => {
-                    (M6ErrorCode::RegistryCorrupt, false)
+                    (RuntimeErrorCode::RegistryCorrupt, false)
                 }
-                _ => (M6ErrorCode::RegistryUnavailable, false),
+                _ => (RuntimeErrorCode::RegistryUnavailable, false),
             },
-            _ => (M6ErrorCode::RegistryUnavailable, false),
+            _ => (RuntimeErrorCode::RegistryUnavailable, false),
         };
         Self::new(code, format!("{context}: {error}"), None, retryable)
     }
 }
 
-impl Display for M6Error {
+impl Display for RuntimeError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{:?}: {}", self.code, self.message)
     }
 }
 
-impl std::error::Error for M6Error {}
+impl std::error::Error for RuntimeError {}
 
-pub type M6Result<T> = Result<T, M6Error>;
+pub type RuntimeResult<T> = Result<T, RuntimeError>;

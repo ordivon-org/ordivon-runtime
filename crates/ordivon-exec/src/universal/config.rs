@@ -10,10 +10,7 @@ pub const MAX_UNIVERSAL_ENV_VARS: usize = 64;
 pub const MAX_UNIVERSAL_ENV_VALUE_BYTES: usize = 16 * 1024;
 pub const MAX_UNIVERSAL_RUNTIME_MS: u64 = 24 * 60 * 60 * 1000;
 pub const MAX_UNIVERSAL_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
-pub const MAX_ARTIFACT_READ_BYTES: u64 = 1024 * 1024;
-pub const MAX_COMPACT_TAIL_BYTES: u64 = 64 * 1024;
 pub const MAX_WORKSPACE_MUTATIONS: usize = 32;
-pub const MAX_TASK_WAIT_MS: u64 = 30_000;
 pub const MAX_WORKSPACE_IO_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -124,10 +121,6 @@ impl UniversalExecutorConfig {
     pub(crate) fn workspace_record_path(&self, workspace_id: &str) -> PathBuf {
         self.workspace_records_root()
             .join(format!("{workspace_id}.json"))
-    }
-
-    pub(crate) fn task_path(&self, task_id: &str) -> PathBuf {
-        self.tasks_root().join(task_id)
     }
 }
 
