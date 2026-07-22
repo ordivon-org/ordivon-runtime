@@ -153,7 +153,7 @@ The real systemd suite remained ignored because it had been organized as stage p
 |---|---|---|---|
 | R1 | Final head did not execute all real systemd/cgroup tests | Observed | process, recovery, cancellation, and cleanup regressions may remain |
 | R2 | No complete MCP tool/task journey | Observed | initialize success may hide tool-chain failures |
-| R3 | Branch is based on an older closure commit | Observed | current-main changes may conflict or be lost |
+| R3 | The branch contains a 45-commit not-yet-main capability chain before simplification | Observed | reviewers may evaluate only the deletion tail and miss the complete net adoption |
 | R4 | No external API/caller inventory | Unknown | old binaries or feature names may still be consumed |
 | R5 | `trusted-local` broadens the default trust boundary | Observed | untrusted code may have greater host impact |
 | R6 | Host/Origin checks are not default gates | Observed | a future proxy or non-loopback deployment may violate assumptions |
@@ -201,7 +201,7 @@ rather than a combined governance, proof, infrastructure, migration, and executi
 - Final-head real systemd/cgroup suite.
 - Complete MCP end-to-end journey.
 - Breaking-change and compatibility inventory.
-- Replay onto current main.
+- Mainline-adoption decision for the complete `main..HEAD` net change.
 - Independent review.
 - Machine-readable final acceptance manifest.
 - Real Registry backup/restore drill.
@@ -213,6 +213,7 @@ rather than a combined governance, proof, infrastructure, migration, and executi
 - Host/Origin behavior under the Cloudflare/Tunnel topology.
 - Repository-external service and bridge consumers.
 - Separation of fast CI from merge/release acceptance.
+- Mainline adoption of a 56-commit descendant chain without reviewing transient historical architecture as current design.
 
 **Long-term structural debt**
 
@@ -250,7 +251,7 @@ Do not restore the Python governance platform, governance databases and brokers,
 
 P0 actions:
 
-1. Replay the ten commits onto the latest `main`, record every conflict, and produce a main-delta report.
+1. Treat `main..HEAD` as the adoption surface, document that `main` is an ancestor, and review the final net architecture plus the logical commit history before opening any merge path.
 2. Execute all real systemd/cgroup integration tests on the replayed exact head and retain raw logs.
 3. Execute a complete MCP journey covering all nine tools, durable task observation, restart recovery, artifact digest, cancellation, and listing.
 4. Audit repository-external callers: systemd units, Cloudflare Tunnel, MCP bridge, connector configuration, scripts, binaries, and environment variables.
@@ -278,4 +279,4 @@ Retained reusable rules:
 
 ## 10. One-sentence summary
 
-The task removed roughly 81% of the active engineering footprint while preserving the minimum execution truth required for reliable local agent work; the next stage must replay that result onto current main and close real systemd, complete MCP journey, compatibility, restore, and independent-review gaps before any new capability is added.
+The task removed roughly 81% of the active engineering footprint while preserving the minimum execution truth required for reliable local agent work; the next stage must validate and independently review the complete `main..HEAD` adoption surface, then close real systemd, complete MCP journey, compatibility, restore, and deployment-boundary gaps before any new capability is added.
