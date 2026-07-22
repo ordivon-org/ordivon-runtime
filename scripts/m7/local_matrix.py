@@ -70,7 +70,7 @@ def git_head() -> str:
 
 
 def systemd_version() -> str:
-    return subprocess.check_output(["systemd", "--version"], text=True).splitlines()[0]
+    return subprocess.check_output(["systemctl", "--version"], text=True).splitlines()[0]
 
 
 def active_units() -> list[str]:
