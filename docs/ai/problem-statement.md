@@ -1,148 +1,71 @@
-# Ordivon 问题陈述
+# Ordivon Problem Statement
 
-> **为什么做 Ordivon，以及它试图解决什么问题。**
->
-> 不讨论实现。只讨论问题本身。
+## The problem
 
----
+Capable agents can edit repositories and run commands quickly, but ordinary tool chains do not preserve enough execution truth to make long-running local work reliable.
 
-## 核心命题
+A task can fail because:
 
-**AI 时代产出成本降为零，但认知系统仍然把"有产出"当作"有证据"。**
+- the agent reads stale or contradictory project context;
+- several documents or Issues describe different current architectures;
+- an execution result disappears when a process, client, or machine restarts;
+- a command is dispatched but its actual outcome becomes ambiguous;
+- duplicate requests consume the same external effect twice;
+- cancellation stops one process but leaves descendants running;
+- output or Artifacts change after the Runtime recorded them;
+- blanket isolation and governance slow reversible work without reducing these risks.
 
-人类文明的默认假设：生成一份分析、一篇报告、一段代码，需要时间、精力、理解。
-产出的存在本身就是部分证据——至少有人坐下来想过。
+The problem is therefore not a lack of generated plans, reports, Receipts, or policy objects. It is the absence of one clear current path and a small amount of durable execution truth.
 
-AI 打破了这个假设。
+## First-principles objective
 
-```
-人类写 50 页报告 → 两周 → 产出本身就是 effort 的 proxy
-AI 写 50 页报告  → 五秒  → 产出不证明任何东西
-```
+Ordivon should let an agent transform user intent into a real result while preserving only what reasoning cannot reconstruct:
 
-产出与证据之间的耦合被永久打破。在学会重新耦合之前，工作信任基建处于真空。
-
----
-
-## 自证循环
-
-一次对话中，AI 可以自闭环完成：
-
-```
-AI generates plan → AI executes plan → AI summarizes result
-→ AI declares done → AI closes debt → AI generates next rule
+```text
+current repository truth
+→ bounded action
+→ owned process
+→ observed result
+→ persistent identity
+→ recovery or continuation
 ```
 
-四个混淆是这个循环的燃料：
+## What evidence means here
 
-- **Claim mistaken for Evidence** — "done" 等同于真的做完了
-- **Summary mistaken for Truth** — AI 写的摘要被当成事实
-- **Generated view mistaken for Source** — 生成的仪表盘被当成真相来源
-- **READY mistaken for Authorization** — 能跑等同于可以上线
+AI output is not evidence merely because it is fluent or complete. Ordivon does not solve that problem by governing vocabulary or requiring a parallel document bureaucracy.
 
----
+Evidence comes from the mechanism that produced the fact:
 
-## 为什么必须解决
+- Git identifies repository state;
+- SQLite transactions identify admission, idempotency, and concurrency ownership;
+- systemd and cgroups identify the running process tree;
+- digests bind requests, plans, outputs, results, and Artifacts;
+- reconciliation compares persistent state with observable machine state;
+- exact-head acceptance records the commands actually executed.
 
-不是"防止 AI 骗人"。
+A summary may explain these facts, but it does not replace them.
 
-是更根本的：如果你无法区分"有证据的完成"和"流畅的声称完成"，
-你就失去了理性行动的能力。
+## Design consequence
 
-推演几条链：
+Reversible repository work should be easy to attempt, inspect, correct, and roll back. Hard blocking is reserved for failures whose cost cannot be repaired by another ordinary iteration:
 
-**工程链：**
-AI 写代码说 "all tests pass" → 你没跑 → 合并 → 线上崩了。
-一次教训。但如果 agent 每分钟都在产出这样的声明，你不可能
-每次都手动验证。要么建自动证据系统，要么退回不用 AI——
-而后者在经济上不可逆。
+- credential exposure;
+- irreversible external effects;
+- ambiguous dispatch that could be duplicated;
+- real concurrency ownership violations;
+- corruption of persistent execution truth;
+- untrusted code crossing the selected isolation boundary.
 
-**金融链：**
-AI 分析市场数据说 "risk is controlled" → 你没验证 → 下单 →
-亏了。防御不是修辞——是生存。
+## Non-goals
 
-**组织链：**
-公司决策基于 AI 生成的摘要 → 摘要基于 AI 分析的数据 → 数据基于
-AI 抓取的来源。三层以后，没有任何人类知道原始事实是什么。
+Ordivon does not need to model every claim, document, policy, approval, project, or future capability. It does not attempt to eliminate trust or prevent all mistakes before execution.
 
----
+Its responsibility is narrower:
 
-## 推广后的深层问题
+1. make the current execution path obvious;
+2. execute within explicit local boundaries;
+3. preserve non-reconstructable facts;
+4. expose uncertainty instead of guessing;
+5. recover from failure without duplicating side effects.
 
-### 1. 认识论基础设施的缺失
-
-人类有司法系统（"有人说他偷了" ≠ "他偷了"）、科学方法（"我感觉有效" ≠ "有效"）、
-审计（"账是对的" ≠ "账是对的"）。
-
-AI 时代之前，这些基础设施是给人类的。人类说话有后果、有声誉机制、有社会约束。
-AI 的输出缺少完整的认识论闭环：谁声称、什么证据、谁验证、什么后果。
-
-这不是新发明。这是人类文明的基本操作。只是过去由社会机制承担，现在需要
-显式建到系统里。
-
-### 2. 流畅性本身就是攻击向量
-
-AI 最危险的不是错误。是最容易让人失去怀疑的错误：流畅、完整、自信，但是假。
-
-一段人类写的 bug 代码——你会怀疑。一段 AI 写的带完整注释、测试、文档的
-"解决方案"——你不会怀疑。即使它基于一个错误的假设。
-
-**AI 的质量信号（流畅性）与我们需要的质量信号（正确性）是反向相关的。**
-越流畅越危险，因为流畅性压制了审慎。
-
-### 3. 判断力的外包螺旋
-
-每一次"让 AI 总结一下"都是一次微小的判断力外包。
-第一次你还看原文。第十次你看摘要。第一百次你只读标题。
-
-问题不在于某一次外包错了。问题在于认知肌肉萎缩。
-而 AI 让外包变得太容易——容易到不做比做难。
-
-这不是 AI 的错。是激励结构。验证需要努力，接受只需要眼。
-短期效率的诱惑压倒长期判断力的维持。
-
-### 4. 治理系统的自指问题
-
-所有证据在某层都是信任决策。系统的目标不是消除信任——
-是最小化信任表面，使信任点显式化，使反证容易。
-
-### 5. 努力信号的替代
-
-有史以来，"这个人花了三个月写这份报告"就是一种信号——即使报告错了，
-至少努力是真的。AI 消除了这个信号。
-
-替代物可能是：
-- **可复现性**：不是"我做了"而是"你可以重做一遍并得到相同结果"
-- **可反驳性**：不是"这是对的"而是"这是可被推翻的条件"
-- **边界声明的诚实性**：不是"我覆盖了全部"而是"我没有覆盖这些"
-- **行动后果的绑定**：不是"我建议"而是"如果我错了，损失由 X 承担"
-
----
-
-## 问题的价值
-
-解决好这个问题：
-
-1. Agent 可以高频率、高自主性地工作——因为每次输出的可信度可验证，
-   不需要人类逐条检查
-2. AI 产出可以进入正式决策链——不是因为"AI 说的"，而是因为"有证据链支撑"
-3. 失败可追溯、可学习——不是"AI 又错了"，而是"这个 debt 需要改检查逻辑"
-4. 人在循环中的位置可以被精确放置——不是"永远需要人审核"，而是
-   "当证据不足/权限不够时，升级给人"
-
-**治理不是减速带。是高速路的护栏。**
-
----
-
-## 一句话
-
-**AI 时代最稀缺的不再是产出，是可信度。**
-
-当产出比空气还廉价，什么东西还能让一份产出具有信用。
-这是 Ordivon 试图回答的唯一问题。
-
----
-
-> 记录时间：2026-06-10
-> 来源：Ordivon 设计哲学讨论
-> 状态：问题陈述，非架构规范
+The smallest system that satisfies these responsibilities is preferred over a broader governance platform.

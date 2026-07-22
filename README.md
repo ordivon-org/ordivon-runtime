@@ -1,30 +1,34 @@
 # Ordivon
 
-Ordivon is a local execution runtime for capable agents.
+Ordivon is a local execution Runtime for capable agents.
 
-Its default engineering model is:
+It provides one path from a Git-backed repository task to a bounded process, persistent Job and Attempt truth, observable results, and recovery after interruption.
 
 ```text
-agent acts freely
-→ runtime records what happened
-→ failures remain recoverable
-→ hard blocking is reserved for irreversible boundaries
+agent intent
+→ exact repository state
+→ bounded execution
+→ owned process tree
+→ persistent result
+→ recovery or continuation
 ```
 
-Code and repository files are treated as reversible through Git. Strong controls remain for credentials, external side effects, ambiguous dispatch, concurrency ownership, and other state that cannot be reconstructed by reasoning alone.
+Ordivon treats ordinary repository edits as reversible through Git. Strong controls remain for credentials, irreversible external effects, ambiguous dispatch, concurrency ownership, persistent-state integrity, and untrusted execution.
 
-## Current direction
+## Current surface
 
-The active simplification removes historical governance machinery and converges on:
+- one `ordivon-mcp` Streamable HTTP server;
+- one `ordivon-exec` Runtime;
+- SQLite Job, Attempt, idempotency, and concurrency truth;
+- systemd and cgroup process ownership;
+- timeout, bounded output, cancellation, restart recovery, and Artifact verification;
+- `trusted-local` by default and `isolated` on demand.
 
-- one Rust execution runtime;
-- one `ordivon-mcp` Streamable HTTP surface;
-- SQLite-backed Job and Attempt truth;
-- idempotency and concurrency reservation;
-- cgroup ownership, timeout, output bounds, cancellation, and recovery;
-- trusted-local execution by default, with isolation available on demand.
+## Current truth
 
-See [docs/README.md](docs/README.md) for the small current document set.
+Read [docs/current-state.md](docs/current-state.md) first. It distinguishes repository `main`, the simplification candidate, and the live remote Desktop Commander bridge. These are not yet the same system.
+
+The complete active document set is listed in [docs/README.md](docs/README.md). Dated audits, acceptance reports, closure notes, and retrospectives are records rather than current architecture.
 
 ## Development checks
 
@@ -34,8 +38,8 @@ cargo test --workspace
 ruff check scripts/
 ```
 
-Stronger isolation, Clippy, systemd matrices, reboot testing, dependency audits, and CodeQL are run when the changed boundary requires them.
+Use stronger checks when the changed boundary makes them relevant.
 
 ## Recovery point
 
-The complete M0–M7 tree remains available through Git tag `m-series-closed-2026-07-22`.
+The complete M0–M7 tree remains available through Git tag `m-series-closed-2026-07-22`. Historical code is not retained as parallel current architecture.
