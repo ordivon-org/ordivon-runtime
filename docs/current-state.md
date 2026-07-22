@@ -30,7 +30,7 @@ Do not collapse these states:
 | Surface | Current truth |
 |---|---|
 | Repository `main` | The pre-adoption mainline; it does not yet contain the simplification candidate. |
-| Simplification candidate | Branch `agent/post-m-series-simplification`; this is the proposed current architecture. |
+| Simplification candidate | Published branch `agent/post-m-series-simplification`, tracked by Issue #25 and Draft PR #26; this is the proposed current architecture. |
 | Live remote service | `mcp.ordivon.com` still reaches Supergateway and Desktop Commander on port 8811. It does not run the Rust MCP candidate. |
 
 Use Git and the workstation for exact identity:
@@ -57,18 +57,19 @@ Exit conditions:
 1. the candidate diff is reviewable as one coherent replacement of the old active surface;
 2. active documents agree on product identity, current topology, and operating boundary;
 3. exact-head fast and merge acceptance pass;
-4. the branch is published and reviewed through an ordinary pull request;
+4. published Draft PR #26 receives ordinary diff review;
 5. `main` adopts one MCP server and one execution Runtime.
 
 Remote Rust MCP migration is the next milestone, not part of repository adoption. It begins only after the candidate is in `main` and keeps the current 8811 bridge available for rollback.
 
 ## Current issue disposition
 
-- #22 is an obsolete capability-fabric umbrella. Its eight horizontal capability surfaces are not the current execution plan.
-- #23 proposes a GitHub-hosted read-only worker. It is not on the active local-Runtime path.
-- #24 proposes a Docker worker and draft Receipt path. Its execution objective is superseded by the systemd, cgroup, SQLite, and Runner implementation in the simplification candidate.
+- #25 is the only open implementation Issue. It tracks adoption of the simplified Runtime into `main` and explicitly excludes live remote migration.
+- #22, the horizontal capability-fabric umbrella, is closed as superseded by #25.
+- #23, the GitHub-hosted read-only worker, is closed as not planned because CI is verification rather than the execution substrate.
+- #24, the Docker worker and draft Receipt path, is closed as superseded by the systemd, cgroup, SQLite, and Runner implementation.
 
-These Issues should not be expanded or used to derive new work. Remote closure or replacement should state the exact superseding branch or merged revision; until then, this repository document records the intended disposition without pretending the remote Issues are already closed.
+Do not reopen these Issues to recover old capability catalogues. A future Issue must advance the current milestone through one observable state change.
 
 ## Truth precedence
 
