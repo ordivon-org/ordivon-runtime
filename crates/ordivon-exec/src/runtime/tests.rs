@@ -58,7 +58,6 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
         client_request_id: client_request_id.to_string(),
         plan: RuntimeExecutionPlan {
             schema_version: RUNTIME_SCHEMA_VERSION,
-            plan_kind: PlanKind::UniversalSandbox,
             workspace_id: "workspace:test".to_string(),
             workspace_path: sandbox.workspace().to_string_lossy().into_owned(),
             source_revision: "test-revision".to_string(),
@@ -70,15 +69,9 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
             timeout_ms: 10_000,
             stdout_limit_bytes: 65_536,
             stderr_limit_bytes: 65_536,
-            policy_id: "policy:test".to_string(),
-            policy_version: "1".to_string(),
-            policy_digest: digest(b"policy:test:1"),
-            profile_id: None,
             principal: "principal:test".to_string(),
-            authority_ref: "authority:test".to_string(),
         },
         global_limit,
-        profile_limit: None,
     }
 }
 

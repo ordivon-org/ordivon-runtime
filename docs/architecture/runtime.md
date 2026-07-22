@@ -32,7 +32,7 @@ Everything reconstructable from these sources should remain reconstructable rath
 
 ## Authority
 
-`trusted-local` is the default. A task inherits the Ordivon service user's network, environment, credentials, filesystem access, Git remotes, Docker, systemd, cloud tooling, and executable surface. The MCP client does not self-assert authority metadata; the server binds execution identity and concurrency once from deployment configuration.
+`trusted-local` is the default. A task inherits the Ordivon service user's network, environment, credentials, filesystem access, Git remotes, Docker, systemd, cloud tooling, and executable surface. The server binds the Principal and global concurrency limit once from deployment configuration. Policy, profile, authority-reference, and one-value plan-kind fields are not persisted because they do not contribute to recovery.
 
 `isolated` is an explicit reduced-authority mode for untrusted input. It activates the non-root worker, private network and filesystem views, hidden credentials and host-control paths, and systemd hardening.
 
@@ -58,6 +58,7 @@ Git restores code. SQLite and result bundles restore task knowledge. systemd/cgr
 
 ```text
 workspace.open
+workspace.close
 workspace.read
 workspace.mutate
 workspace.diff

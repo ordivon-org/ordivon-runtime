@@ -8,11 +8,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ordivon_exec::{
     create_git_workspace_compact, mutate_workspace, read_workspace_slice_compact,
-    read_workspace_text_compact, workspace_diff_compact, ArtifactReadRequest, ArtifactReadResult,
-    CompactWorkspaceDiffResult, CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, Runtime,
-    RuntimeConfig, RuntimeError, RuntimeJobListRequest, RuntimeJobListResult, TaskCancelRequest,
-    TaskObservation, TaskObserveRequest, TaskRunRequest, UniversalExecError,
-    UniversalExecutionRequest, UniversalExecutorConfig,
+    read_workspace_text_compact, remove_git_workspace, workspace_diff_compact, ArtifactReadRequest,
+    ArtifactReadResult, CompactWorkspaceDiffResult, CompactWorkspaceOpenResult,
+    GitWorkspaceCreateRequest, Runtime, RuntimeConfig, RuntimeError, RuntimeJobListRequest,
+    RuntimeJobListResult, TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunRequest,
+    UniversalExecError, UniversalExecutionRequest, UniversalExecutorConfig,
     WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceMutateRequest,
     WorkspaceMutateResult, WorkspaceReadRequest as ExecWorkspaceReadRequest,
     WorkspaceReadSliceRequest,
@@ -70,6 +70,20 @@ pub struct WorkspaceDiffRequest {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceCloseRequest {
+    pub schema_version: u32,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCloseResult {
+    pub workspace_id: String,
+    pub removed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceExecRequest {
     pub schema_version: u32,
     pub client_request_id: String,
@@ -85,10 +99,6 @@ pub struct WorkspaceExecRequest {
 #[derive(Clone)]
 pub struct ExecutionContext {
     pub principal: String,
-    pub authority_ref: String,
-    pub policy_id: String,
-    pub policy_version: String,
-    pub policy_digest: String,
     pub global_limit: u32,
 }
 
@@ -98,13 +108,7 @@ impl ExecutionContext {
             schema_version: request.schema_version,
             client_request_id: request.client_request_id,
             principal: self.principal.clone(),
-            authority_ref: self.authority_ref.clone(),
-            policy_id: self.policy_id.clone(),
-            policy_version: self.policy_version.clone(),
-            policy_digest: self.policy_digest.clone(),
-            profile_id: None,
             global_limit: self.global_limit,
-            profile_limit: None,
             execution: request.execution,
             wait_ms: request.wait_ms,
             stdout_tail_bytes: request.stdout_tail_bytes,

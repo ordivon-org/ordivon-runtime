@@ -15,10 +15,10 @@ use super::supervisor::{
 };
 use super::{
     AdmissionOutcome, ArtifactReadRequest, ArtifactReadResult, ArtifactRegistration, AttemptRecord,
-    AttemptState, PlanKind, Registry, RegistryConfig, RunnerIdentity, RuntimeError,
-    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeJobListRequest, RuntimeJobListResult,
-    RuntimeResult, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
-    TaskRunRequest, TerminalCommit, RUNTIME_SCHEMA_VERSION,
+    AttemptState, Registry, RegistryConfig, RunnerIdentity, RuntimeError, RuntimeErrorCode,
+    RuntimeExecutionPlan, RuntimeJobListRequest, RuntimeJobListResult, RuntimeResult,
+    SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunRequest,
+    TerminalCommit, RUNTIME_SCHEMA_VERSION,
 };
 use crate::universal::{
     canonical_directory, load_workspace_record, resolve_workspace_cwd, sha256_bytes, sha256_file,
@@ -141,7 +141,6 @@ impl Runtime {
             client_request_id: request.client_request_id.clone(),
             plan,
             global_limit: request.global_limit,
-            profile_limit: request.profile_limit,
         };
         let job_id = match self.registry.submit(&submit)? {
             AdmissionOutcome::Created(created) => {
@@ -173,7 +172,6 @@ impl Runtime {
         let executable = validate_executable(&self.executor, &request.execution.executable)?;
         Ok(RuntimeExecutionPlan {
             schema_version: RUNTIME_SCHEMA_VERSION,
-            plan_kind: PlanKind::UniversalSandbox,
             workspace_id: request.execution.workspace_id.clone(),
             workspace_path: workspace_path.to_string_lossy().into_owned(),
             source_revision: record.source_revision,
@@ -185,12 +183,7 @@ impl Runtime {
             timeout_ms: request.execution.timeout_ms,
             stdout_limit_bytes: request.execution.stdout_limit_bytes,
             stderr_limit_bytes: request.execution.stderr_limit_bytes,
-            policy_id: request.policy_id.clone(),
-            policy_version: request.policy_version.clone(),
-            policy_digest: request.policy_digest.clone(),
-            profile_id: request.profile_id.clone(),
             principal: request.principal.clone(),
-            authority_ref: request.authority_ref.clone(),
         })
     }
 
@@ -1272,21 +1265,11 @@ fn validate_run_request(request: &TaskRunRequest) -> RuntimeResult<()> {
     for (value, field) in [
         (&request.client_request_id, "clientRequestId"),
         (&request.principal, "principal"),
-        (&request.authority_ref, "authorityRef"),
-        (&request.policy_id, "policyId"),
-        (&request.policy_version, "policyVersion"),
         (&request.execution.workspace_id, "execution.workspaceId"),
     ] {
         validate_text_id(value, field)?;
     }
-    validate_sha256(&request.policy_digest, "policyDigest")?;
-    if request.profile_id.is_some() != request.profile_limit.is_some() {
-        return Err(RuntimeError::invalid(
-            "profileId and profileLimit must appear together",
-            "profileLimit",
-        ));
-    }
-    if request.global_limit == 0 || request.profile_limit == Some(0) {
+    if request.global_limit == 0 {
         return Err(RuntimeError::invalid(
             "concurrency limits must be positive",
             "globalLimit",
@@ -1785,19 +1768,6 @@ fn validate_text_id(value: &str, field: &str) -> RuntimeResult<()> {
     {
         return Err(RuntimeError::invalid(
             format!("{field} must be non-empty, bounded, and control-free"),
-            field,
-        ));
-    }
-    Ok(())
-}
-
-fn validate_sha256(value: &str, field: &str) -> RuntimeResult<()> {
-    let valid = value
-        .strip_prefix("sha256:")
-        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    if !valid {
-        return Err(RuntimeError::invalid(
-            format!("{field} must be a SHA-256 digest"),
             field,
         ));
     }

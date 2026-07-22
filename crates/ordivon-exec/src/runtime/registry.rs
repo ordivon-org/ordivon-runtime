@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::{
     AdmissionOutcome, ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent,
-    ConditionUpdate, CreatedAdmission, JobDesiredState, JobProjection, JobResolution, PlanKind,
+    ConditionUpdate, CreatedAdmission, JobDesiredState, JobProjection, JobResolution,
     ReservationRecord, ReservationState, RunnerIdentity, RuntimeArtifactRecord, RuntimeError,
     RuntimeErrorCode, RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult,
     RuntimeJobRecord, RuntimeResult, SubmitRequest, TerminalCommit, MAX_RUNTIME_LIST_LIMIT,
@@ -21,7 +21,7 @@ const MIGRATION_V1: i64 = 1;
 const MIGRATION_V1_NAME: &str = "0001_runtime";
 const MIGRATION_V1_SQL: &str = include_str!("../../migrations/runtime/0001_runtime.sql");
 pub const RUNTIME_MIGRATION_CHECKSUM: &str =
-    "sha256:0711776bd2d2a6d50793971cbcde1c9a295991e32731f6a5db42024299ba898b";
+    "sha256:9c5e0ccf94b0c3efa9b671a9300cfe00e4539d0c880e6a8df8982df9fa8826ac";
 const MAX_MIGRATION_VERSION: i64 = 1;
 
 #[derive(Clone, Debug)]
@@ -244,11 +244,7 @@ impl Registry {
         })
         .to_string();
         let operation_digest = sha256_bytes(
-            format!(
-                "runtime-operation-v1\0{request_digest}\0{plan_digest}\0{}\0{}",
-                request.plan.policy_digest, request.plan.authority_ref
-            )
-            .as_bytes(),
+            format!("runtime-operation-v2\0{request_digest}\0{plan_digest}").as_bytes(),
         );
         let job_id = format!("job-{}", Uuid::now_v7());
         let attempt_id = format!("attempt-{}", Uuid::now_v7());
@@ -271,14 +267,8 @@ impl Registry {
             operation_digest: operation_digest.clone(),
             workspace_id: request.plan.workspace_id.clone(),
             workspace_snapshot_json: workspace_snapshot_json.clone(),
-            plan_kind: request.plan.plan_kind,
             execution_plan_json: plan_json.clone(),
             execution_plan_digest: plan_digest.clone(),
-            policy_id: request.plan.policy_id.clone(),
-            policy_version: request.plan.policy_version.clone(),
-            policy_digest: request.plan.policy_digest.clone(),
-            authority_ref: request.plan.authority_ref.clone(),
-            profile_id: request.plan.profile_id.clone(),
             created_at_ms,
             desired_state: JobDesiredState::Run,
             resolution: None,
@@ -312,9 +302,7 @@ impl Registry {
         let reservation = ReservationRecord {
             reservation_id: reservation_id.clone(),
             attempt_id: attempt_id.clone(),
-            profile_id: request.plan.profile_id.clone(),
             global_limit: request.global_limit,
-            profile_limit: request.profile_limit,
             state: ReservationState::Active,
             acquired_at_ms: created_at_ms,
             released_at_ms: None,
@@ -367,29 +355,9 @@ impl Registry {
                 true,
             ));
         }
-        if let (Some(profile_id), Some(profile_limit)) =
-            (&request.plan.profile_id, request.profile_limit)
-        {
-            let profile_active: u32 = transaction
-                .query_row(
-                    "SELECT COUNT(*) FROM concurrency_reservations WHERE profile_id=?1 AND state IN ('active','held_orphaned')",
-                    [profile_id],
-                    |row| row.get(0),
-                )
-                .map_err(|error| RuntimeError::from_sql(error, "cannot count profile reservations"))?;
-            if profile_active >= profile_limit {
-                return Err(RuntimeError::new(
-                    RuntimeErrorCode::ConcurrencyLimit,
-                    format!("profile {profile_id} concurrency limit reached"),
-                    Some("profileLimit"),
-                    true,
-                ));
-            }
-        }
-
         transaction
             .execute(
-                "INSERT INTO jobs(job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,plan_kind,execution_plan_json,execution_plan_digest,policy_id,policy_version,policy_digest,authority_ref,profile_id,created_at_ms,desired_state,resolution,current_attempt_id,row_version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,NULL,?18,0)",
+                "INSERT INTO jobs(job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,NULL,?12,0)",
                 params![
                     job.job_id,
                     job.principal,
@@ -398,14 +366,8 @@ impl Registry {
                     job.operation_digest,
                     job.workspace_id,
                     job.workspace_snapshot_json,
-                    job.plan_kind.as_db(),
                     job.execution_plan_json,
                     job.execution_plan_digest,
-                    job.policy_id,
-                    job.policy_version,
-                    job.policy_digest,
-                    job.authority_ref,
-                    job.profile_id,
                     created_at_ms,
                     job.desired_state.as_db(),
                     attempt.attempt_id,
@@ -442,13 +404,11 @@ impl Registry {
 
         transaction
             .execute(
-                "INSERT INTO concurrency_reservations(reservation_id,attempt_id,profile_id,global_limit,profile_limit,state,acquired_at_ms,released_at_ms,release_reason) VALUES(?1,?2,?3,?4,?5,?6,?7,NULL,NULL)",
+                "INSERT INTO concurrency_reservations(reservation_id,attempt_id,global_limit,state,acquired_at_ms,released_at_ms,release_reason) VALUES(?1,?2,?3,?4,?5,NULL,NULL)",
                 params![
                     reservation.reservation_id,
                     reservation.attempt_id,
-                    reservation.profile_id,
                     reservation.global_limit,
-                    reservation.profile_limit,
                     reservation.state.as_db(),
                     reservation.acquired_at_ms,
                 ],
@@ -465,21 +425,6 @@ impl Registry {
             None,
             "REQUEST_ACCEPTED",
             serde_json::json!({"requestDigest": request_digest}),
-            created_at_ms,
-        )?;
-        append_event(
-            &transaction,
-            &job_id,
-            Some(&attempt_id),
-            "AUTHORIZATION_ALLOWED",
-            "SYSTEM_DERIVED",
-            None,
-            None,
-            "POLICY_AND_AUTHORITY_BOUND",
-            serde_json::json!({
-                "policyDigest": request.plan.policy_digest,
-                "authorityRef": request.plan.authority_ref,
-            }),
             created_at_ms,
         )?;
         append_event(
@@ -642,7 +587,7 @@ impl Registry {
         if let Some(cursor) = &request.cursor {
             let mut statement = connection
                 .prepare(
-                    "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,plan_kind,execution_plan_json,execution_plan_digest,policy_id,policy_version,policy_digest,authority_ref,profile_id,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE created_at_ms>?1 OR (created_at_ms=?1 AND job_id>?2) ORDER BY created_at_ms,job_id LIMIT ?3",
+                    "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE created_at_ms>?1 OR (created_at_ms=?1 AND job_id>?2) ORDER BY created_at_ms,job_id LIMIT ?3",
                 )
                 .map_err(|error| RuntimeError::from_sql(error, "cannot prepare Job list"))?;
             let rows = statement
@@ -660,7 +605,7 @@ impl Registry {
         } else {
             let mut statement = connection
                 .prepare(
-                    "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,plan_kind,execution_plan_json,execution_plan_digest,policy_id,policy_version,policy_digest,authority_ref,profile_id,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs ORDER BY created_at_ms,job_id LIMIT ?1",
+                    "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs ORDER BY created_at_ms,job_id LIMIT ?1",
                 )
                 .map_err(|error| RuntimeError::from_sql(error, "cannot prepare Job list"))?;
             let rows = statement
@@ -1289,14 +1234,8 @@ struct RawJob {
     operation_digest: String,
     workspace_id: String,
     workspace_snapshot_json: String,
-    plan_kind: String,
     execution_plan_json: String,
     execution_plan_digest: String,
-    policy_id: String,
-    policy_version: String,
-    policy_digest: String,
-    authority_ref: String,
-    profile_id: Option<String>,
     created_at_ms: u64,
     desired_state: String,
     resolution: Option<String>,
@@ -1314,14 +1253,8 @@ impl RawJob {
             operation_digest: self.operation_digest,
             workspace_id: self.workspace_id,
             workspace_snapshot_json: self.workspace_snapshot_json,
-            plan_kind: PlanKind::parse(&self.plan_kind)?,
             execution_plan_json: self.execution_plan_json,
             execution_plan_digest: self.execution_plan_digest,
-            policy_id: self.policy_id,
-            policy_version: self.policy_version,
-            policy_digest: self.policy_digest,
-            authority_ref: self.authority_ref,
-            profile_id: self.profile_id,
             created_at_ms: self.created_at_ms,
             desired_state: JobDesiredState::parse(&self.desired_state)?,
             resolution: self
@@ -1344,26 +1277,20 @@ fn raw_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawJob> {
         operation_digest: row.get(4)?,
         workspace_id: row.get(5)?,
         workspace_snapshot_json: row.get(6)?,
-        plan_kind: row.get(7)?,
-        execution_plan_json: row.get(8)?,
-        execution_plan_digest: row.get(9)?,
-        policy_id: row.get(10)?,
-        policy_version: row.get(11)?,
-        policy_digest: row.get(12)?,
-        authority_ref: row.get(13)?,
-        profile_id: row.get(14)?,
-        created_at_ms: row.get(15)?,
-        desired_state: row.get(16)?,
-        resolution: row.get(17)?,
-        current_attempt_id: row.get(18)?,
-        row_version: row.get(19)?,
+        execution_plan_json: row.get(7)?,
+        execution_plan_digest: row.get(8)?,
+        created_at_ms: row.get(9)?,
+        desired_state: row.get(10)?,
+        resolution: row.get(11)?,
+        current_attempt_id: row.get(12)?,
+        row_version: row.get(13)?,
     })
 }
 
 fn load_job(connection: &Connection, job_id: &str) -> RuntimeResult<RuntimeJobRecord> {
     connection
         .query_row(
-            "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,plan_kind,execution_plan_json,execution_plan_digest,policy_id,policy_version,policy_digest,authority_ref,profile_id,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE job_id=?1",
+            "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE job_id=?1",
             [job_id],
             raw_job_from_row,
         )
@@ -1479,9 +1406,7 @@ fn load_attempt(connection: &Connection, attempt_id: &str) -> RuntimeResult<Atte
 struct RawReservation {
     reservation_id: String,
     attempt_id: String,
-    profile_id: Option<String>,
     global_limit: u32,
-    profile_limit: Option<u32>,
     state: String,
     acquired_at_ms: u64,
     released_at_ms: Option<u64>,
@@ -1491,19 +1416,17 @@ struct RawReservation {
 fn load_reservation(connection: &Connection, attempt_id: &str) -> RuntimeResult<ReservationRecord> {
     let raw = connection
         .query_row(
-            "SELECT reservation_id,attempt_id,profile_id,global_limit,profile_limit,state,acquired_at_ms,released_at_ms,release_reason FROM concurrency_reservations WHERE attempt_id=?1",
+            "SELECT reservation_id,attempt_id,global_limit,state,acquired_at_ms,released_at_ms,release_reason FROM concurrency_reservations WHERE attempt_id=?1",
             [attempt_id],
             |row| {
                 Ok(RawReservation {
                     reservation_id: row.get(0)?,
                     attempt_id: row.get(1)?,
-                    profile_id: row.get(2)?,
-                    global_limit: row.get(3)?,
-                    profile_limit: row.get(4)?,
-                    state: row.get(5)?,
-                    acquired_at_ms: row.get(6)?,
-                    released_at_ms: row.get(7)?,
-                    release_reason: row.get(8)?,
+                    global_limit: row.get(2)?,
+                    state: row.get(3)?,
+                    acquired_at_ms: row.get(4)?,
+                    released_at_ms: row.get(5)?,
+                    release_reason: row.get(6)?,
                 })
             },
         )
@@ -1520,9 +1443,7 @@ fn load_reservation(connection: &Connection, attempt_id: &str) -> RuntimeResult<
     Ok(ReservationRecord {
         reservation_id: raw.reservation_id,
         attempt_id: raw.attempt_id,
-        profile_id: raw.profile_id,
         global_limit: raw.global_limit,
-        profile_limit: raw.profile_limit,
         state: ReservationState::parse(&raw.state)?,
         acquired_at_ms: raw.acquired_at_ms,
         released_at_ms: raw.released_at_ms,
@@ -1768,29 +1689,11 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
     }
     validate_identifier(&request.client_request_id, "clientRequestId")?;
     validate_identifier(&request.plan.principal, "plan.principal")?;
-    validate_identifier(&request.plan.authority_ref, "plan.authorityRef")?;
     validate_identifier(&request.plan.workspace_id, "plan.workspaceId")?;
-    validate_identifier(&request.plan.policy_id, "plan.policyId")?;
-    validate_identifier(&request.plan.policy_version, "plan.policyVersion")?;
-    if let Some(profile_id) = &request.plan.profile_id {
-        validate_identifier(profile_id, "plan.profileId")?;
-    }
     if request.global_limit == 0 {
         return Err(RuntimeError::invalid(
             "globalLimit must be positive",
             "globalLimit",
-        ));
-    }
-    if request.profile_limit == Some(0) {
-        return Err(RuntimeError::invalid(
-            "profileLimit must be positive",
-            "profileLimit",
-        ));
-    }
-    if request.plan.profile_id.is_some() != request.profile_limit.is_some() {
-        return Err(RuntimeError::invalid(
-            "profileId and profileLimit must appear together",
-            "profileLimit",
         ));
     }
 
@@ -1813,7 +1716,6 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
         ));
     }
     validate_digest(&request.plan.executable_digest, "plan.executableDigest")?;
-    validate_digest(&request.plan.policy_digest, "plan.policyDigest")?;
     if request.plan.source_revision.is_empty() || request.plan.source_revision.len() > 256 {
         return Err(RuntimeError::invalid(
             "sourceRevision must be non-empty and bounded",

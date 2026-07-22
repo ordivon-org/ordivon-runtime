@@ -10,7 +10,7 @@ pub use registry::{Registry, RegistryConfig, RUNTIME_MIGRATION_CHECKSUM};
 pub use types::{
     AdmissionOutcome, ArtifactReadRequest, ArtifactReadResult, ArtifactRegistration, AttemptRecord,
     AttemptState, AttemptTerminationIntent, ConditionUpdate, CreatedAdmission, JobDesiredState,
-    JobProjection, JobResolution, PlanKind, ReservationRecord, ReservationState, RunnerIdentity,
+    JobProjection, JobResolution, ReservationRecord, ReservationState, RunnerIdentity,
     RuntimeArtifactRecord, RuntimeExecutionPlan, RuntimeJobListCursor, RuntimeJobListRequest,
     RuntimeJobListResult, RuntimeJobRecord, SubmitRequest, TaskCancelRequest, TaskObservation,
     TaskObserveRequest, TaskRunRequest, TerminalCommit, UniversalExecutionRequest,

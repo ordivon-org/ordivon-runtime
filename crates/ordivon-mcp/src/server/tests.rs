@@ -1,8 +1,7 @@
 use super::tasks::task_from_job;
 use super::*;
 use ordivon_exec::{
-    AdmissionOutcome, PlanKind, RegistryConfig, RuntimeExecutionPlan, SubmitRequest,
-    RUNTIME_SCHEMA_VERSION,
+    AdmissionOutcome, RegistryConfig, RuntimeExecutionPlan, SubmitRequest, RUNTIME_SCHEMA_VERSION,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -52,10 +51,6 @@ impl Sandbox {
             },
             execution: ExecutionContext {
                 principal: "principal:mcp-test".to_string(),
-                authority_ref: "authority:mcp-test".to_string(),
-                policy_id: "policy:mcp-test".to_string(),
-                policy_version: "1".to_string(),
-                policy_digest: format!("sha256:{}", "b".repeat(64)),
                 global_limit: 4,
             },
             trace_path: None,
@@ -84,7 +79,6 @@ fn submit(server: &OrdivonServer, client_request_id: &str) -> ordivon_exec::Crea
             client_request_id: client_request_id.to_string(),
             plan: RuntimeExecutionPlan {
                 schema_version: RUNTIME_SCHEMA_VERSION,
-                plan_kind: PlanKind::UniversalSandbox,
                 workspace_id: "workspace:mcp-test".to_string(),
                 workspace_path: workspace.clone(),
                 source_revision: "revision:test".to_string(),
@@ -96,15 +90,9 @@ fn submit(server: &OrdivonServer, client_request_id: &str) -> ordivon_exec::Crea
                 timeout_ms: 1000,
                 stdout_limit_bytes: 1024,
                 stderr_limit_bytes: 1024,
-                policy_id: "policy:mcp-test".to_string(),
-                policy_version: "1".to_string(),
-                policy_digest: format!("sha256:{}", "b".repeat(64)),
-                profile_id: None,
                 principal: "principal:mcp-test".to_string(),
-                authority_ref: "authority:mcp-test".to_string(),
             },
             global_limit: 4,
-            profile_limit: None,
         })
         .unwrap();
     match outcome {
@@ -127,6 +115,7 @@ fn tool_catalog_uses_transactional_job_contract() {
             "task.cancel",
             "task.list",
             "task.observe",
+            "workspace.close",
             "workspace.diff",
             "workspace.exec",
             "workspace.mutate",
@@ -146,15 +135,7 @@ fn tool_catalog_uses_transactional_job_contract() {
     let schema = serde_json::to_string(&exec.input_schema).unwrap();
     assert!(schema.contains("clientRequestId"));
     assert!(!schema.contains("taskId"));
-    for server_owned in [
-        "principal",
-        "authorityRef",
-        "policyId",
-        "policyVersion",
-        "policyDigest",
-        "globalLimit",
-        "profileLimit",
-    ] {
+    for server_owned in ["principal", "globalLimit", "profileLimit"] {
         assert!(
             !schema.contains(server_owned),
             "schema exposes {server_owned}"

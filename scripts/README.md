@@ -3,7 +3,7 @@
 These scripts are external utilities, not Runtime Core protocols.
 
 - `smoke.py` performs one bounded MCP `initialize` request against a running loopback server.
-- `mcp_e2e.py` launches the current server and proves all nine tools, cancellation, restart observation, and Artifact digest verification.
+- `mcp_e2e.py` launches the current server and proves all ten tools, cancellation, restart observation, and Artifact digest verification.
 - `acceptance.py` runs layered `fast`, `merge`, or explicit `release` acceptance and writes an exact-head JSON manifest.
 - `legacy_reference_scan.py` rejects active tracked references to removed runtime entry points.
 - `tracked_secret_scan.py` exports and scans the exact tracked Git tree without build artifacts or old-history noise.
