@@ -34,3 +34,8 @@ serde_json.workspace = true
 schemars.workspace = true
 sha2.workspace = true
 uuid = { workspace = true, optional = true }
+
+[[example]]
+name = "m6_registry_performance"
+path = "examples/m6_registry_performance.rs"
+required-features = ["transactional-registry-m6"]

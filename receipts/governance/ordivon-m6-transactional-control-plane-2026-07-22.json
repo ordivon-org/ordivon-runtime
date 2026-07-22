@@ -1,0 +1,201 @@
+{
+  "stage_id": "ORDIVON-M6-TRANSACTIONAL-CONTROL-PLANE-2026-07-22",
+  "receipt_type": "R2",
+  "risk_class": "R2",
+  "draft": true,
+  "status": "LOCAL_TRANSACTIONAL_DOGFOOD_GATES_PASS_NO_PRODUCTION_CUTOVER",
+  "task_type": "transactional_job_attempt_control_plane_and_local_dogfood",
+  "timestamp": "2026-07-22T00:00:00Z",
+  "branch": "agent/m6-transactional-job-attempt-control-plane",
+  "base_commit": "dfbfbe4a514bc28e6013b8475923bc87f5d411a3",
+  "measured_implementation_commit": "ffaca2f1989573d8d085d5cbeaa96b6a91726b35",
+  "files_changed": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/ordivon-exec/Cargo.toml",
+    "crates/ordivon-exec/examples/m6_registry_performance.rs",
+    "crates/ordivon-exec/migrations/m6/0001_initial.sql",
+    "crates/ordivon-exec/src/lib.rs",
+    "crates/ordivon-exec/src/m6/error.rs",
+    "crates/ordivon-exec/src/m6/mod.rs",
+    "crates/ordivon-exec/src/m6/registry.rs",
+    "crates/ordivon-exec/src/m6/runtime.rs",
+    "crates/ordivon-exec/src/m6/tests.rs",
+    "crates/ordivon-exec/src/m6/types.rs",
+    "crates/ordivon-exec/src/universal/mod.rs",
+    "crates/ordivon-exec/src/universal/runner.rs",
+    "crates/ordivon-exec/src/universal/task/start.rs",
+    "crates/ordivon-exec/src/universal/task/status.rs",
+    "crates/ordivon-exec/src/universal/tests.rs",
+    "crates/ordivon-exec/src/universal/types.rs",
+    "crates/ordivon-exec/tests/m6_transactional_runtime.rs",
+    "crates/ordivon-mcp/Cargo.toml",
+    "crates/ordivon-mcp/src/bin/ordivon-m6-http.rs",
+    "crates/ordivon-mcp/src/lib.rs",
+    "crates/ordivon-mcp/src/m4/mod.rs",
+    "crates/ordivon-mcp/src/m6/mod.rs",
+    "crates/ordivon-mcp/src/m6/tasks.rs",
+    "crates/ordivon-mcp/src/m6/tests.rs",
+    "crates/ordivon-mcp/src/m6/tools.rs",
+    "docs/architecture/ordivon-m6-transactional-control-plane-implementation.md",
+    "docs/audits/runtime/ordivon-m6-concurrency-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-limited-dogfood-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-model-loop-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-registry-performance-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-registry-shadow-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-runtime-crash-matrix-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-transport-security-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-wire-contract-evidence-2026-07-22.json",
+    "docs/governance/document-registry.jsonl",
+    "receipts/governance/ordivon-m6-transactional-control-plane-2026-07-22.json",
+    "scripts/README.md",
+    "scripts/mcp/check_m6_evidence.py",
+    "scripts/mcp/client.mjs",
+    "scripts/mcp/m6_concurrency.mjs",
+    "scripts/mcp/m6_dogfood.mjs",
+    "scripts/mcp/m6_registry_shadow.mjs",
+    "scripts/mcp/m6_transport_security.mjs",
+    "scripts/mcp/m6_wire_contract.mjs",
+    "scripts/mcp/stack_m5_m6.py",
+    "scripts/mcp/stack_m6.py"
+  ],
+  "implemented_contracts": [
+    "feature-gated bundled SQLite Registry with WAL, FULL synchronous writes, migrations, private permissions, and fail-closed validation",
+    "server-generated Job and Attempt identities with atomic principal and client-request idempotency",
+    "atomic global and profile concurrency reservations with held-orphaned capacity semantics",
+    "append-only Job events, immutable terminal resolution, Artifact lineage, and bounded Job listing",
+    "immutable Attempt bundles and a persisted at-most-once dispatch boundary before systemd launch",
+    "Runner launch identity binding across PID namespace, host MainPID, InvocationID, cgroup, boot ID, and process start identity",
+    "atomic terminal and intent-first cancellation transactions with startup and targeted reconciliation",
+    "independent M6 MCP adapter projecting SQLite Job identity as Native MCP Task identity",
+    "real 2/4/8 concurrency, eight systemd recovery journeys, bounded model-in-the-loop evaluation, and M5-to-M6 Shadow comparison",
+    "independent evidence recomputation and tamper rejection"
+  ],
+  "evidence": "Eight M6 Dogfood journeys succeeded with 39 model-facing calls, 19817 context bytes, one repair round, zero fallback, disconnect recovery, cancellation cleanup, and idempotent replay. Real 2/4/8 Job batches preserved unique identities, rejected the final excess request with CONCURRENCY_LIMIT, and released all 14 reservations. Eight systemd recovery journeys passed, including ten consecutive fast failures without a lost misclassification. Registry p95 values were 20.30 ms admission, 0.97 ms replay, 0.86 ms status, 5.11 ms list-100, and 21.15 ms terminal. Twelve M5-versus-M6 Shadow pairs were semantically equivalent; overall medians were M5 509 ms and 1687 context bytes versus M6 603 ms and 1754 context bytes with equal calls and HTTP requests.",
+  "verification_result": "M6 is eligible for continued bounded local transactional Dogfood only. The evidence does not authorize production routing, remote exposure, credentials, deployment, push, merge, network access, or external side effects.",
+  "degraded_reasons": [
+    "The M6 Registry backend was 18.5 percent slower than the M5 file backend in the bounded twelve-pair Shadow matrix.",
+    "M6 returned about 4 percent more Context than M5 in the bounded Shadow matrix.",
+    "Only one bounded model-in-the-loop journey was executed; broad autonomous planning quality remains unproven.",
+    "The recovery matrix reconstructs Core and injects systemd failures but does not perform an actual WSL reboot.",
+    "Execution still lacks a dedicated non-privileged Worker identity.",
+    "Retention, quota, garbage collection, operational remediation for held-orphaned capacity, and remote authentication remain absent.",
+    "Repository document governance retains the exact three pre-existing violations from the M6 design base."
+  ],
+  "remaining_debt": [
+    "Move execution to a dedicated non-privileged Worker before expanding authority or external capabilities.",
+    "Add actual WSL reboot recovery, startup reconciliation evidence across boot changes, and operator remediation for orphaned Attempts.",
+    "Implement retention, quota, garbage collection, Registry backup and recovery, and bounded evidence compaction.",
+    "Strengthen machine-enforced capability policy beyond the current local repository, executable-root, sandbox, and transport boundaries.",
+    "Expand model-driven evaluation to longer repair loops, Rust build failures, concurrent planning, and adversarial tool selection.",
+    "Keep Cloudflare, remote MCP, credentials, deployment, push, merge, network access, and external side effects in separate authority stages."
+  ],
+  "authorization": {
+    "status": "not_requested",
+    "rationale": "M6 uses an independent localhost-only experimental MCP adapter and explicitly excludes production routing and external side effects."
+  },
+  "next_bounded_action": "Design the next stage around a dedicated non-privileged Worker and lifecycle governance while continuing M6 only as bounded local transactional Dogfood evidence.",
+  "canonical_sources": [
+    "docs/architecture/ordivon-m6-transactional-job-attempt-control-plane.md",
+    "docs/architecture/ordivon-m6-transactional-control-plane-implementation.md",
+    "docs/audits/runtime/ordivon-m6-wire-contract-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-limited-dogfood-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-concurrency-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-registry-shadow-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-registry-performance-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-model-loop-evidence-2026-07-22.json",
+    "docs/audits/runtime/ordivon-m6-runtime-crash-matrix-evidence-2026-07-22.json"
+  ],
+  "verification_results": [
+    {
+      "id": "m6-registry-tests",
+      "command": "cargo test -p ordivon-exec --features transactional-registry-m6",
+      "passed": true,
+      "summary": "Ninety-five feature tests passed, including twelve SQLite transaction and corruption tests."
+    },
+    {
+      "id": "m6-mcp-tests",
+      "command": "cargo test -p ordivon-mcp --features experimental-http-m6",
+      "passed": true,
+      "summary": "Nine M4/M6 adapter tests and the existing MCP main test passed."
+    },
+    {
+      "id": "m6-systemd-matrix",
+      "command": "run eight ignored M6 systemd integration tests with explicit local opt-in",
+      "passed": true,
+      "summary": "Eight recovery journeys passed; the fast-failure journey executed ten iterations without lost misclassification."
+    },
+    {
+      "id": "m6-wire-contract",
+      "command": "run m6_wire_contract through the independent M6 stack",
+      "passed": true,
+      "summary": "Nine-tool contract, server Job identity, Native Tasks, 64 concurrent reads, Artifact, recovery, cancellation, and trace identity passed."
+    },
+    {
+      "id": "m6-transport-security",
+      "command": "run M6 bearer, Origin, Host, and body-limit negative paths",
+      "passed": true,
+      "summary": "Responses were 401, 401, 403, 403, and 413 as frozen."
+    },
+    {
+      "id": "m6-dogfood",
+      "command": "run eight bounded local transactional Dogfood journeys",
+      "passed": true,
+      "summary": "Eight journeys passed with one repair round, zero fallback, recovery, cancellation, Rust verification, and idempotent replay."
+    },
+    {
+      "id": "m6-concurrency",
+      "command": "run real 2/4/8 Job concurrency batches",
+      "passed": true,
+      "summary": "Unique Job identities, final-slot protection, parallel completion, and zero residual active capacity passed."
+    },
+    {
+      "id": "m6-registry-performance",
+      "command": "run feature-gated Registry-only performance example",
+      "passed": true,
+      "summary": "Admission, replay, status, list-100, and terminal p95 values all passed their frozen budgets."
+    },
+    {
+      "id": "m6-shadow",
+      "command": "run four journeys as three alternating M5 and M6 pairs",
+      "passed": true,
+      "summary": "Twelve pairs were semantically equivalent; M6 median latency and Context remained within the frozen 25 percent budgets."
+    },
+    {
+      "id": "m6-model-loop",
+      "command": "execute one observation-driven model journey through M6 MCP",
+      "passed": true,
+      "summary": "The model selected tools, authored isolated validation tests, ran a server-generated Job, and verified its Registry projection without production mutation."
+    },
+    {
+      "id": "m6-independent-checker",
+      "command": "recompute eight M6 evidence classes from raw observations",
+      "passed": true,
+      "summary": "M6_EVIDENCE_PASS"
+    },
+    {
+      "id": "m6-tamper-negative",
+      "command": "modify the M6 Shadow median and rerun the independent checker",
+      "passed": true,
+      "summary": "The checker rejected the modified summary with exit 1."
+    },
+    {
+      "id": "strict-clippy",
+      "command": "run default, M6 executor, and M6 MCP Clippy with warnings denied",
+      "passed": true,
+      "summary": "All strict Clippy gates passed."
+    },
+    {
+      "id": "document-governance-delta",
+      "command": "compare the document registry checker at the exact M6 design base and implementation worktree",
+      "passed": true,
+      "summary": "Both report the same three pre-existing violations; M6 implementation adds none."
+    },
+    {
+      "id": "final-cleanup",
+      "command": "scan M5/M6 units, processes, listeners, worktrees, Registry roots, and benchmark state",
+      "passed": true,
+      "summary": "No M5 or M6 experimental runtime residue remains."
+    }
+  ]
+}

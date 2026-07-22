@@ -55,3 +55,18 @@ state removal.
 
 The M5 harness does not modify the production 8811 endpoint or authorize
 external side effects, credentials, deployment, or automatic Legacy fallback.
+
+## M6 transactional harness
+
+`stack_m6.py` owns an independent transactional MCP server, SQLite Registry,
+Runner units, worktrees, tokens, and cleanup. `stack_m5_m6.py` starts isolated
+M5 and M6 stacks for paired Registry migration comparisons.
+
+`m6_wire_contract.mjs`, `m6_dogfood.mjs`, `m6_concurrency.mjs`,
+`m6_registry_shadow.mjs`, and `m6_transport_security.mjs` produce the bounded
+M6 evidence. The feature-gated `m6_registry_performance` Rust example measures
+Registry-only budgets. `check_m6_evidence.py` independently recomputes the
+material claims and rejects modified summaries.
+
+M6 remains localhost-only and does not authorize production routing, push,
+merge, deployment, credentials, network access, or external side effects.

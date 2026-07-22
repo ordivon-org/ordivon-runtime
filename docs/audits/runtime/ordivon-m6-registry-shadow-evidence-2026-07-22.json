@@ -1,0 +1,498 @@
+{
+  "schemaVersion": 1,
+  "phase": "ORDIVON-MIGRATION-M6-REGISTRY-SHADOW-2026-07-22",
+  "generatedAt": "2026-07-21T23:41:43.870Z",
+  "sourceRevision": "ffaca2f1989573d8d085d5cbeaa96b6a91726b35",
+  "iterationsPerJourney": 3,
+  "alternatingOrder": true,
+  "journeyKinds": [
+    "readonly-audit",
+    "single-file-edit",
+    "multi-file-test",
+    "failure-repair-loop"
+  ],
+  "rawSamples": {
+    "m5": [
+      {
+        "backend": "M5_FILE_TASK_BACKEND",
+        "kind": "readonly-audit",
+        "pairId": "readonly-audit-0-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 536,
+        "toolCalls": 4,
+        "contextBytes": 1273,
+        "outputBytes": 85,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:85bb8ad6ed22ec0a0bbfe95810ca4843ba789e1c2ac47a075da8e30f50a87a3f"
+      },
+      {
+        "backend": "M5_FILE_TASK_BACKEND",
+        "kind": "readonly-audit",
+        "pairId": "readonly-audit-1-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 532,
+        "toolCalls": 4,
+        "contextBytes": 1273,
+        "outputBytes": 85,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:52916de0f83ba757702faf73aef73ac296f13019a911d02cc8be715f0e117466"
+      },
+      {
+        "backend": "M5_FILE_TASK_BACKEND",
+        "kind": "readonly-audit",
+        "pairId": "readonly-audit-2-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 568,
+        "toolCalls": 4,
+        "contextBytes": 1273,
+        "outputBytes": 85,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:bc7f5f58a6f00cb8c286e9f9a6c2234ceeef3681609ea815f5d7b22f806ea7f1"
+      },
+      {
+        "backend": "M5_FILE_TASK_BACKEND",
+        "kind": "single-file-edit",
+        "pairId": "single-file-edit-0-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 402,
+        "toolCalls": 5,
+        "contextBytes": 3952,
+        "outputBytes": 0,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:5b5dface6924f882ff9cd6378ed71904d9e0ce5d0657ec5a3f62568dfb3ba31d"
+      },
+      {
+        "backend": "M5_FILE_TASK_BACKEND",
+        "kind": "single-file-edit",
+        "pairId": "single-file-edit-1-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 351,
+        "toolCalls": 5,
+        "contextBytes": 3952,
+        "outputBytes": 0,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:45e4e655ee715f08685ff68c276cc8832c7e7ffd7054b3477942b09c026604fa"
+      },
+      {
+        "backend": "M5_FILE_TASK_BACKEND",
+        "kind": "single-file-edit",
+        "pairId": "single-file-edit-2-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 374,
+        "toolCalls": 5,
+        "contextBytes": 3952,
+        "outputBytes": 0,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:f7fb5a9b3bcafcd32adf076662e2b3cec0b8946691119fded5f47c1164dc0502"
+      },
+      {
+        "backend": "M5_FILE_TASK_BACKEND",
+        "kind": "multi-file-test",
+        "pairId": "multi-file-test-0-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 485,
+        "toolCalls": 4,
+        "contextBytes": 953,
+        "outputBytes": 155,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:f32d90beccc3ab6266face79f3c3683c7cac9068cbe5ec8b6e5a92789f866da4"
+      },
+      {
+        "backend": "M5_FILE_TASK_BACKEND",
+        "kind": "multi-file-test",
+        "pairId": "multi-file-test-1-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 458,
+        "toolCalls": 4,
+        "contextBytes": 953,
+        "outputBytes": 155,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:9d829e9ebfad2cd9d6be26fd448947069d2516ea40e5e3eaae3e96bda7cace07"
+      },
+      {
+        "backend": "M5_FILE_TASK_BACKEND",
+        "kind": "multi-file-test",
+        "pairId": "multi-file-test-2-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 428,
+        "toolCalls": 4,
+        "contextBytes": 953,
+        "outputBytes": 155,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:45236c7092283ead0d2b0eb07c5f07780d822e8d5c8077ee379877c229f00fd7"
+      },
+      {
+        "backend": "M5_FILE_TASK_BACKEND",
+        "kind": "failure-repair-loop",
+        "pairId": "failure-repair-loop-0-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 624,
+        "toolCalls": 6,
+        "contextBytes": 2101,
+        "outputBytes": 773,
+        "httpRequests": 6,
+        "repairRounds": 1,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:96637504f28728dc9ff2e295334f60c4feff6d3a850907345862855b4fcd9daa"
+      },
+      {
+        "backend": "M5_FILE_TASK_BACKEND",
+        "kind": "failure-repair-loop",
+        "pairId": "failure-repair-loop-1-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 683,
+        "toolCalls": 6,
+        "contextBytes": 2101,
+        "outputBytes": 773,
+        "httpRequests": 6,
+        "repairRounds": 1,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:489189d0c3a93bc13d906a03581cf4835f47644d3d4875bed073d1500649c9f8"
+      },
+      {
+        "backend": "M5_FILE_TASK_BACKEND",
+        "kind": "failure-repair-loop",
+        "pairId": "failure-repair-loop-2-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 700,
+        "toolCalls": 6,
+        "contextBytes": 2101,
+        "outputBytes": 773,
+        "httpRequests": 6,
+        "repairRounds": 1,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:02113a3cde94ad660a09f1a4005bdaaa4c7a5b3dab4b199a2d78e64254134a20"
+      }
+    ],
+    "m6": [
+      {
+        "backend": "M6_SQLITE_JOB_BACKEND",
+        "kind": "readonly-audit",
+        "pairId": "readonly-audit-0-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 629,
+        "toolCalls": 4,
+        "contextBytes": 1335,
+        "outputBytes": 85,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:85bb8ad6ed22ec0a0bbfe95810ca4843ba789e1c2ac47a075da8e30f50a87a3f"
+      },
+      {
+        "backend": "M6_SQLITE_JOB_BACKEND",
+        "kind": "readonly-audit",
+        "pairId": "readonly-audit-1-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 652,
+        "toolCalls": 4,
+        "contextBytes": 1335,
+        "outputBytes": 85,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:52916de0f83ba757702faf73aef73ac296f13019a911d02cc8be715f0e117466"
+      },
+      {
+        "backend": "M6_SQLITE_JOB_BACKEND",
+        "kind": "readonly-audit",
+        "pairId": "readonly-audit-2-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 705,
+        "toolCalls": 4,
+        "contextBytes": 1335,
+        "outputBytes": 85,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:bc7f5f58a6f00cb8c286e9f9a6c2234ceeef3681609ea815f5d7b22f806ea7f1"
+      },
+      {
+        "backend": "M6_SQLITE_JOB_BACKEND",
+        "kind": "single-file-edit",
+        "pairId": "single-file-edit-0-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 538,
+        "toolCalls": 5,
+        "contextBytes": 4011,
+        "outputBytes": 0,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:5b5dface6924f882ff9cd6378ed71904d9e0ce5d0657ec5a3f62568dfb3ba31d"
+      },
+      {
+        "backend": "M6_SQLITE_JOB_BACKEND",
+        "kind": "single-file-edit",
+        "pairId": "single-file-edit-1-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 466,
+        "toolCalls": 5,
+        "contextBytes": 4011,
+        "outputBytes": 0,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:45e4e655ee715f08685ff68c276cc8832c7e7ffd7054b3477942b09c026604fa"
+      },
+      {
+        "backend": "M6_SQLITE_JOB_BACKEND",
+        "kind": "single-file-edit",
+        "pairId": "single-file-edit-2-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 567,
+        "toolCalls": 5,
+        "contextBytes": 4011,
+        "outputBytes": 0,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:f7fb5a9b3bcafcd32adf076662e2b3cec0b8946691119fded5f47c1164dc0502"
+      },
+      {
+        "backend": "M6_SQLITE_JOB_BACKEND",
+        "kind": "multi-file-test",
+        "pairId": "multi-file-test-0-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 568,
+        "toolCalls": 4,
+        "contextBytes": 1014,
+        "outputBytes": 155,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:f32d90beccc3ab6266face79f3c3683c7cac9068cbe5ec8b6e5a92789f866da4"
+      },
+      {
+        "backend": "M6_SQLITE_JOB_BACKEND",
+        "kind": "multi-file-test",
+        "pairId": "multi-file-test-1-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 554,
+        "toolCalls": 4,
+        "contextBytes": 1014,
+        "outputBytes": 155,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:9d829e9ebfad2cd9d6be26fd448947069d2516ea40e5e3eaae3e96bda7cace07"
+      },
+      {
+        "backend": "M6_SQLITE_JOB_BACKEND",
+        "kind": "multi-file-test",
+        "pairId": "multi-file-test-2-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 576,
+        "toolCalls": 4,
+        "contextBytes": 1014,
+        "outputBytes": 155,
+        "httpRequests": 4,
+        "repairRounds": 0,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:45236c7092283ead0d2b0eb07c5f07780d822e8d5c8077ee379877c229f00fd7"
+      },
+      {
+        "backend": "M6_SQLITE_JOB_BACKEND",
+        "kind": "failure-repair-loop",
+        "pairId": "failure-repair-loop-0-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 954,
+        "toolCalls": 6,
+        "contextBytes": 2173,
+        "outputBytes": 773,
+        "httpRequests": 6,
+        "repairRounds": 1,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:96637504f28728dc9ff2e295334f60c4feff6d3a850907345862855b4fcd9daa"
+      },
+      {
+        "backend": "M6_SQLITE_JOB_BACKEND",
+        "kind": "failure-repair-loop",
+        "pairId": "failure-repair-loop-1-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 975,
+        "toolCalls": 6,
+        "contextBytes": 2173,
+        "outputBytes": 773,
+        "httpRequests": 6,
+        "repairRounds": 1,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:489189d0c3a93bc13d906a03581cf4835f47644d3d4875bed073d1500649c9f8"
+      },
+      {
+        "backend": "M6_SQLITE_JOB_BACKEND",
+        "kind": "failure-repair-loop",
+        "pairId": "failure-repair-loop-2-ffaca2f198",
+        "succeeded": true,
+        "elapsedMs": 1025,
+        "toolCalls": 6,
+        "contextBytes": 2173,
+        "outputBytes": 773,
+        "httpRequests": 6,
+        "repairRounds": 1,
+        "fallbackCount": 0,
+        "semanticDigest": "sha256:02113a3cde94ad660a09f1a4005bdaaa4c7a5b3dab4b199a2d78e64254134a20"
+      }
+    ]
+  },
+  "summaries": {
+    "byKind": {
+      "readonly-audit": {
+        "m5": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 536,
+          "toolCalls": 4,
+          "contextBytes": 1273,
+          "outputBytes": 85,
+          "httpRequests": 4,
+          "repairRounds": 0,
+          "fallbackCount": 0
+        },
+        "m6": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 652,
+          "toolCalls": 4,
+          "contextBytes": 1335,
+          "outputBytes": 85,
+          "httpRequests": 4,
+          "repairRounds": 0,
+          "fallbackCount": 0
+        }
+      },
+      "single-file-edit": {
+        "m5": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 374,
+          "toolCalls": 5,
+          "contextBytes": 3952,
+          "outputBytes": 0,
+          "httpRequests": 5,
+          "repairRounds": 0,
+          "fallbackCount": 0
+        },
+        "m6": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 538,
+          "toolCalls": 5,
+          "contextBytes": 4011,
+          "outputBytes": 0,
+          "httpRequests": 5,
+          "repairRounds": 0,
+          "fallbackCount": 0
+        }
+      },
+      "multi-file-test": {
+        "m5": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 458,
+          "toolCalls": 4,
+          "contextBytes": 953,
+          "outputBytes": 155,
+          "httpRequests": 4,
+          "repairRounds": 0,
+          "fallbackCount": 0
+        },
+        "m6": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 568,
+          "toolCalls": 4,
+          "contextBytes": 1014,
+          "outputBytes": 155,
+          "httpRequests": 4,
+          "repairRounds": 0,
+          "fallbackCount": 0
+        }
+      },
+      "failure-repair-loop": {
+        "m5": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 683,
+          "toolCalls": 6,
+          "contextBytes": 2101,
+          "outputBytes": 773,
+          "httpRequests": 6,
+          "repairRounds": 1,
+          "fallbackCount": 0
+        },
+        "m6": {
+          "samples": 3,
+          "succeeded": true,
+          "elapsedMs": 975,
+          "toolCalls": 6,
+          "contextBytes": 2173,
+          "outputBytes": 773,
+          "httpRequests": 6,
+          "repairRounds": 1,
+          "fallbackCount": 0
+        }
+      }
+    },
+    "overall": {
+      "m5": {
+        "samples": 12,
+        "succeeded": true,
+        "elapsedMs": 509,
+        "toolCalls": 5,
+        "contextBytes": 1687,
+        "outputBytes": 120,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0
+      },
+      "m6": {
+        "samples": 12,
+        "succeeded": true,
+        "elapsedMs": 603,
+        "toolCalls": 5,
+        "contextBytes": 1754,
+        "outputBytes": 120,
+        "httpRequests": 5,
+        "repairRounds": 0,
+        "fallbackCount": 0
+      }
+    }
+  },
+  "decision": {
+    "transactionalDogfoodEligible": true,
+    "gates": {
+      "completionNotWorse": true,
+      "semanticEquivalence": true,
+      "repairRoundsNotWorse": true,
+      "toolCallsNotWorse": true,
+      "contextWithinTwentyFivePercent": true,
+      "elapsedWithinTwentyFivePercent": true,
+      "noFallback": true
+    }
+  },
+  "claimsNotMade": [
+    "Scripted Shadow journeys do not measure autonomous model planning quality.",
+    "Twelve paired samples do not establish production reliability.",
+    "The decision authorizes only bounded local M6 Dogfood, not production routing.",
+    "M6 transactional durability is evaluated separately from this performance comparison."
+  ]
+}

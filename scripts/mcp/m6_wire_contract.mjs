@@ -230,6 +230,7 @@ try {
     console.log(JSON.stringify({
       schemaVersion: 1,
       phase: 'ORDIVON-M6-WIRE-CONTRACT',
+      sourceRevision: config.sourceRevision,
       workspaceId,
       replayJobId: first.jobId,
       nativeJobId,
