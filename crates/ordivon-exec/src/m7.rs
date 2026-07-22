@@ -1,3 +1,12 @@
+mod lifecycle;
+mod remediation;
+
+pub use lifecycle::{
+    M7AdmissionQuota, M7BackupResult, M7GcPlan, M7LifecycleManager, M7LifecyclePolicy,
+    M7LifecycleUsage, M7RestoreResult,
+};
+pub use remediation::{M7OrphanEvidence, M7OrphanRemediator, M7RemediationResult};
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -23,10 +32,16 @@ pub struct M7RuntimeHardeningConfig {
     pub worker_root: PathBuf,
     pub cache_root: PathBuf,
     pub runtime_view_root: PathBuf,
+    pub lifecycle_policy: M7LifecyclePolicy,
 }
 
 impl M7RuntimeHardeningConfig {
     pub fn validate(&self) -> M6Result<()> {
+        self.validate_layout()?;
+        self.verify_host_identity()
+    }
+
+    pub fn validate_layout(&self) -> M6Result<()> {
         if self.worker.user != "ordivon-worker" || self.worker.group != "ordivon-worker" {
             return Err(M6Error::invalid(
                 "M7 worker identity must be ordivon-worker",
@@ -56,7 +71,7 @@ impl M7RuntimeHardeningConfig {
                 "controlRoot",
             ));
         }
-        self.verify_host_identity()?;
+        self.lifecycle_policy.validate()?;
         Ok(())
     }
 
@@ -154,3 +169,6 @@ pub(crate) fn ensure_traversal_directory(path: &Path, gid: u32, mode: u32) -> M6
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

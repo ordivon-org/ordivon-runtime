@@ -436,6 +436,8 @@ impl IntegrationContext {
             },
             global_limit,
             profile_limit: None,
+            #[cfg(feature = "runtime-hardening-m7")]
+            lifecycle_quota: None,
         }
     }
 }

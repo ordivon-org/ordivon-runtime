@@ -13,8 +13,8 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use ordivon_exec::{
-    M6RegistryConfig, M6Runtime, M6RuntimeConfig, M7RuntimeHardeningConfig, M7WorkerIdentity,
-    UniversalExecutorConfig,
+    M6RegistryConfig, M6Runtime, M6RuntimeConfig, M7LifecyclePolicy, M7RuntimeHardeningConfig,
+    M7WorkerIdentity, UniversalExecutorConfig,
 };
 use ordivon_mcp::m4::M5DogfoodPolicy;
 use ordivon_mcp::m6::{M6Server, M6ServerConfig};
@@ -240,6 +240,31 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         worker_root: worker_root.clone(),
         cache_root,
         runtime_view_root,
+        lifecycle_policy: M7LifecyclePolicy {
+            schema_version: 1,
+            retention_ms: std::env::var("ORDIVON_M7_RETENTION_MS")
+                .ok()
+                .map(|value| value.parse())
+                .transpose()?
+                .unwrap_or(604_800_000),
+            max_retained_artifact_bytes: std::env::var("ORDIVON_M7_MAX_RETAINED_ARTIFACT_BYTES")
+                .ok()
+                .map(|value| value.parse())
+                .transpose()?
+                .unwrap_or(1_073_741_824),
+            max_single_job_artifact_bytes: std::env::var(
+                "ORDIVON_M7_MAX_SINGLE_JOB_ARTIFACT_BYTES",
+            )
+            .ok()
+            .map(|value| value.parse())
+            .transpose()?
+            .unwrap_or(33_554_432),
+            max_gc_items: std::env::var("ORDIVON_M7_MAX_GC_ITEMS")
+                .ok()
+                .map(|value| value.parse())
+                .transpose()?
+                .unwrap_or(1000),
+        },
     };
 
     Ok(AppConfig {

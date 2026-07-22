@@ -79,6 +79,8 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> M6S
         },
         global_limit,
         profile_limit: None,
+        #[cfg(feature = "runtime-hardening-m7")]
+        lifecycle_quota: None,
     }
 }
 
@@ -359,8 +361,8 @@ fn newer_schema_and_checksum_drift_fail_closed() {
     let connection = Connection::open(&newer.registry.config().db_path).unwrap();
     connection
         .execute(
-            "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(2,'future','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0)",
-            [],
+            "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,'future','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0)",
+            [if cfg!(feature = "runtime-hardening-m7") { 3 } else { 2 }],
         )
         .unwrap();
     drop(connection);

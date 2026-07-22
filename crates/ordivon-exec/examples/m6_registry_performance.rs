@@ -47,6 +47,8 @@ fn request(root: &Path, id: &str, source_revision: &str) -> M6SubmitRequest {
         },
         global_limit: 1000,
         profile_limit: None,
+        #[cfg(feature = "runtime-hardening-m7")]
+        lifecycle_quota: None,
     }
 }
 

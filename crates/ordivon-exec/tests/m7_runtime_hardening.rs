@@ -1,11 +1,12 @@
 #![cfg(feature = "runtime-hardening-m7")]
 
 use ordivon_exec::{
-    create_git_workspace, remove_git_workspace, write_workspace_text, GitWorkspaceCreateRequest,
-    M6RegistryConfig, M6Runtime, M6RuntimeConfig, M6TaskCancelRequest, M6TaskRunRequest,
-    M6UniversalExecutionRequest, M7RuntimeHardeningConfig, M7WorkerIdentity,
-    UniversalExecutorConfig, WorkspaceWriteRequest, M6_SCHEMA_VERSION, MAX_UNIVERSAL_OUTPUT_BYTES,
-    MAX_UNIVERSAL_RUNTIME_MS, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    create_git_workspace, remove_git_workspace, write_workspace_text, AttemptState,
+    GitWorkspaceCreateRequest, M6RegistryConfig, M6Runtime, M6RuntimeConfig, M6TaskCancelRequest,
+    M6TaskRunRequest, M6UniversalExecutionRequest, M7LifecyclePolicy, M7OrphanRemediator,
+    M7RuntimeHardeningConfig, M7WorkerIdentity, TerminalCommitM6, UniversalExecutorConfig,
+    WorkspaceWriteRequest, M6_SCHEMA_VERSION, MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS,
+    UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -58,6 +59,7 @@ struct Context {
     view_root: PathBuf,
     executor: UniversalExecutorConfig,
     runtime: M6Runtime,
+    hardening: M7RuntimeHardeningConfig,
     workspace_id: String,
     other_workspace_id: String,
 }
@@ -109,6 +111,20 @@ impl Context {
             },
         )
         .unwrap();
+        let hardening = M7RuntimeHardeningConfig {
+            worker,
+            control_root: control_root.clone(),
+            worker_root: worker_root.clone(),
+            cache_root: cache_root.clone(),
+            runtime_view_root: view_root.clone(),
+            lifecycle_policy: M7LifecyclePolicy {
+                schema_version: 1,
+                retention_ms: 86_400_000,
+                max_retained_artifact_bytes: 1_073_741_824,
+                max_single_job_artifact_bytes: 33_554_432,
+                max_gc_items: 1000,
+            },
+        };
         let runtime = M6Runtime::new(M6RuntimeConfig {
             registry: M6RegistryConfig {
                 db_path: control_root.join("registry/registry.sqlite3"),
@@ -117,13 +133,7 @@ impl Context {
             },
             executor: executor.clone(),
             startup_grace_ms: 3000,
-            hardening: Some(M7RuntimeHardeningConfig {
-                worker,
-                control_root: control_root.clone(),
-                worker_root: worker_root.clone(),
-                cache_root: cache_root.clone(),
-                runtime_view_root: view_root.clone(),
-            }),
+            hardening: Some(hardening.clone()),
         })
         .unwrap();
         Self {
@@ -134,6 +144,7 @@ impl Context {
             view_root,
             executor,
             runtime,
+            hardening,
             workspace_id,
             other_workspace_id,
         }
@@ -193,6 +204,25 @@ impl Context {
             stderr_tail_bytes: 16_384,
         }
     }
+}
+
+fn force_orphan(context: &Context, attempt_id: &str) {
+    let attempt = context.runtime.registry().get_attempt(attempt_id).unwrap();
+    context
+        .runtime
+        .registry()
+        .commit_terminal(&TerminalCommitM6 {
+            attempt_id: attempt.attempt_id,
+            expected_row_version: attempt.row_version,
+            state: AttemptState::Orphaned,
+            result_digest: digest(b"m7-forced-orphan"),
+            exit_code: None,
+            infrastructure_error_digest: Some(digest(b"m7-forced-orphan")),
+            finished_at_ms: 999,
+            artifacts: Vec::new(),
+            reason_code: "M7_TEST_FORCED_ORPHAN".to_string(),
+        })
+        .unwrap();
 }
 
 impl Drop for Context {
@@ -360,4 +390,159 @@ fn active_unit_has_minimal_capabilities_and_cancel_cleans_worker_descendants() {
                 .is_empty()
     );
     assert!(!context.view_root.join(&attempt_id).exists());
+}
+
+#[test]
+#[ignore = "requires root, systemd, static ordivon-worker, installed M7 Runner, and explicit opt-in"]
+fn orphan_remediation_holds_live_tree_then_terminates_and_releases() {
+    if !enabled() {
+        return;
+    }
+    let context = Context::new("orphan-live");
+    context.write(
+        "m7_orphan.py",
+        "import time\nprint('M7_ORPHAN_LIVE', flush=True)\ntime.sleep(30)\n",
+    );
+    let observation = context
+        .runtime
+        .run_task(&context.request("m7_orphan.py", 0))
+        .unwrap();
+    let attempt_id = observation.attempt_id.unwrap();
+    thread::sleep(Duration::from_millis(200));
+    force_orphan(&context, &attempt_id);
+    let remediator = M7OrphanRemediator::new(
+        context.runtime.registry().clone(),
+        context.hardening.clone(),
+    )
+    .unwrap();
+    let evidence = remediator
+        .inspect(&attempt_id, "operator:m7-test", 1000)
+        .unwrap();
+    assert!(!evidence.live_processes.is_empty());
+    let denied = remediator
+        .remediate(
+            &attempt_id,
+            "operator:m7-test",
+            &evidence.evidence_digest,
+            false,
+            1001,
+        )
+        .unwrap_err();
+    assert_eq!(
+        denied.code,
+        ordivon_exec::M6ErrorCode::OrphanRemediationDenied
+    );
+    assert_eq!(
+        context
+            .runtime
+            .registry()
+            .get_reservation(&attempt_id)
+            .unwrap()
+            .state,
+        ordivon_exec::ReservationState::HeldOrphaned
+    );
+    let current = remediator
+        .inspect(&attempt_id, "operator:m7-test", 1002)
+        .unwrap();
+    let released = remediator
+        .remediate(
+            &attempt_id,
+            "operator:m7-test",
+            &current.evidence_digest,
+            true,
+            1003,
+        )
+        .unwrap();
+    assert!(released.reservation_released);
+    assert!(released.termination_requested);
+    assert_eq!(
+        context
+            .runtime
+            .registry()
+            .active_reservation_count()
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+#[ignore = "requires root, systemd, static ordivon-worker, installed M7 Runner, and explicit opt-in"]
+fn reused_unit_is_not_terminated_while_original_reservation_is_released() {
+    if !enabled() {
+        return;
+    }
+    let context = Context::new("orphan-reused");
+    context.write(
+        "m7_reused.py",
+        "import time\nprint('M7_REUSED_ORIGINAL', flush=True)\ntime.sleep(30)\n",
+    );
+    let observation = context
+        .runtime
+        .run_task(&context.request("m7_reused.py", 0))
+        .unwrap();
+    let attempt_id = observation.attempt_id.unwrap();
+    thread::sleep(Duration::from_millis(200));
+    let original = context.runtime.registry().get_attempt(&attempt_id).unwrap();
+    force_orphan(&context, &attempt_id);
+    Command::new("systemctl")
+        .args(["stop", &original.unit_name])
+        .status()
+        .unwrap();
+    Command::new("systemctl")
+        .args(["reset-failed", &original.unit_name])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(100));
+    let unit_base = original.unit_name.trim_end_matches(".service");
+    let output = Command::new("systemd-run")
+        .args([
+            "--quiet",
+            "--unit",
+            unit_base,
+            "--collect",
+            "/usr/bin/sleep",
+            "30",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    thread::sleep(Duration::from_millis(100));
+    let remediator = M7OrphanRemediator::new(
+        context.runtime.registry().clone(),
+        context.hardening.clone(),
+    )
+    .unwrap();
+    let evidence = remediator
+        .inspect(&attempt_id, "operator:m7-test", 2000)
+        .unwrap();
+    assert!(evidence.unit_active);
+    assert!(!evidence.invocation_matches);
+    let released = remediator
+        .remediate(
+            &attempt_id,
+            "operator:m7-test",
+            &evidence.evidence_digest,
+            true,
+            2001,
+        )
+        .unwrap();
+    assert!(released.reservation_released);
+    assert!(!released.termination_requested);
+    assert!(Command::new("systemctl")
+        .args(["is-active", "--quiet", &original.unit_name])
+        .status()
+        .unwrap()
+        .success());
+    Command::new("systemctl")
+        .args(["stop", &original.unit_name])
+        .status()
+        .unwrap();
+    Command::new("systemctl")
+        .args(["reset-failed", &original.unit_name])
+        .status()
+        .unwrap();
 }
