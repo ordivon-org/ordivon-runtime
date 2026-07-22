@@ -62,6 +62,7 @@ def command_profiles(repo: Path, runner: Path) -> dict[str, list[CommandSpec]]:
             ("cargo", "test", "-p", "ordivon-exec", "--features", "isolated-execution", "--test", "transactional_runtime", "--", "--ignored", "--nocapture", "--test-threads=1"),
             (("ORDIVON_RUN_INTEGRATION", "1"), ("ORDIVON_RUNNER_PATH", str(runner))),
         ),
+        CommandSpec("gitleaks-history", ("gitleaks", "git", "--no-banner", "--redact", str(repo))),
         CommandSpec("bounded-benchmark", (python, "scripts/benchmark.py", "--repo", str(repo))),
     ]
     return {"fast": fast, "merge": merge, "release": release}

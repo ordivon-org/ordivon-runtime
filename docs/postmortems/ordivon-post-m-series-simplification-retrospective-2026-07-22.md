@@ -23,7 +23,7 @@ Success required an isolated worktree and recovery point, logically separated co
 **Inferred:** the structural simplification goal was highly achieved.  
 **Unknown:** full production readiness and workload-wide performance improvement were not established.
 
-Overall completion is assessed at approximately 88%: architecture reduction and rollback safety were strong, while current-main integration, real systemd acceptance, full MCP end-to-end validation, compatibility review, and formal benchmarks remain incomplete.
+Overall completion at the reviewed simplification head was assessed at approximately 88%: architecture reduction and rollback safety were strong, while mainline adoption, real systemd acceptance, full MCP end-to-end validation, compatibility review, and formal benchmarks remained incomplete at that time.
 
 ## 2. Execution process review
 
@@ -72,7 +72,7 @@ Mechanical file removal, repeated search, formatting, and ordinary test invocati
 | Tracked lines | 100,331 | 18,927 | -81,404 (-81.1%) |
 | Diff | - | 436 files | +2,422 / -83,845 |
 | Logical commits | - | 10 | reviewable sequence |
-| Default tests | - | 88 passed | 8 systemd tests ignored |
+| Default tests | - | 88 passed | 10 real-system tests ignored (2 supervisor + 8 transactional) |
 | Transactional runtime | - | 77 passed | 8 ignored |
 | Isolated execution | - | 81 passed | 8 ignored |
 | Strict Clippy | - | passed | `-D warnings` |
@@ -145,7 +145,7 @@ Strong practices included isolated worktrees, a fixed recovery point, logical co
 
 ### 5.3 Root causes
 
-The real systemd suite remained ignored because it had been organized as stage proof rather than a stable long-term acceptance target. The branch remained behind current main because isolation and integration were treated as separate stages without a mandatory replay gate. Documentation drift appeared late because active operational references were not maintained as an explicit inventory.
+The real systemd suite remained ignored because it had been organized as stage proof rather than a stable long-term acceptance target. Mainline adoption remained unresolved because the candidate contained a 45-commit capability chain beyond `main` before the simplification tail, requiring review of the complete net architecture rather than an ordinary replay. Documentation drift appeared late because active operational references were not maintained as an explicit inventory.
 
 ## 6. Limitations, risks, and improvements
 
