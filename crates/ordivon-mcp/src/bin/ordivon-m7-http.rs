@@ -35,10 +35,33 @@ struct HttpState {
 static HTTP_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static HTTP_TRACE_LOCK: Mutex<()> = Mutex::new(());
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecutionMode {
+    TrustedLocal,
+    Isolated,
+}
+
+impl ExecutionMode {
+    fn parse(value: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        match value {
+            "trusted-local" => Ok(Self::TrustedLocal),
+            "isolated" => Ok(Self::Isolated),
+            _ => Err("ORDIVON_M7_EXECUTION_MODE must be trusted-local or isolated".into()),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TrustedLocal => "trusted-local",
+            Self::Isolated => "isolated",
+        }
+    }
+}
+
 struct AppConfig {
     bind: SocketAddr,
     token: String,
-    allowed_origins: Vec<String>,
+    execution_mode: ExecutionMode,
     body_limit_bytes: usize,
     server: M6ServerConfig,
 }
@@ -69,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|error| std::io::Error::other(error.message))
         },
         Default::default(),
-        transport_config(address, &app.allowed_origins, cancellation.child_token()),
+        transport_config(cancellation.child_token()),
     );
 
     let http_state = HttpState {
@@ -92,7 +115,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         bind = %address,
         endpoint = %format!("http://{address}/mcp"),
-        "Ordivon M6 experimental MCP listening"
+        execution_mode = app.execution_mode.as_str(),
+        "Ordivon MCP listening"
     );
 
     let shutdown = cancellation.clone();
@@ -164,20 +188,13 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     difference == 0
 }
 
-fn transport_config(
-    address: SocketAddr,
-    origins: &[String],
-    cancellation: CancellationToken,
-) -> StreamableHttpServerConfig {
+fn transport_config(cancellation: CancellationToken) -> StreamableHttpServerConfig {
     StreamableHttpServerConfig::default()
         .with_stateful_mode(false)
         .with_json_response(true)
         .with_sse_keep_alive(None)
-        .with_allowed_hosts([
-            format!("127.0.0.1:{}", address.port()),
-            format!("localhost:{}", address.port()),
-        ])
-        .with_allowed_origins(origins.iter().cloned())
+        .disable_allowed_hosts()
+        .disable_allowed_origins()
         .with_cancellation_token(cancellation)
 }
 
@@ -189,6 +206,9 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     if token.len() < 32 {
         return Err("ORDIVON_M7_BEARER_TOKEN must be at least 32 characters".into());
     }
+    let execution_mode = ExecutionMode::parse(
+        &std::env::var("ORDIVON_M7_EXECUTION_MODE").unwrap_or_else(|_| "trusted-local".to_string()),
+    )?;
     let store_root = PathBuf::from(required_env("ORDIVON_M7_STORE_ROOT")?);
     let registry_root = PathBuf::from(required_env("ORDIVON_M7_REGISTRY_ROOT")?);
     let runner_path = PathBuf::from(required_env("ORDIVON_M7_RUNNER_PATH")?);
@@ -201,13 +221,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     let trace_path = std::env::var("ORDIVON_M7_TRACE_PATH")
         .ok()
         .map(PathBuf::from)
-        .or_else(|| Some(registry_root.join("m7-trace.jsonl")));
-    let allowed_origins = std::env::var("ORDIVON_M7_ALLOWED_ORIGINS")
-        .unwrap_or_else(|_| "http://localhost,http://127.0.0.1".to_string())
-        .split(',')
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .collect();
+        .or_else(|| Some(registry_root.join("runtime-trace.jsonl")));
     let body_limit_bytes = std::env::var("ORDIVON_M7_BODY_LIMIT_BYTES")
         .ok()
         .map(|value| value.parse())
@@ -223,29 +237,41 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         .map(|value| value.parse())
         .transpose()?
         .unwrap_or(2_000);
-    let control_root = PathBuf::from(required_env("ORDIVON_M7_CONTROL_ROOT")?);
-    let worker_root = PathBuf::from(required_env("ORDIVON_M7_WORKER_ROOT")?);
-    let cache_root = PathBuf::from(required_env("ORDIVON_M7_CACHE_ROOT")?);
-    let runtime_view_root = PathBuf::from(required_env("ORDIVON_M7_RUNTIME_VIEW_ROOT")?);
-    let worker_uid: u32 = required_env("ORDIVON_M7_WORKER_UID")?.parse()?;
-    let worker_gid: u32 = required_env("ORDIVON_M7_WORKER_GID")?.parse()?;
-    let hardening = M7RuntimeHardeningConfig {
-        worker: M7WorkerIdentity {
-            user: "ordivon-worker".to_string(),
-            group: "ordivon-worker".to_string(),
-            uid: worker_uid,
-            gid: worker_gid,
-        },
-        control_root: control_root.clone(),
-        worker_root: worker_root.clone(),
-        cache_root,
-        runtime_view_root,
+
+    let (workspace_root, workspace_uid, workspace_gid, hardening) = match execution_mode {
+        ExecutionMode::TrustedLocal => (None, None, None, None),
+        ExecutionMode::Isolated => {
+            let control_root = PathBuf::from(required_env("ORDIVON_M7_CONTROL_ROOT")?);
+            let worker_root = PathBuf::from(required_env("ORDIVON_M7_WORKER_ROOT")?);
+            let cache_root = PathBuf::from(required_env("ORDIVON_M7_CACHE_ROOT")?);
+            let runtime_view_root = PathBuf::from(required_env("ORDIVON_M7_RUNTIME_VIEW_ROOT")?);
+            let worker_uid: u32 = required_env("ORDIVON_M7_WORKER_UID")?.parse()?;
+            let worker_gid: u32 = required_env("ORDIVON_M7_WORKER_GID")?.parse()?;
+            let hardening = M7RuntimeHardeningConfig {
+                worker: M7WorkerIdentity {
+                    user: "ordivon-worker".to_string(),
+                    group: "ordivon-worker".to_string(),
+                    uid: worker_uid,
+                    gid: worker_gid,
+                },
+                control_root,
+                worker_root,
+                cache_root,
+                runtime_view_root,
+            };
+            (
+                Some(hardening.workspaces_root()),
+                Some(worker_uid),
+                Some(worker_gid),
+                Some(hardening),
+            )
+        }
     };
 
     Ok(AppConfig {
         bind,
         token,
-        allowed_origins,
+        execution_mode,
         body_limit_bytes,
         server: M6ServerConfig {
             runtime: M6RuntimeConfig {
@@ -256,16 +282,16 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                 },
                 executor: UniversalExecutorConfig {
                     store_root,
-                    workspace_root: Some(hardening.workspaces_root()),
-                    workspace_uid: Some(worker_uid),
-                    workspace_gid: Some(worker_gid),
+                    workspace_root,
+                    workspace_uid,
+                    workspace_gid,
                     runner_path,
                     allowed_executable_roots,
                     max_runtime_ms: 900_000,
                     max_output_bytes: 16 * 1024 * 1024,
                 },
                 startup_grace_ms,
-                hardening: Some(hardening),
+                hardening,
             },
             trace_path,
             dogfood_policy: load_dogfood_policy()?,
@@ -361,4 +387,30 @@ fn unix_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExecutionMode;
+
+    #[test]
+    fn trusted_local_is_the_explicit_low_friction_mode() {
+        assert_eq!(
+            ExecutionMode::parse("trusted-local").unwrap(),
+            ExecutionMode::TrustedLocal
+        );
+    }
+
+    #[test]
+    fn isolated_mode_remains_available() {
+        assert_eq!(
+            ExecutionMode::parse("isolated").unwrap(),
+            ExecutionMode::Isolated
+        );
+    }
+
+    #[test]
+    fn unknown_execution_mode_is_rejected() {
+        assert!(ExecutionMode::parse("sandbox-everything").is_err());
+    }
 }

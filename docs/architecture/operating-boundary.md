@@ -2,7 +2,9 @@
 
 ## Default mode: trusted-local
 
-Use for user-owned repositories with an exact Git revision and ordinary rollback. The runtime should preserve:
+`trusted-local` is now the runtime default. It does not require a dedicated worker identity, ownership transfer, mount namespace, or isolated filesystem view.
+
+Use it for user-owned repositories with an exact Git revision and ordinary rollback. The runtime preserves:
 
 - isolated worktree ownership;
 - command timeout;
@@ -15,7 +17,7 @@ It should not impose document governance, wording checks, stage receipts, or a m
 
 ## Explicit mode: isolated
 
-Use strong isolation for unknown repositories, downloaded code, untrusted scripts, dependency investigation, or security work. The retained worker identity and systemd filesystem layout are the basis for this mode.
+Set the execution mode to `isolated` for unknown repositories, downloaded code, untrusted scripts, dependency investigation, or security work. This mode activates the non-root `ordivon-worker`, ownership transfer, private runtime views, and systemd filesystem restrictions.
 
 ## Hard-blocking boundary
 

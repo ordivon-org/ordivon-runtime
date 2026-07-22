@@ -38,6 +38,8 @@ m-series-closed-2026-07-22
 
 SQLite Registry and result files are the execution truth. Before manual maintenance, stop new dispatches and copy the control root with the SQLite backup API or `sqlite3 .backup`. Runtime cleanup and backup helpers will be reduced to small external scripts in a later batch.
 
-## Strong isolation
+## Execution modes
 
-The static `ordivon-worker` identity and systemd directory definitions remain available under `packaging/systemd/`. Strong isolation is an explicit mode for untrusted repositories or scripts; it is not the default cost for trusted, Git-backed local work.
+The MCP runtime defaults to `trusted-local`. Only the common store, Registry, runner, executable roots, loopback bind, and bearer token are required.
+
+Set `ORDIVON_M7_EXECUTION_MODE=isolated` for untrusted repositories or scripts. The static `ordivon-worker` identity and systemd directory definitions remain available under `packaging/systemd/`; worker UID/GID and isolated roots are required only in this mode.
