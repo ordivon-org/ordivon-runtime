@@ -743,6 +743,7 @@ impl Runtime {
                 stdout_tail_bytes,
                 terminal,
                 "stdoutOffset",
+                "stdoutTailBytes",
             )?;
             let stderr_view = read_output_text(
                 &Path::new(&attempt.bundle_path).join(STDERR_FILE),
@@ -750,6 +751,7 @@ impl Runtime {
                 stderr_tail_bytes,
                 terminal,
                 "stderrOffset",
+                "stderrTailBytes",
             )?;
             let (result, result_error) = match load_runner_result_if_present(attempt) {
                 Ok(result) => (result, None),
@@ -1269,7 +1271,10 @@ impl Runtime {
             request.max_bytes,
             artifact.byte_length,
             true,
-            "offset",
+            RangeFields {
+                offset: "offset",
+                max_bytes: "maxBytes",
+            },
             "Artifact",
         )?;
         Ok(ArtifactReadResult {
@@ -1736,19 +1741,25 @@ struct TextRange {
     next_offset: u64,
 }
 
+#[derive(Clone, Copy)]
+struct RangeFields<'a> {
+    offset: &'a str,
+    max_bytes: &'a str,
+}
+
 fn read_utf8_range(
     path: &Path,
     offset: u64,
     max_bytes: u64,
     available: u64,
     terminal: bool,
-    field: &str,
+    fields: RangeFields<'_>,
     context: &str,
 ) -> RuntimeResult<TextRange> {
     if offset > available {
         return Err(RuntimeError::invalid(
-            format!("{field} exceeds retained byte length {available}"),
-            field,
+            format!("{} exceeds retained byte length {available}", fields.offset),
+            fields.offset,
         ));
     }
     if max_bytes == 0 || offset == available {
@@ -1769,8 +1780,8 @@ fn read_utf8_range(
     bytes.truncate(read);
     if offset > 0 && bytes.first().is_some_and(|byte| byte & 0xc0 == 0x80) {
         return Err(RuntimeError::invalid(
-            format!("{field} must point to a UTF-8 character boundary"),
-            field,
+            format!("{} must point to a UTF-8 character boundary", fields.offset),
+            fields.offset,
         ));
     }
     let safe_len = match std::str::from_utf8(&bytes) {
@@ -1787,9 +1798,10 @@ fn read_utf8_range(
         }
         return Err(RuntimeError::invalid(
             format!(
-                "{field} range is too small for the next UTF-8 character; use at least 4 bytes"
+                "{} is too small for the next UTF-8 character; use at least 4 bytes",
+                fields.max_bytes
             ),
-            field,
+            fields.max_bytes,
         ));
     }
     bytes.truncate(safe_len);
@@ -1804,7 +1816,8 @@ fn read_output_text(
     offset: Option<u64>,
     max_bytes: u64,
     terminal: bool,
-    field: &str,
+    offset_field: &str,
+    max_bytes_field: &str,
 ) -> RuntimeResult<OutputView> {
     let Some(offset) = offset else {
         return Ok(OutputView {
@@ -1824,8 +1837,8 @@ fn read_output_text(
     };
     if offset > available {
         return Err(RuntimeError::invalid(
-            format!("{field} exceeds retained output length {available}"),
-            field,
+            format!("{offset_field} exceeds retained output length {available}"),
+            offset_field,
         ));
     }
     if max_bytes == 0 || !path.exists() {
@@ -1838,7 +1851,16 @@ fn read_output_text(
         });
     }
     let range = read_utf8_range(
-        path, offset, max_bytes, available, terminal, field, "output",
+        path,
+        offset,
+        max_bytes,
+        available,
+        terminal,
+        RangeFields {
+            offset: offset_field,
+            max_bytes: max_bytes_field,
+        },
+        "output",
     )?;
     Ok(OutputView {
         content: range.content,
@@ -1993,6 +2015,7 @@ mod trusted_systemd_command_tests {
                     chunk_size,
                     true,
                     "stdoutOffset",
+                    "stdoutTailBytes",
                 ).unwrap();
                 reconstructed.push_str(&view.content);
                 offset = view.next_offset.unwrap();
@@ -2019,12 +2042,49 @@ mod trusted_systemd_command_tests {
         fs::create_dir_all(&root).unwrap();
         let path = root.join("stdout.log");
         fs::write(&path, "🙂x".as_bytes()).unwrap();
-        let error = read_utf8_range(&path, 0, 3, 5, true, "stdoutOffset", "output").unwrap_err();
+        let error = read_utf8_range(
+            &path,
+            0,
+            3,
+            5,
+            true,
+            RangeFields {
+                offset: "stdoutOffset",
+                max_bytes: "stdoutTailBytes",
+            },
+            "output",
+        )
+        .unwrap_err();
         assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
-        let first = read_utf8_range(&path, 0, 4, 5, true, "stdoutOffset", "output").unwrap();
+        assert_eq!(error.field.as_deref(), Some("stdoutTailBytes"));
+        let first = read_utf8_range(
+            &path,
+            0,
+            4,
+            5,
+            true,
+            RangeFields {
+                offset: "stdoutOffset",
+                max_bytes: "stdoutTailBytes",
+            },
+            "output",
+        )
+        .unwrap();
         assert_eq!(first.content, "🙂");
         assert_eq!(first.next_offset, 4);
-        let second = read_utf8_range(&path, 4, 1, 5, true, "stdoutOffset", "output").unwrap();
+        let second = read_utf8_range(
+            &path,
+            4,
+            1,
+            5,
+            true,
+            RangeFields {
+                offset: "stdoutOffset",
+                max_bytes: "stdoutTailBytes",
+            },
+            "output",
+        )
+        .unwrap();
         assert_eq!(second.content, "x");
         assert_eq!(second.next_offset, 5);
         fs::remove_dir_all(root).unwrap();

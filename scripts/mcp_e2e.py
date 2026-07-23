@@ -475,6 +475,27 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         )
         check("task-observe", observed.get("status") == "succeeded", observed)
 
+        too_small = client.tool_result(
+            "task.observe",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "jobId": job_id,
+                "waitMs": 0,
+                "stdoutTailBytes": 1,
+                "stderrTailBytes": 1,
+                "stdoutOffset": len("MCP_E2E_".encode("utf-8")),
+                "stderrOffset": 0,
+            },
+        )
+        check("observe-utf8-hard-bound", too_small.get("isError") is True, too_small)
+        too_small_error = too_small.get("structuredContent", {}).get("error", {})
+        check(
+            "observe-utf8-hard-bound-field",
+            too_small_error.get("code") == "INVALID_REQUEST"
+            and too_small_error.get("field") == "stdoutTailBytes",
+            too_small,
+        )
+
         offset = 0
         incremental_parts: list[str] = []
         while True:
