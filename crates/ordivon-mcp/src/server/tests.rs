@@ -123,6 +123,31 @@ fn tool_catalog_uses_transactional_job_contract() {
             "workspace.read",
         ]
     );
+    for tool in tools
+        .iter()
+        .filter(|tool| tool.name.as_ref() != "task.list")
+    {
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        assert_eq!(
+            schema.pointer("/properties/schemaVersion/const"),
+            Some(&serde_json::json!(1)),
+            "{} schemaVersion const drifted",
+            tool.name
+        );
+        assert_eq!(
+            schema.pointer("/properties/schemaVersion/minimum"),
+            Some(&serde_json::json!(1)),
+            "{} schemaVersion minimum drifted",
+            tool.name
+        );
+        assert_eq!(
+            schema.pointer("/properties/schemaVersion/maximum"),
+            Some(&serde_json::json!(1)),
+            "{} schemaVersion maximum drifted",
+            tool.name
+        );
+    }
+
     let exec = tools
         .iter()
         .find(|tool| tool.name.as_ref() == "workspace.exec")
@@ -135,6 +160,15 @@ fn tool_catalog_uses_transactional_job_contract() {
     let schema = serde_json::to_string(&exec.input_schema).unwrap();
     assert!(schema.contains("clientRequestId"));
     assert!(!schema.contains("taskId"));
+    let exec_schema = serde_json::to_value(&exec.input_schema).unwrap();
+    assert!(exec_schema
+        .pointer("/$defs/UniversalExecutionRequest/properties/executable/description")
+        .and_then(Value::as_str)
+        .is_some_and(|description| description.contains("Absolute host path")));
+    assert!(exec_schema
+        .pointer("/$defs/UniversalExecutionRequest/properties/cwdRelative/description")
+        .and_then(Value::as_str)
+        .is_some_and(|description| description.contains("relative to the Workspace root")));
     for server_owned in ["principal", "globalLimit", "profileLimit"] {
         assert!(
             !schema.contains(server_owned),
@@ -158,6 +192,14 @@ fn tool_catalog_uses_transactional_job_contract() {
     assert_eq!(
         mutate_schema.pointer("/properties/mutations/maxItems"),
         Some(&serde_json::json!(32))
+    );
+    assert!(
+        mutate_schema
+            .pointer("/$defs/WorkspaceMutation/properties/expectedDigest/description")
+            .and_then(Value::as_str)
+            .is_some_and(
+                |description| description.contains("Required when the target already exists")
+            )
     );
 
     let observe = tools

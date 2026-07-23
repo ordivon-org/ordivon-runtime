@@ -112,7 +112,7 @@ impl OrdivonServer {
 
     #[tool(
         name = "workspace.mutate",
-        description = "Apply one atomic validated batch. mode must be exactly WRITE, APPEND, or REPLACE_EXACT; REPLACE_EXACT requires expectedText, and expectedDigest protects the complete file version.",
+        description = "Apply one atomic validated batch. mode must be exactly WRITE, APPEND, or REPLACE_EXACT; REPLACE_EXACT requires expectedText. expectedDigest is required when a target already exists and protects the complete file version.",
         annotations(
             title = "Mutate workspace files",
             read_only_hint = false,
@@ -164,7 +164,7 @@ impl OrdivonServer {
 
     #[tool(
         name = "workspace.exec",
-        description = "Run one command inside a workspace with the installed service user's trusted-local authority. The server owns identity, concurrency, Job IDs, and Attempt IDs; duplicate clientRequestId values are idempotent.",
+        description = "Run one command inside a workspace with the installed service user's trusted-local authority. execution.executable must be an absolute host path and execution.cwdRelative must be relative to the Workspace root. The server owns identity, concurrency, Job IDs, and Attempt IDs; duplicate clientRequestId values are idempotent.",
         execution(task_support = "optional"),
         annotations(
             title = "Execute transactional workspace job",

@@ -276,8 +276,31 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         check("initialize", initialized.get("serverInfo", {}).get("name") == "ordivon-mcp", initialized)
 
         listed = client.request("tools/list")
-        names = {tool.get("name") for tool in listed.get("tools", []) if isinstance(tool, dict)}
+        tool_entries = {
+            tool.get("name"): tool
+            for tool in listed.get("tools", [])
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+        }
+        names = set(tool_entries)
         check("tool-catalog", names == EXPECTED_TOOLS, sorted(names))
+        for tool_name in sorted(EXPECTED_TOOLS - {"task.list"}):
+            version_schema = (
+                tool_entries.get(tool_name, {})
+                .get("inputSchema", {})
+                .get("properties", {})
+                .get("schemaVersion", {})
+            )
+            check(
+                f"schema-version-{tool_name}",
+                version_schema.get("const") == SCHEMA_VERSION
+                and version_schema.get("minimum") == SCHEMA_VERSION
+                and version_schema.get("maximum") == SCHEMA_VERSION,
+                version_schema,
+            )
+        exec_schema_text = json.dumps(tool_entries["workspace.exec"].get("inputSchema", {}), sort_keys=True)
+        check("exec-path-contract", "Absolute host path" in exec_schema_text and "Workspace root" in exec_schema_text, exec_schema_text)
+        mutate_schema_text = json.dumps(tool_entries["workspace.mutate"].get("inputSchema", {}), sort_keys=True)
+        check("mutation-digest-contract", "Required when the target already exists" in mutate_schema_text, mutate_schema_text)
 
         workspace_id = f"acceptance-{uuid.uuid4()}"
         opened = client.tool(
@@ -315,6 +338,29 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             },
         )
         check("workspace-read-slice", sliced.get("content") == "ell", sliced)
+
+        missing_digest = client.tool_result(
+            "workspace.mutate",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "workspaceId": workspace_id,
+                "mutations": [
+                    {
+                        "relativePath": "README.md",
+                        "mode": "REPLACE_EXACT",
+                        "content": "replacement",
+                        "expectedText": "hello\n",
+                    }
+                ],
+            },
+        )
+        missing_digest_error = missing_digest.get("structuredContent", {}).get("error", {})
+        check(
+            "mutation-existing-requires-digest",
+            missing_digest.get("isError") is True
+            and missing_digest_error.get("field") == "mutations[0].expectedDigest",
+            missing_digest,
+        )
 
         mutated = client.tool(
             "workspace.mutate",

@@ -39,6 +39,17 @@ pub fn mutate_workspace(
             None
         };
         let before_digest = existing.as_ref().map(|(_, digest)| digest.clone());
+        if mutation.expected_digest.is_none() && before_digest.is_some() {
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::RevisionMismatch,
+                format!(
+                    "workspace file {} already exists; expectedDigest is required",
+                    mutation.relative_path
+                ),
+                Some(&format!("mutations[{mutation_index}].expectedDigest")),
+                false,
+            ));
+        }
         if mutation.expected_digest != before_digest
             && (mutation.expected_digest.is_some() || before_digest.is_some())
         {

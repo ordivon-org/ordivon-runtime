@@ -40,6 +40,7 @@ pub enum WorkspaceReadMode {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceReadRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
     pub workspace_id: String,
     pub relative_path: String,
@@ -64,6 +65,7 @@ pub struct WorkspaceReadResult {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceDiffRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
     pub workspace_id: String,
     #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
@@ -73,6 +75,7 @@ pub struct WorkspaceDiffRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceExecRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
     pub client_request_id: String,
     pub execution: UniversalExecutionRequest,

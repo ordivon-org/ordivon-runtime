@@ -535,9 +535,11 @@ pub(crate) fn default_runtime_list_limit() -> u32 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UniversalExecutionRequest {
     pub workspace_id: String,
+    /// Absolute host path to the executable; PATH lookup is intentionally not performed.
     pub executable: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Working directory relative to the Workspace root.
     pub cwd_relative: String,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
@@ -549,6 +551,7 @@ pub struct UniversalExecutionRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskRunRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
     pub client_request_id: String,
     pub principal: String,
@@ -568,6 +571,7 @@ pub struct TaskRunRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskObserveRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
     pub job_id: String,
     #[serde(default)]
@@ -588,6 +592,7 @@ pub struct TaskObserveRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskCancelRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
     pub job_id: String,
 }
@@ -638,6 +643,7 @@ pub struct TaskObservation {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArtifactReadRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
     pub job_id: String,
     pub artifact_id: String,

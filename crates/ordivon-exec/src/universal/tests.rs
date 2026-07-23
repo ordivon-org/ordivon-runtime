@@ -285,6 +285,227 @@ fn mutation_failures_identify_the_exact_batch_item() {
 }
 
 #[test]
+fn mutation_shape_errors_identify_the_exact_batch_item() {
+    let base = WorkspaceMutateRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        workspace_id: "workspace-shape-index".to_string(),
+        mutations: vec![
+            WorkspaceMutation {
+                relative_path: "first.txt".to_string(),
+                mode: WorkspaceMutationMode::Write,
+                content: "first".to_string(),
+                expected_digest: None,
+                expected_text: None,
+            },
+            WorkspaceMutation {
+                relative_path: "second.txt".to_string(),
+                mode: WorkspaceMutationMode::ReplaceExact,
+                content: "replacement".to_string(),
+                expected_digest: None,
+                expected_text: None,
+            },
+        ],
+    };
+    let missing_text = base.validate_shape().unwrap_err();
+    assert_eq!(
+        missing_text.field.as_deref(),
+        Some("mutations[1].expectedText")
+    );
+
+    let invalid_digest = WorkspaceMutateRequest {
+        mutations: vec![
+            base.mutations[0].clone(),
+            WorkspaceMutation {
+                expected_digest: Some("not-a-digest".to_string()),
+                expected_text: Some("old".to_string()),
+                ..base.mutations[1].clone()
+            },
+        ],
+        ..base.clone()
+    }
+    .validate_shape()
+    .unwrap_err();
+    assert_eq!(
+        invalid_digest.field.as_deref(),
+        Some("mutations[1].expectedDigest")
+    );
+
+    let duplicate = WorkspaceMutateRequest {
+        mutations: vec![
+            base.mutations[0].clone(),
+            WorkspaceMutation {
+                relative_path: "first.txt".to_string(),
+                mode: WorkspaceMutationMode::Append,
+                content: "again".to_string(),
+                expected_digest: None,
+                expected_text: None,
+            },
+        ],
+        ..base
+    }
+    .validate_shape()
+    .unwrap_err();
+    assert_eq!(
+        duplicate.field.as_deref(),
+        Some("mutations[1].relativePath")
+    );
+}
+
+#[test]
+fn existing_mutation_requires_digest_before_exact_text_match() {
+    let sandbox = Sandbox::new("mutation-preconditions");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-mutation-preconditions".to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let read = read_workspace_text(
+        &config,
+        &WorkspaceReadRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-mutation-preconditions".to_string(),
+            relative_path: "README.md".to_string(),
+            max_bytes: 1024,
+        },
+    )
+    .unwrap();
+
+    let without_digest = mutate_workspace(
+        &config,
+        &WorkspaceMutateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-mutation-preconditions".to_string(),
+            mutations: vec![WorkspaceMutation {
+                relative_path: "README.md".to_string(),
+                mode: WorkspaceMutationMode::ReplaceExact,
+                content: "replacement".to_string(),
+                expected_digest: None,
+                expected_text: Some("not-present".to_string()),
+            }],
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        without_digest.field.as_deref(),
+        Some("mutations[0].expectedDigest")
+    );
+    assert!(without_digest
+        .message
+        .contains("expectedDigest is required"));
+
+    let wrong_text = mutate_workspace(
+        &config,
+        &WorkspaceMutateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-mutation-preconditions".to_string(),
+            mutations: vec![WorkspaceMutation {
+                relative_path: "README.md".to_string(),
+                mode: WorkspaceMutationMode::ReplaceExact,
+                content: "replacement".to_string(),
+                expected_digest: Some(read.digest),
+                expected_text: Some("not-present".to_string()),
+            }],
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        wrong_text.field.as_deref(),
+        Some("mutations[0].expectedText")
+    );
+    assert_eq!(
+        fs::read_to_string(
+            config
+                .workspace_path("workspace-mutation-preconditions")
+                .join("README.md")
+        )
+        .unwrap(),
+        "baseline\n"
+    );
+}
+
+#[test]
+fn maximum_mutation_batch_preflights_atomically() {
+    let sandbox = Sandbox::new("mutation-maximum-batch");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-mutation-maximum-batch";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+
+    let mut mutations: Vec<_> = (0..31)
+        .map(|index| WorkspaceMutation {
+            relative_path: format!("generated-{index:02}.txt"),
+            mode: WorkspaceMutationMode::Write,
+            content: format!("generated-{index}\n"),
+            expected_digest: None,
+            expected_text: None,
+        })
+        .collect();
+    mutations.push(WorkspaceMutation {
+        relative_path: "README.md".to_string(),
+        mode: WorkspaceMutationMode::ReplaceExact,
+        content: "replacement\n".to_string(),
+        expected_digest: None,
+        expected_text: Some("baseline\n".to_string()),
+    });
+    assert_eq!(mutations.len(), MAX_WORKSPACE_MUTATIONS);
+
+    let error = mutate_workspace(
+        &config,
+        &WorkspaceMutateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            mutations: mutations.clone(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.field.as_deref(), Some("mutations[31].expectedDigest"));
+    for index in 0..31 {
+        assert!(!config
+            .workspace_path(workspace_id)
+            .join(format!("generated-{index:02}.txt"))
+            .exists());
+    }
+    assert_eq!(
+        fs::read_to_string(config.workspace_path(workspace_id).join("README.md")).unwrap(),
+        "baseline\n"
+    );
+
+    mutations.push(WorkspaceMutation {
+        relative_path: "overflow.txt".to_string(),
+        mode: WorkspaceMutationMode::Write,
+        content: "overflow\n".to_string(),
+        expected_digest: None,
+        expected_text: None,
+    });
+    let overflow = WorkspaceMutateRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        workspace_id: workspace_id.to_string(),
+        mutations,
+    }
+    .validate_shape()
+    .unwrap_err();
+    assert_eq!(overflow.field.as_deref(), Some("mutations"));
+}
+
+#[test]
 fn runner_executes_model_authored_script_and_bounds_output() {
     let sandbox = Sandbox::new("runner");
     let workspace = sandbox.root.join("workspace");
