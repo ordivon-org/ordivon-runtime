@@ -130,8 +130,11 @@ class McpClient:
             },
         )
 
+    def tool_result(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self.request("tools/call", {"name": name, "arguments": arguments})
+
     def tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        result = self.request("tools/call", {"name": name, "arguments": arguments})
+        result = self.tool_result(name, arguments)
         if result.get("isError") is True:
             raise ValueError(f"tool {name} returned an error: {result}")
         structured = result.get("structuredContent")
@@ -349,12 +352,14 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         check("workspace-diff", "hello accepted" in diff.get("diff", ""), diff)
         check("workspace-untracked", "generated.txt" in diff.get("untrackedPaths", []), diff)
 
+        expected_stdout = "MCP_E2E_🙂\n"
+        execution_request_id = f"request:{uuid.uuid4()}"
         execution = {
             "workspaceId": workspace_id,
             "executable": "/usr/bin/python3",
             "args": [
                 "-c",
-                "import sys; print('MCP_E2E_OK', flush=True); print('stderr-e2e', file=sys.stderr, flush=True)",
+                "import sys; print('MCP_E2E_🙂', flush=True); print('stderr-e2e', file=sys.stderr, flush=True)",
             ],
             "cwdRelative": ".",
             "env": {},
@@ -366,7 +371,7 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             "workspace.exec",
             {
                 "schemaVersion": SCHEMA_VERSION,
-                "clientRequestId": f"request:{uuid.uuid4()}",
+                "clientRequestId": execution_request_id,
                 "execution": execution,
                 "waitMs": 30_000,
                 "stdoutTailBytes": 8192,
@@ -377,7 +382,7 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         job_id = str(submitted["jobId"])
         attempt_id = str(submitted["attemptId"])
         attempt_ids.append(attempt_id)
-        check("exec-stdout", "MCP_E2E_OK" in submitted.get("stdoutTail", ""), submitted)
+        check("exec-stdout", submitted.get("stdoutTail") == expected_stdout, submitted)
 
         probe_port, probe_thread = host_network_probe()
         docker_socket = next(
@@ -470,8 +475,43 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         )
         check("task-observe", observed.get("status") == "succeeded", observed)
 
+        offset = 0
+        incremental_parts: list[str] = []
+        while True:
+            incremental = client.tool(
+                "task.observe",
+                {
+                    "schemaVersion": SCHEMA_VERSION,
+                    "jobId": job_id,
+                    "waitMs": 0,
+                    "stdoutTailBytes": 4,
+                    "stderrTailBytes": 4,
+                    "stdoutOffset": offset,
+                    "stderrOffset": 0,
+                },
+            )
+            incremental_parts.append(incremental.get("stdoutTail", ""))
+            next_offset = incremental.get("stdoutNextOffset")
+            check("observe-offset-progress", isinstance(next_offset, int) and next_offset >= offset, incremental)
+            offset = int(next_offset)
+            if incremental.get("stdoutEof") is True:
+                break
+        check("observe-incremental", "".join(incremental_parts) == expected_stdout, incremental_parts)
+
         task_list = client.tool("task.list", {"limit": 100})
-        check("task-list", any(job.get("jobId") == job_id for job in task_list.get("jobs", [])), task_list)
+        jobs = task_list.get("jobs", [])
+        listed_job = next((job for job in jobs if job.get("jobId") == job_id), None)
+        check("task-list", listed_job is not None, task_list)
+        check(
+            "task-list-semantic-summary",
+            listed_job.get("clientRequestId") == execution_request_id
+            and listed_job.get("workspaceId") == workspace_id
+            and str(listed_job.get("executableName", "")).startswith("python3")
+            and isinstance(listed_job.get("durationMs"), int),
+            listed_job,
+        )
+        created = [job.get("createdAtMs", 0) for job in jobs]
+        check("task-list-newest-first", created == sorted(created, reverse=True), created)
         native_list = client.request("tasks/list", {})
         check(
             "native-task-list", any(task.get("taskId") == job_id for task in native_list.get("tasks", [])), native_list
@@ -488,7 +528,7 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
                 "maxBytes": 65_536,
             },
         )
-        check("artifact-content", artifact.get("content") == "MCP_E2E_OK\n", artifact)
+        check("artifact-content", artifact.get("content") == expected_stdout, artifact)
         check("artifact-digest", artifact.get("digest") == digest_bytes(artifact["content"].encode("utf-8")), artifact)
 
         long_task = client.tool(
@@ -509,6 +549,14 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         cancel_job_id = str(long_task["jobId"])
         cancel_attempt_id = str(long_task["attemptId"])
         attempt_ids.append(cancel_attempt_id)
+        active_close = client.tool_result(
+            "workspace.close",
+            {"schemaVersion": SCHEMA_VERSION, "workspaceId": workspace_id, "force": True},
+        )
+        check("workspace-close-active-blocked", active_close.get("isError") is True, active_close)
+        active_structured = active_close.get("structuredContent", {})
+        active_code = active_structured.get("code") or active_structured.get("error", {}).get("code")
+        check("workspace-close-active-code", active_code == "WORKSPACE_BUSY", active_close)
         cancelled = client.tool("task.cancel", {"schemaVersion": SCHEMA_VERSION, "jobId": cancel_job_id})
         if cancelled.get("status") not in TERMINAL:
             cancelled = wait_terminal(client, cancel_job_id)
@@ -528,9 +576,17 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             },
         )
         check("restart-observe", after_restart.get("status") == "succeeded", after_restart)
-        closed = client.tool(
+        dirty_close = client.tool_result(
             "workspace.close",
             {"schemaVersion": SCHEMA_VERSION, "workspaceId": workspace_id},
+        )
+        check("workspace-close-dirty-blocked", dirty_close.get("isError") is True, dirty_close)
+        dirty_structured = dirty_close.get("structuredContent", {})
+        dirty_code = dirty_structured.get("code") or dirty_structured.get("error", {}).get("code")
+        check("workspace-close-dirty-code", dirty_code == "WORKSPACE_DIRTY", dirty_close)
+        closed = client.tool(
+            "workspace.close",
+            {"schemaVersion": SCHEMA_VERSION, "workspaceId": workspace_id, "force": True},
         )
         check(
             "workspace-close",

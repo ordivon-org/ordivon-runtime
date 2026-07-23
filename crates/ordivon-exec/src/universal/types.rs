@@ -62,10 +62,34 @@ pub struct CompactWorkspaceOpenResult {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceCloseRequest {
+    pub schema_version: u32,
+    pub workspace_id: String,
+    #[serde(default)]
+    pub force: bool,
+}
+
+impl WorkspaceCloseRequest {
+    pub fn validate_shape(&self) -> Result<(), UniversalExecError> {
+        require_schema(self.schema_version)?;
+        validate_id(&self.workspace_id, "workspaceId")
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceCloseResult {
+    pub workspace_id: String,
+    pub removed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceReadRequest {
     pub schema_version: u32,
     pub workspace_id: String,
     pub relative_path: String,
+    #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
     pub max_bytes: u64,
 }
 
@@ -150,6 +174,7 @@ pub struct WorkspaceWriteResult {
 pub struct WorkspaceDiffRequest {
     pub schema_version: u32,
     pub workspace_id: String,
+    #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
     pub max_bytes: u64,
 }
 
@@ -261,6 +286,7 @@ impl WorkspaceMutation {
 pub struct WorkspaceMutateRequest {
     pub schema_version: u32,
     pub workspace_id: String,
+    #[schemars(length(min = 1, max = MAX_WORKSPACE_MUTATIONS))]
     pub mutations: Vec<WorkspaceMutation>,
 }
 
@@ -310,6 +336,7 @@ pub struct WorkspaceReadSliceRequest {
     pub relative_path: String,
     #[serde(default)]
     pub offset: u64,
+    #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
     pub max_bytes: u64,
 }
 

@@ -5,6 +5,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,12 +19,16 @@ use super::{
     ArtifactRegistration, AttemptRecord, AttemptState, JobResolution, Registry, RegistryConfig,
     RunnerIdentity, RuntimeArtifactRecord, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
     RuntimeJobListRequest, RuntimeJobListResult, RuntimeResult, SubmitRequest, TaskCancelRequest,
-    TaskObservation, TaskObserveRequest, TaskRunRequest, TerminalCommit, RUNTIME_SCHEMA_VERSION,
+    TaskObservation, TaskObserveRequest, TaskRunRequest, TerminalCommit, MAX_ARTIFACT_READ_BYTES,
+    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
 };
 use crate::universal::{
-    canonical_directory, load_workspace_record, resolve_workspace_cwd, sha256_bytes, sha256_file,
-    write_json_atomic, CapturedOutput, RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskRequest,
-    RunnerTaskResult, TaskTerminalStatus, UniversalExecutorConfig, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    canonical_directory, create_git_workspace_compact, load_workspace_record, mutate_workspace,
+    remove_git_workspace, resolve_workspace_cwd, sha256_bytes, sha256_file, write_json_atomic,
+    CapturedOutput, CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerPayloadConfig,
+    RunnerStartEvidence, RunnerTaskRequest, RunnerTaskResult, TaskTerminalStatus,
+    UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult, WorkspaceMutateRequest,
+    WorkspaceMutateResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
 const RUNNER_REQUEST_FILE: &str = "request.json";
@@ -35,9 +40,6 @@ const STDOUT_FILE: &str = "stdout.log";
 const STDERR_FILE: &str = "stderr.log";
 const CANCEL_FILE: &str = "cancel-requested.json";
 const CONTROL_RESULT_FILE: &str = "control-result.json";
-const MAX_TASK_WAIT_MS: u64 = 30_000;
-const MAX_TASK_TAIL_BYTES: u64 = 64 * 1024;
-const MAX_ARTIFACT_READ_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -51,6 +53,7 @@ pub struct Runtime {
     registry: Registry,
     executor: UniversalExecutorConfig,
     startup_grace_ms: u64,
+    lifecycle_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -92,6 +95,7 @@ impl Runtime {
             registry,
             executor: config.executor,
             startup_grace_ms: config.startup_grace_ms,
+            lifecycle_lock: Arc::new(Mutex::new(())),
         };
         runtime.reconcile_recoverable_orphans()?;
         Ok(runtime)
@@ -101,23 +105,44 @@ impl Runtime {
         &self.registry
     }
 
+    fn lock_lifecycle(&self) -> RuntimeResult<MutexGuard<'_, ()>> {
+        self.lifecycle_lock.lock().map_err(|_| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryUnavailable,
+                "Workspace lifecycle lock is poisoned",
+                None,
+                true,
+            )
+        })
+    }
+
     pub fn run_task(&self, request: &TaskRunRequest) -> RuntimeResult<TaskObservation> {
         validate_run_request(request)?;
-        self.reconcile_recoverable_orphans()?;
-        let plan = self.resolve_plan(request)?;
-        let submit = SubmitRequest {
-            schema_version: RUNTIME_SCHEMA_VERSION,
-            client_request_id: request.client_request_id.clone(),
-            plan,
-            global_limit: request.global_limit,
-        };
-        let job_id = match self.registry.submit(&submit)? {
-            AdmissionOutcome::Created(created) => {
-                let job_id = created.job.job_id.clone();
-                self.ensure_attempt_dispatched(&created.attempt)?;
-                job_id
+        let job_id = {
+            let _guard = self.lifecycle_lock.lock().map_err(|_| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryUnavailable,
+                    "Workspace lifecycle lock is poisoned",
+                    None,
+                    true,
+                )
+            })?;
+            self.reconcile_recoverable_orphans()?;
+            let plan = self.resolve_plan(request)?;
+            let submit = SubmitRequest {
+                schema_version: RUNTIME_SCHEMA_VERSION,
+                client_request_id: request.client_request_id.clone(),
+                plan,
+                global_limit: request.global_limit,
+            };
+            match self.registry.submit(&submit)? {
+                AdmissionOutcome::Created(created) => {
+                    let job_id = created.job.job_id.clone();
+                    self.ensure_attempt_dispatched(&created.attempt)?;
+                    job_id
+                }
+                AdmissionOutcome::Existing { job } => job.job_id.clone(),
             }
-            AdmissionOutcome::Existing { job } => job.job_id.clone(),
         };
         self.observe_task(&TaskObserveRequest {
             schema_version: RUNTIME_SCHEMA_VERSION,
@@ -125,7 +150,44 @@ impl Runtime {
             wait_ms: request.wait_ms,
             stdout_tail_bytes: request.stdout_tail_bytes,
             stderr_tail_bytes: request.stderr_tail_bytes,
+            stdout_offset: None,
+            stderr_offset: None,
         })
+    }
+
+    pub fn open_workspace(
+        &self,
+        request: &GitWorkspaceCreateRequest,
+    ) -> RuntimeResult<CompactWorkspaceOpenResult> {
+        let _guard = self.lock_lifecycle()?;
+        create_git_workspace_compact(&self.executor, request).map_err(map_universal_error)
+    }
+
+    pub fn mutate_workspace(
+        &self,
+        request: &WorkspaceMutateRequest,
+    ) -> RuntimeResult<WorkspaceMutateResult> {
+        let _guard = self.lock_lifecycle()?;
+        mutate_workspace(&self.executor, request).map_err(map_universal_error)
+    }
+
+    pub fn close_workspace(
+        &self,
+        request: &WorkspaceCloseRequest,
+    ) -> RuntimeResult<WorkspaceCloseResult> {
+        let _guard = self.lock_lifecycle()?;
+        let active = self
+            .registry
+            .active_job_ids_for_workspace(&request.workspace_id, 20)?;
+        if !active.is_empty() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::WorkspaceBusy,
+                format!("workspace has active or held Jobs: {}", active.join(", ")),
+                Some("workspaceId"),
+                true,
+            ));
+        }
+        remove_git_workspace(&self.executor, request).map_err(map_universal_error)
     }
 
     fn resolve_plan(&self, request: &TaskRunRequest) -> RuntimeResult<RuntimeExecutionPlan> {
@@ -503,7 +565,7 @@ impl Runtime {
         let terminal = self.prepare_runner_terminal(&current)?;
         let projection = self.registry.commit_terminal(&terminal)?;
         self.cleanup_payload_view(&current.attempt_id)?;
-        self.observation_from_parts(projection, Some(current), 4096, 4096)
+        self.observation_from_parts(projection, Some(current), 4096, 4096, None, None)
     }
 
     fn prepare_runner_terminal(&self, current: &AttemptRecord) -> RuntimeResult<TerminalCommit> {
@@ -618,11 +680,7 @@ impl Runtime {
                 || request.wait_ms == 0
                 || Instant::now() >= deadline
             {
-                return self.observation_from_snapshot(
-                    snapshot,
-                    request.stdout_tail_bytes,
-                    request.stderr_tail_bytes,
-                );
+                return self.observation_from_snapshot(snapshot, request);
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -635,20 +693,28 @@ impl Runtime {
         stderr_tail_bytes: u64,
     ) -> RuntimeResult<TaskObservation> {
         let snapshot = self.registry.job_snapshot(job_id)?;
-        self.observation_from_snapshot(snapshot, stdout_tail_bytes, stderr_tail_bytes)
-    }
-
-    fn observation_from_snapshot(
-        &self,
-        snapshot: JobSnapshot,
-        stdout_tail_bytes: u64,
-        stderr_tail_bytes: u64,
-    ) -> RuntimeResult<TaskObservation> {
         self.observation_from_parts(
             snapshot.projection,
             snapshot.attempt,
             stdout_tail_bytes,
             stderr_tail_bytes,
+            None,
+            None,
+        )
+    }
+
+    fn observation_from_snapshot(
+        &self,
+        snapshot: JobSnapshot,
+        request: &TaskObserveRequest,
+    ) -> RuntimeResult<TaskObservation> {
+        self.observation_from_parts(
+            snapshot.projection,
+            snapshot.attempt,
+            request.stdout_tail_bytes,
+            request.stderr_tail_bytes,
+            request.stdout_offset,
+            request.stderr_offset,
         )
     }
 
@@ -658,23 +724,32 @@ impl Runtime {
         attempt: Option<AttemptRecord>,
         stdout_tail_bytes: u64,
         stderr_tail_bytes: u64,
+        stdout_offset: Option<u64>,
+        stderr_offset: Option<u64>,
     ) -> RuntimeResult<TaskObservation> {
         let job_id = projection.job_id.clone();
+        let terminal = projection.result_available;
         let (
-            stdout_tail,
-            stderr_tail,
+            stdout_view,
+            stderr_view,
             stdout_truncated,
             stderr_truncated,
             artifacts,
             error_summary,
         ) = if let Some(attempt) = &attempt {
-            let stdout_tail = read_tail_text(
+            let stdout_view = read_output_text(
                 &Path::new(&attempt.bundle_path).join(STDOUT_FILE),
+                stdout_offset,
                 stdout_tail_bytes,
+                terminal,
+                "stdoutOffset",
             )?;
-            let stderr_tail = read_tail_text(
+            let stderr_view = read_output_text(
                 &Path::new(&attempt.bundle_path).join(STDERR_FILE),
+                stderr_offset,
                 stderr_tail_bytes,
+                terminal,
+                "stderrOffset",
             )?;
             let (result, result_error) = match load_runner_result_if_present(attempt) {
                 Ok(result) => (result, None),
@@ -697,23 +772,38 @@ impl Runtime {
                 .and_then(|result| result.infrastructure_error.clone())
                 .or(result_error);
             (
-                stdout_tail,
-                stderr_tail,
+                stdout_view,
+                stderr_view,
                 stdout_truncated,
                 stderr_truncated,
                 artifacts,
                 error_summary,
             )
         } else {
-            (String::new(), String::new(), false, false, Vec::new(), None)
+            (
+                OutputView::empty(stdout_offset, terminal),
+                OutputView::empty(stderr_offset, terminal),
+                false,
+                false,
+                Vec::new(),
+                None,
+            )
         };
         Ok(TaskObservation {
             job_id,
             status: projection.status,
             attempt_id: attempt.map(|attempt| attempt.attempt_id),
             exit_code: projection.exit_code,
-            stdout_tail,
-            stderr_tail,
+            stdout_tail: stdout_view.content,
+            stderr_tail: stderr_view.content,
+            stdout_offset: stdout_view.offset,
+            stdout_next_offset: stdout_view.next_offset,
+            stdout_available_bytes: stdout_view.available_bytes,
+            stdout_eof: stdout_view.eof,
+            stderr_offset: stderr_view.offset,
+            stderr_next_offset: stderr_view.next_offset,
+            stderr_available_bytes: stderr_view.available_bytes,
+            stderr_eof: stderr_view.eof,
             stdout_truncated,
             stderr_truncated,
             artifacts_available: projection.artifacts_available,
@@ -1042,7 +1132,7 @@ impl Runtime {
         if state != AttemptState::Orphaned {
             self.cleanup_payload_view(&current.attempt_id)?;
         }
-        self.observation_from_parts(projection, Some(current), 4096, 4096)
+        self.observation_from_parts(projection, Some(current), 4096, 4096, None, None)
     }
 
     pub fn cancel_task(&self, request: &TaskCancelRequest) -> RuntimeResult<TaskObservation> {
@@ -1117,16 +1207,7 @@ impl Runtime {
         request: &RuntimeJobListRequest,
     ) -> RuntimeResult<RuntimeJobListResult> {
         self.reconcile_recoverable_orphans()?;
-        let mut result = self.registry.list_jobs(request)?;
-        for job in &mut result.jobs {
-            job.artifacts = self
-                .registry
-                .list_artifacts(&job.job_id)?
-                .into_iter()
-                .map(|artifact| artifact_descriptor(artifact, None))
-                .collect();
-        }
-        Ok(result)
+        self.registry.list_jobs(request)
     }
 
     pub fn read_artifact(
@@ -1182,22 +1263,22 @@ impl Runtime {
                 false,
             ));
         }
-        let mut file = File::open(&canonical).map_err(|error| io_error("open Artifact", error))?;
-        file.seek(SeekFrom::Start(request.offset))
-            .map_err(|error| io_error("seek Artifact", error))?;
-        let mut bytes = vec![0_u8; usize::try_from(request.max_bytes).unwrap_or(usize::MAX)];
-        let read = file
-            .read(&mut bytes)
-            .map_err(|error| io_error("read Artifact", error))?;
-        bytes.truncate(read);
-        let next_offset = request.offset.saturating_add(read as u64);
+        let range = read_utf8_range(
+            &canonical,
+            request.offset,
+            request.max_bytes,
+            artifact.byte_length,
+            true,
+            "offset",
+            "Artifact",
+        )?;
         Ok(ArtifactReadResult {
             job_id: request.job_id.clone(),
             artifact_id: request.artifact_id.clone(),
-            content: String::from_utf8_lossy(&bytes).into_owned(),
+            content: range.content,
             offset: request.offset,
-            next_offset,
-            eof: next_offset >= artifact.byte_length,
+            next_offset: range.next_offset,
+            eof: range.next_offset >= artifact.byte_length,
             digest: artifact.digest,
         })
     }
@@ -1628,6 +1709,146 @@ fn load_runner_result_if_present(
     })
 }
 
+#[derive(Debug)]
+struct OutputView {
+    content: String,
+    offset: Option<u64>,
+    next_offset: Option<u64>,
+    available_bytes: Option<u64>,
+    eof: Option<bool>,
+}
+
+impl OutputView {
+    fn empty(offset: Option<u64>, terminal: bool) -> Self {
+        Self {
+            content: String::new(),
+            offset,
+            next_offset: offset,
+            available_bytes: offset.map(|_| 0),
+            eof: offset.map(|value| terminal && value == 0),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TextRange {
+    content: String,
+    next_offset: u64,
+}
+
+fn read_utf8_range(
+    path: &Path,
+    offset: u64,
+    max_bytes: u64,
+    available: u64,
+    terminal: bool,
+    field: &str,
+    context: &str,
+) -> RuntimeResult<TextRange> {
+    if offset > available {
+        return Err(RuntimeError::invalid(
+            format!("{field} exceeds retained byte length {available}"),
+            field,
+        ));
+    }
+    if max_bytes == 0 || offset == available {
+        return Ok(TextRange {
+            content: String::new(),
+            next_offset: offset,
+        });
+    }
+    let read_limit = max_bytes.min(available.saturating_sub(offset));
+    let mut file =
+        File::open(path).map_err(|error| io_error(&format!("open {context} range"), error))?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| io_error(&format!("seek {context} range"), error))?;
+    let mut bytes = vec![0_u8; usize::try_from(read_limit).unwrap_or(usize::MAX)];
+    let read = file
+        .read(&mut bytes)
+        .map_err(|error| io_error(&format!("read {context} range"), error))?;
+    bytes.truncate(read);
+    if offset > 0 && bytes.first().is_some_and(|byte| byte & 0xc0 == 0x80) {
+        return Err(RuntimeError::invalid(
+            format!("{field} must point to a UTF-8 character boundary"),
+            field,
+        ));
+    }
+    let safe_len = match std::str::from_utf8(&bytes) {
+        Ok(_) => bytes.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(_) => bytes.len(),
+    };
+    if safe_len == 0 && !bytes.is_empty() {
+        if !terminal && offset.saturating_add(bytes.len() as u64) >= available {
+            return Ok(TextRange {
+                content: String::new(),
+                next_offset: offset,
+            });
+        }
+        return Err(RuntimeError::invalid(
+            format!(
+                "{field} range is too small for the next UTF-8 character; use at least 4 bytes"
+            ),
+            field,
+        ));
+    }
+    bytes.truncate(safe_len);
+    Ok(TextRange {
+        content: String::from_utf8_lossy(&bytes).into_owned(),
+        next_offset: offset.saturating_add(safe_len as u64),
+    })
+}
+
+fn read_output_text(
+    path: &Path,
+    offset: Option<u64>,
+    max_bytes: u64,
+    terminal: bool,
+    field: &str,
+) -> RuntimeResult<OutputView> {
+    let Some(offset) = offset else {
+        return Ok(OutputView {
+            content: read_tail_text(path, max_bytes)?,
+            offset: None,
+            next_offset: None,
+            available_bytes: None,
+            eof: None,
+        });
+    };
+    let available = if path.exists() {
+        fs::metadata(path)
+            .map_err(|error| io_error("inspect output range", error))?
+            .len()
+    } else {
+        0
+    };
+    if offset > available {
+        return Err(RuntimeError::invalid(
+            format!("{field} exceeds retained output length {available}"),
+            field,
+        ));
+    }
+    if max_bytes == 0 || !path.exists() {
+        return Ok(OutputView {
+            content: String::new(),
+            offset: Some(offset),
+            next_offset: Some(offset),
+            available_bytes: Some(available),
+            eof: Some(terminal && offset >= available),
+        });
+    }
+    let range = read_utf8_range(
+        path, offset, max_bytes, available, terminal, field, "output",
+    )?;
+    Ok(OutputView {
+        content: range.content,
+        offset: Some(offset),
+        next_offset: Some(range.next_offset),
+        available_bytes: Some(available),
+        eof: Some(terminal && range.next_offset >= available),
+    })
+}
+
 fn read_tail_text(path: &Path, max_bytes: u64) -> RuntimeResult<String> {
     if max_bytes == 0 || !path.exists() {
         return Ok(String::new());
@@ -1714,12 +1935,11 @@ fn serialization_error(error: serde_json::Error) -> RuntimeError {
 }
 
 fn map_universal_error(error: crate::UniversalExecError) -> RuntimeError {
-    RuntimeError::new(
-        RuntimeErrorCode::InvalidRequest,
-        error.message,
-        error.field.as_deref(),
-        error.retryable,
-    )
+    let code = match error.code {
+        crate::UniversalExecErrorCode::WorkspaceDirty => RuntimeErrorCode::WorkspaceDirty,
+        _ => RuntimeErrorCode::InvalidRequest,
+    };
+    RuntimeError::new(code, error.message, error.field.as_deref(), error.retryable)
 }
 
 fn io_error(context: &str, error: std::io::Error) -> RuntimeError {
@@ -1743,6 +1963,72 @@ fn tool_error(context: &str, error: std::io::Error) -> RuntimeError {
 #[cfg(test)]
 mod trusted_systemd_command_tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn incremental_output_ranges_reconstruct_retained_bytes(
+            chunks in prop::collection::vec(
+                prop::collection::vec(any::<char>(), 0..16)
+                    .prop_map(|chars| chars.into_iter().collect::<String>()),
+                1..30,
+            ),
+            chunk_size in 4u64..64,
+        ) {
+            let root = std::env::temp_dir().join(format!(
+                "ordivon-output-range-property-{}-{}",
+                std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            ));
+            fs::create_dir_all(&root).unwrap();
+            let path = root.join("stdout.log");
+            let expected = chunks.concat();
+            fs::write(&path, expected.as_bytes()).unwrap();
+            let mut offset = 0u64;
+            let mut reconstructed = String::new();
+            loop {
+                let view = read_output_text(
+                    &path,
+                    Some(offset),
+                    chunk_size,
+                    true,
+                    "stdoutOffset",
+                ).unwrap();
+                reconstructed.push_str(&view.content);
+                offset = view.next_offset.unwrap();
+                if view.eof == Some(true) {
+                    break;
+                }
+            }
+            prop_assert_eq!(reconstructed, expected);
+            prop_assert_eq!(offset, fs::metadata(&path).unwrap().len());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn utf8_ranges_respect_hard_byte_bounds() {
+        let root = std::env::temp_dir().join(format!(
+            "ordivon-utf8-hard-bound-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("stdout.log");
+        fs::write(&path, "🙂x".as_bytes()).unwrap();
+        let error = read_utf8_range(&path, 0, 3, 5, true, "stdoutOffset", "output").unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+        let first = read_utf8_range(&path, 0, 4, 5, true, "stdoutOffset", "output").unwrap();
+        assert_eq!(first.content, "🙂");
+        assert_eq!(first.next_offset, 4);
+        let second = read_utf8_range(&path, 4, 1, 5, true, "stdoutOffset", "output").unwrap();
+        assert_eq!(second.content, "x");
+        assert_eq!(second.next_offset, 5);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn trusted_runtime_accepts_temporary_storage_roots() {

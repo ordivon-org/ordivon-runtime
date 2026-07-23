@@ -12,9 +12,9 @@ use super::{
     AdmissionOutcome, ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent,
     ConditionUpdate, CreatedAdmission, JobDesiredState, JobProjection, JobResolution,
     ReservationRecord, ReservationState, RunnerIdentity, RuntimeArtifactRecord, RuntimeError,
-    RuntimeErrorCode, RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult,
-    RuntimeJobRecord, RuntimeResult, SubmitRequest, TerminalCommit, MAX_RUNTIME_LIST_LIMIT,
-    RUNTIME_SCHEMA_VERSION,
+    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeJobListCursor, RuntimeJobListRequest,
+    RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary, RuntimeResult, SubmitRequest,
+    TerminalCommit, MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
 };
 
 const MIGRATION_V1: i64 = 1;
@@ -634,6 +634,32 @@ impl Registry {
         Ok(self.job_snapshot(job_id)?.projection)
     }
 
+    pub fn active_job_ids_for_workspace(
+        &self,
+        workspace_id: &str,
+        limit: u32,
+    ) -> RuntimeResult<Vec<String>> {
+        if limit == 0 || limit > MAX_RUNTIME_LIST_LIMIT {
+            return Err(RuntimeError::invalid(
+                format!("limit must be in 1..={MAX_RUNTIME_LIST_LIMIT}"),
+                "limit",
+            ));
+        }
+        let connection = self.open_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT DISTINCT jobs.job_id FROM jobs LEFT JOIN attempts ON attempts.job_id=jobs.job_id LEFT JOIN concurrency_reservations ON concurrency_reservations.attempt_id=attempts.attempt_id WHERE jobs.workspace_id=?1 AND (jobs.resolution IS NULL OR concurrency_reservations.state IN ('active','held_orphaned')) ORDER BY jobs.created_at_ms DESC,jobs.job_id DESC LIMIT ?2",
+            )
+            .map_err(|error| RuntimeError::from_sql(error, "cannot prepare active Workspace Job query"))?;
+        let rows = statement
+            .query_map(params![workspace_id, limit], |row| row.get::<_, String>(0))
+            .map_err(|error| RuntimeError::from_sql(error, "cannot query active Workspace Jobs"))?;
+        rows.map(|row| {
+            row.map_err(|error| RuntimeError::from_sql(error, "cannot decode active Workspace Job"))
+        })
+        .collect()
+    }
+
     pub fn list_jobs(
         &self,
         request: &RuntimeJobListRequest,
@@ -650,7 +676,7 @@ impl Registry {
         if let Some(cursor) = &request.cursor {
             let mut statement = connection
                 .prepare(
-                    "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE created_at_ms>?1 OR (created_at_ms=?1 AND job_id>?2) ORDER BY created_at_ms,job_id LIMIT ?3",
+                    "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE created_at_ms<?1 OR (created_at_ms=?1 AND job_id<?2) ORDER BY created_at_ms DESC,job_id DESC LIMIT ?3",
                 )
                 .map_err(|error| RuntimeError::from_sql(error, "cannot prepare Job list"))?;
             let rows = statement
@@ -668,7 +694,7 @@ impl Registry {
         } else {
             let mut statement = connection
                 .prepare(
-                    "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs ORDER BY created_at_ms,job_id LIMIT ?1",
+                    "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs ORDER BY created_at_ms DESC,job_id DESC LIMIT ?1",
                 )
                 .map_err(|error| RuntimeError::from_sql(error, "cannot prepare Job list"))?;
             let rows = statement
@@ -692,7 +718,8 @@ impl Registry {
         } else {
             None
         };
-        let mut projections = Vec::with_capacity(jobs.len());
+        let observed_at_ms = now_ms()?;
+        let mut summaries = Vec::with_capacity(jobs.len());
         for job in jobs {
             let attempt = match job.current_attempt_id.as_deref() {
                 Some(attempt_id) => Some(load_attempt(&connection, attempt_id)?),
@@ -710,10 +737,61 @@ impl Registry {
                         .transpose()?
                 }
             };
-            projections.push(project_job(&job, attempt.as_ref()));
+            let projection = project_job(&job, attempt.as_ref());
+            let plan: RuntimeExecutionPlan = serde_json::from_str(&job.execution_plan_json)
+                .map_err(|error| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::RegistryCorrupt,
+                        format!("stored execution plan is invalid: {error}"),
+                        Some("executionPlan"),
+                        false,
+                    )
+                })?;
+            let executable_name = Path::new(&plan.executable)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&plan.executable)
+                .to_string();
+            let cwd_relative = Path::new(&plan.cwd)
+                .strip_prefix(&plan.workspace_path)
+                .ok()
+                .and_then(|path| path.to_str())
+                .filter(|path| !path.is_empty())
+                .unwrap_or(".")
+                .to_string();
+            let started_at_ms = attempt.as_ref().and_then(|attempt| attempt.started_at_ms);
+            let finished_at_ms = attempt.as_ref().and_then(|attempt| attempt.finished_at_ms);
+            let duration_start = started_at_ms.unwrap_or(job.created_at_ms);
+            let duration_end = finished_at_ms.unwrap_or(observed_at_ms);
+            let artifact_count: u32 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM artifacts WHERE job_id=?1",
+                    [&job.job_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| RuntimeError::from_sql(error, "cannot count Job Artifacts"))?;
+            summaries.push(RuntimeJobSummary {
+                job_id: job.job_id,
+                status: projection.status,
+                attempt_id: projection.attempt_id,
+                exit_code: projection.exit_code,
+                client_request_id: job.client_request_id,
+                workspace_id: job.workspace_id,
+                source_revision: plan.source_revision,
+                executable_name,
+                cwd_relative,
+                created_at_ms: job.created_at_ms,
+                started_at_ms,
+                finished_at_ms,
+                duration_ms: duration_end.saturating_sub(duration_start),
+                result_available: projection.result_available,
+                artifacts_available: projection.artifacts_available,
+                artifact_count,
+                poll_after_ms: projection.poll_after_ms,
+            });
         }
         Ok(RuntimeJobListResult {
-            jobs: projections,
+            jobs: summaries,
             next_cursor,
         })
     }

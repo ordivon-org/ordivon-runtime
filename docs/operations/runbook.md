@@ -5,7 +5,7 @@
 ```bash
 cargo build --workspace
 cargo fmt --check
-cargo test --workspace
+PROPTEST_CASES=512 cargo test --workspace
 ruff check scripts/
 ```
 
@@ -60,11 +60,15 @@ ORDIVON_RUNNER_PATH="$PWD/target/debug/ordivon-task-runner" \
 python scripts/mcp_e2e.py --repo "$PWD"
 ```
 
+Before a release, also run the official MCP Inspector against an isolated candidate server and use a short temporary `cargo-fuzz` harness for public request deserialization and validation. Keep product fixes and regression cases; remove the temporary fuzz project instead of adding another permanent test subsystem.
+
 Temporary filesystem roots are valid in trusted-local mode because the Runner does not use `PrivateTmp`.
 
 ## Running tasks
 
-Use `task.list`, `task.observe`, and `task.cancel`. Restarting the MCP reconciles nonterminal Attempts and held orphan reservations from SQLite, result bundles, and systemd/cgroup state.
+Use newest-first `task.list`, `task.observe`, and `task.cancel`. For repeated observation, pass the returned stdout/stderr next offsets to receive only newly retained text; omit offsets to keep tail mode. Restarting the MCP reconciles nonterminal Attempts and held orphan reservations from SQLite, result bundles, and systemd/cgroup state.
+
+`workspace.close` rejects tracked or untracked changes by default. Use `force=true` only after the work is committed, adopted, backed up, or deliberately discarded. Active or held Jobs always block closure.
 
 Execution capacity is shared across all clients. Different Workspaces may run concurrently. A second `workspace.exec` against the same Workspace receives a retryable `CONCURRENCY_LIMIT`; do not create a second Registry or server to bypass it.
 

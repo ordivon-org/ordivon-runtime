@@ -6,9 +6,10 @@ use std::process::Command;
 use super::{
     canonical_directory, invalid, io_error, now_unix_ms, sha256_bytes, sha256_file,
     validate_relative_path, write_bytes_atomic, write_json_atomic, GitWorkspaceCreateRequest,
-    UniversalExecError, UniversalExecErrorCode, UniversalExecutorConfig, WorkspaceDiffRequest,
-    WorkspaceDiffResult, WorkspaceReadRequest, WorkspaceReadResult, WorkspaceRecord,
-    WorkspaceWriteRequest, WorkspaceWriteResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    UniversalExecError, UniversalExecErrorCode, UniversalExecutorConfig, WorkspaceCloseRequest,
+    WorkspaceCloseResult, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceReadRequest,
+    WorkspaceReadResult, WorkspaceRecord, WorkspaceWriteRequest, WorkspaceWriteResult,
+    UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
 pub fn create_git_workspace(
@@ -60,7 +61,7 @@ pub fn create_git_workspace(
     let canonical_target = canonical_directory(&target, "workspacePath")?;
     let actual_revision = git_output(&canonical_target, ["rev-parse", "HEAD"])?;
     if actual_revision.trim() != revision {
-        let _ = remove_git_worktree(&source_repo, &canonical_target);
+        let _ = remove_git_worktree(&source_repo, &canonical_target, true);
         return Err(UniversalExecError::new(
             UniversalExecErrorCode::RevisionMismatch,
             "created workspace HEAD does not match requested revision",
@@ -70,7 +71,7 @@ pub fn create_git_workspace(
     }
     if let (Some(uid), Some(gid)) = (config.workspace_uid, config.workspace_gid) {
         if let Err(error) = transfer_workspace_ownership(&canonical_target, uid, gid) {
-            let _ = remove_git_worktree(&source_repo, &canonical_target);
+            let _ = remove_git_worktree(&source_repo, &canonical_target, true);
             return Err(error);
         }
     }
@@ -83,7 +84,7 @@ pub fn create_git_workspace(
         created_unix_ms: now_unix_ms()?,
     };
     if let Err(error) = write_json_atomic(&record_path, &record) {
-        let _ = remove_git_worktree(&source_repo, &canonical_target);
+        let _ = remove_git_worktree(&source_repo, &canonical_target, true);
         return Err(error);
     }
     Ok(record)
@@ -299,18 +300,37 @@ pub fn workspace_diff(
 
 pub fn remove_git_workspace(
     config: &UniversalExecutorConfig,
-    workspace_id: &str,
-) -> Result<(), UniversalExecError> {
-    let record = load_workspace_record(config, workspace_id)?;
+    request: &WorkspaceCloseRequest,
+) -> Result<WorkspaceCloseResult, UniversalExecError> {
+    request.validate_shape()?;
+    let record = load_workspace_record(config, &request.workspace_id)?;
+    if !request.force {
+        let dirty = workspace_dirty_paths(Path::new(&record.workspace_path))?;
+        if !dirty.is_empty() {
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::WorkspaceDirty,
+                format!(
+                    "workspace contains uncommitted or untracked paths: {}",
+                    dirty.join(", ")
+                ),
+                Some("workspaceId"),
+                false,
+            ));
+        }
+    }
     remove_git_worktree(
         Path::new(&record.source_repo),
         Path::new(&record.workspace_path),
+        request.force,
     )?;
-    let record_path = config.workspace_record_path(workspace_id);
+    let record_path = config.workspace_record_path(&request.workspace_id);
     if record_path.exists() {
         fs::remove_file(&record_path).map_err(|error| io_error(&record_path, "remove", error))?;
     }
-    Ok(())
+    Ok(WorkspaceCloseResult {
+        workspace_id: request.workspace_id.clone(),
+        removed: true,
+    })
 }
 
 pub(crate) fn resolve_existing_workspace_path(
@@ -320,9 +340,19 @@ pub(crate) fn resolve_existing_workspace_path(
 ) -> Result<PathBuf, UniversalExecError> {
     let relative = validate_relative_path(relative, "relativePath")?;
     let root = canonical_directory(Path::new(&record.workspace_path), "workspacePath")?;
-    let candidate = root.join(relative);
-    let metadata =
-        fs::symlink_metadata(&candidate).map_err(|error| io_error(&candidate, "inspect", error))?;
+    let candidate = root.join(&relative);
+    let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            UniversalExecError::new(
+                UniversalExecErrorCode::WorkspacePathNotFound,
+                format!("workspace path does not exist: {}", relative.display()),
+                Some("relativePath"),
+                false,
+            )
+        } else {
+            io_error(&candidate, "inspect", error)
+        }
+    })?;
     if metadata.file_type().is_symlink() {
         return Err(UniversalExecError::new(
             UniversalExecErrorCode::WorkspacePathDenied,
@@ -482,11 +512,64 @@ fn git_output<'a>(
     })
 }
 
-fn remove_git_worktree(source_repo: &Path, workspace: &Path) -> Result<(), UniversalExecError> {
+fn workspace_dirty_paths(workspace: &Path) -> Result<Vec<String>, UniversalExecError> {
+    const MAX_DIRTY_PATHS: usize = 20;
+    let tracked = git_output_bytes(workspace, ["diff", "--name-only", "-z", "HEAD", "--"])?;
+    let untracked = git_output_bytes(
+        workspace,
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
+    let mut paths = Vec::new();
+    for raw in tracked
+        .split(|byte| *byte == 0)
+        .chain(untracked.split(|byte| *byte == 0))
+    {
+        if raw.is_empty() {
+            continue;
+        }
+        let path = String::from_utf8_lossy(raw).into_owned();
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+        if paths.len() == MAX_DIRTY_PATHS {
+            paths.push("…".to_string());
+            break;
+        }
+    }
+    Ok(paths)
+}
+
+fn git_output_bytes<'a>(
+    repo: &Path,
+    args: impl IntoIterator<Item = &'a str>,
+) -> Result<Vec<u8>, UniversalExecError> {
     let output = Command::new("git")
         .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(|error| tool_unavailable("git", error))?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(tool_failed("git", &output.stderr))
+    }
+}
+
+fn remove_git_worktree(
+    source_repo: &Path,
+    workspace: &Path,
+    force: bool,
+) -> Result<(), UniversalExecError> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
         .arg(source_repo)
-        .args(["worktree", "remove", "--force"])
+        .args(["worktree", "remove"]);
+    if force {
+        command.arg("--force");
+    }
+    let output = command
         .arg(workspace)
         .output()
         .map_err(|error| tool_unavailable("git worktree remove", error))?;

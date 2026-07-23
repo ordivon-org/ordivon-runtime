@@ -47,7 +47,11 @@ Local HTTP uses a fixed Bearer token. An explicitly enabled Cloudflare Access pa
 - persisted cancellation intent before termination;
 - timeout and bounded retained output;
 - Digest-bound executable, result, and Artifact identity;
-- startup and observation-time reconciliation.
+- startup and observation-time reconciliation;
+- dirty Workspaces survive accidental close requests;
+- active or held Jobs always prevent Workspace removal;
+- Job pages are newest-first and expose semantic identity without command arguments or environment values;
+- incremental output cursors consume retained UTF-8 text without replaying earlier bytes or exceeding requested byte bounds.
 
 ## Recovery
 
@@ -71,5 +75,7 @@ task.cancel
 task.list
 artifact.read
 ```
+
+`workspace.close` rejects dirty state unless `force=true`, and never removes a Workspace with active or held Jobs. `task.list` returns newest semantic summaries. `task.observe` retains tail mode while optional stdout/stderr byte offsets provide incremental reads; returned offsets remain UTF-8 boundaries. `artifact.read` uses the same bounded range semantics.
 
 Mature host CLIs remain the preferred extension mechanism. A bespoke Adapter is justified only after repeated real use proves ordinary command execution insufficient.

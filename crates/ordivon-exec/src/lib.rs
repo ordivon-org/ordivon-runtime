@@ -26,13 +26,13 @@ pub use universal::{
     workspace_diff_compact, write_workspace_text, CompactWorkspaceDiffResult,
     CompactWorkspaceOpenResult, CompactWorkspaceReadResult, CompactWorkspaceSliceResult,
     GitWorkspaceCreateRequest, UniversalExecError, UniversalExecErrorCode, UniversalExecutorConfig,
-    WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceMutateRequest, WorkspaceMutateResult,
-    WorkspaceMutation, WorkspaceMutationMode, WorkspaceMutationResult, WorkspaceReadRequest,
-    WorkspaceReadResult, WorkspaceReadSliceRequest, WorkspaceReadSliceResult, WorkspaceRecord,
-    WorkspaceWriteRequest, WorkspaceWriteResult, MAX_UNIVERSAL_ARGS, MAX_UNIVERSAL_ARG_BYTES,
-    MAX_UNIVERSAL_ENV_VALUE_BYTES, MAX_UNIVERSAL_ENV_VARS, MAX_UNIVERSAL_OUTPUT_BYTES,
-    MAX_UNIVERSAL_RUNTIME_MS, MAX_WORKSPACE_IO_BYTES, MAX_WORKSPACE_MUTATIONS,
-    UNIVERSAL_EXEC_SCHEMA_VERSION,
+    WorkspaceCloseRequest, WorkspaceCloseResult, WorkspaceDiffRequest, WorkspaceDiffResult,
+    WorkspaceMutateRequest, WorkspaceMutateResult, WorkspaceMutation, WorkspaceMutationMode,
+    WorkspaceMutationResult, WorkspaceReadRequest, WorkspaceReadResult, WorkspaceReadSliceRequest,
+    WorkspaceReadSliceResult, WorkspaceRecord, WorkspaceWriteRequest, WorkspaceWriteResult,
+    MAX_UNIVERSAL_ARGS, MAX_UNIVERSAL_ARG_BYTES, MAX_UNIVERSAL_ENV_VALUE_BYTES,
+    MAX_UNIVERSAL_ENV_VARS, MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS,
+    MAX_WORKSPACE_IO_BYTES, MAX_WORKSPACE_MUTATIONS, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
 #[cfg(feature = "transactional-runtime")]
@@ -43,7 +43,8 @@ pub use runtime::{
     ReservationRecord, ReservationState, RunnerIdentity, Runtime, RuntimeArtifactRecord,
     RuntimeCapacity, RuntimeConfig, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
     RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord,
-    RuntimeResult, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
-    TaskRunRequest, TerminalCommit, UniversalExecutionRequest, MAX_RUNTIME_LIST_LIMIT,
+    RuntimeJobSummary, RuntimeResult, SubmitRequest, TaskCancelRequest, TaskObservation,
+    TaskObserveRequest, TaskRunRequest, TerminalCommit, UniversalExecutionRequest,
+    MAX_ARTIFACT_READ_BYTES, MAX_RUNTIME_LIST_LIMIT, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
     RUNTIME_MIGRATION_CHECKSUM, RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM, RUNTIME_SCHEMA_VERSION,
 };

@@ -14,6 +14,8 @@ pub enum RuntimeErrorCode {
     MigrationChecksumMismatch,
     IdempotencyConflict,
     ConcurrencyLimit,
+    WorkspaceBusy,
+    WorkspaceDirty,
     JobNotFound,
     AttemptNotFound,
     AttemptStateConflict,

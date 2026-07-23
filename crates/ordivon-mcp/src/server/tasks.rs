@@ -78,6 +78,8 @@ impl ServerHandler for OrdivonServer {
                 wait_ms: 0,
                 stdout_tail_bytes: 4096,
                 stderr_tail_bytes: 4096,
+                stdout_offset: None,
+                stderr_offset: None,
             })
         })
         .await
@@ -163,6 +165,8 @@ impl OrdivonServer {
                 wait_ms: 0,
                 stdout_tail_bytes: 0,
                 stderr_tail_bytes: 0,
+                stdout_offset: None,
+                stderr_offset: None,
             })?;
             let job = runtime.registry().get_job(&job_id_owned)?;
             let attempt = runtime.registry().get_latest_attempt(&job_id_owned)?;

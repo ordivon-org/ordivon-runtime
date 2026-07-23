@@ -1,4 +1,5 @@
 use super::*;
+use proptest::prelude::*;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -182,6 +183,40 @@ fn busy_writer_fails_with_retryable_registry_busy() {
 }
 
 #[test]
+fn active_workspace_job_lookup_tracks_reservations_and_resolution() {
+    let sandbox = Sandbox::new("active-workspace", 5000);
+    let mut active_request = request(&sandbox, "request:active-workspace", 4);
+    active_request.plan.workspace_id = "workspace:active-workspace".to_string();
+    let created = created(sandbox.registry.submit(&active_request).unwrap());
+    assert_eq!(
+        sandbox
+            .registry
+            .active_job_ids_for_workspace("workspace:active-workspace", 20)
+            .unwrap(),
+        vec![created.job.job_id.clone()]
+    );
+    sandbox
+        .registry
+        .commit_terminal(&TerminalCommit {
+            attempt_id: created.attempt.attempt_id,
+            expected_row_version: created.attempt.row_version,
+            state: AttemptState::Cancelled,
+            result_digest: digest(b"cancelled"),
+            exit_code: None,
+            infrastructure_error_digest: None,
+            finished_at_ms: created.job.created_at_ms + 1,
+            artifacts: Vec::new(),
+            reason_code: "TEST_CANCELLED".to_string(),
+        })
+        .unwrap();
+    assert!(sandbox
+        .registry
+        .active_job_ids_for_workspace("workspace:active-workspace", 20)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn list_is_bounded_and_cursor_stable() {
     let sandbox = Sandbox::new("list", 5000);
     for index in 0..3 {
@@ -208,6 +243,47 @@ fn list_is_bounded_and_cursor_stable() {
         .unwrap();
     assert_eq!(second.jobs.len(), 1);
     assert!(second.next_cursor.is_none());
+}
+
+proptest! {
+    #[test]
+    fn newest_first_cursor_pagination_is_complete_and_unique(
+        job_count in 1usize..30,
+        page_size in 1u32..10,
+    ) {
+        let sandbox = Sandbox::new("property-list", 5000);
+        for index in 0..job_count {
+            let mut list_request = request(&sandbox, &format!("request:property:{index}"), 64);
+            list_request.plan.workspace_id = format!("workspace:property:{index}");
+            sandbox.registry.submit(&list_request).unwrap();
+        }
+        let mut cursor = None;
+        let mut observed = Vec::new();
+        loop {
+            let page = sandbox.registry.list_jobs(&RuntimeJobListRequest {
+                limit: page_size,
+                cursor,
+            }).unwrap();
+            observed.extend(page.jobs.iter().map(|job| (
+                job.created_at_ms,
+                job.job_id.clone(),
+                job.client_request_id.clone(),
+            )));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        prop_assert_eq!(observed.len(), job_count);
+        let unique: std::collections::BTreeSet<_> = observed.iter().map(|(_, id, _)| id).collect();
+        prop_assert_eq!(unique.len(), job_count);
+        let newest_first = observed.windows(2).all(|pair| {
+            (pair[0].0, pair[0].1.as_str()) >= (pair[1].0, pair[1].1.as_str())
+        });
+        prop_assert!(newest_first);
+        let requests: std::collections::BTreeSet<_> = observed.iter().map(|(_, _, request)| request).collect();
+        prop_assert_eq!(requests.len(), job_count);
+    }
 }
 
 #[test]

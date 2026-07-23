@@ -4,7 +4,7 @@ use super::*;
 impl OrdivonServer {
     #[tool(
         name = "workspace.open",
-        description = "Create one detached Git workspace at an exact revision. This isolates the code tree and Git state, not host authority.",
+        description = "Resolve a revision already present in the local source repository, create one detached Git workspace at that exact commit, and return the resolved commit SHA. This tool does not fetch or update remote refs and does not isolate host authority.",
         annotations(
             title = "Open isolated workspace",
             read_only_hint = false,
@@ -17,16 +17,16 @@ impl OrdivonServer {
         &self,
         Parameters(request): Parameters<GitWorkspaceCreateRequest>,
     ) -> ToolOutcome<CompactWorkspaceOpenResult> {
-        let config = self.state.executor.clone();
+        let runtime = self.state.runtime.clone();
         self.run_core("workspace.open", move || {
-            create_git_workspace_compact(&config, &request).map_err(ToolError::from)
+            runtime.open_workspace(&request).map_err(ToolError::from)
         })
         .await
     }
 
     #[tool(
         name = "workspace.close",
-        description = "Remove one Git workspace and its workspace record after its work is complete.",
+        description = "Close one Workspace. By default, reject tracked or untracked changes; force=true may remove dirty files. Active or held Jobs always block closure.",
         annotations(
             title = "Close workspace",
             read_only_hint = false,
@@ -39,20 +39,9 @@ impl OrdivonServer {
         &self,
         Parameters(request): Parameters<WorkspaceCloseRequest>,
     ) -> ToolOutcome<WorkspaceCloseResult> {
-        let config = self.state.executor.clone();
-        let workspace_id = request.workspace_id;
+        let runtime = self.state.runtime.clone();
         self.run_core("workspace.close", move || {
-            if request.schema_version != ordivon_exec::UNIVERSAL_EXEC_SCHEMA_VERSION {
-                return Err(ToolError::invalid(
-                    "unsupported workspace schema version",
-                    "schemaVersion",
-                ));
-            }
-            remove_git_workspace(&config, &workspace_id).map_err(ToolError::from)?;
-            Ok(WorkspaceCloseResult {
-                workspace_id,
-                removed: true,
-            })
+            runtime.close_workspace(&request).map_err(ToolError::from)
         })
         .await
     }
@@ -123,7 +112,7 @@ impl OrdivonServer {
 
     #[tool(
         name = "workspace.mutate",
-        description = "Apply one validated batch of WRITE, APPEND, or exact replacement mutations.",
+        description = "Apply one atomic validated batch. mode must be exactly WRITE, APPEND, or REPLACE_EXACT; REPLACE_EXACT requires expectedText, and expectedDigest protects the complete file version.",
         annotations(
             title = "Mutate workspace files",
             read_only_hint = false,
@@ -136,9 +125,9 @@ impl OrdivonServer {
         &self,
         Parameters(request): Parameters<WorkspaceMutateRequest>,
     ) -> ToolOutcome<WorkspaceMutateResult> {
-        let config = self.state.executor.clone();
+        let runtime = self.state.runtime.clone();
         self.run_core("workspace.mutate", move || {
-            mutate_workspace(&config, &request).map_err(ToolError::from)
+            runtime.mutate_workspace(&request).map_err(ToolError::from)
         })
         .await
     }
@@ -199,7 +188,7 @@ impl OrdivonServer {
 
     #[tool(
         name = "task.observe",
-        description = "Observe or briefly await one transactional Job by server-generated Job ID.",
+        description = "Observe or briefly await one Job. Omit offsets for tail mode, or pass stdoutOffset/stderrOffset with at least 4 tail bytes to read only new retained UTF-8 text and continue from returned next offsets.",
         annotations(
             title = "Observe transactional job",
             read_only_hint = true,
@@ -243,7 +232,7 @@ impl OrdivonServer {
 
     #[tool(
         name = "task.list",
-        description = "List a bounded page of transactional Jobs using a stable database cursor.",
+        description = "List newest Jobs first with semantic identity, Workspace, command summary, timestamps, duration, and Artifact count using a stable cursor.",
         annotations(
             title = "List transactional jobs",
             read_only_hint = true,

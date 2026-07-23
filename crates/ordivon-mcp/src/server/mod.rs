@@ -7,15 +7,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ordivon_exec::{
-    create_git_workspace_compact, mutate_workspace, read_workspace_slice_compact,
-    read_workspace_text_compact, remove_git_workspace, workspace_diff_compact, ArtifactReadRequest,
-    ArtifactReadResult, CompactWorkspaceDiffResult, CompactWorkspaceOpenResult,
-    GitWorkspaceCreateRequest, Runtime, RuntimeCapacity, RuntimeConfig, RuntimeError,
-    RuntimeJobListRequest, RuntimeJobListResult, TaskCancelRequest, TaskObservation,
+    read_workspace_slice_compact, read_workspace_text_compact, workspace_diff_compact,
+    ArtifactReadRequest, ArtifactReadResult, CompactWorkspaceDiffResult,
+    CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, Runtime, RuntimeCapacity, RuntimeConfig,
+    RuntimeError, RuntimeJobListRequest, RuntimeJobListResult, TaskCancelRequest, TaskObservation,
     TaskObserveRequest, TaskRunRequest, UniversalExecError, UniversalExecutionRequest,
-    UniversalExecutorConfig, WorkspaceDiffRequest as ExecWorkspaceDiffRequest,
-    WorkspaceMutateRequest, WorkspaceMutateResult,
-    WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
+    UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
+    WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceMutateRequest,
+    WorkspaceMutateResult, WorkspaceReadRequest as ExecWorkspaceReadRequest,
+    WorkspaceReadSliceRequest, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::IntoCallToolResult;
@@ -46,6 +46,7 @@ pub struct WorkspaceReadRequest {
     pub mode: WorkspaceReadMode,
     #[serde(default)]
     pub offset: u64,
+    #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
     pub max_bytes: u64,
 }
 
@@ -65,21 +66,8 @@ pub struct WorkspaceReadResult {
 pub struct WorkspaceDiffRequest {
     pub schema_version: u32,
     pub workspace_id: String,
+    #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
     pub max_bytes: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WorkspaceCloseRequest {
-    pub schema_version: u32,
-    pub workspace_id: String,
-}
-
-#[derive(Clone, Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceCloseResult {
-    pub workspace_id: String,
-    pub removed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -89,10 +77,13 @@ pub struct WorkspaceExecRequest {
     pub client_request_id: String,
     pub execution: UniversalExecutionRequest,
     #[serde(default = "default_exec_wait_ms")]
+    #[schemars(range(max = MAX_TASK_WAIT_MS))]
     pub wait_ms: u64,
     #[serde(default = "default_exec_tail_bytes")]
+    #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stdout_tail_bytes: u64,
     #[serde(default = "default_exec_tail_bytes")]
+    #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stderr_tail_bytes: u64,
 }
 

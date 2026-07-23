@@ -7,6 +7,8 @@ pub enum UniversalExecErrorCode {
     InvalidRequest,
     WorkspaceExists,
     WorkspaceNotFound,
+    WorkspacePathNotFound,
+    WorkspaceDirty,
     WorkspacePathDenied,
     RevisionNotFound,
     RevisionMismatch,

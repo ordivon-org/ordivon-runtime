@@ -6,6 +6,9 @@ use super::{RuntimeError, RuntimeResult};
 
 pub const RUNTIME_SCHEMA_VERSION: u32 = 1;
 pub const MAX_RUNTIME_LIST_LIMIT: u32 = 100;
+pub const MAX_TASK_WAIT_MS: u64 = 30_000;
+pub const MAX_TASK_TAIL_BYTES: u64 = 64 * 1024;
+pub const MAX_ARTIFACT_READ_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -264,12 +267,16 @@ pub struct RuntimeExecutionPlan {
     pub executable: String,
     pub executable_digest: String,
     #[serde(default)]
+    #[schemars(length(max = 128))]
     pub args: Vec<String>,
     pub cwd: String,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[schemars(range(min = 1, max = crate::MAX_UNIVERSAL_RUNTIME_MS))]
     pub timeout_ms: u64,
+    #[schemars(range(min = 1, max = crate::MAX_UNIVERSAL_OUTPUT_BYTES))]
     pub stdout_limit_bytes: u64,
+    #[schemars(range(min = 1, max = crate::MAX_UNIVERSAL_OUTPUT_BYTES))]
     pub stderr_limit_bytes: u64,
     pub principal: String,
 }
@@ -456,6 +463,7 @@ pub struct RuntimeJobListCursor {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeJobListRequest {
     #[serde(default = "default_runtime_list_limit")]
+    #[schemars(range(min = 1, max = MAX_RUNTIME_LIST_LIMIT))]
     pub limit: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<RuntimeJobListCursor>,
@@ -463,8 +471,35 @@ pub struct RuntimeJobListRequest {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeJobSummary {
+    pub job_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub client_request_id: String,
+    pub workspace_id: String,
+    pub source_revision: String,
+    pub executable_name: String,
+    pub cwd_relative: String,
+    pub created_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
+    pub duration_ms: u64,
+    pub result_available: bool,
+    pub artifacts_available: bool,
+    pub artifact_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poll_after_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeJobListResult {
-    pub jobs: Vec<JobProjection>,
+    pub jobs: Vec<RuntimeJobSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<RuntimeJobListCursor>,
 }
@@ -493,7 +528,7 @@ pub struct ConditionUpdate {
 }
 
 pub(crate) fn default_runtime_list_limit() -> u32 {
-    50
+    20
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
@@ -520,10 +555,13 @@ pub struct TaskRunRequest {
     pub global_limit: u32,
     pub execution: UniversalExecutionRequest,
     #[serde(default = "default_task_wait_ms")]
+    #[schemars(range(max = MAX_TASK_WAIT_MS))]
     pub wait_ms: u64,
     #[serde(default = "default_task_tail_bytes")]
+    #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stdout_tail_bytes: u64,
     #[serde(default = "default_task_tail_bytes")]
+    #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stderr_tail_bytes: u64,
 }
 
@@ -533,11 +571,18 @@ pub struct TaskObserveRequest {
     pub schema_version: u32,
     pub job_id: String,
     #[serde(default)]
+    #[schemars(range(max = MAX_TASK_WAIT_MS))]
     pub wait_ms: u64,
     #[serde(default = "default_task_tail_bytes")]
+    #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stdout_tail_bytes: u64,
     #[serde(default = "default_task_tail_bytes")]
+    #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stderr_tail_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr_offset: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
@@ -560,6 +605,22 @@ pub struct TaskObservation {
     pub stdout_tail: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr_tail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout_next_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout_available_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout_eof: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr_next_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr_available_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr_eof: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub stdout_truncated: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -581,6 +642,7 @@ pub struct ArtifactReadRequest {
     pub job_id: String,
     pub artifact_id: String,
     pub offset: u64,
+    #[schemars(range(min = 1, max = MAX_ARTIFACT_READ_BYTES))]
     pub max_bytes: u64,
 }
 

@@ -5,8 +5,8 @@ use ordivon_exec::{
     AttemptState, GitWorkspaceCreateRequest, RegistryConfig, Runtime, RuntimeConfig,
     RuntimeExecutionPlan, RuntimeJobListRequest, SubmitRequest, TaskCancelRequest,
     TaskObserveRequest, TaskRunRequest, UniversalExecutionRequest, UniversalExecutorConfig,
-    WorkspaceWriteRequest, MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS,
-    RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    WorkspaceCloseRequest, WorkspaceWriteRequest, MAX_UNIVERSAL_OUTPUT_BYTES,
+    MAX_UNIVERSAL_RUNTIME_MS, RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -140,13 +140,10 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
         .unwrap();
     assert_eq!(listed.jobs.len(), 1);
     assert_eq!(listed.jobs[0].job_id, first.job_id);
-    let listed_stdout = listed.jobs[0]
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.kind == "stdout")
-        .unwrap();
-    assert_eq!(listed_stdout.artifact_id, stdout_descriptor.artifact_id);
-    assert_eq!(listed_stdout.dropped_bytes, None);
+    assert_eq!(listed.jobs[0].client_request_id, request.client_request_id);
+    assert_eq!(listed.jobs[0].workspace_id, workspace_id);
+    assert_eq!(listed.jobs[0].executable_name, "python3.14");
+    assert_eq!(listed.jobs[0].artifact_count, 3);
     let artifacts = runtime.registry().list_artifacts(&first.job_id).unwrap();
     assert_eq!(artifacts.len(), 3);
     let stdout = artifacts
@@ -171,7 +168,15 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
     let _ = Command::new("systemctl")
         .args(["reset-failed", &unit])
         .output();
-    remove_git_workspace(&executor, &workspace_id).unwrap();
+    remove_git_workspace(
+        &executor,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.clone(),
+            force: true,
+        },
+    )
+    .unwrap();
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -312,6 +317,76 @@ impl Drop for IntegrationContext {
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_incremental_observe_and_safe_close_preserve_active_work() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("incremental-safe-close");
+    context.write(
+        "runtime_incremental.py",
+        "import time\nfor value in ['alpha','beta','gamma']:\n print(value, flush=True)\n time.sleep(0.25)\ntime.sleep(10)\n",
+    );
+    let runtime = context.runtime(2000);
+    let started = runtime
+        .run_task(&context.request("runtime_incremental.py", 0))
+        .unwrap();
+    assert!(matches!(started.status.as_str(), "queued" | "working"));
+
+    let close_error = runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: context.workspace_id.clone(),
+            force: true,
+        })
+        .unwrap_err();
+    assert_eq!(
+        close_error.code,
+        ordivon_exec::RuntimeErrorCode::WorkspaceBusy
+    );
+
+    let mut stdout_offset = 0;
+    let mut stdout = String::new();
+    for _ in 0..20 {
+        let observed = runtime
+            .observe_task(&TaskObserveRequest {
+                schema_version: RUNTIME_SCHEMA_VERSION,
+                job_id: started.job_id.clone(),
+                wait_ms: 200,
+                stdout_tail_bytes: 5,
+                stderr_tail_bytes: 5,
+                stdout_offset: Some(stdout_offset),
+                stderr_offset: Some(0),
+            })
+            .unwrap();
+        stdout.push_str(&observed.stdout_tail);
+        let next = observed.stdout_next_offset.unwrap();
+        assert!(next >= stdout_offset);
+        stdout_offset = next;
+        if stdout.contains("alpha\nbeta\ngamma\n") {
+            break;
+        }
+    }
+    assert_eq!(stdout, "alpha\nbeta\ngamma\n");
+
+    let cancelled = runtime
+        .cancel_task(&TaskCancelRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: started.job_id,
+        })
+        .unwrap();
+    assert_eq!(cancelled.status, "cancelled");
+    let closed = runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: context.workspace_id.clone(),
+            force: true,
+        })
+        .unwrap();
+    assert!(closed.removed);
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
 fn runtime_core_restart_recovers_running_attempt_and_terminal_result() {
     if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
@@ -342,6 +417,8 @@ fn runtime_core_restart_recovers_running_attempt_and_terminal_result() {
             wait_ms: 10_000,
             stdout_tail_bytes: 8192,
             stderr_tail_bytes: 8192,
+            stdout_offset: None,
+            stderr_offset: None,
         })
         .unwrap();
     assert_eq!(completed.status, "succeeded");
@@ -566,6 +643,8 @@ fn runtime_reconciler_rebuilds_bundle_after_admission_commit() {
             wait_ms: 10_000,
             stdout_tail_bytes: 1024,
             stderr_tail_bytes: 1024,
+            stdout_offset: None,
+            stderr_offset: None,
         })
         .unwrap();
     assert_eq!(completed.status, "succeeded");
@@ -607,6 +686,8 @@ fn runtime_corrupt_runner_result_is_orphaned_and_quarantined() {
             wait_ms: 0,
             stdout_tail_bytes: 1024,
             stderr_tail_bytes: 1024,
+            stdout_offset: None,
+            stderr_offset: None,
         })
         .unwrap();
     assert_eq!(observation.status, "orphaned");

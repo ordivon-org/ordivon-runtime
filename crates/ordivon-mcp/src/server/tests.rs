@@ -151,6 +151,54 @@ fn tool_catalog_uses_transactional_job_contract() {
         mutate_schema.pointer("/$defs/WorkspaceMutation/properties/mode/enum"),
         Some(&serde_json::json!(["WRITE", "APPEND", "REPLACE_EXACT"]))
     );
+    assert_eq!(
+        mutate_schema.pointer("/properties/mutations/minItems"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        mutate_schema.pointer("/properties/mutations/maxItems"),
+        Some(&serde_json::json!(32))
+    );
+
+    let observe = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "task.observe")
+        .unwrap();
+    let observe_schema = serde_json::to_value(&observe.input_schema).unwrap();
+    assert_eq!(
+        observe_schema.pointer("/properties/waitMs/maximum"),
+        Some(&serde_json::json!(30_000))
+    );
+    assert_eq!(
+        observe_schema.pointer("/properties/stdoutTailBytes/maximum"),
+        Some(&serde_json::json!(65_536))
+    );
+    assert!(observe_schema.pointer("/properties/stdoutOffset").is_some());
+    assert!(observe_schema.pointer("/properties/stderrOffset").is_some());
+
+    let list = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "task.list")
+        .unwrap();
+    let list_schema = serde_json::to_value(&list.input_schema).unwrap();
+    assert_eq!(
+        list_schema.pointer("/properties/limit/maximum"),
+        Some(&serde_json::json!(100))
+    );
+    assert_eq!(
+        list_schema.pointer("/properties/limit/default"),
+        Some(&serde_json::json!(20))
+    );
+
+    let close = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "workspace.close")
+        .unwrap();
+    let close_schema = serde_json::to_value(&close.input_schema).unwrap();
+    assert_eq!(
+        close_schema.pointer("/properties/force/default"),
+        Some(&serde_json::json!(false))
+    );
 }
 
 #[test]
@@ -162,6 +210,14 @@ fn task_observation_serializes_discoverable_artifacts() {
         exit_code: Some(0),
         stdout_tail: "ok\n".to_string(),
         stderr_tail: String::new(),
+        stdout_offset: None,
+        stdout_next_offset: None,
+        stdout_available_bytes: None,
+        stdout_eof: None,
+        stderr_offset: None,
+        stderr_next_offset: None,
+        stderr_available_bytes: None,
+        stderr_eof: None,
         stdout_truncated: false,
         stderr_truncated: false,
         artifacts_available: true,

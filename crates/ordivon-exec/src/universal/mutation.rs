@@ -22,7 +22,7 @@ pub fn mutate_workspace(
     request.validate_shape()?;
     let record = load_workspace_record(config, &request.workspace_id)?;
     let mut prepared = Vec::with_capacity(request.mutations.len());
-    for mutation in &request.mutations {
+    for (mutation_index, mutation) in request.mutations.iter().enumerate() {
         let path = preflight_workspace_write_path(&record, &mutation.relative_path)?;
         let existing = if path.exists() {
             let read = read_workspace_text(
@@ -48,7 +48,7 @@ pub fn mutate_workspace(
                     "workspace file {} does not match expectedDigest",
                     mutation.relative_path
                 ),
-                Some("mutations.expectedDigest"),
+                Some(&format!("mutations[{mutation_index}].expectedDigest")),
                 false,
             ));
         }
@@ -63,9 +63,12 @@ pub fn mutate_workspace(
             WorkspaceMutationMode::ReplaceExact => {
                 let content = before_content.as_ref().ok_or_else(|| {
                     UniversalExecError::new(
-                        UniversalExecErrorCode::WorkspaceNotFound,
-                        "REPLACE_EXACT target does not exist",
-                        Some("mutations.relativePath"),
+                        UniversalExecErrorCode::WorkspacePathNotFound,
+                        format!(
+                            "REPLACE_EXACT target does not exist: {}",
+                            mutation.relative_path
+                        ),
+                        Some(&format!("mutations[{mutation_index}].relativePath")),
                         false,
                     )
                 })?;
@@ -78,7 +81,7 @@ pub fn mutate_workspace(
                             "REPLACE_EXACT expected one match in {}, found {occurrences}",
                             mutation.relative_path
                         ),
-                        Some("mutations.expectedText"),
+                        Some(&format!("mutations[{mutation_index}].expectedText")),
                         false,
                     ));
                 }
@@ -89,7 +92,7 @@ pub fn mutate_workspace(
             return Err(UniversalExecError::new(
                 UniversalExecErrorCode::OutputLimitExceeded,
                 "mutated file exceeds the workspace limit",
-                Some("mutations.content"),
+                Some(&format!("mutations[{mutation_index}].content")),
                 false,
             ));
         }

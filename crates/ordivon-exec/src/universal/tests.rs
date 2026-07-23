@@ -151,7 +151,137 @@ fn workspace_round_trip_is_isolated_and_digest_guarded() {
     );
     assert!(!outside.join("nested").exists());
 
-    remove_git_workspace(&config, "workspace-1").unwrap();
+    remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-1".to_string(),
+            force: true,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn workspace_close_rejects_dirty_state_unless_force_is_explicit() {
+    let sandbox = Sandbox::new("safe-close");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-safe-close".to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path("workspace-safe-close");
+    fs::write(workspace.join("README.md"), "dirty tracked\n").unwrap();
+    fs::write(workspace.join("untracked.txt"), "untracked\n").unwrap();
+    let error = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-safe-close".to_string(),
+            force: false,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, UniversalExecErrorCode::WorkspaceDirty);
+    assert!(error.message.contains("README.md"));
+    assert!(error.message.contains("untracked.txt"));
+    assert!(workspace.exists());
+
+    let closed = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-safe-close".to_string(),
+            force: true,
+        },
+    )
+    .unwrap();
+    assert!(closed.removed);
+    assert!(!workspace.exists());
+}
+
+#[test]
+fn clean_workspace_close_succeeds_without_force() {
+    let sandbox = Sandbox::new("clean-close");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-clean-close".to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let closed = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-clean-close".to_string(),
+            force: false,
+        },
+    )
+    .unwrap();
+    assert!(closed.removed);
+}
+
+#[test]
+fn mutation_failures_identify_the_exact_batch_item() {
+    let sandbox = Sandbox::new("mutation-index");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-mutation-index".to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let error = mutate_workspace(
+        &config,
+        &WorkspaceMutateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-mutation-index".to_string(),
+            mutations: vec![
+                WorkspaceMutation {
+                    relative_path: "new.txt".to_string(),
+                    mode: WorkspaceMutationMode::Write,
+                    content: "ok".to_string(),
+                    expected_digest: None,
+                    expected_text: None,
+                },
+                WorkspaceMutation {
+                    relative_path: "missing.txt".to_string(),
+                    mode: WorkspaceMutationMode::ReplaceExact,
+                    content: "replacement".to_string(),
+                    expected_digest: None,
+                    expected_text: Some("old".to_string()),
+                },
+            ],
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, UniversalExecErrorCode::WorkspacePathNotFound);
+    assert_eq!(error.field.as_deref(), Some("mutations[1].relativePath"));
+    assert!(!config
+        .workspace_path("workspace-mutation-index")
+        .join("new.txt")
+        .exists());
 }
 
 #[test]
@@ -292,7 +422,7 @@ fn workspace_batch_mutation_preflights_before_writing() {
     };
     assert_eq!(
         mutate_workspace(&config, &bad).unwrap_err().code,
-        UniversalExecErrorCode::WorkspaceNotFound
+        UniversalExecErrorCode::WorkspacePathNotFound
     );
     assert_eq!(
         fs::read_to_string(config.workspace_path("workspace-batch").join("README.md")).unwrap(),

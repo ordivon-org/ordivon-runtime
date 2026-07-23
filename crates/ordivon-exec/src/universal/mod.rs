@@ -22,11 +22,11 @@ pub use projection::{
 pub use runner::run_task_runner;
 pub use types::{
     CompactWorkspaceDiffResult, CompactWorkspaceOpenResult, CompactWorkspaceReadResult,
-    CompactWorkspaceSliceResult, GitWorkspaceCreateRequest, WorkspaceDiffRequest,
-    WorkspaceDiffResult, WorkspaceMutateRequest, WorkspaceMutateResult, WorkspaceMutation,
-    WorkspaceMutationMode, WorkspaceMutationResult, WorkspaceReadRequest, WorkspaceReadResult,
-    WorkspaceReadSliceRequest, WorkspaceReadSliceResult, WorkspaceRecord, WorkspaceWriteRequest,
-    WorkspaceWriteResult,
+    CompactWorkspaceSliceResult, GitWorkspaceCreateRequest, WorkspaceCloseRequest,
+    WorkspaceCloseResult, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceMutateRequest,
+    WorkspaceMutateResult, WorkspaceMutation, WorkspaceMutationMode, WorkspaceMutationResult,
+    WorkspaceReadRequest, WorkspaceReadResult, WorkspaceReadSliceRequest, WorkspaceReadSliceResult,
+    WorkspaceRecord, WorkspaceWriteRequest, WorkspaceWriteResult,
 };
 pub use workspace::{
     create_git_workspace, load_workspace_record, read_workspace_text, remove_git_workspace,
