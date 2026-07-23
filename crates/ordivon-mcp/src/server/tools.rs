@@ -4,7 +4,7 @@ use super::*;
 impl OrdivonServer {
     #[tool(
         name = "workspace.open",
-        description = "Create one detached Git workspace at an exact revision. This isolates the code tree and Git state; execution authority is determined separately by the Runtime mode.",
+        description = "Create one detached Git workspace at an exact revision. This isolates the code tree and Git state, not host authority.",
         annotations(
             title = "Open isolated workspace",
             read_only_hint = false,
@@ -175,7 +175,7 @@ impl OrdivonServer {
 
     #[tool(
         name = "workspace.exec",
-        description = "Run one command inside a workspace with authority determined by the configured Runtime mode. Trusted-local inherits the host user's delegated authority; isolated mode is explicit. The server owns identity, concurrency, Job IDs, and Attempt IDs; duplicate clientRequestId values are idempotent.",
+        description = "Run one command inside a workspace with the installed service user's trusted-local authority. The server owns identity, concurrency, Job IDs, and Attempt IDs; duplicate clientRequestId values are idempotent.",
         execution(task_support = "optional"),
         annotations(
             title = "Execute transactional workspace job",

@@ -12,10 +12,7 @@ use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use ordivon_exec::{
-    IsolationConfig, RegistryConfig, Runtime, RuntimeConfig, UniversalExecutorConfig,
-    WorkerIdentity,
-};
+use ordivon_exec::{RegistryConfig, Runtime, RuntimeConfig, UniversalExecutorConfig};
 use ordivon_mcp::server::{ExecutionContext, OrdivonServer, ServerConfig};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -35,33 +32,9 @@ struct HttpState {
 static HTTP_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static HTTP_TRACE_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ExecutionMode {
-    TrustedLocal,
-    Isolated,
-}
-
-impl ExecutionMode {
-    fn parse(value: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        match value {
-            "trusted-local" => Ok(Self::TrustedLocal),
-            "isolated" => Ok(Self::Isolated),
-            _ => Err("ORDIVON_EXECUTION_MODE must be trusted-local or isolated".into()),
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::TrustedLocal => "trusted-local",
-            Self::Isolated => "isolated",
-        }
-    }
-}
-
 struct AppConfig {
     bind: SocketAddr,
     token: String,
-    execution_mode: ExecutionMode,
     body_limit_bytes: usize,
     trust_cf_access: bool,
     server: ServerConfig,
@@ -118,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         bind = %address,
         endpoint = %format!("http://{address}/mcp"),
-        execution_mode = app.execution_mode.as_str(),
+        execution_mode = "trusted-local",
         "Ordivon MCP listening"
     );
 
@@ -216,9 +189,6 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     if token.len() < 32 {
         return Err("ORDIVON_BEARER_TOKEN must be at least 32 characters".into());
     }
-    let execution_mode = ExecutionMode::parse(
-        &std::env::var("ORDIVON_EXECUTION_MODE").unwrap_or_else(|_| "trusted-local".to_string()),
-    )?;
     let store_root = PathBuf::from(required_env("ORDIVON_STORE_ROOT")?);
     let registry_root = PathBuf::from(required_env("ORDIVON_REGISTRY_ROOT")?);
     let runner_path = PathBuf::from(required_env("ORDIVON_RUNNER_PATH")?);
@@ -232,12 +202,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                 .collect::<Vec<_>>()
         })
         .filter(|roots| !roots.is_empty())
-        .unwrap_or_else(|| match execution_mode {
-            ExecutionMode::TrustedLocal => vec![PathBuf::from("/")],
-            ExecutionMode::Isolated => {
-                vec![PathBuf::from("/usr/bin"), PathBuf::from("/usr/local/bin")]
-            }
-        });
+        .unwrap_or_else(|| vec![PathBuf::from("/")]);
     let trace_path = std::env::var("ORDIVON_TRACE_PATH")
         .ok()
         .map(PathBuf::from)
@@ -275,40 +240,11 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     }
     let principal =
         std::env::var("ORDIVON_PRINCIPAL").unwrap_or_else(|_| "principal:local-owner".to_string());
-    let (workspace_root, workspace_uid, workspace_gid, hardening) = match execution_mode {
-        ExecutionMode::TrustedLocal => (None, None, None, None),
-        ExecutionMode::Isolated => {
-            let control_root = PathBuf::from(required_env("ORDIVON_CONTROL_ROOT")?);
-            let worker_root = PathBuf::from(required_env("ORDIVON_WORKER_ROOT")?);
-            let cache_root = PathBuf::from(required_env("ORDIVON_CACHE_ROOT")?);
-            let runtime_view_root = PathBuf::from(required_env("ORDIVON_RUNTIME_VIEW_ROOT")?);
-            let worker_uid: u32 = required_env("ORDIVON_WORKER_UID")?.parse()?;
-            let worker_gid: u32 = required_env("ORDIVON_WORKER_GID")?.parse()?;
-            let hardening = IsolationConfig {
-                worker: WorkerIdentity {
-                    user: "ordivon-worker".to_string(),
-                    group: "ordivon-worker".to_string(),
-                    uid: worker_uid,
-                    gid: worker_gid,
-                },
-                control_root,
-                worker_root,
-                cache_root,
-                runtime_view_root,
-            };
-            (
-                Some(hardening.workspaces_root()),
-                Some(worker_uid),
-                Some(worker_gid),
-                Some(hardening),
-            )
-        }
-    };
+    let (workspace_root, workspace_uid, workspace_gid) = (None, None, None);
 
     Ok(AppConfig {
         bind,
         token,
-        execution_mode,
         body_limit_bytes,
         trust_cf_access,
         server: ServerConfig {
@@ -329,7 +265,6 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                     max_output_bytes: 16 * 1024 * 1024,
                 },
                 startup_grace_ms,
-                hardening,
             },
             execution: ExecutionContext {
                 principal,
@@ -408,30 +343,10 @@ fn unix_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{request_is_authorized, ExecutionMode, HttpState};
+    use super::{request_is_authorized, HttpState};
     use axum::http::{header, HeaderMap, HeaderValue};
     use std::sync::Arc;
 
-    #[test]
-    fn trusted_local_is_the_explicit_low_friction_mode() {
-        assert_eq!(
-            ExecutionMode::parse("trusted-local").unwrap(),
-            ExecutionMode::TrustedLocal
-        );
-    }
-
-    #[test]
-    fn isolated_mode_remains_available() {
-        assert_eq!(
-            ExecutionMode::parse("isolated").unwrap(),
-            ExecutionMode::Isolated
-        );
-    }
-
-    #[test]
-    fn unknown_execution_mode_is_rejected() {
-        assert!(ExecutionMode::parse("sandbox-everything").is_err());
-    }
     fn auth_state(trust_cf_access: bool) -> HttpState {
         HttpState {
             bearer: Arc::from("Bearer local-secret-token-value-1234567890"),

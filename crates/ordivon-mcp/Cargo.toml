@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 axum.workspace = true
-ordivon-exec = { path = "../ordivon-exec", features = ["isolated-execution"] }
+ordivon-exec = { path = "../ordivon-exec" }
 rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 schemars.workspace = true
 serde.workspace = true

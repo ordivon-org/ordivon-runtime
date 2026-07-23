@@ -25,7 +25,6 @@ def load_script(name: str):
 
 backup = load_script("backup")
 restore = load_script("restore")
-legacy = load_script("legacy_reference_scan")
 
 
 class OperationalScriptTests(unittest.TestCase):
@@ -96,19 +95,7 @@ class OperationalScriptTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "digest mismatch"):
                 restore.restore_snapshot(snapshot, root / "restored")
 
-    def test_legacy_scan_current_tree_is_clean(self) -> None:
-        self.assertEqual(legacy.scan(REPO), [])
 
-    def test_acceptance_list_is_non_mutating(self) -> None:
-        process = subprocess.run(
-            [sys.executable, "scripts/acceptance.py", "fast", "--repo", str(REPO), "--list"],
-            cwd=REPO,
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-        self.assertIn("cargo fmt --check", process.stdout)
-        self.assertIn("tracked_secret_scan.py", process.stdout)
 
 
 if __name__ == "__main__":

@@ -189,7 +189,6 @@ def start_server(repo: Path, root: Path, port: int, token: str) -> ServerProcess
             "ORDIVON_STORE_ROOT": str(root / "store"),
             "ORDIVON_REGISTRY_ROOT": str(root / "registry"),
             "ORDIVON_RUNNER_PATH": str(repo / "target/debug/ordivon-task-runner"),
-            "ORDIVON_EXECUTION_MODE": "trusted-local",
             "ORDIVON_TRACE_PATH": str(root / "registry/runtime-trace.jsonl"),
         }
     )

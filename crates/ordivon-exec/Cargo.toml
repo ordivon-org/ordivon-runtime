@@ -9,7 +9,6 @@ default = ["transactional-runtime"]
 systemd-supervisor = ["dep:libc"]
 universal-executor = ["dep:libc"]
 transactional-runtime = ["universal-executor", "dep:rusqlite", "dep:uuid"]
-isolated-execution = ["transactional-runtime"]
 
 [[bin]]
 name = "ordivon-job-fixture"

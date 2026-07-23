@@ -1,80 +1,45 @@
 # Ordivon Current State
 
-This is the single current-state and roadmap document. It describes what exists now, what is live, and the next observable state changes. It is not a historical record or a future capability catalogue.
-
 ## Product identity
 
-Ordivon is a local execution and recovery Runtime for capable Agents. It gives an authenticated Agent high-bandwidth access to the user's machine while preserving the execution facts that cannot be reconstructed after interruption.
+Ordivon is a trusted-local execution and recovery Runtime for capable Agents. It gives an authenticated Agent high-bandwidth access to the user's machine while preserving the execution facts needed after interruption.
 
-It is not an Agent loop, governance operating system, policy platform, document knowledge base, cloud scheduler, or multi-tenant control plane.
+It is not an Agent loop, governance operating system, policy platform, knowledge base, cloud scheduler, or multi-tenant control plane.
 
-## Current execution path
+## Production path
 
 ```text
 MCP client
+→ Cloudflare Access and Tunnel
+→ 127.0.0.1:8897
 → ordivon-mcp
 → ordivon-exec
 → SQLite Job / Attempt truth
 → systemd transient unit and cgroup
-→ task runner
-→ result and Artifacts
-→ reconciliation
+→ result, Artifacts, and reconciliation
 ```
 
-The public MCP surface contains ten tools: workspace open, close, read, mutate, diff, and exec; task observe, cancel, and list; and Artifact read. All clients share one transactional global execution limit; different Workspaces may execute concurrently, while each Workspace admits only one active command tree.
+The Rust service is the single Ordivon MCP origin. The former Supergateway/Desktop Commander bridge has been retired. A separate Docker MCP listener on `127.0.0.1:18812` is an independent tool system and does not share Ordivon Runtime state.
 
-## Current deployment truth
+## Current surface
 
-Repository `main` contains the simplified Runtime. The Rust service is installed locally and the production hostname is being moved from the retained Desktop Commander bridge to the Rust MCP. Exact truth remains observable through Git, systemd, listeners, and the Cloudflare origin.
+The public MCP surface contains ten tools: workspace open, close, read, mutate, diff, and exec; task observe, cancel, and list; and Artifact read.
 
-## Three long-term shifts
+All clients share one transactional global execution limit. Different Workspaces may execute concurrently, while each Workspace admits only one active command tree.
 
-### 1. Thin active context
+## Sources of truth
 
-An Agent should recover the repository's main mental model from `AGENTS.md`, this file, Runtime architecture, relevant source, and tests. Historical records remain in Git or dated files but do not enter the default context.
+- Git owns code history, diff, rollback, and workspace identity.
+- SQLite owns Job, Attempt, reservation, cancellation, and terminal resolution.
+- systemd/cgroups own live process-tree observation and termination.
+- bounded result and Artifact files own output bytes and Digests.
 
-### 2. Thin recovery and governance
+Everything else should be reconstructed instead of persisted as a second proof system.
 
-Git owns code history and rollback. SQLite, systemd/cgroups, and bounded result files preserve only non-reconstructable execution facts. Governance acts at actual failure points; it does not create a second proof system around ordinary reversible work.
+## Operating rule
 
-### 3. Reallocated responsibility
-
-The user owns intent, preferences, risk posture, and final commitments. The Agent owns implementation, testing, repair, and ordinary operations. The Runtime owns durable execution identity and recovery. Classical engineering mechanisms remain where they produce causal feedback or preserve reality, not as ceremony.
-
-## Current operational milestone
-
-**Complete production use of the merged Runtime without rebuilding a governance platform.**
-
-Exit conditions:
-
-1. the minimal Registry and ten-tool MCP run on the installed Rust service;
-2. Ordivon, FinHarness, and research Dogfood tasks complete through the Runtime;
-3. completed workspaces can be closed and removed;
-4. backup and restore preserve the minimal Registry;
-5. the production Cloudflare origin reaches the Rust MCP while the old bridge remains available only for rollback.
-
-## Post-adoption route
-
-### A. Real local use
-
-Install the Rust MCP on a separate loopback port and use it for real Ordivon, FinHarness, and research tasks. Do not add capabilities during installation. Measure where the Agent still falls back to Desktop Commander or manual intervention.
-
-### B. Recovery minimization
-
-Use Dogfood evidence to delete any persistent state, policy object, checker, or helper that does not preserve a non-reconstructable fact or improve observed recovery. Keep Git, minimal SQLite task truth, process ownership, cancellation, terminal results, and backup/restore.
-
-### C. Remote cutover
-
-Expose the Rust MCP through a separate Cloudflare route, verify authenticated full-authority operation, then switch the production hostname with the old bridge available for rollback. Remote transport does not imply reduced Agent authority.
-
-### D. Capability growth by failure
-
-Add a capability only after repeated real tasks demonstrate a missing operation. Prefer mature host CLIs through `workspace.exec`. Do not prebuild GitHub, Cloudflare, Docker, Browser, Scheduler, Memory, Skill Registry, or Agent-loop platforms.
-
-## Truth precedence
-
-Use observed source, tests, Git identity, and live process state first; then this document, Runtime architecture, and the Runbook. Dated records and closed Issues explain history only.
+Use Ordivon on real tasks. Add a capability only after repeated work demonstrates a missing operation that existing host CLIs through `workspace.exec` cannot provide. Delete state, checks, and helpers that do not preserve non-reconstructable execution truth or improve observed recovery.
 
 ## Explicit non-goals
 
-No new governance platform, Receipt hierarchy, document Registry, policy engine, Agent loop, cloud scheduler, capability catalogue, multi-tenancy, or UI is planned. Future work begins from a concrete failed task, not an imagined platform surface.
+No parallel Runtime, policy engine, Receipt hierarchy, document Registry, Agent loop, distributed scheduler, capability catalogue, multi-tenancy, UI, or internal sandbox platform is planned.

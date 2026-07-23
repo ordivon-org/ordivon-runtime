@@ -1,10 +1,10 @@
 # Ordivon Documents
 
-The default Agent context is deliberately small:
+The active Agent context contains four files:
 
 1. [`AGENTS.md`](../AGENTS.md) — read order and engineering defaults.
-2. [`current-state.md`](current-state.md) — current truth, active milestone, and next route.
-3. [`architecture/runtime.md`](architecture/runtime.md) — execution, authority, and recovery model.
-4. [`operations/runbook.md`](operations/runbook.md) — build, operate, migrate, back up, and recover.
+2. [`current-state.md`](current-state.md) — current deployed truth.
+3. [`architecture/runtime.md`](architecture/runtime.md) — execution and recovery model.
+4. [`operations/runbook.md`](operations/runbook.md) — build, operate, back up, and recover.
 
-Code, tests, Git identity, and live process state outrank text. Dated audits, reports, closure notes, and retrospectives are historical records and should be opened only to answer a specific question.
+Code, tests, Git identity, and live process state outrank text. Historical designs, reports, and removed systems are available through Git history and tag `m-series-closed-2026-07-22`, not the active tree.

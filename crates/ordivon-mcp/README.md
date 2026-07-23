@@ -1,8 +1,8 @@
 # ordivon-mcp
 
-`ordivon-mcp` is the single current MCP entry over `ordivon-exec`.
+`ordivon-mcp` is the single MCP entry over `ordivon-exec`.
 
-It serves Streamable HTTP on a loopback address, requires a random bearer token, bounds request bodies, and exposes:
+It serves Streamable HTTP on loopback, requires a random bearer token, bounds request bodies, and exposes:
 
 ```text
 workspace.open
@@ -17,8 +17,8 @@ task.list
 artifact.read
 ```
 
-The adapter owns protocol schemas, MCP Task projection, transport authentication, and conversion between tool results and Runtime results. It binds the server-owned Principal and one global concurrency limit shared by all clients; no policy or profile objects are part of the execution contract. `ordivon-exec` additionally serializes command execution within each Workspace while allowing different Workspaces to use the remaining global capacity. A capacity rejection is retryable and includes `retryAfterMs` plus the active, limit, scope, and optional Workspace identity. Filesystem, Git, execution, idempotency, cancellation, result, and reconciliation semantics remain in `ordivon-exec`.
+The adapter owns protocol schemas, MCP Task projection, authentication, and conversion between MCP and Runtime results. Filesystem, Git, execution, idempotency, cancellation, result, capacity, and reconciliation semantics remain in `ordivon-exec`.
 
-`workspace.open` isolates the checked-out code tree and Git state. It does not create a hermetic filesystem or security sandbox. `workspace.exec` authority comes from the Runtime mode: `trusted-local` is the default and inherits the service user's host authority, while `isolated` explicitly activates the reduced-authority non-root worker boundary.
+`workspace.open` isolates Git state, not host authority. `workspace.exec` inherits the installed service user's trusted-local authority.
 
-For a Cloudflare Access protected remote hostname, set `ORDIVON_TRUST_CF_ACCESS=true`. The loopback service then accepts either its fixed local Bearer token or a non-empty `Cf-Access-Jwt-Assertion` inserted by Access.
+For a Cloudflare Access protected hostname, set `ORDIVON_TRUST_CF_ACCESS=true`. The loopback origin then accepts either its fixed local Bearer token or the Access JWT assertion.

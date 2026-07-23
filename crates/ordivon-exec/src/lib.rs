@@ -1,7 +1,5 @@
 mod error;
 mod file;
-#[cfg(feature = "isolated-execution")]
-mod isolation;
 mod repo;
 #[cfg(feature = "transactional-runtime")]
 mod runtime;
@@ -48,9 +46,4 @@ pub use runtime::{
     RuntimeResult, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
     TaskRunRequest, TerminalCommit, UniversalExecutionRequest, MAX_RUNTIME_LIST_LIMIT,
     RUNTIME_MIGRATION_CHECKSUM, RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM, RUNTIME_SCHEMA_VERSION,
-};
-
-#[cfg(feature = "isolated-execution")]
-pub use isolation::{
-    IsolationConfig, OrphanRemediator, RemediationResult, WorkerIdentity, ISOLATION_SCHEMA_VERSION,
 };

@@ -4,32 +4,21 @@ Ordivon optimizes for one understandable execution path, minimal active context,
 
 ## Start from current truth
 
-Read `AGENTS.md` and `docs/current-state.md`. Confirm the branch, exact HEAD, relevant source and tests, and live topology. Do not load historical reports by default.
-
-## Issue contract
-
-An implementation Issue describes one observable state change:
-
-```text
-current state
-→ one bounded change
-→ target state
-→ reproducible exit evidence
-```
-
-Keep only work that is ready for the active milestone open. Do not use Issues as product encyclopedias, capability catalogues, or permanent roadmaps.
+Read `AGENTS.md` and `docs/current-state.md`. Confirm the branch, exact HEAD, relevant source and tests, and live topology. Do not load historical implementations by default.
 
 ## Change contract
 
-Every persistent addition must name:
+One change should express:
 
-1. the observed failure or missing capability;
-2. why the current code, Git, tests, Runtime, or an existing CLI cannot solve it;
-3. the structure it replaces.
+```text
+observed failure or missing operation
+→ bounded implementation
+→ reproducible result
+```
 
-Preserve unrelated user changes. Prefer isolated worktrees and ordinary Git rollback. Do not add parallel execution paths, document Registries, Receipt hierarchies, evidence envelopes, wording gates, per-tool approval systems, or speculative Adapters.
+Every persistent addition must explain why current code, Git, tests, Runtime, or an existing CLI cannot solve the problem, and what existing structure it replaces. Preserve unrelated user changes. Prefer isolated Git workspaces and ordinary rollback. Do not add parallel execution paths, document Registries, Receipt hierarchies, wording gates, per-tool approval systems, or speculative Adapters.
 
-`trusted-local` inherits the service user's authority. `isolated` is explicit. Preserve Runtime invariants such as idempotency, ambiguous-dispatch handling, cgroup ownership, cancellation, result identity, and reconciliation without treating them as restrictions on Agent capability.
+Ordivon is a trusted-local Runtime. Untrusted workloads require an external isolation boundary. Preserve idempotency, process ownership, cancellation, result identity, and reconciliation without turning them into governance ceremony.
 
 ## Verification
 
@@ -41,4 +30,4 @@ cargo test --workspace
 ruff check scripts/
 ```
 
-Use stronger integration or Release checks when systemd, cgroups, persistence, transport, isolation, or deployment behavior changes.
+Use stronger integration or release checks only when systemd, cgroups, persistence, transport, or deployment behavior changes.

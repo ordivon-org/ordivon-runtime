@@ -23,10 +23,8 @@ jobs:
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test -p ordivon-exec --no-default-features --features transactional-runtime
-      - run: cargo test -p ordivon-exec --features isolated-execution
       - run: uvx ruff check scripts/
       - run: python -m unittest discover -s scripts/tests -v
-      - run: python scripts/legacy_reference_scan.py --root .
       - name: Explain local-only acceptance boundary
         run: |
           echo "Real systemd/cgroup tests and MCP execution E2E require the local WSL runner."

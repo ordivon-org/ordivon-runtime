@@ -44,8 +44,6 @@ pub struct RuntimeConfig {
     pub registry: RegistryConfig,
     pub executor: UniversalExecutorConfig,
     pub startup_grace_ms: u64,
-    #[cfg(feature = "isolated-execution")]
-    pub hardening: Option<crate::IsolationConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -53,8 +51,6 @@ pub struct Runtime {
     registry: Registry,
     executor: UniversalExecutorConfig,
     startup_grace_ms: u64,
-    #[cfg(feature = "isolated-execution")]
-    hardening: Option<crate::IsolationConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -93,39 +89,11 @@ impl Runtime {
         }
         ensure_systemd_visible(&config.registry.store_root, "registry.storeRoot")?;
         ensure_systemd_visible(&config.executor.store_root, "executor.storeRoot")?;
-        #[cfg(feature = "isolated-execution")]
-        if let Some(hardening) = &config.hardening {
-            hardening.validate()?;
-            validate_hardening_roots(&config, hardening)?;
-            crate::isolation::ensure_traversal_directory(
-                &hardening.workspaces_root(),
-                hardening.worker.gid,
-                0o710,
-            )?;
-            crate::isolation::ensure_traversal_directory(
-                &hardening.attempts_root(),
-                hardening.worker.gid,
-                0o710,
-            )?;
-            crate::isolation::ensure_traversal_directory(
-                &hardening.runtime_view_root,
-                hardening.worker.gid,
-                0o750,
-            )?;
-            crate::isolation::ensure_owned_directory(
-                &hardening.cache_root,
-                hardening.worker.uid,
-                hardening.worker.gid,
-                0o750,
-            )?;
-        }
         let registry = Registry::initialize(config.registry)?;
         let runtime = Self {
             registry,
             executor: config.executor,
             startup_grace_ms: config.startup_grace_ms,
-            #[cfg(feature = "isolated-execution")]
-            hardening: config.hardening,
         };
         runtime.reconcile_recoverable_orphans()?;
         Ok(runtime)
@@ -210,14 +178,7 @@ impl Runtime {
     }
 
     fn inherit_host_environment(&self) -> bool {
-        #[cfg(feature = "isolated-execution")]
-        {
-            self.hardening.is_none()
-        }
-        #[cfg(not(feature = "isolated-execution"))]
-        {
-            true
-        }
+        true
     }
 
     fn materialize_bundle(&self, attempt: &AttemptRecord) -> RuntimeResult<AttemptRecord> {
@@ -381,8 +342,6 @@ impl Runtime {
             &bundle_path,
             Path::new(&plan.workspace_path),
             runtime_ceiling,
-            #[cfg(feature = "isolated-execution")]
-            self.hardening.as_ref(),
         )?;
         if !output.status.success() {
             let detail = format!(
@@ -1247,69 +1206,10 @@ impl Runtime {
         })
     }
 
-    #[cfg(feature = "isolated-execution")]
-    fn cleanup_payload_view(&self, attempt_id: &str) -> RuntimeResult<()> {
-        let Some(hardening) = &self.hardening else {
-            return Ok(());
-        };
-        let view_root = hardening.payload_view_root(attempt_id);
-        if view_root.exists() {
-            fs::remove_dir_all(&view_root)
-                .map_err(|error| io_error("remove isolated payload view", error))?;
-        }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "isolated-execution"))]
     fn cleanup_payload_view(&self, _attempt_id: &str) -> RuntimeResult<()> {
         Ok(())
     }
 
-    #[cfg(feature = "isolated-execution")]
-    fn payload_config(
-        &self,
-        attempt_id: &str,
-        plan: &RuntimeExecutionPlan,
-    ) -> RuntimeResult<Option<RunnerPayloadConfig>> {
-        let Some(hardening) = &self.hardening else {
-            return Ok(None);
-        };
-        let runtime_dir = hardening.payload_runtime_dir(attempt_id);
-        crate::isolation::ensure_owned_directory(
-            &runtime_dir,
-            hardening.worker.uid,
-            hardening.worker.gid,
-            0o700,
-        )?;
-        let view_root = hardening.payload_view_root(attempt_id);
-        for path in [
-            view_root.clone(),
-            view_root.join("workspace"),
-            view_root.join("runtime"),
-            view_root.join("cache"),
-        ] {
-            crate::isolation::ensure_traversal_directory(&path, hardening.worker.gid, 0o750)?;
-        }
-        let workspace = Path::new(&plan.workspace_path);
-        let cwd = Path::new(&plan.cwd);
-        let relative_cwd = cwd
-            .strip_prefix(workspace)
-            .map_err(|_| RuntimeError::invalid("isolated cwd escaped workspace", "cwd"))?;
-        let workspace_view = view_root.join("workspace");
-        Ok(Some(RunnerPayloadConfig {
-            uid: hardening.worker.uid,
-            gid: hardening.worker.gid,
-            workspace_view: workspace_view.to_string_lossy().into_owned(),
-            cwd_view: workspace_view
-                .join(relative_cwd)
-                .to_string_lossy()
-                .into_owned(),
-            runtime_view: view_root.join("runtime").to_string_lossy().into_owned(),
-            cache_view: view_root.join("cache").to_string_lossy().into_owned(),
-        }))
-    }
-
-    #[cfg(not(feature = "isolated-execution"))]
     fn payload_config(
         &self,
         _attempt_id: &str,
@@ -1319,52 +1219,8 @@ impl Runtime {
     }
 
     fn payload_evidence_matches(&self, uid: Option<u32>, gid: Option<u32>) -> bool {
-        #[cfg(feature = "isolated-execution")]
-        {
-            match &self.hardening {
-                Some(hardening) => {
-                    uid == Some(hardening.worker.uid) && gid == Some(hardening.worker.gid)
-                }
-                None => uid.is_none() && gid.is_none(),
-            }
-        }
-        #[cfg(not(feature = "isolated-execution"))]
-        {
-            uid.is_none() && gid.is_none()
-        }
+        uid.is_none() && gid.is_none()
     }
-}
-
-#[cfg(feature = "isolated-execution")]
-fn validate_hardening_roots(
-    config: &RuntimeConfig,
-    hardening: &crate::IsolationConfig,
-) -> RuntimeResult<()> {
-    if !config
-        .registry
-        .store_root
-        .starts_with(&hardening.control_root)
-        || !config.registry.db_path.starts_with(&hardening.control_root)
-        || !config
-            .executor
-            .store_root
-            .starts_with(&hardening.control_root)
-    {
-        return Err(RuntimeError::invalid(
-            "Registry and executor metadata must remain under isolated controlRoot",
-            "controlRoot",
-        ));
-    }
-    if config.executor.workspace_root.as_ref() != Some(&hardening.workspaces_root())
-        || config.executor.workspace_uid != Some(hardening.worker.uid)
-        || config.executor.workspace_gid != Some(hardening.worker.gid)
-    {
-        return Err(RuntimeError::invalid(
-            "executor workspace root and owner must match isolated worker configuration",
-            "workspaceRoot",
-        ));
-    }
-    Ok(())
 }
 
 fn artifact_descriptor(
@@ -1522,7 +1378,6 @@ fn build_systemd_run_command(
     bundle_path: &Path,
     _workspace_path: &Path,
     runtime_ceiling_ms: u64,
-    #[cfg(feature = "isolated-execution")] hardening: Option<&crate::IsolationConfig>,
 ) -> RuntimeResult<Command> {
     let mut command = Command::new("systemd-run");
     command
@@ -1538,82 +1393,7 @@ fn build_systemd_run_command(
         ])
         .arg(format!("--property=RuntimeMaxSec={runtime_ceiling_ms}ms"));
 
-    #[cfg(feature = "isolated-execution")]
-    let trusted = hardening.is_none();
-    #[cfg(not(feature = "isolated-execution"))]
-    let trusted = true;
-    if trusted {
-        append_trusted_environment(&mut command);
-    }
-
-    #[cfg(feature = "isolated-execution")]
-    if let Some(hardening) = hardening {
-        let attempt_id = bundle_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                RuntimeError::invalid("bundle path omitted Attempt identity", "bundlePath")
-            })?;
-        let runtime_dir = hardening.payload_runtime_dir(attempt_id);
-        let view_root = hardening.payload_view_root(attempt_id);
-        command
-            .args([
-                "--property=NoNewPrivileges=yes",
-                "--property=AmbientCapabilities=",
-                "--property=ProtectSystem=strict",
-                "--property=PrivateTmp=yes",
-                "--property=PrivateNetwork=yes",
-                "--property=PrivateDevices=yes",
-                "--property=PrivateIPC=yes",
-                "--property=PrivatePIDs=yes",
-                "--property=ProtectProc=invisible",
-                "--property=ProcSubset=pid",
-                "--property=RestrictNamespaces=yes",
-                "--property=RestrictAddressFamilies=AF_UNIX",
-                "--property=ProtectKernelTunables=yes",
-                "--property=ProtectKernelModules=yes",
-                "--property=ProtectControlGroups=yes",
-                "--property=ProtectHostname=yes",
-                "--property=ProtectClock=yes",
-                "--property=RestrictSUIDSGID=yes",
-                "--property=LockPersonality=yes",
-                "--property=SystemCallArchitectures=native",
-                "--property=InaccessiblePaths=-/run/systemd/private -/run/dbus/system_bus_socket -/run/docker.sock -/var/run/docker.sock -/run/credentials -/root/.ssh -/root/.cloudflared -/root/.config -/root/.aws -/root/.kube -/root/.docker -/root/.git-credentials -/root/.netrc",
-                "--property=UMask=0077",
-                "--property=TasksMax=128",
-                "--property=MemoryMax=1073741824",
-                "--property=CapabilityBoundingSet=CAP_SETUID CAP_SETGID",
-                "--property=ProtectHome=yes",
-            ])
-            .arg(format!("--property=ReadWritePaths={}", bundle_path.display()))
-            .arg(format!(
-                "--property=InaccessiblePaths={}",
-                hardening.worker_root.display()
-            ))
-            .arg(format!(
-                "--property=InaccessiblePaths={}",
-                hardening.cache_root.display()
-            ))
-            .arg(format!(
-                "--property=BindPaths={}:{}",
-                _workspace_path.display(),
-                view_root.join("workspace").display()
-            ))
-            .arg(format!(
-                "--property=BindPaths={}:{}",
-                runtime_dir.display(),
-                view_root.join("runtime").display()
-            ))
-            .arg(format!(
-                "--property=BindPaths={}:{}",
-                hardening.cache_root.display(),
-                view_root.join("cache").display()
-            ))
-            .arg(format!(
-                "--property=InaccessiblePaths={}/workspace/.git",
-                view_root.display()
-            ));
-    }
+    append_trusted_environment(&mut command);
 
     command.arg(runner).arg("--task-dir").arg(bundle_path);
     Ok(command)
@@ -1659,7 +1439,6 @@ fn systemd_run(
     bundle_path: &Path,
     workspace_path: &Path,
     runtime_ceiling_ms: u64,
-    #[cfg(feature = "isolated-execution")] hardening: Option<&crate::IsolationConfig>,
 ) -> RuntimeResult<std::process::Output> {
     build_systemd_run_command(
         unit_name,
@@ -1667,8 +1446,6 @@ fn systemd_run(
         bundle_path,
         workspace_path,
         runtime_ceiling_ms,
-        #[cfg(feature = "isolated-execution")]
-        hardening,
     )?
     .output()
     .map_err(|error| tool_error("cannot execute systemd-run", error))
@@ -1991,8 +1768,6 @@ mod trusted_systemd_command_tests {
             Path::new("/var/lib/ordivon/attempts/attempt-test"),
             Path::new("/root/projects/Ordivon"),
             10_000,
-            #[cfg(feature = "isolated-execution")]
-            None,
         )
         .unwrap();
         let args = command
@@ -2021,50 +1796,5 @@ mod trusted_systemd_command_tests {
         assert!(valid_environment_name("GITHUB_TOKEN"));
         assert!(valid_environment_name("CARGO_BIN_EXE_ordivon_job_fixture"));
         assert!(!valid_environment_name("CARGO_BIN_EXE_ordivon-job-fixture"));
-    }
-
-    #[cfg(feature = "isolated-execution")]
-    #[test]
-    fn isolated_command_keeps_the_explicit_sandbox() {
-        let hardening = crate::IsolationConfig {
-            worker: crate::WorkerIdentity {
-                user: "ordivon-worker".to_string(),
-                group: "ordivon-worker".to_string(),
-                uid: 1001,
-                gid: 1001,
-            },
-            control_root: PathBuf::from("/var/lib/ordivon/control"),
-            worker_root: PathBuf::from("/var/lib/ordivon/worker"),
-            cache_root: PathBuf::from("/var/cache/ordivon-worker"),
-            runtime_view_root: PathBuf::from("/run/ordivon"),
-        };
-        let command = build_systemd_run_command(
-            "ordivon-test.service",
-            Path::new("/usr/bin/true"),
-            Path::new("/var/lib/ordivon/control/attempts/attempt-test"),
-            Path::new("/var/lib/ordivon/worker/workspaces/workspace-test"),
-            10_000,
-            Some(&hardening),
-        )
-        .unwrap();
-        let args = command
-            .get_args()
-            .map(|value| value.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(" ");
-        for required in [
-            "PrivateNetwork=yes",
-            "ProtectSystem=strict",
-            "NoNewPrivileges=yes",
-            "CapabilityBoundingSet=CAP_SETUID CAP_SETGID",
-            "ProtectHome=yes",
-            "ReadWritePaths=",
-        ] {
-            assert!(
-                args.contains(required),
-                "isolated command omitted {required}"
-            );
-        }
-        assert!(!args.contains("--setenv=HOME="));
     }
 }

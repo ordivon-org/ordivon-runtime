@@ -92,8 +92,6 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
         },
         executor: executor.clone(),
         startup_grace_ms: 2000,
-        #[cfg(feature = "isolated-execution")]
-        hardening: None,
     })
     .unwrap();
     let request = TaskRunRequest {
@@ -236,8 +234,6 @@ impl IntegrationContext {
             registry: self.registry.clone(),
             executor: self.executor.clone(),
             startup_grace_ms,
-            #[cfg(feature = "isolated-execution")]
-            hardening: None,
         })
         .unwrap()
     }

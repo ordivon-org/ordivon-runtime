@@ -48,7 +48,6 @@ impl Sandbox {
                     max_output_bytes: 1024 * 1024,
                 },
                 startup_grace_ms: 1000,
-                hardening: None,
             },
             execution: ExecutionContext {
                 principal: "principal:mcp-test".to_string(),
