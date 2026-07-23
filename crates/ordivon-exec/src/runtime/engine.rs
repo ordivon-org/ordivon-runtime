@@ -87,8 +87,6 @@ impl Runtime {
                 "startupGraceMs",
             ));
         }
-        ensure_systemd_visible(&config.registry.store_root, "registry.storeRoot")?;
-        ensure_systemd_visible(&config.executor.store_root, "executor.storeRoot")?;
         let registry = Registry::initialize(config.registry)?;
         let runtime = Self {
             registry,
@@ -138,8 +136,6 @@ impl Runtime {
                 .map_err(map_universal_error)?;
         let cwd = resolve_workspace_cwd(&record, &request.execution.cwd_relative)
             .map_err(map_universal_error)?;
-        ensure_systemd_visible(&workspace_path, "workspacePath")?;
-        ensure_systemd_visible(&cwd, "cwd")?;
         let executable = validate_executable(&self.executor, &request.execution.executable)?;
         Ok(RuntimeExecutionPlan {
             schema_version: RUNTIME_SCHEMA_VERSION,
@@ -1744,21 +1740,42 @@ fn tool_error(context: &str, error: std::io::Error) -> RuntimeError {
     )
 }
 
-fn ensure_systemd_visible(path: &Path, field: &str) -> RuntimeResult<()> {
-    for private_root in ["/tmp", "/var/tmp", "/dev/shm"] {
-        if path.starts_with(private_root) {
-            return Err(RuntimeError::invalid(
-                format!("{field} is hidden by the Runner PrivateTmp boundary"),
-                field,
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod trusted_systemd_command_tests {
     use super::*;
+
+    #[test]
+    fn trusted_runtime_accepts_temporary_storage_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "ordivon-runtime-temp-root-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime = Runtime::new(RuntimeConfig {
+            registry: RegistryConfig {
+                db_path: root.join("registry/registry.sqlite3"),
+                store_root: root.join("registry"),
+                busy_timeout_ms: 5_000,
+            },
+            executor: UniversalExecutorConfig {
+                store_root: root.join("runtime"),
+                workspace_root: None,
+                workspace_uid: None,
+                workspace_gid: None,
+                runner_path: PathBuf::from("/usr/bin/true"),
+                allowed_executable_roots: vec![PathBuf::from("/")],
+                max_runtime_ms: 60_000,
+                max_output_bytes: 1_048_576,
+            },
+            startup_grace_ms: 2_000,
+        })
+        .unwrap();
+        drop(runtime);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn trusted_command_keeps_only_process_ownership_and_lifecycle_properties() {

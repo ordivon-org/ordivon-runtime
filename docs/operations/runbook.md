@@ -44,6 +44,24 @@ mcp.ordivon.com
 
 There is no Ordivon rollback bridge on port 8811. The independent Docker MCP listener on `127.0.0.1:18812` is outside Ordivon.
 
+## Local Runtime acceptance
+
+Run these only when process ownership, cancellation, persistence, transport, or deployment changes:
+
+```bash
+cargo build -p ordivon-exec --bin ordivon-task-runner
+ORDIVON_RUN_SYSTEMD_SPIKE=1 \
+  cargo test -p ordivon-exec --features systemd-supervisor \
+  --test systemd_supervisor -- --ignored --test-threads=1
+ORDIVON_RUN_INTEGRATION=1 \
+ORDIVON_RUNNER_PATH="$PWD/target/debug/ordivon-task-runner" \
+  cargo test -p ordivon-exec --test transactional_runtime \
+  -- --ignored --test-threads=1
+python scripts/mcp_e2e.py --repo "$PWD"
+```
+
+Temporary filesystem roots are valid in trusted-local mode because the Runner does not use `PrivateTmp`.
+
 ## Running tasks
 
 Use `task.list`, `task.observe`, and `task.cancel`. Restarting the MCP reconciles nonterminal Attempts and held orphan reservations from SQLite, result bundles, and systemd/cgroup state.

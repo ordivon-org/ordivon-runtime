@@ -15,7 +15,8 @@ Ordivon is a trusted-local execution Runtime. It intentionally inherits the inst
 Strong controls remain where reality cannot be reconstructed safely:
 
 - bearer credentials and Cloudflare Access authentication;
-- loopback-only origin and bounded request bodies;
+- loopback-only origin, bounded request bodies, and Bearer authentication for direct local clients;
+- Cloudflare Access assertion trust only when Cloudflare Tunnel is the remote path to that loopback origin;
 - idempotent admission and transactional capacity ownership;
 - ambiguous dispatch, process-tree ownership, timeout, and cancellation;
 - persistent Job, Attempt, result, and Artifact identity.

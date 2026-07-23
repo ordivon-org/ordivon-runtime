@@ -28,4 +28,4 @@ jobs:
       - name: Explain local-only acceptance boundary
         run: |
           echo "Real systemd/cgroup tests and MCP execution E2E require the local WSL runner."
-          echo "Run: python scripts/acceptance.py release --release-opt-in"
+          echo 'Run the commands documented in docs/operations/runbook.md under "Local Runtime acceptance".'

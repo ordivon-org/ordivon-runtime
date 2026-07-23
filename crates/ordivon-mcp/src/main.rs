@@ -50,12 +50,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init();
 
     let app = load_config()?;
+    validate_loopback_bind(app.bind)?;
     let startup_runtime = Runtime::new(app.server.runtime.clone())?;
     startup_runtime.reconcile_all()?;
     drop(startup_runtime);
-    if !app.bind.ip().is_loopback() {
-        return Err("ORDIVON_BIND must use a loopback address".into());
-    }
     let listener = tokio::net::TcpListener::bind(app.bind).await?;
     let address = listener.local_addr()?;
     let cancellation = CancellationToken::new();
@@ -179,6 +177,14 @@ fn transport_config(cancellation: CancellationToken) -> StreamableHttpServerConf
         .disable_allowed_hosts()
         .disable_allowed_origins()
         .with_cancellation_token(cancellation)
+}
+
+fn validate_loopback_bind(bind: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    if bind.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err("ORDIVON_BIND must use a loopback address".into())
+    }
 }
 
 fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
@@ -343,7 +349,7 @@ fn unix_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{request_is_authorized, HttpState};
+    use super::{request_is_authorized, validate_loopback_bind, HttpState};
     use axum::http::{header, HeaderMap, HeaderValue};
     use std::sync::Arc;
 
@@ -354,6 +360,13 @@ mod tests {
             body_limit_bytes: 1024,
             trust_cf_access,
         }
+    }
+
+    #[test]
+    fn only_loopback_bindings_are_accepted() {
+        assert!(validate_loopback_bind("127.0.0.1:8897".parse().unwrap()).is_ok());
+        assert!(validate_loopback_bind("[::1]:8897".parse().unwrap()).is_ok());
+        assert!(validate_loopback_bind("0.0.0.0:8897".parse().unwrap()).is_err());
     }
 
     #[test]
