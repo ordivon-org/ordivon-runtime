@@ -39,3 +39,7 @@ ruff check scripts/
 ```
 
 The complete pre-simplification implementation remains recoverable at Git tag `m-series-closed-2026-07-22`.
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE).
