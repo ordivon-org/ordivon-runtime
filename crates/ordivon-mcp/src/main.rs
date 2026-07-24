@@ -52,7 +52,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = load_config()?;
     validate_loopback_bind(app.bind)?;
     let startup_runtime = Runtime::new(app.server.runtime.clone())?;
-    startup_runtime.reconcile_all()?;
+    let startup_reconciliation = startup_runtime.reconcile_all()?;
+    if startup_reconciliation.failed > 0 {
+        tracing::warn!(
+            inspected = startup_reconciliation.inspected,
+            reconciled = startup_reconciliation.reconciled,
+            recovered_orphans = startup_reconciliation.recovered_orphans,
+            quarantined = startup_reconciliation.quarantined,
+            unchanged = startup_reconciliation.unchanged,
+            failed = startup_reconciliation.failed,
+            "runtime startup reconciliation isolated Job-level failures"
+        );
+        for failure in &startup_reconciliation.failures {
+            tracing::warn!(
+                job_id = %failure.job_id,
+                attempt_id = %failure.attempt_id,
+                code = failure.code.as_str(),
+                message = %failure.message,
+                "runtime startup reconciliation requires targeted recovery"
+            );
+        }
+    } else {
+        tracing::info!(
+            inspected = startup_reconciliation.inspected,
+            reconciled = startup_reconciliation.reconciled,
+            recovered_orphans = startup_reconciliation.recovered_orphans,
+            quarantined = startup_reconciliation.quarantined,
+            unchanged = startup_reconciliation.unchanged,
+            "runtime startup reconciliation completed"
+        );
+    }
     drop(startup_runtime);
     let listener = tokio::net::TcpListener::bind(app.bind).await?;
     let address = listener.local_addr()?;

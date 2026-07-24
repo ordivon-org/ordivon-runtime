@@ -57,6 +57,25 @@ pub struct Runtime {
     lifecycle_lock: Arc<Mutex<()>>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationFailure {
+    pub attempt_id: String,
+    pub job_id: String,
+    pub code: RuntimeErrorCode,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ReconciliationReport {
+    pub inspected: usize,
+    pub reconciled: usize,
+    pub recovered_orphans: usize,
+    pub quarantined: usize,
+    pub unchanged: usize,
+    pub failed: usize,
+    pub failures: Vec<ReconciliationFailure>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BundleManifest {
@@ -868,41 +887,87 @@ impl Runtime {
         self.reconcile_attempt(&attempt.attempt_id)
     }
 
-    pub fn reconcile_all(&self) -> RuntimeResult<Vec<TaskObservation>> {
-        self.reconcile_recoverable_orphans()?;
-        let attempts = self.registry.list_nonterminal_attempts()?;
-        let mut observations = Vec::with_capacity(attempts.len());
-        for attempt in attempts {
-            if attempt.state == AttemptState::Accepted {
-                self.ensure_attempt_dispatched(&attempt)?;
+    pub fn reconcile_all(&self) -> RuntimeResult<ReconciliationReport> {
+        let mut report = ReconciliationReport::default();
+        self.reconcile_recoverable_orphans_into(&mut report)?;
+        for attempt in self.registry.list_nonterminal_attempts()? {
+            report.inspected += 1;
+            let result = if attempt.state == AttemptState::Accepted {
+                self.ensure_attempt_dispatched(&attempt)
             } else {
-                self.reconcile_attempt(&attempt.attempt_id)?;
+                self.reconcile_attempt(&attempt.attempt_id)
+            };
+            match result {
+                Ok(()) => {
+                    let current = self.registry.get_attempt(&attempt.attempt_id)?;
+                    if current.state == AttemptState::Orphaned {
+                        report.quarantined += 1;
+                    } else if current.state == attempt.state {
+                        report.unchanged += 1;
+                    } else {
+                        report.reconciled += 1;
+                    }
+                    self.registry
+                        .clear_reconciliation_failure(&attempt.attempt_id, now_ms()?)?;
+                }
+                Err(error) => {
+                    self.record_isolated_reconciliation_failure(&attempt, error, &mut report)?
+                }
             }
-            observations.push(self.observation_from_registry(&attempt.job_id, 0, 0)?);
         }
-        Ok(observations)
+        Ok(report)
     }
 
-    pub fn reconcile_recoverable_orphans(&self) -> RuntimeResult<Vec<String>> {
-        let mut recovered = Vec::new();
+    pub fn reconcile_recoverable_orphans(&self) -> RuntimeResult<ReconciliationReport> {
+        let mut report = ReconciliationReport::default();
+        self.reconcile_recoverable_orphans_into(&mut report)?;
+        Ok(report)
+    }
+
+    fn reconcile_recoverable_orphans_into(
+        &self,
+        report: &mut ReconciliationReport,
+    ) -> RuntimeResult<()> {
         for attempt in self.registry.list_held_orphaned_attempts()? {
+            report.inspected += 1;
             if !Path::new(&attempt.bundle_path).join(RESULT_FILE).is_file() {
+                report.unchanged += 1;
                 continue;
             }
             match self.recover_orphaned_runner_result(&attempt) {
-                Ok(true) => recovered.push(attempt.attempt_id),
-                Ok(false) => {}
-                Err(error)
-                    if matches!(
-                        error.code,
-                        RuntimeErrorCode::ResultIdentityConflict
-                            | RuntimeErrorCode::ArtifactIdentityConflict
-                    ) || (error.code == RuntimeErrorCode::RegistryCorrupt
-                        && error.field.as_deref() == Some("result")) => {}
-                Err(error) => return Err(error),
+                Ok(true) => {
+                    report.recovered_orphans += 1;
+                    self.registry
+                        .clear_reconciliation_failure(&attempt.attempt_id, now_ms()?)?;
+                }
+                Ok(false) => report.unchanged += 1,
+                Err(error) => {
+                    self.record_isolated_reconciliation_failure(&attempt, error, report)?
+                }
             }
         }
-        Ok(recovered)
+        Ok(())
+    }
+
+    fn record_isolated_reconciliation_failure(
+        &self,
+        attempt: &AttemptRecord,
+        error: RuntimeError,
+        report: &mut ReconciliationReport,
+    ) -> RuntimeResult<()> {
+        if error.is_reconciliation_fatal() {
+            return Err(error);
+        }
+        self.registry
+            .record_reconciliation_failure(attempt, &error, now_ms()?)?;
+        report.failed += 1;
+        report.failures.push(ReconciliationFailure {
+            attempt_id: attempt.attempt_id.clone(),
+            job_id: attempt.job_id.clone(),
+            code: error.code,
+            message: error.message,
+        });
+        Ok(())
     }
 
     fn recover_orphaned_runner_result(&self, attempt: &AttemptRecord) -> RuntimeResult<bool> {

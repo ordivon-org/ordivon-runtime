@@ -8,6 +8,7 @@ use ordivon_exec::{
     WorkspaceCloseRequest, WorkspaceWriteRequest, MAX_UNIVERSAL_OUTPUT_BYTES,
     MAX_UNIVERSAL_RUNTIME_MS, RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
+use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -436,6 +437,110 @@ fn runtime_cancel_reconciles_a_completed_runner_result_before_stop_intent() {
     assert_eq!(completed.status, "succeeded");
     assert!(completed.stdout_tail.contains("RESULT_ALREADY_FINISHED"));
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_reconcile_all_isolates_one_broken_job_and_converges_another() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("reconcile-isolation");
+    context.write(
+        "runtime_isolation_bad.py",
+        "import time\ntime.sleep(0.4)\nprint('BAD_JOB_RESULT', flush=True)\n",
+    );
+    let second_workspace = format!("runtime-reconcile-good-{}", Uuid::now_v7());
+    create_git_workspace(
+        &context.executor,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: second_workspace.clone(),
+            source_repo: context.repo.to_string_lossy().into_owned(),
+            source_revision: context.revision.clone(),
+        },
+    )
+    .unwrap();
+    write_workspace_text(
+        &context.executor,
+        &WorkspaceWriteRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: second_workspace.clone(),
+            relative_path: "runtime_isolation_good.py".to_string(),
+            content: "import time\ntime.sleep(0.6)\nprint('GOOD_JOB_RESULT', flush=True)\n"
+                .to_string(),
+            expected_digest: None,
+        },
+    )
+    .unwrap();
+
+    let runtime = context.runtime(2000);
+    let bad = runtime
+        .run_task(&context.request("runtime_isolation_bad.py", 0))
+        .unwrap();
+    let mut good_request = context.request("runtime_isolation_good.py", 0);
+    good_request.execution.workspace_id = second_workspace;
+    good_request.client_request_id = format!("request:isolation-good:{}", Uuid::now_v7());
+    let good = runtime.run_task(&good_request).unwrap();
+    let bad_attempt = runtime
+        .registry()
+        .get_latest_attempt(&bad.job_id)
+        .unwrap()
+        .unwrap();
+    let good_attempt = runtime
+        .registry()
+        .get_latest_attempt(&good.job_id)
+        .unwrap()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while (!(Path::new(&bad_attempt.bundle_path)
+        .join("result.json")
+        .is_file()
+        && Path::new(&good_attempt.bundle_path)
+            .join("result.json")
+            .is_file()))
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(Path::new(&bad_attempt.bundle_path)
+        .join("result.json")
+        .is_file());
+    assert!(Path::new(&good_attempt.bundle_path)
+        .join("result.json")
+        .is_file());
+
+    let connection = Connection::open(&context.registry.db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET resolution='lost' WHERE job_id=?1",
+            [&bad.job_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = runtime.reconcile_all().unwrap();
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(
+        report.failures[0].code,
+        ordivon_exec::RuntimeErrorCode::JobAlreadyResolved
+    );
+    assert_eq!(report.failures[0].job_id, bad.job_id);
+    assert_eq!(
+        runtime.registry().project_job(&good.job_id).unwrap().status,
+        "succeeded"
+    );
+
+    let connection = Connection::open(&context.registry.db_path).unwrap();
+    let recovery_required: String = connection
+        .query_row(
+            "SELECT status FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required'",
+            [&bad_attempt.attempt_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(recovery_required, "true");
 }
 
 #[test]

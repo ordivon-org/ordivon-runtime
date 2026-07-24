@@ -4,7 +4,7 @@ mod registry;
 mod supervisor;
 mod types;
 
-pub use engine::{Runtime, RuntimeConfig};
+pub use engine::{ReconciliationFailure, ReconciliationReport, Runtime, RuntimeConfig};
 pub use error::{RuntimeCapacity, RuntimeError, RuntimeErrorCode, RuntimeResult};
 pub use registry::{
     Registry, RegistryConfig, RUNTIME_MIGRATION_CHECKSUM,

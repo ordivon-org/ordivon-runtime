@@ -1471,6 +1471,91 @@ impl Registry {
         Ok(load_job_snapshot(&connection, &attempt.job_id)?.projection)
     }
 
+    pub fn record_reconciliation_failure(
+        &self,
+        attempt: &AttemptRecord,
+        error: &RuntimeError,
+        observed_at_ms: u64,
+    ) -> RuntimeResult<()> {
+        let mut connection = self.open_connection()?;
+        let transaction = immediate(&mut connection, "reconciliation failure transaction")?;
+        let current = load_attempt(&transaction, &attempt.attempt_id)?;
+        let reason_code = error.code.as_str();
+        let evidence_digest = sha256_bytes(
+            format!(
+                "runtime-reconciliation-failure\0{}\0{}\0{}",
+                current.attempt_id, reason_code, error.message
+            )
+            .as_bytes(),
+        );
+        upsert_condition(
+            &transaction,
+            &current.attempt_id,
+            &ConditionUpdate {
+                condition_type: "recovery_required".to_string(),
+                status: "true".to_string(),
+                reason_code: reason_code.to_string(),
+                evidence_digest,
+                observed_at_ms,
+            },
+        )?;
+        append_event(
+            &transaction,
+            &current.job_id,
+            Some(&current.attempt_id),
+            "RECONCILIATION_FAILED",
+            "SYSTEM_OBSERVED",
+            Some(current.state),
+            None,
+            reason_code,
+            serde_json::json!({
+                "message": error.message,
+                "field": error.field,
+                "retryable": error.retryable,
+            }),
+            observed_at_ms,
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| RuntimeError::from_sql(error, "cannot commit reconciliation failure"))
+    }
+
+    pub fn clear_reconciliation_failure(
+        &self,
+        attempt_id: &str,
+        observed_at_ms: u64,
+    ) -> RuntimeResult<()> {
+        let mut connection = self.open_connection()?;
+        let transaction = immediate(&mut connection, "reconciliation success transaction")?;
+        let current = load_attempt(&transaction, attempt_id)?;
+        let evidence_digest = sha256_bytes(
+            format!("runtime-reconciliation-converged\0{attempt_id}\0{observed_at_ms}").as_bytes(),
+        );
+        let changed = transaction
+            .execute(
+                "UPDATE attempt_conditions SET status='false',reason_code='RECONCILIATION_CONVERGED',evidence_digest=?1,observed_at_ms=?2 WHERE attempt_id=?3 AND condition_type='recovery_required' AND status!='false'",
+                params![evidence_digest, observed_at_ms, attempt_id],
+            )
+            .map_err(|error| RuntimeError::from_sql(error, "cannot clear recovery condition"))?;
+        if changed > 0 {
+            append_event(
+                &transaction,
+                &current.job_id,
+                Some(&current.attempt_id),
+                "RECONCILIATION_CONVERGED",
+                "SYSTEM_OBSERVED",
+                Some(current.state),
+                Some(current.state),
+                "RECONCILIATION_CONVERGED",
+                serde_json::json!({}),
+                observed_at_ms,
+            )?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| RuntimeError::from_sql(error, "cannot commit reconciliation success"))
+    }
+
     pub fn active_reservation_count(&self) -> RuntimeResult<u32> {
         let connection = self.open_connection()?;
         connection
