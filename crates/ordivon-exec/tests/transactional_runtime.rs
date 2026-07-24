@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 fn digest(value: &[u8]) -> String {
@@ -383,6 +385,57 @@ fn runtime_incremental_observe_and_safe_close_preserve_active_work() {
         })
         .unwrap();
     assert!(closed.removed);
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_cancel_reconciles_a_completed_runner_result_before_stop_intent() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("cancel-completed-result");
+    context.write(
+        "runtime_cancel_completed.py",
+        "import time\ntime.sleep(0.5)\nprint('RESULT_ALREADY_FINISHED', flush=True)\n",
+    );
+    let runtime = context.runtime(2000);
+    let started = runtime
+        .run_task(&context.request("runtime_cancel_completed.py", 0))
+        .unwrap();
+    assert!(matches!(started.status.as_str(), "queued" | "working"));
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&started.job_id)
+        .unwrap()
+        .unwrap();
+    let result_path = Path::new(&attempt.bundle_path).join("result.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !result_path.is_file() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        result_path.is_file(),
+        "Runner result was not written in time"
+    );
+    assert_eq!(
+        runtime
+            .registry()
+            .get_attempt(&attempt.attempt_id)
+            .unwrap()
+            .state,
+        AttemptState::Running
+    );
+
+    let completed = runtime
+        .cancel_task(&TaskCancelRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: started.job_id,
+        })
+        .unwrap();
+
+    assert_eq!(completed.status, "succeeded");
+    assert!(completed.stdout_tail.contains("RESULT_ALREADY_FINISHED"));
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }
 
 #[test]

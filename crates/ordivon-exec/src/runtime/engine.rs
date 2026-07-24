@@ -16,11 +16,12 @@ use super::supervisor::{
 };
 use super::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
-    ArtifactRegistration, AttemptRecord, AttemptState, JobResolution, Registry, RegistryConfig,
-    RunnerIdentity, RuntimeArtifactRecord, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
-    RuntimeJobListRequest, RuntimeJobListResult, RuntimeResult, SubmitRequest, TaskCancelRequest,
-    TaskObservation, TaskObserveRequest, TaskRunRequest, TerminalCommit, MAX_ARTIFACT_READ_BYTES,
-    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
+    ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, JobResolution,
+    Registry, RegistryConfig, RunnerIdentity, RuntimeArtifactRecord, RuntimeError,
+    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeJobListRequest, RuntimeJobListResult,
+    RuntimeResult, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
+    TaskRunRequest, TerminalCommit, MAX_ARTIFACT_READ_BYTES, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
+    RUNTIME_SCHEMA_VERSION,
 };
 use crate::universal::{
     canonical_directory, create_git_workspace_compact, load_workspace_record, mutate_workspace,
@@ -553,19 +554,38 @@ impl Runtime {
     }
 
     fn commit_runner_result(&self, attempt: &AttemptRecord) -> RuntimeResult<TaskObservation> {
-        let current = self.registry.get_attempt(&attempt.attempt_id)?;
-        if current.state == AttemptState::Orphaned
-            && self.recover_orphaned_runner_result(&current)?
-        {
-            return self.observation_from_registry(&current.job_id, 0, 0);
+        let mut current = self.registry.get_attempt(&attempt.attempt_id)?;
+        for retry in 0..=1 {
+            if current.state == AttemptState::Orphaned
+                && self.recover_orphaned_runner_result(&current)?
+            {
+                return self.observation_from_registry(&current.job_id, 0, 0);
+            }
+            if current.state.is_terminal() {
+                return self.observation_from_registry(&current.job_id, 0, 0);
+            }
+            let terminal = self.prepare_runner_terminal(&current)?;
+            match self.registry.commit_terminal(&terminal) {
+                Ok(projection) => {
+                    self.cleanup_payload_view(&current.attempt_id)?;
+                    return self.observation_from_parts(
+                        projection,
+                        Some(current),
+                        4096,
+                        4096,
+                        None,
+                        None,
+                    );
+                }
+                Err(error)
+                    if retry == 0 && error.code == RuntimeErrorCode::AttemptStateConflict =>
+                {
+                    current = self.registry.get_attempt(&attempt.attempt_id)?;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        if current.state.is_terminal() {
-            return self.observation_from_registry(&current.job_id, 0, 0);
-        }
-        let terminal = self.prepare_runner_terminal(&current)?;
-        let projection = self.registry.commit_terminal(&terminal)?;
-        self.cleanup_payload_view(&current.attempt_id)?;
-        self.observation_from_parts(projection, Some(current), 4096, 4096, None, None)
+        unreachable!("terminal commit retry loop always returns")
     }
 
     fn prepare_runner_terminal(&self, current: &AttemptRecord) -> RuntimeResult<TerminalCommit> {
@@ -597,6 +617,15 @@ impl Runtime {
         let stdout = self.validate_captured_output(current, &result.stdout, true)?;
         let stderr = self.validate_captured_output(current, &result.stderr, false)?;
         let (state, reason_code) = match result.status {
+            TaskTerminalStatus::Completed
+                if current.state == AttemptState::Stopping
+                    || current.termination_intent == AttemptTerminationIntent::StopRequested =>
+            {
+                (
+                    AttemptState::Succeeded,
+                    "PROCESS_COMPLETED_BEFORE_STOP_EFFECTIVE",
+                )
+            }
             TaskTerminalStatus::Completed => (AttemptState::Succeeded, "PROCESS_EXIT_ZERO"),
             TaskTerminalStatus::Failed if result.timed_out => {
                 (AttemptState::TimedOut, "DEADLINE_EXCEEDED")
@@ -1144,6 +1173,7 @@ impl Runtime {
                 "schemaVersion",
             ));
         }
+        self.reconcile_job(&request.job_id)?;
         let projection = self.registry.request_cancel(&request.job_id, now_ms()?)?;
         if projection.result_available {
             return self.observation_from_registry(&request.job_id, 4096, 4096);
