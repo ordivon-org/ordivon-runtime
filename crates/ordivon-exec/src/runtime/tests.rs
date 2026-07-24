@@ -362,6 +362,74 @@ fn terminal_commit_is_atomic_idempotent_and_releases_capacity() {
 }
 
 #[test]
+fn stopping_attempt_accepts_verified_success_and_releases_capacity() {
+    let sandbox = Sandbox::new("stopping-success", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:stopping-success", 1))
+            .unwrap(),
+    );
+    let attempt = sandbox
+        .registry
+        .mark_bundle_ready(&created.attempt.attempt_id, 0, &digest(b"bundle"), 10)
+        .unwrap();
+    let attempt = sandbox
+        .registry
+        .mark_dispatch_issued(&attempt.attempt_id, attempt.row_version, 11)
+        .unwrap();
+    let attempt = sandbox
+        .registry
+        .bind_running(
+            &attempt.attempt_id,
+            attempt.row_version,
+            &RunnerIdentity {
+                boot_id: "boot:test".to_string(),
+                unit_name: attempt.unit_name.clone(),
+                invocation_id: "invocation:test".to_string(),
+                control_group: "/system.slice/ordivon-test.service".to_string(),
+                main_pid: 42,
+                process_start_identity: "start:42".to_string(),
+                runner_start_digest: digest(b"runner-start"),
+                observed_at_ms: 12,
+            },
+        )
+        .unwrap();
+    sandbox
+        .registry
+        .request_cancel(&created.job.job_id, 13)
+        .unwrap();
+    let stopping = sandbox.registry.get_attempt(&attempt.attempt_id).unwrap();
+    assert_eq!(stopping.state, AttemptState::Stopping);
+
+    let projection = sandbox
+        .registry
+        .commit_terminal(&TerminalCommit {
+            attempt_id: stopping.attempt_id.clone(),
+            expected_row_version: stopping.row_version,
+            state: AttemptState::Succeeded,
+            result_digest: digest(b"completed-before-stop"),
+            exit_code: Some(0),
+            infrastructure_error_digest: None,
+            finished_at_ms: 14,
+            artifacts: Vec::new(),
+            reason_code: "PROCESS_COMPLETED_BEFORE_STOP_EFFECTIVE".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(projection.status, "succeeded");
+    assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
+    assert_eq!(
+        sandbox
+            .registry
+            .get_reservation(&stopping.attempt_id)
+            .unwrap()
+            .state,
+        ReservationState::Released
+    );
+}
+
+#[test]
 fn cancel_before_dispatch_resolves_without_launch() {
     let sandbox = Sandbox::new("cancel-accepted", 5000);
     let created = created(

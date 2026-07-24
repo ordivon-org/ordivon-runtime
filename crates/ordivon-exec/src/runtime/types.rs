@@ -169,6 +169,7 @@ impl AttemptState {
             Self::Stopping => matches!(
                 next,
                 Self::Recovering
+                    | Self::Succeeded
                     | Self::Cancelled
                     | Self::Failed
                     | Self::TimedOut
