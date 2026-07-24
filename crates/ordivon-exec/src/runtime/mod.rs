@@ -1,9 +1,16 @@
+mod doctor;
 mod engine;
 mod error;
+mod evidence;
 mod registry;
 mod supervisor;
 mod types;
 
+pub use doctor::{
+    inspect_runtime, RuntimeDoctorAttemptState, RuntimeDoctorCase, RuntimeDoctorConfig,
+    RuntimeDoctorJobState, RuntimeDoctorProposal, RuntimeDoctorReport,
+    RuntimeDoctorReservationState, RUNTIME_DOCTOR_SCHEMA_VERSION,
+};
 pub use engine::{ReconciliationFailure, ReconciliationReport, Runtime, RuntimeConfig};
 pub use error::{RuntimeCapacity, RuntimeError, RuntimeErrorCode, RuntimeResult};
 pub use registry::{

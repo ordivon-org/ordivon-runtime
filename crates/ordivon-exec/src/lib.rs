@@ -37,15 +37,17 @@ pub use universal::{
 
 #[cfg(feature = "transactional-runtime")]
 pub use runtime::{
-    AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
+    inspect_runtime, AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,
     CreatedAdmission, JobDesiredState, JobProjection, JobResolution, ReconciliationFailure,
     ReconciliationReport, Registry, RegistryConfig, ReservationRecord, ReservationState,
-    RunnerIdentity, Runtime, RuntimeArtifactRecord, RuntimeCapacity, RuntimeConfig, RuntimeError,
+    RunnerIdentity, Runtime, RuntimeArtifactRecord, RuntimeCapacity, RuntimeConfig,
+    RuntimeDoctorAttemptState, RuntimeDoctorCase, RuntimeDoctorConfig, RuntimeDoctorJobState,
+    RuntimeDoctorProposal, RuntimeDoctorReport, RuntimeDoctorReservationState, RuntimeError,
     RuntimeErrorCode, RuntimeExecutionPlan, RuntimeInvariantViolation, RuntimeJobListCursor,
     RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary,
     RuntimeResult, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
     TaskRunRequest, TerminalCommit, UniversalExecutionRequest, MAX_ARTIFACT_READ_BYTES,
-    MAX_RUNTIME_LIST_LIMIT, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_MIGRATION_CHECKSUM,
-    RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM, RUNTIME_SCHEMA_VERSION,
+    MAX_RUNTIME_LIST_LIMIT, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_DOCTOR_SCHEMA_VERSION,
+    RUNTIME_MIGRATION_CHECKSUM, RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM, RUNTIME_SCHEMA_VERSION,
 };

@@ -27,7 +27,7 @@ const MIGRATION_V2_NAME: &str = "0002_orphan_recovery";
 const MIGRATION_V2_SQL: &str = include_str!("../../migrations/runtime/0002_orphan_recovery.sql");
 pub const RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM: &str =
     "sha256:08361881c9f589254e5e9fad089fcbf756bd8613352e995437fb7a616e9ce500";
-const MAX_MIGRATION_VERSION: i64 = 2;
+pub(crate) const MAX_MIGRATION_VERSION: i64 = 2;
 const WORKSPACE_EXECUTION_LIMIT: u32 = 1;
 
 #[derive(Clone, Debug)]
@@ -1599,70 +1599,7 @@ impl Registry {
 
     pub fn inspect_runtime_invariants(&self) -> RuntimeResult<Vec<RuntimeInvariantViolation>> {
         let connection = self.open_connection()?;
-        let mut violations = Vec::new();
-        let mut collect = |sql: &str, code: &str, detail: &str| -> RuntimeResult<()> {
-            let mut statement = connection
-                .prepare(sql)
-                .map_err(|error| RuntimeError::from_sql(error, "cannot prepare invariant query"))?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                    ))
-                })
-                .map_err(|error| {
-                    RuntimeError::from_sql(error, "cannot query Runtime invariants")
-                })?;
-            for row in rows {
-                let (job_id, attempt_id) = row.map_err(|error| {
-                    RuntimeError::from_sql(error, "cannot decode invariant row")
-                })?;
-                violations.push(RuntimeInvariantViolation {
-                    code: code.to_string(),
-                    job_id,
-                    attempt_id,
-                    detail: detail.to_string(),
-                });
-            }
-            Ok(())
-        };
-        collect(
-            "SELECT job_id,NULL FROM jobs WHERE resolution IS NULL AND current_attempt_id IS NULL",
-            "UNRESOLVED_JOB_WITHOUT_CURRENT_ATTEMPT",
-            "unresolved Job must reference its current Attempt",
-        )?;
-        collect(
-            "SELECT job_id,current_attempt_id FROM jobs WHERE resolution IS NOT NULL AND current_attempt_id IS NOT NULL",
-            "RESOLVED_JOB_WITH_CURRENT_ATTEMPT",
-            "resolved Job must not retain current_attempt_id",
-        )?;
-        collect(
-            "SELECT j.job_id,a.attempt_id FROM jobs j JOIN attempts a ON a.attempt_id=j.current_attempt_id WHERE j.resolution IS NULL AND a.state IN ('succeeded','failed','timed_out','cancelled','lost','orphaned')",
-            "UNRESOLVED_JOB_POINTS_TO_TERMINAL_ATTEMPT",
-            "unresolved Job must not reference a terminal Attempt",
-        )?;
-        collect(
-            "SELECT j.job_id,a.attempt_id FROM jobs j JOIN attempts a ON a.job_id=j.job_id WHERE j.resolution IS NOT NULL AND NOT EXISTS (SELECT 1 FROM attempts newer WHERE newer.job_id=a.job_id AND newer.attempt_number>a.attempt_number) AND ((j.resolution='succeeded' AND a.state!='succeeded') OR (j.resolution='failed' AND a.state!='failed') OR (j.resolution='timed_out' AND a.state!='timed_out') OR (j.resolution='cancelled' AND a.state!='cancelled') OR (j.resolution='lost' AND a.state!='lost') OR (j.resolution='orphaned' AND a.state!='orphaned'))",
-            "JOB_RESOLUTION_ATTEMPT_STATE_MISMATCH",
-            "resolved Job must agree with its latest terminal Attempt",
-        )?;
-        collect(
-            "SELECT a.job_id,a.attempt_id FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.state IN ('succeeded','failed','timed_out','cancelled','lost') AND r.state!='released'",
-            "TERMINAL_ATTEMPT_HOLDS_RESERVATION",
-            "non-orphan terminal Attempt must release its reservation",
-        )?;
-        collect(
-            "SELECT a.job_id,a.attempt_id FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.state='orphaned' AND r.state!='held_orphaned'",
-            "ORPHAN_RESERVATION_NOT_HELD",
-            "orphaned Attempt must hold its reservation",
-        )?;
-        collect(
-            "SELECT job_id,attempt_id FROM attempts WHERE state IN ('succeeded','failed','timed_out','cancelled','lost','orphaned') AND (result_digest IS NULL OR finished_at_ms IS NULL)",
-            "TERMINAL_ATTEMPT_MISSING_EVIDENCE",
-            "terminal Attempt must retain result digest and finish time",
-        )?;
-        Ok(violations)
+        inspect_runtime_invariants_connection(&connection)
     }
 
     pub fn record_reconciliation_failure(
@@ -1888,7 +1825,7 @@ fn raw_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawJob> {
     })
 }
 
-fn load_job(connection: &Connection, job_id: &str) -> RuntimeResult<RuntimeJobRecord> {
+pub(crate) fn load_job(connection: &Connection, job_id: &str) -> RuntimeResult<RuntimeJobRecord> {
     connection
         .query_row(
             "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE job_id=?1",
@@ -1984,7 +1921,10 @@ fn raw_attempt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawAttempt>
     })
 }
 
-fn load_attempt(connection: &Connection, attempt_id: &str) -> RuntimeResult<AttemptRecord> {
+pub(crate) fn load_attempt(
+    connection: &Connection,
+    attempt_id: &str,
+) -> RuntimeResult<AttemptRecord> {
     connection
         .query_row(
             "SELECT attempt_id,job_id,attempt_number,state,termination_intent,launch_token_digest,bundle_path,bundle_digest,boot_id,unit_name,invocation_id,control_group,main_pid,process_start_identity,runner_start_digest,result_digest,exit_code,infrastructure_error_digest,created_at_ms,started_at_ms,finished_at_ms,row_version FROM attempts WHERE attempt_id=?1",
@@ -2014,7 +1954,10 @@ struct RawReservation {
     release_reason: Option<String>,
 }
 
-fn load_reservation(connection: &Connection, attempt_id: &str) -> RuntimeResult<ReservationRecord> {
+pub(crate) fn load_reservation(
+    connection: &Connection,
+    attempt_id: &str,
+) -> RuntimeResult<ReservationRecord> {
     let raw = connection
         .query_row(
             "SELECT reservation_id,attempt_id,global_limit,state,acquired_at_ms,released_at_ms,release_reason FROM concurrency_reservations WHERE attempt_id=?1",
@@ -2258,6 +2201,72 @@ fn resolution_for_state(state: AttemptState) -> RuntimeResult<JobResolution> {
             "state",
         )),
     }
+}
+
+pub(crate) fn inspect_runtime_invariants_connection(
+    connection: &Connection,
+) -> RuntimeResult<Vec<RuntimeInvariantViolation>> {
+    let mut violations = Vec::new();
+    let mut collect = |sql: &str, code: &str, detail: &str| -> RuntimeResult<()> {
+        let mut statement = connection
+            .prepare(sql)
+            .map_err(|error| RuntimeError::from_sql(error, "cannot prepare invariant query"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .map_err(|error| RuntimeError::from_sql(error, "cannot query Runtime invariants"))?;
+        for row in rows {
+            let (job_id, attempt_id) =
+                row.map_err(|error| RuntimeError::from_sql(error, "cannot decode invariant row"))?;
+            violations.push(RuntimeInvariantViolation {
+                code: code.to_string(),
+                job_id,
+                attempt_id,
+                detail: detail.to_string(),
+            });
+        }
+        Ok(())
+    };
+    collect(
+        "SELECT job_id,NULL FROM jobs WHERE resolution IS NULL AND current_attempt_id IS NULL",
+        "UNRESOLVED_JOB_WITHOUT_CURRENT_ATTEMPT",
+        "unresolved Job must reference its current Attempt",
+    )?;
+    collect(
+        "SELECT job_id,current_attempt_id FROM jobs WHERE resolution IS NOT NULL AND current_attempt_id IS NOT NULL",
+        "RESOLVED_JOB_WITH_CURRENT_ATTEMPT",
+        "resolved Job must not retain current_attempt_id",
+    )?;
+    collect(
+        "SELECT j.job_id,a.attempt_id FROM jobs j JOIN attempts a ON a.attempt_id=j.current_attempt_id WHERE j.resolution IS NULL AND a.state IN ('succeeded','failed','timed_out','cancelled','lost','orphaned')",
+        "UNRESOLVED_JOB_POINTS_TO_TERMINAL_ATTEMPT",
+        "unresolved Job must not reference a terminal Attempt",
+    )?;
+    collect(
+        "SELECT j.job_id,a.attempt_id FROM jobs j JOIN attempts a ON a.job_id=j.job_id WHERE j.resolution IS NOT NULL AND NOT EXISTS (SELECT 1 FROM attempts newer WHERE newer.job_id=a.job_id AND newer.attempt_number>a.attempt_number) AND ((j.resolution='succeeded' AND a.state!='succeeded') OR (j.resolution='failed' AND a.state!='failed') OR (j.resolution='timed_out' AND a.state!='timed_out') OR (j.resolution='cancelled' AND a.state!='cancelled') OR (j.resolution='lost' AND a.state!='lost') OR (j.resolution='orphaned' AND a.state!='orphaned'))",
+        "JOB_RESOLUTION_ATTEMPT_STATE_MISMATCH",
+        "resolved Job must agree with its latest terminal Attempt",
+    )?;
+    collect(
+        "SELECT a.job_id,a.attempt_id FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.state IN ('succeeded','failed','timed_out','cancelled','lost') AND r.state!='released'",
+        "TERMINAL_ATTEMPT_HOLDS_RESERVATION",
+        "non-orphan terminal Attempt must release its reservation",
+    )?;
+    collect(
+        "SELECT a.job_id,a.attempt_id FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.state='orphaned' AND r.state!='held_orphaned'",
+        "ORPHAN_RESERVATION_NOT_HELD",
+        "orphaned Attempt must hold its reservation",
+    )?;
+    collect(
+        "SELECT job_id,attempt_id FROM attempts WHERE state IN ('succeeded','failed','timed_out','cancelled','lost','orphaned') AND (result_digest IS NULL OR finished_at_ms IS NULL)",
+        "TERMINAL_ATTEMPT_MISSING_EVIDENCE",
+        "terminal Attempt must retain result digest and finish time",
+    )?;
+    Ok(violations)
 }
 
 fn load_job_snapshot(connection: &Connection, job_id: &str) -> RuntimeResult<JobSnapshot> {

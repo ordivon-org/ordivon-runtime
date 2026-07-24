@@ -72,6 +72,19 @@ Use newest-first `task.list`, `task.observe`, and `task.cancel`. For repeated ob
 
 Execution capacity is shared across all clients. Different Workspaces may run concurrently. A second `workspace.exec` against the same Workspace receives a retryable `CONCURRENCY_LIMIT`; do not create a second Registry or server to bypass it.
 
+## Runtime Doctor
+
+Inspect Registry integrity and cross-table Runtime invariants without applying migrations or writing state:
+
+```bash
+ordivon-runtime-doctor inspect \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --store-root /var/lib/ordivon/registry \
+  --pretty
+```
+
+The report fingerprints the exact Job, Attempt, reservation, and validated Bundle evidence used by a repair plan. `recoverRunnerResult` means the existing Runner result passed the same identity and Artifact checks used by ordinary reconciliation. `manualReview` is deliberately non-actionable until additional evidence is supplied. Use `--fail-on-violation` in diagnostics that should exit with status `2` after printing the report.
+
 ## Backup and restore
 
 Use ordinary Git for repository recovery. The pre-simplification implementation remains at tag `m-series-closed-2026-07-22`.
