@@ -430,6 +430,159 @@ fn stopping_attempt_accepts_verified_success_and_releases_capacity() {
 }
 
 #[test]
+fn reconciliation_receipts_change_only_when_the_condition_changes() {
+    let sandbox = Sandbox::new("reconciliation-receipts", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:reconciliation-receipts", 1))
+            .unwrap(),
+    );
+    let error = RuntimeError::new(
+        RuntimeErrorCode::ReconciliationRequired,
+        "synthetic recovery requirement",
+        Some("attemptId"),
+        false,
+    );
+
+    sandbox
+        .registry
+        .record_reconciliation_failure(&created.attempt, &error, 30)
+        .unwrap();
+    sandbox
+        .registry
+        .record_reconciliation_failure(&created.attempt, &error, 31)
+        .unwrap();
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    let failed_events: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM job_events WHERE attempt_id=?1 AND event_type='RECONCILIATION_FAILED'",
+            [&created.attempt.attempt_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(failed_events, 1);
+    drop(connection);
+
+    sandbox
+        .registry
+        .clear_reconciliation_failure(&created.attempt.attempt_id, 32)
+        .unwrap();
+    sandbox
+        .registry
+        .clear_reconciliation_failure(&created.attempt.attempt_id, 33)
+        .unwrap();
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    let converged_events: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM job_events WHERE attempt_id=?1 AND event_type='RECONCILIATION_CONVERGED'",
+            [&created.attempt.attempt_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required'",
+            [&created.attempt.attempt_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(converged_events, 1);
+    assert_eq!(status, "false");
+}
+
+#[test]
+fn evidence_complete_terminal_reservation_converges_and_clears_invariants() {
+    let sandbox = Sandbox::new("terminal-reservation-convergence", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(
+                &sandbox,
+                "request:terminal-reservation-convergence",
+                1,
+            ))
+            .unwrap(),
+    );
+    sandbox
+        .registry
+        .commit_terminal(&TerminalCommit {
+            attempt_id: created.attempt.attempt_id.clone(),
+            expected_row_version: created.attempt.row_version,
+            state: AttemptState::Cancelled,
+            result_digest: digest(b"terminal-result"),
+            exit_code: None,
+            infrastructure_error_digest: None,
+            finished_at_ms: 20,
+            artifacts: Vec::new(),
+            reason_code: "TEST_CANCELLED".to_string(),
+        })
+        .unwrap();
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE concurrency_reservations SET state='active',released_at_ms=NULL,release_reason=NULL WHERE attempt_id=?1",
+            [&created.attempt.attempt_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let before = sandbox.registry.inspect_runtime_invariants().unwrap();
+    assert!(before
+        .iter()
+        .any(|violation| violation.code == "TERMINAL_ATTEMPT_HOLDS_RESERVATION"));
+    assert!(sandbox
+        .registry
+        .converge_terminal_reservation(&created.attempt.attempt_id, 21)
+        .unwrap());
+    assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
+    assert!(sandbox
+        .registry
+        .inspect_runtime_invariants()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn incomplete_terminal_evidence_is_not_guessed_or_released() {
+    let sandbox = Sandbox::new("incomplete-terminal", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:incomplete-terminal", 1))
+            .unwrap(),
+    );
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE attempts SET state='lost' WHERE attempt_id=?1",
+            [&created.attempt.attempt_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET resolution='lost' WHERE job_id=?1",
+            [&created.job.job_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = sandbox
+        .registry
+        .converge_terminal_reservation(&created.attempt.attempt_id, 22)
+        .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::ReconciliationRequired);
+    assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 1);
+    let violations = sandbox.registry.inspect_runtime_invariants().unwrap();
+    assert!(violations
+        .iter()
+        .any(|violation| violation.code == "TERMINAL_ATTEMPT_MISSING_EVIDENCE"));
+    assert!(violations
+        .iter()
+        .any(|violation| violation.code == "RESOLVED_JOB_WITH_CURRENT_ATTEMPT"));
+}
+
+#[test]
 fn cancel_before_dispatch_resolves_without_launch() {
     let sandbox = Sandbox::new("cancel-accepted", 5000);
     let created = created(

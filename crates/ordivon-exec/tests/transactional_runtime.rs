@@ -39,6 +39,14 @@ fn command_output(program: &str, args: &[&str], cwd: &Path) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
+fn wait_for_file(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.is_file() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(path.is_file(), "{} was not written in time", path.display());
+}
+
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
 fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
@@ -310,10 +318,6 @@ impl Drop for IntegrationContext {
                     .output();
             }
         }
-        let _ = Command::new("git")
-            .args(["worktree", "prune"])
-            .current_dir(&self.repo)
-            .output();
         let _ = fs::remove_dir_all(&self.root);
     }
 }
@@ -541,6 +545,129 @@ fn runtime_reconcile_all_isolates_one_broken_job_and_converges_another() {
         )
         .unwrap();
     assert_eq!(recovery_required, "true");
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_interactive_close_reconciles_completed_unobserved_job() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("interactive-close");
+    context.write(
+        "runtime_interactive_close.py",
+        "import time\ntime.sleep(0.4)\nprint('INTERACTIVE_CLOSE_DONE', flush=True)\n",
+    );
+    let runtime = context.runtime(2000);
+    let started = runtime
+        .run_task(&context.request("runtime_interactive_close.py", 0))
+        .unwrap();
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&started.job_id)
+        .unwrap()
+        .unwrap();
+    wait_for_file(&Path::new(&attempt.bundle_path).join("result.json"));
+
+    let closed = runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: context.workspace_id.clone(),
+            force: true,
+        })
+        .unwrap();
+
+    assert!(closed.removed);
+    assert_eq!(
+        runtime
+            .registry()
+            .project_job(&started.job_id)
+            .unwrap()
+            .status,
+        "succeeded"
+    );
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_interactive_admission_reconciles_previous_same_workspace_job() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("interactive-admission");
+    context.write(
+        "runtime_interactive_first.py",
+        "import time\ntime.sleep(0.4)\nprint('FIRST_UNOBSERVED_DONE', flush=True)\n",
+    );
+    context.write(
+        "runtime_interactive_second.py",
+        "print('SECOND_ADMITTED', flush=True)\n",
+    );
+    let runtime = context.runtime(2000);
+    let first = runtime
+        .run_task(&context.request("runtime_interactive_first.py", 0))
+        .unwrap();
+    let first_attempt = runtime
+        .registry()
+        .get_latest_attempt(&first.job_id)
+        .unwrap()
+        .unwrap();
+    wait_for_file(&Path::new(&first_attempt.bundle_path).join("result.json"));
+
+    let second = runtime
+        .run_task(&context.request("runtime_interactive_second.py", 30_000))
+        .unwrap();
+
+    assert_eq!(second.status, "succeeded");
+    assert!(second.stdout_tail.contains("SECOND_ADMITTED"));
+    assert_eq!(
+        runtime
+            .registry()
+            .project_job(&first.job_id)
+            .unwrap()
+            .status,
+        "succeeded"
+    );
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_interactive_list_reconciles_a_bounded_completed_job() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("interactive-list");
+    context.write(
+        "runtime_interactive_list.py",
+        "import time\ntime.sleep(0.4)\nprint('INTERACTIVE_LIST_DONE', flush=True)\n",
+    );
+    let runtime = context.runtime(2000);
+    let started = runtime
+        .run_task(&context.request("runtime_interactive_list.py", 0))
+        .unwrap();
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&started.job_id)
+        .unwrap()
+        .unwrap();
+    wait_for_file(&Path::new(&attempt.bundle_path).join("result.json"));
+
+    let listed = runtime
+        .list_jobs(&RuntimeJobListRequest {
+            limit: 10,
+            cursor: None,
+        })
+        .unwrap();
+    let job = listed
+        .jobs
+        .iter()
+        .find(|job| job.job_id == started.job_id)
+        .unwrap();
+
+    assert_eq!(job.status, "succeeded");
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }
 
 #[test]

@@ -12,9 +12,9 @@ use super::{
     AdmissionOutcome, ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent,
     ConditionUpdate, CreatedAdmission, JobDesiredState, JobProjection, JobResolution,
     ReservationRecord, ReservationState, RunnerIdentity, RuntimeArtifactRecord, RuntimeError,
-    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeJobListCursor, RuntimeJobListRequest,
-    RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary, RuntimeResult, SubmitRequest,
-    TerminalCommit, MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
+    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeInvariantViolation, RuntimeJobListCursor,
+    RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary,
+    RuntimeResult, SubmitRequest, TerminalCommit, MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
 };
 
 const MIGRATION_V1: i64 = 1;
@@ -660,6 +660,33 @@ impl Registry {
         .collect()
     }
 
+    pub fn list_workspace_reconciliation_attempts(
+        &self,
+        workspace_id: &str,
+        limit: u32,
+    ) -> RuntimeResult<Vec<AttemptRecord>> {
+        if limit == 0 || limit > MAX_RUNTIME_LIST_LIMIT {
+            return Err(RuntimeError::invalid(
+                format!("limit must be in 1..={MAX_RUNTIME_LIST_LIMIT}"),
+                "limit",
+            ));
+        }
+        let connection = self.open_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT DISTINCT a.attempt_id,a.job_id,a.attempt_number,a.state,a.termination_intent,a.launch_token_digest,a.bundle_path,a.bundle_digest,a.boot_id,a.unit_name,a.invocation_id,a.control_group,a.main_pid,a.process_start_identity,a.runner_start_digest,a.result_digest,a.exit_code,a.infrastructure_error_digest,a.created_at_ms,a.started_at_ms,a.finished_at_ms,a.row_version FROM attempts a JOIN jobs j ON j.job_id=a.job_id JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE j.workspace_id=?1 AND (a.attempt_id=j.current_attempt_id OR r.state IN ('active','held_orphaned')) ORDER BY a.created_at_ms DESC,a.attempt_id DESC LIMIT ?2",
+            )
+            .map_err(|error| RuntimeError::from_sql(error, "cannot prepare Workspace reconciliation scan"))?;
+        let rows = statement
+            .query_map(params![workspace_id, limit], raw_attempt_from_row)
+            .map_err(|error| RuntimeError::from_sql(error, "cannot scan Workspace Attempts"))?;
+        rows.map(|row| {
+            row.map_err(|error| RuntimeError::from_sql(error, "cannot decode Workspace Attempt"))?
+                .into_record()
+        })
+        .collect()
+    }
+
     pub fn list_jobs(
         &self,
         request: &RuntimeJobListRequest,
@@ -1300,20 +1327,58 @@ impl Registry {
     }
 
     pub fn list_nonterminal_attempts(&self) -> RuntimeResult<Vec<AttemptRecord>> {
+        self.list_nonterminal_attempts_with_limit(None)
+    }
+
+    pub fn list_nonterminal_attempts_bounded(
+        &self,
+        limit: u32,
+    ) -> RuntimeResult<Vec<AttemptRecord>> {
+        if limit == 0 || limit > MAX_RUNTIME_LIST_LIMIT {
+            return Err(RuntimeError::invalid(
+                format!("limit must be in 1..={MAX_RUNTIME_LIST_LIMIT}"),
+                "limit",
+            ));
+        }
+        self.list_nonterminal_attempts_with_limit(Some(limit))
+    }
+
+    fn list_nonterminal_attempts_with_limit(
+        &self,
+        limit: Option<u32>,
+    ) -> RuntimeResult<Vec<AttemptRecord>> {
         let connection = self.open_connection()?;
+        let sql = if limit.is_some() {
+            "SELECT attempt_id,job_id,attempt_number,state,termination_intent,launch_token_digest,bundle_path,bundle_digest,boot_id,unit_name,invocation_id,control_group,main_pid,process_start_identity,runner_start_digest,result_digest,exit_code,infrastructure_error_digest,created_at_ms,started_at_ms,finished_at_ms,row_version FROM attempts WHERE state NOT IN ('succeeded','failed','timed_out','cancelled','lost','orphaned') ORDER BY created_at_ms DESC,attempt_id DESC LIMIT ?1"
+        } else {
+            "SELECT attempt_id,job_id,attempt_number,state,termination_intent,launch_token_digest,bundle_path,bundle_digest,boot_id,unit_name,invocation_id,control_group,main_pid,process_start_identity,runner_start_digest,result_digest,exit_code,infrastructure_error_digest,created_at_ms,started_at_ms,finished_at_ms,row_version FROM attempts WHERE state NOT IN ('succeeded','failed','timed_out','cancelled','lost','orphaned') ORDER BY created_at_ms,attempt_id"
+        };
         let mut statement = connection
-            .prepare(
-                "SELECT attempt_id,job_id,attempt_number,state,termination_intent,launch_token_digest,bundle_path,bundle_digest,boot_id,unit_name,invocation_id,control_group,main_pid,process_start_identity,runner_start_digest,result_digest,exit_code,infrastructure_error_digest,created_at_ms,started_at_ms,finished_at_ms,row_version FROM attempts WHERE state NOT IN ('succeeded','failed','timed_out','cancelled','lost','orphaned') ORDER BY created_at_ms,attempt_id",
-            )
+            .prepare(sql)
             .map_err(|error| RuntimeError::from_sql(error, "cannot prepare reconciliation scan"))?;
-        let rows = statement
-            .query_map([], raw_attempt_from_row)
-            .map_err(|error| RuntimeError::from_sql(error, "cannot scan nonterminal Attempts"))?;
-        rows.map(|row| {
-            row.map_err(|error| RuntimeError::from_sql(error, "cannot decode Attempt row"))?
-                .into_record()
-        })
-        .collect()
+        if let Some(limit) = limit {
+            let rows = statement
+                .query_map([limit], raw_attempt_from_row)
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot scan nonterminal Attempts")
+                })?;
+            rows.map(|row| {
+                row.map_err(|error| RuntimeError::from_sql(error, "cannot decode Attempt row"))?
+                    .into_record()
+            })
+            .collect()
+        } else {
+            let rows = statement
+                .query_map([], raw_attempt_from_row)
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot scan nonterminal Attempts")
+                })?;
+            rows.map(|row| {
+                row.map_err(|error| RuntimeError::from_sql(error, "cannot decode Attempt row"))?
+                    .into_record()
+            })
+            .collect()
+        }
     }
 
     pub fn list_held_orphaned_attempts(&self) -> RuntimeResult<Vec<AttemptRecord>> {
@@ -1471,23 +1536,166 @@ impl Registry {
         Ok(load_job_snapshot(&connection, &attempt.job_id)?.projection)
     }
 
+    pub fn converge_terminal_reservation(
+        &self,
+        attempt_id: &str,
+        observed_at_ms: u64,
+    ) -> RuntimeResult<bool> {
+        let mut connection = self.open_connection()?;
+        let attempt = load_attempt(&connection, attempt_id)?;
+        let job = load_job(&connection, &attempt.job_id)?;
+        let reservation = load_reservation(&connection, attempt_id)?;
+        let target = terminal_reservation_target(&attempt, &job)?;
+        if reservation.state == target {
+            return Ok(false);
+        }
+
+        let transaction = immediate(&mut connection, "terminal reservation convergence")?;
+        let attempt = load_attempt(&transaction, attempt_id)?;
+        let job = load_job(&transaction, &attempt.job_id)?;
+        let reservation = load_reservation(&transaction, attempt_id)?;
+        let target = terminal_reservation_target(&attempt, &job)?;
+        if reservation.state == target {
+            transaction.commit().map_err(|error| {
+                RuntimeError::from_sql(error, "cannot close converged terminal reservation")
+            })?;
+            return Ok(false);
+        }
+        if target == ReservationState::HeldOrphaned {
+            hold_orphaned_reservation(
+                &transaction,
+                attempt_id,
+                observed_at_ms,
+                "TERMINAL_ORPHAN_RESERVATION_CONVERGED",
+            )?;
+        } else {
+            release_reservation(
+                &transaction,
+                attempt_id,
+                observed_at_ms,
+                "TERMINAL_RESERVATION_CONVERGED",
+            )?;
+        }
+        append_event(
+            &transaction,
+            &attempt.job_id,
+            Some(attempt_id),
+            "TERMINAL_RESERVATION_CONVERGED",
+            "SYSTEM_DERIVED",
+            Some(attempt.state),
+            Some(attempt.state),
+            "TERMINAL_RESERVATION_CONVERGED",
+            serde_json::json!({
+                "previousReservationState": reservation.state.as_db(),
+                "newReservationState": target.as_db(),
+            }),
+            observed_at_ms,
+        )?;
+        transaction.commit().map_err(|error| {
+            RuntimeError::from_sql(error, "cannot commit terminal reservation convergence")
+        })?;
+        Ok(true)
+    }
+
+    pub fn inspect_runtime_invariants(&self) -> RuntimeResult<Vec<RuntimeInvariantViolation>> {
+        let connection = self.open_connection()?;
+        let mut violations = Vec::new();
+        let mut collect = |sql: &str, code: &str, detail: &str| -> RuntimeResult<()> {
+            let mut statement = connection
+                .prepare(sql)
+                .map_err(|error| RuntimeError::from_sql(error, "cannot prepare invariant query"))?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                })
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot query Runtime invariants")
+                })?;
+            for row in rows {
+                let (job_id, attempt_id) = row.map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot decode invariant row")
+                })?;
+                violations.push(RuntimeInvariantViolation {
+                    code: code.to_string(),
+                    job_id,
+                    attempt_id,
+                    detail: detail.to_string(),
+                });
+            }
+            Ok(())
+        };
+        collect(
+            "SELECT job_id,NULL FROM jobs WHERE resolution IS NULL AND current_attempt_id IS NULL",
+            "UNRESOLVED_JOB_WITHOUT_CURRENT_ATTEMPT",
+            "unresolved Job must reference its current Attempt",
+        )?;
+        collect(
+            "SELECT job_id,current_attempt_id FROM jobs WHERE resolution IS NOT NULL AND current_attempt_id IS NOT NULL",
+            "RESOLVED_JOB_WITH_CURRENT_ATTEMPT",
+            "resolved Job must not retain current_attempt_id",
+        )?;
+        collect(
+            "SELECT j.job_id,a.attempt_id FROM jobs j JOIN attempts a ON a.attempt_id=j.current_attempt_id WHERE j.resolution IS NULL AND a.state IN ('succeeded','failed','timed_out','cancelled','lost','orphaned')",
+            "UNRESOLVED_JOB_POINTS_TO_TERMINAL_ATTEMPT",
+            "unresolved Job must not reference a terminal Attempt",
+        )?;
+        collect(
+            "SELECT j.job_id,a.attempt_id FROM jobs j JOIN attempts a ON a.job_id=j.job_id WHERE j.resolution IS NOT NULL AND NOT EXISTS (SELECT 1 FROM attempts newer WHERE newer.job_id=a.job_id AND newer.attempt_number>a.attempt_number) AND ((j.resolution='succeeded' AND a.state!='succeeded') OR (j.resolution='failed' AND a.state!='failed') OR (j.resolution='timed_out' AND a.state!='timed_out') OR (j.resolution='cancelled' AND a.state!='cancelled') OR (j.resolution='lost' AND a.state!='lost') OR (j.resolution='orphaned' AND a.state!='orphaned'))",
+            "JOB_RESOLUTION_ATTEMPT_STATE_MISMATCH",
+            "resolved Job must agree with its latest terminal Attempt",
+        )?;
+        collect(
+            "SELECT a.job_id,a.attempt_id FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.state IN ('succeeded','failed','timed_out','cancelled','lost') AND r.state!='released'",
+            "TERMINAL_ATTEMPT_HOLDS_RESERVATION",
+            "non-orphan terminal Attempt must release its reservation",
+        )?;
+        collect(
+            "SELECT a.job_id,a.attempt_id FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.state='orphaned' AND r.state!='held_orphaned'",
+            "ORPHAN_RESERVATION_NOT_HELD",
+            "orphaned Attempt must hold its reservation",
+        )?;
+        collect(
+            "SELECT job_id,attempt_id FROM attempts WHERE state IN ('succeeded','failed','timed_out','cancelled','lost','orphaned') AND (result_digest IS NULL OR finished_at_ms IS NULL)",
+            "TERMINAL_ATTEMPT_MISSING_EVIDENCE",
+            "terminal Attempt must retain result digest and finish time",
+        )?;
+        Ok(violations)
+    }
+
     pub fn record_reconciliation_failure(
         &self,
         attempt: &AttemptRecord,
         error: &RuntimeError,
         observed_at_ms: u64,
     ) -> RuntimeResult<()> {
-        let mut connection = self.open_connection()?;
-        let transaction = immediate(&mut connection, "reconciliation failure transaction")?;
-        let current = load_attempt(&transaction, &attempt.attempt_id)?;
         let reason_code = error.code.as_str();
         let evidence_digest = sha256_bytes(
             format!(
                 "runtime-reconciliation-failure\0{}\0{}\0{}",
-                current.attempt_id, reason_code, error.message
+                attempt.attempt_id, reason_code, error.message
             )
             .as_bytes(),
         );
+        let mut connection = self.open_connection()?;
+        let existing: Option<(String, String, String)> = connection
+            .query_row(
+                "SELECT status,reason_code,evidence_digest FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required'",
+                [&attempt.attempt_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| RuntimeError::from_sql(error, "cannot inspect recovery condition"))?;
+        if existing.as_ref().is_some_and(|(status, reason, evidence)| {
+            status == "true" && reason == reason_code && evidence == &evidence_digest
+        }) {
+            return Ok(());
+        }
+
+        let transaction = immediate(&mut connection, "reconciliation failure transaction")?;
+        let current = load_attempt(&transaction, &attempt.attempt_id)?;
         upsert_condition(
             &transaction,
             &current.attempt_id,
@@ -1526,6 +1734,18 @@ impl Registry {
         observed_at_ms: u64,
     ) -> RuntimeResult<()> {
         let mut connection = self.open_connection()?;
+        let status: Option<String> = connection
+            .query_row(
+                "SELECT status FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required'",
+                [attempt_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| RuntimeError::from_sql(error, "cannot inspect recovery condition"))?;
+        if status.as_deref() != Some("true") {
+            return Ok(());
+        }
+
         let transaction = immediate(&mut connection, "reconciliation success transaction")?;
         let current = load_attempt(&transaction, attempt_id)?;
         let evidence_digest = sha256_bytes(
@@ -1533,7 +1753,7 @@ impl Registry {
         );
         let changed = transaction
             .execute(
-                "UPDATE attempt_conditions SET status='false',reason_code='RECONCILIATION_CONVERGED',evidence_digest=?1,observed_at_ms=?2 WHERE attempt_id=?3 AND condition_type='recovery_required' AND status!='false'",
+                "UPDATE attempt_conditions SET status='false',reason_code='RECONCILIATION_CONVERGED',evidence_digest=?1,observed_at_ms=?2 WHERE attempt_id=?3 AND condition_type='recovery_required' AND status='true'",
                 params![evidence_digest, observed_at_ms, attempt_id],
             )
             .map_err(|error| RuntimeError::from_sql(error, "cannot clear recovery condition"))?;
@@ -1991,6 +2211,38 @@ fn hold_orphaned_reservation(
             observed_at_ms,
         },
     )
+}
+
+fn terminal_reservation_target(
+    attempt: &AttemptRecord,
+    job: &RuntimeJobRecord,
+) -> RuntimeResult<ReservationState> {
+    if !attempt.state.is_terminal() {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::ReconciliationRequired,
+            "Attempt is not terminal while repairing terminal reservation",
+            Some("attemptId"),
+            false,
+        ));
+    }
+    let expected_resolution = resolution_for_state(attempt.state)?;
+    let evidence_complete = attempt.result_digest.is_some()
+        && attempt.finished_at_ms.is_some()
+        && job.resolution == Some(expected_resolution)
+        && job.current_attempt_id.is_none();
+    if !evidence_complete {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::ReconciliationRequired,
+            "terminal Attempt lacks complete result, Job resolution, or current-Attempt evidence",
+            Some("attemptId"),
+            false,
+        ));
+    }
+    if attempt.state == AttemptState::Orphaned {
+        Ok(ReservationState::HeldOrphaned)
+    } else {
+        Ok(ReservationState::Released)
+    }
 }
 
 fn resolution_for_state(state: AttemptState) -> RuntimeResult<JobResolution> {
