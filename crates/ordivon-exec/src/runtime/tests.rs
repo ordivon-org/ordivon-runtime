@@ -548,6 +548,41 @@ fn event_log_is_append_only_and_terminal_trigger_blocks_reopen() {
 }
 
 #[test]
+fn reconciliation_only_treats_registry_wide_failures_as_fatal() {
+    let database_corrupt = RuntimeError::new(
+        RuntimeErrorCode::RegistryCorrupt,
+        "database image is malformed",
+        None,
+        false,
+    );
+    assert!(database_corrupt.is_reconciliation_fatal());
+
+    let result_corrupt = RuntimeError::new(
+        RuntimeErrorCode::RegistryCorrupt,
+        "invalid Runner result",
+        Some("result"),
+        false,
+    );
+    assert!(!result_corrupt.is_reconciliation_fatal());
+
+    let job_conflict = RuntimeError::new(
+        RuntimeErrorCode::JobAlreadyResolved,
+        "Job is already resolved",
+        Some("jobId"),
+        false,
+    );
+    assert!(!job_conflict.is_reconciliation_fatal());
+
+    let unavailable = RuntimeError::new(
+        RuntimeErrorCode::RegistryUnavailable,
+        "cannot open Registry",
+        None,
+        false,
+    );
+    assert!(unavailable.is_reconciliation_fatal());
+}
+
+#[test]
 fn corrupt_database_fails_closed() {
     let sandbox = Sandbox::new("corrupt", 5000);
     fs::write(&sandbox.registry.config().db_path, b"not a sqlite database").unwrap();
