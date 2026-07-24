@@ -15,10 +15,11 @@ pub use types::{
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,
     CreatedAdmission, JobDesiredState, JobProjection, JobResolution, ReservationRecord,
     ReservationState, RunnerIdentity, RuntimeArtifactRecord, RuntimeExecutionPlan,
-    RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord,
-    RuntimeJobSummary, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
-    TaskRunRequest, TerminalCommit, UniversalExecutionRequest, MAX_ARTIFACT_READ_BYTES,
-    MAX_RUNTIME_LIST_LIMIT, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
+    RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult,
+    RuntimeJobRecord, RuntimeJobSummary, SubmitRequest, TaskCancelRequest, TaskObservation,
+    TaskObserveRequest, TaskRunRequest, TerminalCommit, UniversalExecutionRequest,
+    MAX_ARTIFACT_READ_BYTES, MAX_RUNTIME_LIST_LIMIT, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
+    RUNTIME_SCHEMA_VERSION,
 };
 
 #[cfg(test)]

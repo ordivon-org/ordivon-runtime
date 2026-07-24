@@ -41,6 +41,7 @@ const STDOUT_FILE: &str = "stdout.log";
 const STDERR_FILE: &str = "stderr.log";
 const CANCEL_FILE: &str = "cancel-requested.json";
 const CONTROL_RESULT_FILE: &str = "control-result.json";
+const INTERACTIVE_RECONCILIATION_LIMIT: u32 = 32;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -148,6 +149,7 @@ impl Runtime {
                 )
             })?;
             self.reconcile_recoverable_orphans()?;
+            let _ = self.reconcile_workspace(&request.execution.workspace_id)?;
             let plan = self.resolve_plan(request)?;
             let submit = SubmitRequest {
                 schema_version: RUNTIME_SCHEMA_VERSION,
@@ -196,6 +198,7 @@ impl Runtime {
         request: &WorkspaceCloseRequest,
     ) -> RuntimeResult<WorkspaceCloseResult> {
         let _guard = self.lock_lifecycle()?;
+        let _ = self.reconcile_workspace(&request.workspace_id)?;
         let active = self
             .registry
             .active_job_ids_for_workspace(&request.workspace_id, 20)?;
@@ -890,31 +893,25 @@ impl Runtime {
     pub fn reconcile_all(&self) -> RuntimeResult<ReconciliationReport> {
         let mut report = ReconciliationReport::default();
         self.reconcile_recoverable_orphans_into(&mut report)?;
-        for attempt in self.registry.list_nonterminal_attempts()? {
-            report.inspected += 1;
-            let result = if attempt.state == AttemptState::Accepted {
-                self.ensure_attempt_dispatched(&attempt)
-            } else {
-                self.reconcile_attempt(&attempt.attempt_id)
-            };
-            match result {
-                Ok(()) => {
-                    let current = self.registry.get_attempt(&attempt.attempt_id)?;
-                    if current.state == AttemptState::Orphaned {
-                        report.quarantined += 1;
-                    } else if current.state == attempt.state {
-                        report.unchanged += 1;
-                    } else {
-                        report.reconciled += 1;
-                    }
-                    self.registry
-                        .clear_reconciliation_failure(&attempt.attempt_id, now_ms()?)?;
-                }
-                Err(error) => {
-                    self.record_isolated_reconciliation_failure(&attempt, error, &mut report)?
-                }
-            }
-        }
+        let attempts = self.registry.list_nonterminal_attempts()?;
+        self.reconcile_candidates_into(attempts, &mut report)?;
+        Ok(report)
+    }
+
+    pub fn reconcile_workspace(&self, workspace_id: &str) -> RuntimeResult<ReconciliationReport> {
+        let attempts = self.registry.list_workspace_reconciliation_attempts(
+            workspace_id,
+            INTERACTIVE_RECONCILIATION_LIMIT,
+        )?;
+        let mut report = ReconciliationReport::default();
+        self.reconcile_candidates_into(attempts, &mut report)?;
+        Ok(report)
+    }
+
+    fn reconcile_nonterminal_batch(&self, limit: u32) -> RuntimeResult<ReconciliationReport> {
+        let attempts = self.registry.list_nonterminal_attempts_bounded(limit)?;
+        let mut report = ReconciliationReport::default();
+        self.reconcile_candidates_into(attempts, &mut report)?;
         Ok(report)
     }
 
@@ -928,22 +925,63 @@ impl Runtime {
         &self,
         report: &mut ReconciliationReport,
     ) -> RuntimeResult<()> {
-        for attempt in self.registry.list_held_orphaned_attempts()? {
-            report.inspected += 1;
-            if !Path::new(&attempt.bundle_path).join(RESULT_FILE).is_file() {
-                report.unchanged += 1;
-                continue;
-            }
-            match self.recover_orphaned_runner_result(&attempt) {
-                Ok(true) => {
+        let attempts = self.registry.list_held_orphaned_attempts()?;
+        self.reconcile_candidates_into(attempts, report)
+    }
+
+    fn reconcile_candidates_into(
+        &self,
+        attempts: Vec<AttemptRecord>,
+        report: &mut ReconciliationReport,
+    ) -> RuntimeResult<()> {
+        for attempt in attempts {
+            self.reconcile_candidate_into(&attempt, report)?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_candidate_into(
+        &self,
+        attempt: &AttemptRecord,
+        report: &mut ReconciliationReport,
+    ) -> RuntimeResult<()> {
+        report.inspected += 1;
+        let before = attempt.state;
+        let recovering_orphan_result = attempt.state == AttemptState::Orphaned
+            && Path::new(&attempt.bundle_path).join(RESULT_FILE).is_file();
+        let result = if recovering_orphan_result {
+            self.recover_orphaned_runner_result(attempt)
+        } else if attempt.state.is_terminal() {
+            self.registry
+                .converge_terminal_reservation(&attempt.attempt_id, now_ms()?)
+        } else if attempt.state == AttemptState::Accepted {
+            self.ensure_attempt_dispatched(attempt).map(|()| false)
+        } else {
+            self.reconcile_attempt(&attempt.attempt_id).map(|()| false)
+        };
+        match result {
+            Ok(changed) => {
+                let current = self.registry.get_attempt(&attempt.attempt_id)?;
+                let orphan_converged = recovering_orphan_result
+                    && (changed || current.state != AttemptState::Orphaned);
+                if orphan_converged {
                     report.recovered_orphans += 1;
+                } else if current.state == AttemptState::Orphaned
+                    && before != AttemptState::Orphaned
+                {
+                    report.quarantined += 1;
+                } else if changed || current.state != before {
+                    report.reconciled += 1;
+                } else {
+                    report.unchanged += 1;
+                }
+                if !recovering_orphan_result || orphan_converged {
                     self.registry
                         .clear_reconciliation_failure(&attempt.attempt_id, now_ms()?)?;
                 }
-                Ok(false) => report.unchanged += 1,
-                Err(error) => {
-                    self.record_isolated_reconciliation_failure(&attempt, error, report)?
-                }
+            }
+            Err(error) => {
+                self.record_isolated_reconciliation_failure(attempt, error, report)?;
             }
         }
         Ok(())
@@ -1304,6 +1342,7 @@ impl Runtime {
         request: &RuntimeJobListRequest,
     ) -> RuntimeResult<RuntimeJobListResult> {
         self.reconcile_recoverable_orphans()?;
+        let _ = self.reconcile_nonterminal_batch(INTERACTIVE_RECONCILIATION_LIMIT)?;
         self.registry.list_jobs(request)
     }
 

@@ -507,6 +507,17 @@ pub struct RuntimeJobListResult {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeInvariantViolation {
+    pub code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunnerIdentity {
     pub boot_id: String,
     pub unit_name: String,
