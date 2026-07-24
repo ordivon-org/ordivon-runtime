@@ -3,6 +3,7 @@ mod engine;
 mod error;
 mod evidence;
 mod registry;
+mod repair;
 mod supervisor;
 mod types;
 
@@ -15,7 +16,11 @@ pub use engine::{ReconciliationFailure, ReconciliationReport, Runtime, RuntimeCo
 pub use error::{RuntimeCapacity, RuntimeError, RuntimeErrorCode, RuntimeResult};
 pub use registry::{
     Registry, RegistryConfig, RUNTIME_MIGRATION_CHECKSUM,
-    RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM,
+    RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM, RUNTIME_TERMINAL_REPAIR_MIGRATION_CHECKSUM,
+};
+pub use repair::{
+    apply_runtime_repair, RuntimeRepairAction, RuntimeRepairActionKind, RuntimeRepairConfig,
+    RuntimeRepairReport, RuntimeRepairRequest, RUNTIME_REPAIR_SCHEMA_VERSION,
 };
 pub use types::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,

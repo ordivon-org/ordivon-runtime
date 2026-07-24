@@ -1,3 +1,4 @@
+use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::*;
 use crate::universal::{
     CapturedOutput, RunnerTaskResult, TaskTerminalStatus, UNIVERSAL_EXEC_SCHEMA_VERSION,
@@ -5,6 +6,7 @@ use crate::universal::{
 use proptest::prelude::*;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -107,6 +109,33 @@ fn write_completed_runner_result(attempt: &AttemptRecord, finished_at_ms: u128) 
         serde_json::to_vec(&result).unwrap(),
     )
     .unwrap();
+}
+
+fn write_test_snapshot(sandbox: &Sandbox, name: &str) -> PathBuf {
+    let snapshot = sandbox.root.join(format!("snapshot-{name}"));
+    fs::create_dir_all(&snapshot).unwrap();
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    let target = snapshot.join("registry.sqlite3");
+    fs::copy(&sandbox.registry.config().db_path, &target).unwrap();
+    let bytes = fs::read(&target).unwrap();
+    fs::write(
+        snapshot.join("manifest.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "createdAt": "test",
+            "files": [{
+                "path": "registry.sqlite3",
+                "bytes": bytes.len(),
+                "digest": digest(&bytes),
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    snapshot
 }
 
 fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> SubmitRequest {
@@ -653,6 +682,587 @@ fn runtime_doctor_proposes_release_for_complete_terminal_evidence() {
 }
 
 #[test]
+fn runtime_repair_recovers_runner_truth_and_explicitly_finalizes_lost() {
+    let sandbox = Sandbox::new("repair-complete", 5000);
+    let recover = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:repair-recover", 2))
+            .unwrap(),
+    );
+    let mut manual_request = request(&sandbox, "request:repair-manual", 2);
+    manual_request.plan.workspace_id = "workspace:repair-manual".to_string();
+    let manual = created(sandbox.registry.submit(&manual_request).unwrap());
+    write_completed_runner_result(&recover.attempt, 70);
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    for created in [&recover, &manual] {
+        connection
+            .execute(
+                "UPDATE attempts SET state='lost' WHERE attempt_id=?1",
+                [&created.attempt.attempt_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE jobs SET resolution='lost' WHERE job_id=?1",
+                [&created.job.job_id],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    let before = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    assert_eq!(before.cases.len(), 2);
+    let snapshot = write_test_snapshot(&sandbox, "complete");
+    let report = apply_runtime_repair(
+        &RuntimeRepairConfig {
+            doctor: doctor_config(&sandbox),
+        },
+        &RuntimeRepairRequest {
+            expected_fingerprint: before.fingerprint,
+            snapshot_path: snapshot,
+            principal: "runtime-admin:test".to_string(),
+            finalize_lost_attempt_ids: BTreeSet::from([manual.attempt.attempt_id.clone()]),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.actions.len(), 2);
+    assert_eq!(report.after.violation_count, 0);
+    assert_eq!(
+        sandbox
+            .registry
+            .get_attempt(&recover.attempt.attempt_id)
+            .unwrap()
+            .state,
+        AttemptState::Succeeded
+    );
+    let manual_attempt = sandbox
+        .registry
+        .get_attempt(&manual.attempt.attempt_id)
+        .unwrap();
+    assert_eq!(manual_attempt.state, AttemptState::Lost);
+    assert!(manual_attempt.result_digest.is_some());
+    assert!(manual_attempt.finished_at_ms.is_some());
+    assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
+    assert!(sandbox
+        .registry
+        .get_job(&recover.job.job_id)
+        .unwrap()
+        .current_attempt_id
+        .is_none());
+    assert!(sandbox
+        .registry
+        .get_job(&manual.job.job_id)
+        .unwrap()
+        .current_attempt_id
+        .is_none());
+
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    let repair_events: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM job_events WHERE event_type='ADMIN_TERMINAL_REPAIR'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let receipts: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE kind='admin_repair'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(repair_events, 2);
+    assert_eq!(receipts, 2);
+}
+
+#[test]
+fn runtime_repair_batch_rolls_back_every_case_on_late_conflict() {
+    let sandbox = Sandbox::new("repair-atomic", 5000);
+    let first = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:repair-atomic-first", 2))
+            .unwrap(),
+    );
+    let mut second_request = request(&sandbox, "request:repair-atomic-second", 2);
+    second_request.plan.workspace_id = "workspace:repair-atomic-second".to_string();
+    let second = created(sandbox.registry.submit(&second_request).unwrap());
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    for created in [&first, &second] {
+        connection
+            .execute(
+                "UPDATE attempts SET state='lost' WHERE attempt_id=?1",
+                [&created.attempt.attempt_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE jobs SET resolution='lost' WHERE job_id=?1",
+                [&created.job.job_id],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let audit = |created: &CreatedAdmission, expected_job_row_version: u64| AdminRepairAudit {
+        report_fingerprint: digest(b"atomic-report"),
+        case_fingerprint: digest(created.attempt.attempt_id.as_bytes()),
+        snapshot_path: "/tmp/atomic-snapshot".to_string(),
+        snapshot_digest: digest(b"atomic-snapshot"),
+        principal: "runtime-admin:test".to_string(),
+        action: "recover_runner_result".to_string(),
+        observed_at_ms: 90,
+        expected_job_row_version,
+        expected_current_attempt_id: Some(created.attempt.attempt_id.clone()),
+        expected_reservation_state: ReservationState::Active,
+    };
+    let terminal = |created: &CreatedAdmission| TerminalCommit {
+        attempt_id: created.attempt.attempt_id.clone(),
+        expected_row_version: created.attempt.row_version,
+        state: AttemptState::Succeeded,
+        result_digest: digest(created.job.job_id.as_bytes()),
+        exit_code: Some(0),
+        infrastructure_error_digest: None,
+        finished_at_ms: 90,
+        artifacts: Vec::new(),
+        reason_code: "PROCESS_EXIT_ZERO".to_string(),
+    };
+    let operations = vec![
+        AdminRepairOperation::Terminal {
+            terminal: terminal(&first),
+            audit: audit(&first, first.job.row_version),
+        },
+        AdminRepairOperation::Terminal {
+            terminal: terminal(&second),
+            audit: audit(&second, second.job.row_version + 1),
+        },
+    ];
+
+    let error = sandbox
+        .registry
+        .repair_admin_batch(&operations)
+        .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::ReconciliationRequired);
+    for created in [&first, &second] {
+        let attempt = sandbox
+            .registry
+            .get_attempt(&created.attempt.attempt_id)
+            .unwrap();
+        assert_eq!(attempt.state, AttemptState::Lost);
+        assert!(attempt.result_digest.is_none());
+        assert_eq!(
+            sandbox
+                .registry
+                .get_reservation(&created.attempt.attempt_id)
+                .unwrap()
+                .state,
+            ReservationState::Active
+        );
+    }
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    let event_count: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM job_events WHERE event_type='ADMIN_TERMINAL_REPAIR'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let artifact_count: u32 = connection
+        .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(event_count, 0);
+    assert_eq!(artifact_count, 0);
+}
+
+#[test]
+fn runtime_repair_batch_rolls_back_when_any_invariant_remains() {
+    let sandbox = Sandbox::new("repair-precommit-invariant", 5000);
+    let repairable = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:repair-precommit-repairable", 2))
+            .unwrap(),
+    );
+    let mut unrelated_request = request(&sandbox, "request:repair-precommit-unrelated", 2);
+    unrelated_request.plan.workspace_id = "workspace:repair-precommit-unrelated".to_string();
+    let unrelated = created(sandbox.registry.submit(&unrelated_request).unwrap());
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE attempts SET state='lost' WHERE attempt_id=?1",
+            [&repairable.attempt.attempt_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET resolution='lost' WHERE job_id=?1",
+            [&repairable.job.job_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET current_attempt_id=NULL WHERE job_id=?1",
+            [&unrelated.job.job_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let operation = AdminRepairOperation::Terminal {
+        terminal: TerminalCommit {
+            attempt_id: repairable.attempt.attempt_id.clone(),
+            expected_row_version: repairable.attempt.row_version,
+            state: AttemptState::Succeeded,
+            result_digest: digest(b"precommit-result"),
+            exit_code: Some(0),
+            infrastructure_error_digest: None,
+            finished_at_ms: 95,
+            artifacts: Vec::new(),
+            reason_code: "PROCESS_EXIT_ZERO".to_string(),
+        },
+        audit: AdminRepairAudit {
+            report_fingerprint: digest(b"precommit-report"),
+            case_fingerprint: digest(b"precommit-case"),
+            snapshot_path: "/tmp/precommit-snapshot".to_string(),
+            snapshot_digest: digest(b"precommit-snapshot"),
+            principal: "runtime-admin:test".to_string(),
+            action: "recover_runner_result".to_string(),
+            observed_at_ms: 95,
+            expected_job_row_version: repairable.job.row_version,
+            expected_current_attempt_id: Some(repairable.attempt.attempt_id.clone()),
+            expected_reservation_state: ReservationState::Active,
+        },
+    };
+
+    let error = sandbox
+        .registry
+        .repair_admin_batch(&[operation])
+        .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::ReconciliationRequired);
+    let attempt = sandbox
+        .registry
+        .get_attempt(&repairable.attempt.attempt_id)
+        .unwrap();
+    assert_eq!(attempt.state, AttemptState::Lost);
+    assert!(attempt.result_digest.is_none());
+    assert_eq!(
+        sandbox
+            .registry
+            .get_reservation(&repairable.attempt.attempt_id)
+            .unwrap()
+            .state,
+        ReservationState::Active
+    );
+}
+
+#[test]
+fn runtime_repair_requires_every_manual_case_to_be_explicit() {
+    let sandbox = Sandbox::new("repair-explicit", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:repair-explicit", 1))
+            .unwrap(),
+    );
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE attempts SET state='lost' WHERE attempt_id=?1",
+            [&created.attempt.attempt_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET resolution='lost' WHERE job_id=?1",
+            [&created.job.job_id],
+        )
+        .unwrap();
+    drop(connection);
+    let before = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    let snapshot = write_test_snapshot(&sandbox, "explicit");
+    let error = apply_runtime_repair(
+        &RuntimeRepairConfig {
+            doctor: doctor_config(&sandbox),
+        },
+        &RuntimeRepairRequest {
+            expected_fingerprint: before.fingerprint,
+            snapshot_path: snapshot,
+            principal: "runtime-admin:test".to_string(),
+            finalize_lost_attempt_ids: BTreeSet::new(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::ReconciliationRequired);
+    assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 1);
+}
+
+#[test]
+fn runtime_repair_rejects_stale_fingerprint_before_writes() {
+    let sandbox = Sandbox::new("repair-stale", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:repair-stale", 1))
+            .unwrap(),
+    );
+    write_completed_runner_result(&created.attempt, 80);
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE attempts SET state='lost' WHERE attempt_id=?1",
+            [&created.attempt.attempt_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET resolution='lost' WHERE job_id=?1",
+            [&created.job.job_id],
+        )
+        .unwrap();
+    drop(connection);
+    let before = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    let snapshot = write_test_snapshot(&sandbox, "stale");
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE attempts SET row_version=row_version+1 WHERE attempt_id=?1",
+            [&created.attempt.attempt_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = apply_runtime_repair(
+        &RuntimeRepairConfig {
+            doctor: doctor_config(&sandbox),
+        },
+        &RuntimeRepairRequest {
+            expected_fingerprint: before.fingerprint,
+            snapshot_path: snapshot,
+            principal: "runtime-admin:test".to_string(),
+            finalize_lost_attempt_ids: BTreeSet::new(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::ReconciliationRequired);
+    assert!(sandbox
+        .registry
+        .get_attempt(&created.attempt.attempt_id)
+        .unwrap()
+        .result_digest
+        .is_none());
+}
+
+#[test]
+fn runtime_repair_rejects_unscoped_invariants_before_writes() {
+    let sandbox = Sandbox::new("repair-unscoped", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:repair-unscoped", 1))
+            .unwrap(),
+    );
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET current_attempt_id=NULL WHERE job_id=?1",
+            [&created.job.job_id],
+        )
+        .unwrap();
+    drop(connection);
+    let before = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    assert_eq!(before.violation_count, 1);
+    assert!(before.cases.is_empty());
+    let snapshot = write_test_snapshot(&sandbox, "unscoped");
+
+    let error = apply_runtime_repair(
+        &RuntimeRepairConfig {
+            doctor: doctor_config(&sandbox),
+        },
+        &RuntimeRepairRequest {
+            expected_fingerprint: before.fingerprint,
+            snapshot_path: snapshot,
+            principal: "runtime-admin:test".to_string(),
+            finalize_lost_attempt_ids: BTreeSet::new(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::ReconciliationRequired);
+    assert!(sandbox
+        .registry
+        .get_job(&created.job.job_id)
+        .unwrap()
+        .current_attempt_id
+        .is_none());
+}
+
+#[test]
+fn runtime_repair_rejects_snapshot_that_does_not_match_doctor_state() {
+    let sandbox = Sandbox::new("repair-snapshot-state", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:repair-snapshot-state", 1))
+            .unwrap(),
+    );
+    let snapshot = write_test_snapshot(&sandbox, "state-mismatch");
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE attempts SET state='lost' WHERE attempt_id=?1",
+            [&created.attempt.attempt_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET resolution='lost' WHERE job_id=?1",
+            [&created.job.job_id],
+        )
+        .unwrap();
+    drop(connection);
+    let before = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+
+    let error = apply_runtime_repair(
+        &RuntimeRepairConfig {
+            doctor: doctor_config(&sandbox),
+        },
+        &RuntimeRepairRequest {
+            expected_fingerprint: before.fingerprint,
+            snapshot_path: snapshot,
+            principal: "runtime-admin:test".to_string(),
+            finalize_lost_attempt_ids: BTreeSet::from([created.attempt.attempt_id.clone()]),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::ReconciliationRequired);
+    assert!(sandbox
+        .registry
+        .get_attempt(&created.attempt.attempt_id)
+        .unwrap()
+        .result_digest
+        .is_none());
+}
+
+#[test]
+fn runtime_repair_does_not_apply_schema_migrations() {
+    let root = std::env::temp_dir().join(format!(
+        "ordivon-repair-v2-{}-{}",
+        std::process::id(),
+        Uuid::now_v7()
+    ));
+    let store = root.join("store");
+    fs::create_dir_all(store.join("attempts")).unwrap();
+    let db_path = store.join("registry.sqlite3");
+    let connection = Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(include_str!("../../migrations/runtime/0001_runtime.sql"))
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(1,'0001_runtime',?1,0)",
+            [RUNTIME_MIGRATION_CHECKSUM],
+        )
+        .unwrap();
+    connection
+        .execute_batch(include_str!(
+            "../../migrations/runtime/0002_orphan_recovery.sql"
+        ))
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(2,'0002_orphan_recovery',?1,0)",
+            [RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM],
+        )
+        .unwrap();
+    drop(connection);
+    let doctor = RuntimeDoctorConfig {
+        db_path: db_path.clone(),
+        store_root: store,
+        busy_timeout_ms: 5_000,
+    };
+    let before = inspect_runtime(&doctor).unwrap();
+    assert_eq!(before.migration_version, 2);
+
+    let error = apply_runtime_repair(
+        &RuntimeRepairConfig { doctor },
+        &RuntimeRepairRequest {
+            expected_fingerprint: before.fingerprint,
+            snapshot_path: root.join("unused-snapshot"),
+            principal: "runtime-admin:test".to_string(),
+            finalize_lost_attempt_ids: BTreeSet::new(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::SchemaVersionUnsupported);
+    let connection = Connection::open(&db_path).unwrap();
+    let max_version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(max_version, 2);
+    drop(connection);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn runtime_repair_rejects_incomplete_control_snapshot() {
+    let sandbox = Sandbox::new("repair-incomplete-snapshot", 5000);
+    let snapshot = write_test_snapshot(&sandbox, "incomplete-control");
+    let manifest_path = snapshot.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["files"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "path": "control/attempts/missing/result.json",
+            "bytes": 1,
+            "digest": digest(b"x"),
+        }));
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let before = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+
+    let error = apply_runtime_repair(
+        &RuntimeRepairConfig {
+            doctor: doctor_config(&sandbox),
+        },
+        &RuntimeRepairRequest {
+            expected_fingerprint: before.fingerprint,
+            snapshot_path: snapshot,
+            principal: "runtime-admin:test".to_string(),
+            finalize_lost_attempt_ids: BTreeSet::new(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt);
+}
+
+#[test]
+fn runtime_repair_rejects_corrupt_snapshot() {
+    let sandbox = Sandbox::new("repair-snapshot", 5000);
+    let snapshot = write_test_snapshot(&sandbox, "corrupt");
+    fs::write(snapshot.join("registry.sqlite3"), b"corrupt").unwrap();
+    let before = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    let error = apply_runtime_repair(
+        &RuntimeRepairConfig {
+            doctor: doctor_config(&sandbox),
+        },
+        &RuntimeRepairRequest {
+            expected_fingerprint: before.fingerprint,
+            snapshot_path: snapshot,
+            principal: "runtime-admin:test".to_string(),
+            finalize_lost_attempt_ids: BTreeSet::new(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt);
+}
+
+#[test]
 fn reconciliation_receipts_change_only_when_the_condition_changes() {
     let sandbox = Sandbox::new("reconciliation-receipts", 5000);
     let created = created(
@@ -870,7 +1480,7 @@ fn newer_schema_and_checksum_drift_fail_closed() {
     connection
         .execute(
             "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,'future','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0)",
-            [3],
+            [4],
         )
         .unwrap();
     drop(connection);
@@ -887,6 +1497,18 @@ fn newer_schema_and_checksum_drift_fail_closed() {
         .unwrap();
     drop(connection);
     let error = Registry::initialize(drift.registry.config().clone()).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::MigrationChecksumMismatch);
+
+    let terminal_drift = Sandbox::new("terminal-checksum-drift", 5000);
+    let connection = Connection::open(&terminal_drift.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE schema_migrations SET checksum='sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' WHERE version=3",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let error = Registry::initialize(terminal_drift.registry.config().clone()).unwrap_err();
     assert_eq!(error.code, RuntimeErrorCode::MigrationChecksumMismatch);
 }
 
@@ -1088,7 +1710,7 @@ fn late_identity_bound_result_corrects_orphan_and_releases_capacity() {
 }
 
 #[test]
-fn existing_v1_registry_upgrades_to_orphan_recovery_schema() {
+fn existing_v1_registry_upgrades_to_terminal_repair_schema() {
     let root = std::env::temp_dir().join(format!(
         "ordivon-v1-upgrade-{}-{}",
         std::process::id(),
@@ -1121,7 +1743,7 @@ fn existing_v1_registry_upgrades_to_orphan_recovery_schema() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(max_version, 2);
+    assert_eq!(max_version, 3);
     let checksum: String = connection
         .query_row(
             "SELECT checksum FROM schema_migrations WHERE version=2",
@@ -1130,6 +1752,14 @@ fn existing_v1_registry_upgrades_to_orphan_recovery_schema() {
         )
         .unwrap();
     assert_eq!(checksum, RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM);
+    let repair_checksum: String = connection
+        .query_row(
+            "SELECT checksum FROM schema_migrations WHERE version=3",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(repair_checksum, RUNTIME_TERMINAL_REPAIR_MIGRATION_CHECKSUM);
     drop(connection);
     fs::remove_dir_all(root).unwrap();
 }
