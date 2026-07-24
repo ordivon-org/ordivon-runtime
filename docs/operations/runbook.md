@@ -13,10 +13,13 @@ Run strict Clippy, real systemd/cgroup tests, MCP E2E, or full-history secret sc
 
 ## Install and start
 
-Build both binaries:
+Build the service binaries and the local-only administrative binaries:
 
 ```bash
-cargo build -p ordivon-exec --bin ordivon-task-runner
+cargo build -p ordivon-exec \
+  --bin ordivon-task-runner \
+  --bin ordivon-runtime-doctor \
+  --bin ordivon-runtime-repair
 cargo build -p ordivon-mcp
 ```
 
@@ -49,7 +52,10 @@ There is no Ordivon rollback bridge on port 8811. The independent Docker MCP lis
 Run these only when process ownership, cancellation, persistence, transport, or deployment changes:
 
 ```bash
-cargo build -p ordivon-exec --bin ordivon-task-runner
+cargo build -p ordivon-exec \
+  --bin ordivon-task-runner \
+  --bin ordivon-runtime-doctor \
+  --bin ordivon-runtime-repair
 ORDIVON_RUN_SYSTEMD_SPIKE=1 \
   cargo test -p ordivon-exec --features systemd-supervisor \
   --test systemd_supervisor -- --ignored --test-threads=1
@@ -84,6 +90,23 @@ ordivon-runtime-doctor inspect \
 ```
 
 The report fingerprints the exact Job, Attempt, reservation, and validated Bundle evidence used by a repair plan. `recoverRunnerResult` means the existing Runner result passed the same identity and Artifact checks used by ordinary reconciliation. `manualReview` is deliberately non-actionable until additional evidence is supplied. Use `--fail-on-violation` in diagnostics that should exit with status `2` after printing the report.
+
+### Applying an audited Runtime repair
+
+Runtime repair is a separate administrative binary and is never exposed as an MCP tool. Create and verify a fresh backup first, then use the exact Doctor fingerprint. Every manual Lost conclusion must be named explicitly:
+
+```bash
+ordivon-runtime-repair apply \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --store-root /var/lib/ordivon/registry \
+  --expected-fingerprint sha256:... \
+  --snapshot /var/backups/ordivon/<snapshot> \
+  --principal runtime-admin:<operator> \
+  --finalize-lost attempt-... \
+  --apply --pretty
+```
+
+The command refuses stale fingerprints, invalid backup manifests, Digest mismatch, changed row versions, unselected manual-review cases, and invocation without `--apply`. A verified Runner result may correct only `Lost` or `Orphaned` into a Runner terminal state. A missing Runner result remains `Lost` and receives an explicit administrative receipt rather than an inferred process outcome.
 
 ## Backup and restore
 

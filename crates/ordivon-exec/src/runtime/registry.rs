@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::{
     AdmissionOutcome, ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent,
     ConditionUpdate, CreatedAdmission, JobDesiredState, JobProjection, JobResolution,
@@ -27,7 +28,12 @@ const MIGRATION_V2_NAME: &str = "0002_orphan_recovery";
 const MIGRATION_V2_SQL: &str = include_str!("../../migrations/runtime/0002_orphan_recovery.sql");
 pub const RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM: &str =
     "sha256:08361881c9f589254e5e9fad089fcbf756bd8613352e995437fb7a616e9ce500";
-pub(crate) const MAX_MIGRATION_VERSION: i64 = 2;
+const MIGRATION_V3: i64 = 3;
+const MIGRATION_V3_NAME: &str = "0003_terminal_repair";
+const MIGRATION_V3_SQL: &str = include_str!("../../migrations/runtime/0003_terminal_repair.sql");
+pub const RUNTIME_TERMINAL_REPAIR_MIGRATION_CHECKSUM: &str =
+    "sha256:464c9b769dacd10f7302d7a371f5b36a7553eda0b0b112bae35b901d00a67f0d";
+pub(crate) const MAX_MIGRATION_VERSION: i64 = 3;
 const WORKSPACE_EXECUTION_LIMIT: u32 = 1;
 
 #[derive(Clone, Debug)]
@@ -218,6 +224,36 @@ impl Registry {
             MIGRATION_V2,
             RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM,
             "orphan-recovery migration",
+        )?;
+        if max_version < MIGRATION_V3 {
+            let transaction = immediate(connection, "terminal-repair migration")?;
+            transaction
+                .execute_batch(MIGRATION_V3_SQL)
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot apply terminal-repair migration")
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,?2,?3,?4)",
+                    params![
+                        MIGRATION_V3,
+                        MIGRATION_V3_NAME,
+                        RUNTIME_TERMINAL_REPAIR_MIGRATION_CHECKSUM,
+                        now_ms()?
+                    ],
+                )
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot record terminal-repair migration")
+                })?;
+            transaction.commit().map_err(|error| {
+                RuntimeError::from_sql(error, "cannot commit terminal-repair migration")
+            })?;
+        }
+        validate_migration_checksum(
+            connection,
+            MIGRATION_V3,
+            RUNTIME_TERMINAL_REPAIR_MIGRATION_CHECKSUM,
+            "terminal-repair migration",
         )?;
 
         Ok(())
@@ -1536,6 +1572,48 @@ impl Registry {
         Ok(load_job_snapshot(&connection, &attempt.job_id)?.projection)
     }
 
+    pub(crate) fn repair_admin_batch(
+        &self,
+        operations: &[AdminRepairOperation],
+    ) -> RuntimeResult<()> {
+        let mut connection = self.open_connection()?;
+        let transaction = immediate(&mut connection, "administrative Runtime repair batch")?;
+        for operation in operations {
+            match operation {
+                AdminRepairOperation::Terminal { terminal, audit } => {
+                    repair_terminal_admin_transaction(&transaction, terminal, audit)?;
+                }
+                AdminRepairOperation::Reservation {
+                    attempt_id,
+                    expected_attempt_row_version,
+                    audit,
+                } => {
+                    repair_terminal_reservation_admin_transaction(
+                        &transaction,
+                        attempt_id,
+                        *expected_attempt_row_version,
+                        audit,
+                    )?;
+                }
+            }
+        }
+        let remaining = inspect_runtime_invariants_connection(&transaction)?;
+        if !remaining.is_empty() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ReconciliationRequired,
+                format!(
+                    "administrative Runtime repair would leave {} invariant violations",
+                    remaining.len()
+                ),
+                Some("violations"),
+                false,
+            ));
+        }
+        transaction.commit().map_err(|error| {
+            RuntimeError::from_sql(error, "cannot commit administrative Runtime repair batch")
+        })
+    }
+
     pub fn converge_terminal_reservation(
         &self,
         attempt_id: &str,
@@ -2154,6 +2232,238 @@ fn hold_orphaned_reservation(
             observed_at_ms,
         },
     )
+}
+
+fn repair_terminal_admin_transaction(
+    transaction: &Transaction<'_>,
+    request: &TerminalCommit,
+    audit: &AdminRepairAudit,
+) -> RuntimeResult<()> {
+    validate_digest(&request.result_digest, "resultDigest")?;
+    for artifact in &request.artifacts {
+        validate_artifact_registration(artifact)?;
+    }
+    let attempt = load_attempt(transaction, &request.attempt_id)?;
+    let job = load_job(transaction, &attempt.job_id)?;
+    let reservation = load_reservation(transaction, &attempt.attempt_id)?;
+    let runner_terminal = matches!(
+        request.state,
+        AttemptState::Succeeded
+            | AttemptState::Failed
+            | AttemptState::TimedOut
+            | AttemptState::Cancelled
+    );
+    let allowed = (matches!(attempt.state, AttemptState::Lost | AttemptState::Orphaned)
+        && runner_terminal)
+        || (attempt.state == AttemptState::Lost && request.state == AttemptState::Lost);
+    if !allowed {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::OrphanRemediationDenied,
+            "administrative repair cannot rewrite this terminal state",
+            Some("attemptId"),
+            false,
+        ));
+    }
+    let source_resolution = resolution_for_state(attempt.state)?;
+    if attempt.row_version != request.expected_row_version
+        || job.row_version != audit.expected_job_row_version
+        || job.resolution != Some(source_resolution)
+        || job.current_attempt_id != audit.expected_current_attempt_id
+        || reservation.state != audit.expected_reservation_state
+    {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::ReconciliationRequired,
+            "Runtime state changed after the Doctor plan was created",
+            Some("caseFingerprint"),
+            false,
+        ));
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE attempts SET state=?1,result_digest=?2,exit_code=?3,infrastructure_error_digest=?4,finished_at_ms=?5,row_version=row_version+1 WHERE attempt_id=?6 AND row_version=?7 AND state=?8",
+            params![
+                request.state.as_db(),
+                request.result_digest,
+                request.exit_code,
+                request.infrastructure_error_digest,
+                request.finished_at_ms,
+                request.attempt_id,
+                request.expected_row_version,
+                attempt.state.as_db(),
+            ],
+        )
+        .map_err(|error| RuntimeError::from_sql(error, "cannot repair terminal Attempt"))?;
+    if changed != 1 {
+        return Err(state_conflict(
+            "Attempt changed during administrative repair",
+        ));
+    }
+    for artifact in &request.artifacts {
+        transaction
+            .execute(
+                "INSERT INTO artifacts(artifact_id,job_id,attempt_id,kind,relative_path,digest,media_type,byte_length,truncated,created_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![
+                    artifact.artifact_id,
+                    attempt.job_id,
+                    attempt.attempt_id,
+                    artifact.kind,
+                    artifact.relative_path,
+                    artifact.digest,
+                    artifact.media_type,
+                    artifact.byte_length,
+                    i64::from(artifact.truncated),
+                    request.finished_at_ms,
+                ],
+            )
+            .map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::ArtifactIdentityConflict,
+                    format!(
+                        "cannot register administrative repair Artifact {}: {error}",
+                        artifact.artifact_id
+                    ),
+                    Some("artifacts"),
+                    false,
+                )
+            })?;
+    }
+    upsert_condition(
+        transaction,
+        &attempt.attempt_id,
+        &ConditionUpdate {
+            condition_type: "result_available".to_string(),
+            status: "true".to_string(),
+            reason_code: request.reason_code.clone(),
+            evidence_digest: request.result_digest.clone(),
+            observed_at_ms: request.finished_at_ms,
+        },
+    )?;
+    upsert_condition(
+        transaction,
+        &attempt.attempt_id,
+        &ConditionUpdate {
+            condition_type: "recovery_required".to_string(),
+            status: "false".to_string(),
+            reason_code: "ADMIN_REPAIR_COMPLETED".to_string(),
+            evidence_digest: audit.case_fingerprint.clone(),
+            observed_at_ms: audit.observed_at_ms,
+        },
+    )?;
+    release_reservation(
+        transaction,
+        &attempt.attempt_id,
+        audit.observed_at_ms,
+        "ADMIN_RUNTIME_REPAIR",
+    )?;
+    let resolution = resolution_for_state(request.state)?;
+    let job_changed = transaction
+        .execute(
+            "UPDATE jobs SET resolution=?1,current_attempt_id=NULL,row_version=row_version+1 WHERE job_id=?2 AND row_version=?3",
+            params![resolution.as_db(), attempt.job_id, audit.expected_job_row_version],
+        )
+        .map_err(|error| RuntimeError::from_sql(error, "cannot repair Job terminal state"))?;
+    if job_changed != 1 {
+        return Err(state_conflict("Job changed during administrative repair"));
+    }
+    let detail = serde_json::json!({
+        "action": audit.action,
+        "principal": audit.principal,
+        "reportFingerprint": audit.report_fingerprint,
+        "caseFingerprint": audit.case_fingerprint,
+        "snapshotPath": audit.snapshot_path,
+        "snapshotDigest": audit.snapshot_digest,
+        "resultDigest": request.result_digest,
+        "exitCode": request.exit_code,
+    });
+    append_event(
+        transaction,
+        &attempt.job_id,
+        Some(&attempt.attempt_id),
+        "ADMIN_TERMINAL_REPAIR",
+        "SYSTEM_OBSERVED",
+        Some(attempt.state),
+        Some(request.state),
+        &request.reason_code,
+        detail.clone(),
+        audit.observed_at_ms,
+    )?;
+    append_event(
+        transaction,
+        &attempt.job_id,
+        Some(&attempt.attempt_id),
+        "JOB_RESOLUTION_ADMIN_CORRECTED",
+        "SYSTEM_DERIVED",
+        Some(attempt.state),
+        Some(request.state),
+        &request.reason_code,
+        detail,
+        audit.observed_at_ms,
+    )?;
+    Ok(())
+}
+
+fn repair_terminal_reservation_admin_transaction(
+    transaction: &Transaction<'_>,
+    attempt_id: &str,
+    expected_attempt_row_version: u64,
+    audit: &AdminRepairAudit,
+) -> RuntimeResult<()> {
+    let attempt = load_attempt(transaction, attempt_id)?;
+    let job = load_job(transaction, &attempt.job_id)?;
+    let reservation = load_reservation(transaction, attempt_id)?;
+    if attempt.row_version != expected_attempt_row_version
+        || job.row_version != audit.expected_job_row_version
+        || job.current_attempt_id != audit.expected_current_attempt_id
+        || reservation.state != audit.expected_reservation_state
+    {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::ReconciliationRequired,
+            "Runtime state changed after the Doctor plan was created",
+            Some("caseFingerprint"),
+            false,
+        ));
+    }
+    let target = terminal_reservation_target(&attempt, &job)?;
+    if target == reservation.state {
+        return Ok(());
+    }
+    if target == ReservationState::HeldOrphaned {
+        hold_orphaned_reservation(
+            transaction,
+            attempt_id,
+            audit.observed_at_ms,
+            "ADMIN_RUNTIME_REPAIR",
+        )?;
+    } else {
+        release_reservation(
+            transaction,
+            attempt_id,
+            audit.observed_at_ms,
+            "ADMIN_RUNTIME_REPAIR",
+        )?;
+    }
+    append_event(
+        transaction,
+        &attempt.job_id,
+        Some(attempt_id),
+        "ADMIN_RESERVATION_REPAIR",
+        "SYSTEM_OBSERVED",
+        Some(attempt.state),
+        Some(attempt.state),
+        "ADMIN_RUNTIME_REPAIR",
+        serde_json::json!({
+            "action": audit.action,
+            "principal": audit.principal,
+            "reportFingerprint": audit.report_fingerprint,
+            "caseFingerprint": audit.case_fingerprint,
+            "snapshotPath": audit.snapshot_path,
+            "snapshotDigest": audit.snapshot_digest,
+            "previousReservationState": reservation.state.as_db(),
+            "newReservationState": target.as_db(),
+        }),
+        audit.observed_at_ms,
+    )?;
+    Ok(())
 }
 
 fn terminal_reservation_target(
