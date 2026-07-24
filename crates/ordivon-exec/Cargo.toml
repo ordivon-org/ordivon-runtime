@@ -20,6 +20,11 @@ name = "ordivon-task-runner"
 path = "src/bin/ordivon-task-runner.rs"
 required-features = ["universal-executor"]
 
+[[bin]]
+name = "ordivon-runtime-doctor"
+path = "src/bin/ordivon-runtime-doctor.rs"
+required-features = ["transactional-runtime"]
+
 [dependencies]
 hex.workspace = true
 libc = { workspace = true, optional = true }

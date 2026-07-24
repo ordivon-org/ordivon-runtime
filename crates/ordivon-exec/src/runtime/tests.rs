@@ -1,4 +1,7 @@
 use super::*;
+use crate::universal::{
+    CapturedOutput, RunnerTaskResult, TaskTerminalStatus, UNIVERSAL_EXEC_SCHEMA_VERSION,
+};
 use proptest::prelude::*;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -50,6 +53,60 @@ fn digest(bytes: &[u8]) -> String {
 
 fn file_digest(path: &Path) -> String {
     digest(&fs::read(path).unwrap())
+}
+
+fn doctor_config(sandbox: &Sandbox) -> RuntimeDoctorConfig {
+    RuntimeDoctorConfig {
+        db_path: sandbox.registry.config().db_path.clone(),
+        store_root: sandbox.registry.config().store_root.clone(),
+        busy_timeout_ms: 5_000,
+    }
+}
+
+fn write_completed_runner_result(attempt: &AttemptRecord, finished_at_ms: u128) {
+    let bundle = Path::new(&attempt.bundle_path);
+    fs::create_dir_all(bundle).unwrap();
+    let stdout = b"DOCTOR_RESULT_OK
+";
+    let stderr = b"";
+    fs::write(bundle.join("stdout.log"), stdout).unwrap();
+    fs::write(bundle.join("stderr.log"), stderr).unwrap();
+    let result = RunnerTaskResult {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        task_id: attempt.attempt_id.clone(),
+        job_id: Some(attempt.job_id.clone()),
+        attempt_id: Some(attempt.attempt_id.clone()),
+        launch_token_digest: Some(attempt.launch_token_digest.clone()),
+        payload_uid: None,
+        payload_gid: None,
+        status: TaskTerminalStatus::Completed,
+        exit_code: Some(0),
+        timed_out: false,
+        infrastructure_error: None,
+        started_unix_ms: finished_at_ms.saturating_sub(1),
+        finished_unix_ms: finished_at_ms,
+        stdout: CapturedOutput {
+            artifact_id: format!("{}.stdout", attempt.attempt_id),
+            file_name: "stdout.log".to_string(),
+            digest: digest(stdout),
+            retained_bytes: stdout.len() as u64,
+            dropped_bytes: 0,
+            truncated: false,
+        },
+        stderr: CapturedOutput {
+            artifact_id: format!("{}.stderr", attempt.attempt_id),
+            file_name: "stderr.log".to_string(),
+            digest: digest(stderr),
+            retained_bytes: 0,
+            dropped_bytes: 0,
+            truncated: false,
+        },
+    };
+    fs::write(
+        bundle.join("result.json"),
+        serde_json::to_vec(&result).unwrap(),
+    )
+    .unwrap();
 }
 
 fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> SubmitRequest {
@@ -427,6 +484,172 @@ fn stopping_attempt_accepts_verified_success_and_releases_capacity() {
             .state,
         ReservationState::Released
     );
+}
+
+#[test]
+fn runtime_doctor_is_read_only_and_fingerprint_is_stable() {
+    let sandbox = Sandbox::new("doctor-read-only", 5000);
+    let before = fs::read(&sandbox.registry.config().db_path).unwrap();
+
+    let first = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    let second = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+
+    assert_eq!(first.violation_count, 0);
+    assert!(first.cases.is_empty());
+    assert_eq!(first.fingerprint, second.fingerprint);
+    assert_eq!(
+        before,
+        fs::read(&sandbox.registry.config().db_path).unwrap()
+    );
+}
+
+#[test]
+fn runtime_doctor_proposes_verified_runner_result_recovery() {
+    let sandbox = Sandbox::new("doctor-runner-result", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:doctor-runner-result", 1))
+            .unwrap(),
+    );
+    write_completed_runner_result(&created.attempt, 42);
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE attempts SET state='lost' WHERE attempt_id=?1",
+            [&created.attempt.attempt_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET resolution='lost' WHERE job_id=?1",
+            [&created.job.job_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    assert_eq!(report.cases.len(), 1);
+    assert!(report.violation_count >= 3);
+    match &report.cases[0].proposal {
+        RuntimeDoctorProposal::RecoverRunnerResult { terminal } => {
+            assert_eq!(terminal.state, AttemptState::Succeeded);
+            assert_eq!(terminal.exit_code, Some(0));
+            assert_eq!(terminal.finished_at_ms, 42);
+            assert_eq!(terminal.artifacts.len(), 3);
+        }
+        proposal => panic!("unexpected Doctor proposal: {proposal:?}"),
+    }
+}
+
+#[test]
+fn runtime_doctor_does_not_guess_when_runner_result_is_missing() {
+    let sandbox = Sandbox::new("doctor-manual", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:doctor-manual", 1))
+            .unwrap(),
+    );
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE attempts SET state='lost' WHERE attempt_id=?1",
+            [&created.attempt.attempt_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET resolution='lost' WHERE job_id=?1",
+            [&created.job.job_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    match &report.cases[0].proposal {
+        RuntimeDoctorProposal::ManualReview { reasons } => {
+            assert!(reasons
+                .iter()
+                .any(|reason| reason.contains("result digest")));
+            assert!(reasons
+                .iter()
+                .any(|reason| reason.contains("Runner result")));
+        }
+        proposal => panic!("unexpected Doctor proposal: {proposal:?}"),
+    }
+}
+
+#[test]
+fn runtime_doctor_does_not_follow_noncanonical_bundle_paths() {
+    let sandbox = Sandbox::new("doctor-bundle-boundary", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:doctor-bundle-boundary", 1))
+            .unwrap(),
+    );
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE attempts SET state='lost',bundle_path='/tmp/not-an-ordivon-bundle' WHERE attempt_id=?1",
+            [&created.attempt.attempt_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET resolution='lost' WHERE job_id=?1",
+            [&created.job.job_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    match &report.cases[0].proposal {
+        RuntimeDoctorProposal::ManualReview { reasons } => assert!(reasons
+            .iter()
+            .any(|reason| reason.contains("outside the canonical Registry store"))),
+        proposal => panic!("unexpected Doctor proposal: {proposal:?}"),
+    }
+}
+
+#[test]
+fn runtime_doctor_proposes_release_for_complete_terminal_evidence() {
+    let sandbox = Sandbox::new("doctor-release", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:doctor-release", 1))
+            .unwrap(),
+    );
+    sandbox
+        .registry
+        .commit_terminal(&TerminalCommit {
+            attempt_id: created.attempt.attempt_id.clone(),
+            expected_row_version: created.attempt.row_version,
+            state: AttemptState::Cancelled,
+            result_digest: digest(b"doctor-control"),
+            exit_code: None,
+            infrastructure_error_digest: None,
+            finished_at_ms: 50,
+            artifacts: Vec::new(),
+            reason_code: "TEST_CANCELLED".to_string(),
+        })
+        .unwrap();
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE concurrency_reservations SET state='active',released_at_ms=NULL,release_reason=NULL WHERE attempt_id=?1",
+            [&created.attempt.attempt_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    assert!(matches!(
+        report.cases[0].proposal,
+        RuntimeDoctorProposal::ReleaseTerminalReservation
+    ));
 }
 
 #[test]
