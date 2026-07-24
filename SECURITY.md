@@ -10,22 +10,6 @@ Only current `main` is supported. There are no backports or LTS branches.
 
 ## Boundary
 
-Ordivon is a trusted-local execution Runtime. It intentionally inherits the installed service user's authority. Do not submit untrusted repositories or scripts to this Runtime; use a separate VM, container host, or other external isolation boundary.
+Ordivon is a trusted-local execution Runtime and intentionally inherits the installed service user's filesystem, process, network, credential, Git, Docker, systemd, cloud-CLI, and executable authority. Do not submit untrusted repositories or scripts; use a separate VM, container host, or equivalent external isolation boundary.
 
-Strong controls remain where reality cannot be reconstructed safely:
-
-- bearer credentials and Cloudflare Access authentication;
-- loopback-only origin, bounded request bodies, and Bearer authentication for direct local clients;
-- Cloudflare Access assertion trust only when Cloudflare Tunnel is the remote path to that loopback origin;
-- idempotent admission and transactional capacity ownership;
-- ambiguous dispatch, process-tree ownership, timeout, and cancellation;
-- persistent Job, Attempt, result, and Artifact identity.
-
-## Supply chain
-
-- Gitleaks runs on pull requests and pushes to `main`.
-- Dependabot covers Cargo and GitHub Actions.
-- CodeQL and release checks are on demand.
-- Default CI does not publish packages, containers, or SBOMs.
-
-The pre-simplification tree remains recoverable from Git tag `m-series-closed-2026-07-22`.
+The MCP origin must remain loopback-bound. Direct local clients require the configured Bearer token; remote access must reach that origin through the authenticated tunnel boundary configured by the operator.

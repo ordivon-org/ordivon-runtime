@@ -1,3 +1,9 @@
+//! Trusted-local Workspace execution and recovery core for Ordivon.
+//!
+//! This crate owns Workspace operations, transactional Job and Attempt state,
+//! runner dispatch, process-tree ownership, bounded results and Artifacts,
+//! reconciliation, Runtime inspection, and administrative repair semantics.
+
 mod error;
 mod file;
 mod repo;

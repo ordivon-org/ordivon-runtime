@@ -1,47 +1,29 @@
 # Ordivon Agent Entry
 
-## Minimal read path
+## Start from reality
 
-Read only:
+Do not preload the documentation tree. Confirm the exact Git state, then inspect the relevant source, tests, and live process state.
 
-1. `docs/current-state.md`
-2. `docs/architecture/runtime.md`
-3. `docs/operations/runbook.md`
+Read [`docs/runtime.md`](docs/runtime.md) only when changing or diagnosing cross-component execution semantics: Workspace, request identity, Job, Attempt, reservation, runner bundle, process ownership, terminal result, Artifact, or reconciliation.
 
-Then inspect relevant source, tests, Git state, and live process state. Historical implementations and reports belong to Git history and the `m-series-closed-2026-07-22` tag; do not reconstruct them without a concrete unresolved failure.
+Read [`docs/recovery.md`](docs/recovery.md) only when operating on Registry integrity, backups, administrative repair, or restore.
 
-## Engineering defaults
+## Truth and responsibility
 
-### Context over documentation
+- The user owns goals, preferences, risk posture, and final commitments.
+- The Agent owns implementation, testing, ordinary repair, and operation.
+- Git owns code history, diff, rollback, and Workspace identity.
+- SQLite owns durable request, Job, Attempt, reservation, cancellation, and resolution state.
+- systemd and cgroups own observation and termination of live process trees.
+- Result and Artifact files own their Digest-bound bytes.
+- Current tools, configuration, deployment, and health must be queried from the live system rather than copied into prose.
 
-Code, tests, Git, and observed deployment are primary truth. Documents compile the smallest useful context; Git is the archive.
+## Change rule
 
-### Recovery over prevention
+Every persistent addition must solve an observed failure or repeatedly missing operation and state what existing path it replaces or extends. Prefer mature host CLIs through `workspace.exec` over bespoke adapters. Preserve unrelated user changes, use isolated Git Workspaces for substantial work, and keep one execution path.
 
-Use Git for code recovery. Preserve only dispatch identity, process ownership, cancellation intent, terminal result, and Artifact identity. Do not add parallel Receipts, evidence Registries, wording gates, or speculative approval systems.
+Ordivon is trusted-local. Put untrusted code behind an external isolation boundary rather than adding a second policy or sandbox Runtime inside Ordivon.
 
-### Intent over implementation scarcity
+## Verification
 
-The user owns goals, preferences, risk posture, and final commitments. The Agent owns implementation, testing, repair, and ordinary operation. The Runtime owns durable execution truth and recovery.
-
-## Operating model
-
-- Prefer direct execution and rapid correction over ceremony.
-- Preserve unrelated user changes and use isolated Git workspaces for substantial work.
-- `trusted-local` inherits the service user's host authority, including network, credentials, Git, Docker, systemd, cloud CLIs, files, and executables.
-- Put untrusted code in an external VM or container; do not rebuild a policy platform inside Ordivon.
-- Preserve idempotency, ambiguous-dispatch handling, process ownership, cancellation, terminal identity, and restart recovery without restricting ordinary Agent capability.
-
-## Change discipline
-
-Every persistent addition must name the observed failure it solves and the current structure it replaces. Prefer existing CLIs through `workspace.exec` over bespoke Adapters. Keep one execution path and no permanent roadmap catalogue.
-
-## Default verification
-
-```bash
-cargo fmt --check
-cargo test --workspace
-ruff check scripts/
-```
-
-Add stronger checks only when the changed boundary can invalidate them.
+Run the smallest checks that can invalidate the changed boundary. CI is the machine-owned default verification contract.
