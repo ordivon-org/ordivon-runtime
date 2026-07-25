@@ -83,6 +83,13 @@ fn doctor_config(sandbox: &Sandbox) -> RuntimeDoctorConfig {
     }
 }
 
+fn inspection_config(sandbox: &Sandbox) -> RuntimeInspectionConfig {
+    RuntimeInspectionConfig {
+        db_path: sandbox.registry.config().db_path.clone(),
+        busy_timeout_ms: 5_000,
+    }
+}
+
 fn write_completed_runner_result(attempt: &AttemptRecord, finished_at_ms: u128) {
     let bundle = Path::new(&attempt.bundle_path);
     fs::create_dir_all(bundle).unwrap();
@@ -686,6 +693,214 @@ fn stopping_attempt_accepts_verified_success_and_releases_capacity() {
             .state,
         ReservationState::Released
     );
+}
+
+#[test]
+fn runtime_job_inspection_projects_bounded_read_only_timeline() {
+    let sandbox = Sandbox::new("inspection-job", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:inspection-job", 4))
+            .unwrap(),
+    );
+    let base = created.job.created_at_ms;
+    let ready = sandbox
+        .registry
+        .mark_bundle_ready(
+            &created.attempt.attempt_id,
+            created.attempt.row_version,
+            &digest(b"inspection-bundle"),
+            base + 10,
+        )
+        .unwrap();
+    let starting = sandbox
+        .registry
+        .mark_dispatch_issued(&ready.attempt_id, ready.row_version, base + 11)
+        .unwrap();
+    sandbox
+        .registry
+        .commit_terminal(&TerminalCommit {
+            attempt_id: starting.attempt_id.clone(),
+            expected_row_version: starting.row_version,
+            state: AttemptState::Failed,
+            result_digest: digest(b"inspection-result"),
+            exit_code: Some(7),
+            infrastructure_error_digest: None,
+            finished_at_ms: base + 20,
+            artifacts: Vec::new(),
+            reason_code: "PROCESS_EXIT_NONZERO".to_string(),
+        })
+        .unwrap();
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    let before = fs::read(&sandbox.registry.config().db_path).unwrap();
+
+    let bounded = inspect_job(&inspection_config(&sandbox), &created.job.job_id, 3, false).unwrap();
+    assert_eq!(bounded.schema_version, RUNTIME_INSPECTION_SCHEMA_VERSION);
+    assert_eq!(bounded.timeline.len(), 3);
+    assert!(bounded.events_truncated);
+    assert!(bounded.timeline.iter().all(|event| event.detail.is_none()));
+
+    let full = inspect_job(
+        &inspection_config(&sandbox),
+        &created.job.job_id,
+        MAX_INSPECTION_EVENT_LIMIT,
+        true,
+    )
+    .unwrap();
+    assert_eq!(full.job.resolution, Some(JobResolution::Failed));
+    assert!(full.job.mechanically_converged);
+    assert!(!full.job.semantic_completion_evaluated);
+    assert_eq!(full.attempts.len(), 1);
+    assert_eq!(full.attempts[0].state, AttemptState::Failed);
+    assert_eq!(
+        full.attempts[0].reservation_state,
+        ReservationState::Released
+    );
+    assert_eq!(full.episodes.dispatches, 1);
+    assert_eq!(full.episodes.duplicate_dispatches, 0);
+    assert!(!full.events_truncated);
+    assert!(full.timeline.iter().all(|event| event.detail.is_some()));
+    assert_eq!(
+        before,
+        fs::read(&sandbox.registry.config().db_path).unwrap()
+    );
+
+    let terminal = sandbox.registry.get_attempt(&starting.attempt_id).unwrap();
+    let failure = RuntimeError::new(
+        RuntimeErrorCode::AttemptStateConflict,
+        "terminal evidence still needs review",
+        Some("attemptId"),
+        false,
+    );
+    sandbox
+        .registry
+        .record_reconciliation_failure(&terminal, &failure, base + 21)
+        .unwrap();
+    let attention = inspect_job(
+        &inspection_config(&sandbox),
+        &created.job.job_id,
+        MAX_INSPECTION_EVENT_LIMIT,
+        false,
+    )
+    .unwrap();
+    assert!(!attention.job.mechanically_converged);
+    let summary = summarize_experience(&inspection_config(&sandbox), 0).unwrap();
+    assert_eq!(summary.jobs.recovery_required, 1);
+    assert_eq!(summary.jobs.capacity_held, 0);
+    assert_eq!(summary.jobs.converged, 0);
+}
+
+#[test]
+fn runtime_experience_summary_reports_only_mechanical_facts() {
+    let sandbox = Sandbox::new("inspection-summary", 5000);
+    let first = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:inspection-summary-first", 4))
+            .unwrap(),
+    );
+    let first_base = first.job.created_at_ms;
+    let ready = sandbox
+        .registry
+        .mark_bundle_ready(
+            &first.attempt.attempt_id,
+            first.attempt.row_version,
+            &digest(b"summary-bundle"),
+            first_base + 10,
+        )
+        .unwrap();
+    let starting = sandbox
+        .registry
+        .mark_dispatch_issued(&ready.attempt_id, ready.row_version, first_base + 11)
+        .unwrap();
+    let failure = RuntimeError::new(
+        RuntimeErrorCode::AttemptStateConflict,
+        "summary recovery episode",
+        Some("attemptId"),
+        false,
+    );
+    sandbox
+        .registry
+        .record_reconciliation_failure(&starting, &failure, first_base + 12)
+        .unwrap();
+    sandbox
+        .registry
+        .clear_reconciliation_failure(&starting.attempt_id, first_base + 13)
+        .unwrap();
+    let current = sandbox.registry.get_attempt(&starting.attempt_id).unwrap();
+    sandbox
+        .registry
+        .commit_terminal(&TerminalCommit {
+            attempt_id: current.attempt_id.clone(),
+            expected_row_version: current.row_version,
+            state: AttemptState::Failed,
+            result_digest: digest(b"summary-result"),
+            exit_code: Some(1),
+            infrastructure_error_digest: None,
+            finished_at_ms: first_base + 20,
+            artifacts: Vec::new(),
+            reason_code: "PROCESS_EXIT_NONZERO".to_string(),
+        })
+        .unwrap();
+
+    let mut second_request = request(&sandbox, "request:inspection-summary-second", 4);
+    second_request.plan.workspace_id = "workspace:inspection-summary-second".to_string();
+    let second = created(sandbox.registry.submit(&second_request).unwrap());
+    sandbox
+        .registry
+        .request_cancel(&second.job.job_id, second.job.created_at_ms + 30)
+        .unwrap();
+
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    let next_sequence: u64 = connection
+        .query_row(
+            "SELECT MAX(event_sequence)+1 FROM job_events WHERE job_id=?1",
+            [&first.job.job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO job_events(event_id,job_id,attempt_id,event_sequence,event_type,origin,previous_state,new_state,reason_code,detail_json,detail_digest,observed_at_ms) VALUES(?1,?2,?3,?4,'DISPATCH_ISSUED','SYSTEM_DERIVED','starting','starting','AT_MOST_ONCE_BOUNDARY_COMMITTED','{}',?5,?6)",
+            rusqlite::params![
+                format!("event-{}", Uuid::now_v7()),
+                first.job.job_id,
+                first.attempt.attempt_id,
+                next_sequence,
+                digest(b"{}"),
+                first_base + 14
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let summary = summarize_experience(&inspection_config(&sandbox), 0).unwrap();
+    assert_eq!(summary.jobs.total, 2);
+    assert_eq!(summary.jobs.converged, 2);
+    assert_eq!(summary.jobs.unresolved, 0);
+    assert_eq!(summary.jobs.recovery_required, 0);
+    assert_eq!(summary.jobs.capacity_held, 0);
+    assert_eq!(summary.jobs.convergence_rate_basis_points, 10_000);
+    assert_eq!(summary.recovery.jobs_with_reconciliation_failure, 1);
+    assert_eq!(summary.recovery.jobs_with_automatic_recovery, 1);
+    assert_eq!(
+        summary.recovery.automatic_recovery_rate_basis_points,
+        10_000
+    );
+    assert_eq!(summary.dispatch.dispatches, 2);
+    assert_eq!(summary.dispatch.jobs_with_duplicate_dispatch, 1);
+    assert_eq!(summary.dispatch.duplicate_dispatches, 1);
+    assert_eq!(summary.cancellation.requested, 1);
+    assert_eq!(summary.cancellation.resolved_cancelled, 1);
+    assert_eq!(summary.cancellation.unresolved, 0);
+    assert_eq!(summary.resolutions.get("failed"), Some(&1));
+    assert_eq!(summary.resolutions.get("cancelled"), Some(&1));
+    assert!(!summary.semantic_completion_evaluated);
 }
 
 #[test]

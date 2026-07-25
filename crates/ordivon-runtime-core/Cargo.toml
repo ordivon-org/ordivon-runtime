@@ -30,6 +30,11 @@ name = "ordivon-runtime-repair"
 path = "src/bin/ordivon-runtime-repair.rs"
 required-features = ["transactional-runtime"]
 
+[[bin]]
+name = "ordivon-runtime-inspect"
+path = "src/bin/ordivon-runtime-inspect.rs"
+required-features = ["transactional-runtime"]
+
 [dependencies]
 hex.workspace = true
 libc = { workspace = true, optional = true }

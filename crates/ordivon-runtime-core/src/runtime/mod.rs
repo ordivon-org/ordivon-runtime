@@ -2,6 +2,7 @@ mod doctor;
 mod engine;
 mod error;
 mod evidence;
+mod inspection;
 mod registry;
 mod repair;
 mod supervisor;
@@ -14,6 +15,15 @@ pub use doctor::{
 };
 pub use engine::{ReconciliationFailure, ReconciliationReport, Runtime, RuntimeConfig};
 pub use error::{RuntimeCapacity, RuntimeError, RuntimeErrorCode, RuntimeResult};
+pub use inspection::{
+    inspect_job, summarize_experience, RuntimeExperienceArtifactSummary,
+    RuntimeExperienceCancellationSummary, RuntimeExperienceDispatchSummary,
+    RuntimeExperienceDurationSummary, RuntimeExperienceJobSummary,
+    RuntimeExperienceRecoverySummary, RuntimeExperienceSummary, RuntimeInspectionArtifactSummary,
+    RuntimeInspectionAttempt, RuntimeInspectionCondition, RuntimeInspectionConfig,
+    RuntimeInspectionEpisodes, RuntimeInspectionEvent, RuntimeInspectionJob, RuntimeJobInspection,
+    DEFAULT_INSPECTION_EVENT_LIMIT, MAX_INSPECTION_EVENT_LIMIT, RUNTIME_INSPECTION_SCHEMA_VERSION,
+};
 pub use registry::{
     Registry, RegistryConfig, RUNTIME_MIGRATION_CHECKSUM,
     RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM, RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM,
