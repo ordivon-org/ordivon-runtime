@@ -237,6 +237,7 @@ impl Runtime {
             timeout_ms: request.execution.timeout_ms,
             stdout_limit_bytes: request.execution.stdout_limit_bytes,
             stderr_limit_bytes: request.execution.stderr_limit_bytes,
+            budget: request.execution.budget.clone(),
             principal: request.principal.clone(),
         })
     }
@@ -425,6 +426,7 @@ impl Runtime {
             &bundle_path,
             Path::new(&plan.workspace_path),
             runtime_ceiling,
+            &plan.budget,
         )?;
         if !output.status.success() {
             let detail = format!(
@@ -805,6 +807,13 @@ impl Runtime {
 
     fn reconcile_nonterminal_batch(&self, limit: u32) -> RuntimeResult<ReconciliationReport> {
         let attempts = self.registry.list_nonterminal_attempts_bounded(limit)?;
+        let mut report = ReconciliationReport::default();
+        self.reconcile_candidates_into(attempts, &mut report)?;
+        Ok(report)
+    }
+
+    pub fn reconcile_maintenance_batch(&self, limit: u32) -> RuntimeResult<ReconciliationReport> {
+        let attempts = self.registry.list_maintenance_attempts_bounded(limit)?;
         let mut report = ReconciliationReport::default();
         self.reconcile_candidates_into(attempts, &mut report)?;
         Ok(report)
@@ -1563,10 +1572,51 @@ fn validate_run_request(request: &TaskRunRequest, max_output_bytes: u64) -> Runt
             "execution.stderrLimitBytes",
         ));
     }
+    validate_execution_budget(&request.execution.budget, "execution.budget")?;
     if request.execution.args.len() > 128 || request.execution.env.len() > 64 {
         return Err(RuntimeError::invalid(
             "args or environment exceed runtime bounds",
             "execution",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_execution_budget(
+    budget: &super::ExecutionBudget,
+    field_prefix: &str,
+) -> RuntimeResult<()> {
+    if budget.memory_max_bytes.is_some_and(|value| {
+        !(super::MIN_MEMORY_MAX_BYTES..=super::MAX_MEMORY_MAX_BYTES).contains(&value)
+    }) {
+        return Err(RuntimeError::invalid(
+            format!(
+                "memoryMaxBytes must be in {}..={}",
+                super::MIN_MEMORY_MAX_BYTES,
+                super::MAX_MEMORY_MAX_BYTES
+            ),
+            &format!("{field_prefix}.memoryMaxBytes"),
+        ));
+    }
+    if budget
+        .tasks_max
+        .is_some_and(|value| value == 0 || value > super::MAX_TASKS_MAX)
+    {
+        return Err(RuntimeError::invalid(
+            format!("tasksMax must be in 1..={}", super::MAX_TASKS_MAX),
+            &format!("{field_prefix}.tasksMax"),
+        ));
+    }
+    if budget
+        .cpu_quota_percent
+        .is_some_and(|value| value == 0 || value > super::MAX_CPU_QUOTA_PERCENT)
+    {
+        return Err(RuntimeError::invalid(
+            format!(
+                "cpuQuotaPercent must be in 1..={}",
+                super::MAX_CPU_QUOTA_PERCENT
+            ),
+            &format!("{field_prefix}.cpuQuotaPercent"),
         ));
     }
     Ok(())
@@ -1640,6 +1690,7 @@ fn build_systemd_run_command(
     bundle_path: &Path,
     _workspace_path: &Path,
     runtime_ceiling_ms: u64,
+    budget: &super::ExecutionBudget,
 ) -> RuntimeResult<Command> {
     let mut command = Command::new("systemd-run");
     command
@@ -1654,6 +1705,15 @@ fn build_systemd_run_command(
             "--property=StandardError=journal",
         ])
         .arg(format!("--property=RuntimeMaxSec={runtime_ceiling_ms}ms"));
+    if let Some(memory_max_bytes) = budget.memory_max_bytes {
+        command.arg(format!("--property=MemoryMax={memory_max_bytes}"));
+    }
+    if let Some(tasks_max) = budget.tasks_max {
+        command.arg(format!("--property=TasksMax={tasks_max}"));
+    }
+    if let Some(cpu_quota_percent) = budget.cpu_quota_percent {
+        command.arg(format!("--property=CPUQuota={cpu_quota_percent}%"));
+    }
 
     append_trusted_environment(&mut command);
 
@@ -1701,6 +1761,7 @@ fn systemd_run(
     bundle_path: &Path,
     workspace_path: &Path,
     runtime_ceiling_ms: u64,
+    budget: &super::ExecutionBudget,
 ) -> RuntimeResult<std::process::Output> {
     build_systemd_run_command(
         unit_name,
@@ -1708,6 +1769,7 @@ fn systemd_run(
         bundle_path,
         workspace_path,
         runtime_ceiling_ms,
+        budget,
     )?
     .output()
     .map_err(|error| tool_error("cannot execute systemd-run", error))
@@ -2290,6 +2352,7 @@ mod trusted_systemd_command_tests {
                 timeout_ms: 1_000,
                 stdout_limit_bytes: 1_025,
                 stderr_limit_bytes: 1_024,
+                budget: crate::ExecutionBudget::default(),
             },
             wait_ms: 0,
             stdout_tail_bytes: 0,
@@ -2341,6 +2404,7 @@ mod trusted_systemd_command_tests {
             Path::new("/var/lib/ordivon/attempts/attempt-test"),
             Path::new("/root/projects/ordivon-runtime"),
             10_000,
+            &crate::ExecutionBudget::default(),
         )
         .unwrap();
         let args = command
@@ -2357,6 +2421,7 @@ mod trusted_systemd_command_tests {
             "ReadWritePaths",
             "MemoryMax",
             "TasksMax",
+            "CPUQuota",
             "UMask",
         ] {
             assert!(
@@ -2371,5 +2436,30 @@ mod trusted_systemd_command_tests {
         assert!(!valid_environment_name(
             "CARGO_BIN_EXE_ordivon-runtime-job-fixture"
         ));
+    }
+
+    #[test]
+    fn execution_budget_maps_to_systemd_resource_properties() {
+        let command = build_systemd_run_command(
+            "ordivon-budget.service",
+            Path::new("/usr/bin/true"),
+            Path::new("/var/lib/ordivon/attempts/attempt-budget"),
+            Path::new("/root/projects/ordivon-runtime"),
+            10_000,
+            &crate::ExecutionBudget {
+                memory_max_bytes: Some(512 * 1024 * 1024),
+                tasks_max: Some(64),
+                cpu_quota_percent: Some(250),
+            },
+        )
+        .unwrap();
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(args.contains("MemoryMax=536870912"));
+        assert!(args.contains("TasksMax=64"));
+        assert!(args.contains("CPUQuota=250%"));
     }
 }

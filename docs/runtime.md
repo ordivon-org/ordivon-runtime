@@ -63,6 +63,24 @@ Reconciliation compares Registry state with runner evidence and systemd/cgroup r
 
 A verified terminal result can defeat a later cancellation race because observed completion is stronger evidence than delayed intent. An identity-uncertain Attempt remains `orphaned` and retains its reservation while its recorded unit, process identity, or cgroup may still own a live process tree. When all three are proven absent, reconciliation converges it to `lost`, `timed_out`, or `cancelled` according to persisted intent and releases the reservation atomically. A late identity-bound runner Result still takes precedence when available.
 
+## Execution budgets
+
+Time and output bounds are always part of the Execution Plan. A caller may also commit optional physical budgets for memory, process count, and CPU quota. These values participate in the operation Digest and are applied by systemd to the Attempt cgroup through `MemoryMax=`, `TasksMax=`, and `CPUQuota=`. An empty budget is omitted from canonical serialization so requests admitted before this contract remain idempotently replayable.
+
+Budgets constrain physical consumption; they are not a scheduler, priority system, sandbox, or approval policy. The trusted-local authority model remains unchanged.
+
+## Maintenance reconciliation
+
+The service performs a low-frequency bounded reconciliation batch in addition to startup and request-boundary reconciliation. The batch prioritizes recovery-required and held-orphaned Attempts, then inspects other unsettled Attempts oldest first. Missed timer ticks are skipped rather than queued, and one batch never exceeds the configured bound.
+
+This loop does not redispatch ambiguous work or retry failed commands. It only continues convergence among Registry state, runner evidence, and systemd/cgroup reality, including clearing recovery markers that became stale after a conclusive terminal result.
+
+## Semantic health and Workspace lifecycle
+
+`ordivon-runtime-doctor inspect` remains read-only and reports invariant violations, recovery cases, state counts, capacity holders, Artifact volume, and whether the Runtime is `healthy` or needs `attention`. The summary explains current blocking facts; it does not invent a second control plane.
+
+`ordivon-runtime-reclaim inspect` validates the Registry capabilities it actually reads instead of copying a migration-version ceiling. It may measure logical Workspace bytes and classify active, dirty, stale, orphan-directory, and closable cases. It never deletes a Workspace. `workspace.close` remains the only physical release path, preserving dirty-state checks, active-Job exclusion, rescue refs, tombstones, and idempotent retries.
+
 ## Extension boundary
 
 Use existing host executables through `workspace.exec` unless repeated real use proves that a stable operation needs a dedicated structured Tool contract. Untrusted workloads require an external isolation boundary, not an alternate execution mode inside Ordivon Runtime.

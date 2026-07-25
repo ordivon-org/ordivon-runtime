@@ -174,6 +174,7 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
             timeout_ms: 10_000,
             stdout_limit_bytes: 65_536,
             stderr_limit_bytes: 65_536,
+            budget: crate::ExecutionBudget::default(),
             principal: "principal:test".to_string(),
         },
         global_limit,
@@ -195,6 +196,160 @@ fn registry_initializes_with_private_permissions_and_valid_schema() {
     let store = fs::metadata(&sandbox.registry.config().store_root).unwrap();
     assert_eq!(store.permissions().mode() & 0o777, 0o700);
     assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+fn empty_execution_budget_preserves_legacy_plan_identity() {
+    let sandbox = Sandbox::new("budget-legacy-identity", 5000);
+    let submit = request(&sandbox, "request:budget-legacy", 4);
+    let value = serde_json::to_value(&submit.plan).unwrap();
+    assert!(value.get("budget").is_none());
+    let decoded: RuntimeExecutionPlan = serde_json::from_value(value).unwrap();
+    assert!(decoded.budget.is_empty());
+}
+
+#[test]
+fn maintenance_scan_is_bounded_and_oldest_first() {
+    let sandbox = Sandbox::new("maintenance-order", 5000);
+    let mut created_attempts = Vec::new();
+    for index in 0..3_u32 {
+        let mut submit = request(&sandbox, &format!("request:maintenance:{index}"), 8);
+        submit.plan.workspace_id = format!("workspace:maintenance:{index}");
+        let admission = created(sandbox.registry.submit(&submit).unwrap());
+        created_attempts.push(admission.attempt);
+    }
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    for (index, attempt) in created_attempts.iter().enumerate() {
+        connection
+            .execute(
+                "UPDATE attempts SET created_at_ms=?1 WHERE attempt_id=?2",
+                rusqlite::params![100_u64 + index as u64, attempt.attempt_id],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let attempts = sandbox
+        .registry
+        .list_maintenance_attempts_bounded(2)
+        .unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0].attempt_id, created_attempts[0].attempt_id);
+    assert_eq!(attempts[1].attempt_id, created_attempts[1].attempt_id);
+}
+
+#[test]
+fn maintenance_scan_prioritizes_recovery_over_older_running_work() {
+    let sandbox = Sandbox::new("maintenance-priority", 5000);
+    let mut old_request = request(&sandbox, "request:maintenance-priority-old", 4);
+    old_request.plan.workspace_id = "workspace:maintenance-priority-old".to_string();
+    let old = created(sandbox.registry.submit(&old_request).unwrap());
+
+    let mut recovery_request = request(&sandbox, "request:maintenance-priority-recovery", 4);
+    recovery_request.plan.workspace_id = "workspace:maintenance-priority-recovery".to_string();
+    let recovery = created(sandbox.registry.submit(&recovery_request).unwrap());
+    let failure = RuntimeError::new(
+        RuntimeErrorCode::AttemptStateConflict,
+        "prioritized recovery",
+        Some("attemptId"),
+        false,
+    );
+    sandbox
+        .registry
+        .record_reconciliation_failure(&recovery.attempt, &failure, 30)
+        .unwrap();
+
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE attempts SET created_at_ms=1 WHERE attempt_id=?1",
+            [&old.attempt.attempt_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE attempts SET created_at_ms=2 WHERE attempt_id=?1",
+            [&recovery.attempt.attempt_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let attempts = sandbox
+        .registry
+        .list_maintenance_attempts_bounded(1)
+        .unwrap();
+    assert_eq!(attempts[0].attempt_id, recovery.attempt.attempt_id);
+}
+
+#[test]
+fn maintenance_batch_clears_stale_terminal_recovery_condition() {
+    let sandbox = Sandbox::new("maintenance-stale-recovery", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:maintenance-stale-recovery", 4))
+            .unwrap(),
+    );
+    let failure = RuntimeError::new(
+        RuntimeErrorCode::AttemptStateConflict,
+        "simulated stale observation",
+        Some("attemptId"),
+        false,
+    );
+    sandbox
+        .registry
+        .record_reconciliation_failure(&created.attempt, &failure, 20)
+        .unwrap();
+    sandbox
+        .registry
+        .commit_terminal(&TerminalCommit {
+            attempt_id: created.attempt.attempt_id.clone(),
+            expected_row_version: created.attempt.row_version,
+            state: AttemptState::Failed,
+            result_digest: digest(b"maintenance-terminal"),
+            exit_code: Some(1),
+            infrastructure_error_digest: None,
+            finished_at_ms: 21,
+            artifacts: Vec::new(),
+            reason_code: "CONTROL_FAILURE".to_string(),
+        })
+        .unwrap();
+    let before = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    assert_eq!(before.summary.status, "attention");
+    assert_eq!(before.summary.recovery_required_attempts, 1);
+
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let report = runtime.reconcile_maintenance_batch(8).unwrap();
+    assert_eq!(report.inspected, 1);
+    let after = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    assert_eq!(after.summary.status, "healthy");
+    assert_eq!(after.summary.recovery_required_attempts, 0);
+    assert_eq!(
+        runtime
+            .registry()
+            .get_attempt(&created.attempt.attempt_id)
+            .unwrap()
+            .state,
+        AttemptState::Failed
+    );
+}
+
+#[test]
+fn execution_budget_is_validated_and_part_of_idempotent_identity() {
+    let sandbox = Sandbox::new("execution-budget", 5000);
+    let mut invalid = request(&sandbox, "request:budget-invalid", 4);
+    invalid.plan.budget.memory_max_bytes = Some(crate::MIN_MEMORY_MAX_BYTES - 1);
+    let error = sandbox.registry.submit(&invalid).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert_eq!(error.field.as_deref(), Some("plan.budget.memoryMaxBytes"));
+
+    let mut original = request(&sandbox, "request:budget-identity", 4);
+    original.plan.budget.tasks_max = Some(64);
+    created(sandbox.registry.submit(&original).unwrap());
+    let mut changed = original;
+    changed.plan.budget.tasks_max = Some(65);
+    let error = sandbox.registry.submit(&changed).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::IdempotencyConflict);
 }
 
 #[test]
@@ -541,12 +696,42 @@ fn runtime_doctor_is_read_only_and_fingerprint_is_stable() {
     let first = inspect_runtime(&doctor_config(&sandbox)).unwrap();
     let second = inspect_runtime(&doctor_config(&sandbox)).unwrap();
 
+    assert_eq!(first.schema_version, 2);
+    assert_eq!(first.summary.status, "healthy");
+    assert_eq!(first.summary.jobs_total, 0);
+    assert_eq!(first.summary.unresolved_jobs, 0);
+    assert!(first.summary.capacity_holders.is_empty());
     assert_eq!(first.violation_count, 0);
     assert!(first.cases.is_empty());
     assert_eq!(first.fingerprint, second.fingerprint);
     assert_eq!(
         before,
         fs::read(&sandbox.registry.config().db_path).unwrap()
+    );
+}
+
+#[test]
+fn runtime_doctor_summarizes_capacity_holders() {
+    let sandbox = Sandbox::new("doctor-summary", 5000);
+    let admission = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:doctor-summary", 4))
+            .unwrap(),
+    );
+    let report = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    assert_eq!(report.summary.status, "healthy");
+    assert_eq!(report.summary.jobs_total, 1);
+    assert_eq!(report.summary.unresolved_jobs, 1);
+    assert_eq!(report.summary.reservations_by_state.get("active"), Some(&1));
+    assert_eq!(report.summary.capacity_holders.len(), 1);
+    assert_eq!(
+        report.summary.capacity_holders[0].job_id,
+        admission.job.job_id
+    );
+    assert_eq!(
+        report.summary.capacity_holders[0].reservation_state,
+        ReservationState::Active
     );
 }
 

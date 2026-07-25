@@ -25,7 +25,5 @@ jobs:
       - run: cargo test -p ordivon-runtime-core --no-default-features --features transactional-runtime
       - run: uvx ruff check scripts/
       - run: python -m unittest discover -s scripts/tests -v
-      - name: Explain local-only acceptance boundary
-        run: |
-          echo "Real systemd/cgroup tests and MCP execution E2E require the local WSL runner."
-          echo 'Run the commands documented in docs/operations/runbook.md under "Local Runtime acceptance".'
+      - name: Validate local-only acceptance contract
+        run: scripts/local-acceptance check

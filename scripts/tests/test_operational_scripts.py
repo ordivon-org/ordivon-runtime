@@ -75,6 +75,90 @@ class OperationalScriptTests(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT * FROM jobs").fetchall(), [("job-1", "succeeded")])
             self.assertEqual((restored / "control/note.txt").read_text(encoding="utf-8"), "control-data\n")
 
+    def test_reclaim_accepts_future_compatible_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "registry.sqlite3"
+            runtime = root / "runtime"
+            (runtime / "workspace-records").mkdir(parents=True)
+            (runtime / "workspaces").mkdir(parents=True)
+            with sqlite3.connect(database) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE schema_migrations(version INTEGER);
+                    INSERT INTO schema_migrations VALUES (999);
+                    CREATE TABLE jobs(job_id TEXT,workspace_id TEXT,resolution TEXT,created_at_ms INTEGER);
+                    CREATE TABLE attempts(attempt_id TEXT,job_id TEXT,state TEXT);
+                    CREATE TABLE concurrency_reservations(attempt_id TEXT,state TEXT);
+                    """
+                )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-reclaim",
+                    "inspect",
+                    "--database",
+                    str(database),
+                    "--runtime-store-root",
+                    str(runtime),
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(result.stdout)
+            self.assertEqual(report["registryVersion"], 999)
+            self.assertEqual(report["releaseTool"], "workspace.close")
+            self.assertEqual(report["summary"]["counts"], {})
+
+    def test_reclaim_rejects_missing_registry_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "registry.sqlite3"
+            runtime = root / "runtime"
+            runtime.mkdir()
+            with sqlite3.connect(database) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE schema_migrations(version INTEGER);
+                    INSERT INTO schema_migrations VALUES (4);
+                    CREATE TABLE jobs(job_id TEXT,workspace_id TEXT,created_at_ms INTEGER);
+                    CREATE TABLE attempts(attempt_id TEXT,job_id TEXT,state TEXT);
+                    CREATE TABLE concurrency_reservations(attempt_id TEXT,state TEXT);
+                    """
+                )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-reclaim",
+                    "inspect",
+                    "--database",
+                    str(database),
+                    "--runtime-store-root",
+                    str(runtime),
+                ],
+                cwd=REPO,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("column:jobs.resolution", result.stderr)
+
+    def test_local_acceptance_contract_is_executable(self) -> None:
+        result = subprocess.run(
+            ["scripts/local-acceptance", "check"],
+            cwd=REPO,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        self.assertIn("local acceptance contract: present", result.stdout)
+        acceptance = (REPO / "scripts/local-acceptance").read_text(encoding="utf-8")
+        self.assertIn("--features systemd-supervisor", acceptance)
+        self.assertIn("ORDIVON_RUN_SYSTEMD_SPIKE=1", acceptance)
+
     def test_restore_rejects_digest_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
