@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::State;
@@ -37,6 +37,8 @@ struct AppConfig {
     token: String,
     body_limit_bytes: usize,
     trust_cf_access: bool,
+    reconcile_interval_ms: u64,
+    reconcile_batch_size: u32,
     server: ServerConfig,
 }
 #[tokio::main]
@@ -82,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "runtime startup reconciliation completed"
         );
     }
-    drop(startup_runtime);
+    let background_runtime = startup_runtime.clone();
     let listener = tokio::net::TcpListener::bind(app.bind).await?;
     let address = listener.local_addr()?;
     let cancellation = CancellationToken::new();
@@ -121,6 +123,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         execution_mode = "trusted-local",
         "Ordivon Runtime listening"
     );
+
+    let reconcile_shutdown = cancellation.child_token();
+    let reconcile_interval_ms = app.reconcile_interval_ms;
+    let reconcile_batch_size = app.reconcile_batch_size;
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(reconcile_interval_ms));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                _ = reconcile_shutdown.cancelled() => break,
+                _ = ticker.tick() => {
+                    let runtime = background_runtime.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        runtime.reconcile_maintenance_batch(reconcile_batch_size)
+                    }).await {
+                        Ok(Ok(report))
+                            if report.reconciled > 0
+                                || report.recovered_orphans > 0
+                                || report.quarantined > 0
+                                || report.failed > 0 =>
+                        {
+                            tracing::info!(
+                                inspected = report.inspected,
+                                reconciled = report.reconciled,
+                                recovered_orphans = report.recovered_orphans,
+                                quarantined = report.quarantined,
+                                unchanged = report.unchanged,
+                                failed = report.failed,
+                                "runtime maintenance reconciliation completed"
+                            );
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                code = error.code.as_str(),
+                                message = %error.message,
+                                "runtime maintenance reconciliation failed"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "runtime maintenance reconciliation task failed");
+                        }
+                    }
+                }
+            }
+        }
+    });
 
     let shutdown = cancellation.clone();
     tokio::spawn(async move {
@@ -264,6 +314,26 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         .map(|value| value.parse())
         .transpose()?
         .unwrap_or(2_000);
+    let reconcile_interval_ms: u64 = std::env::var("ORDIVON_RECONCILE_INTERVAL_MS")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(15_000);
+    if !(1_000..=3_600_000).contains(&reconcile_interval_ms) {
+        return Err("ORDIVON_RECONCILE_INTERVAL_MS must be in 1000..=3600000".into());
+    }
+    let reconcile_batch_size: u32 = std::env::var("ORDIVON_RECONCILE_BATCH_SIZE")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(32);
+    if !(1..=ordivon_runtime_core::MAX_RUNTIME_LIST_LIMIT).contains(&reconcile_batch_size) {
+        return Err(format!(
+            "ORDIVON_RECONCILE_BATCH_SIZE must be in 1..={}",
+            ordivon_runtime_core::MAX_RUNTIME_LIST_LIMIT
+        )
+        .into());
+    }
 
     let global_limit = std::env::var("ORDIVON_GLOBAL_MAX_CONCURRENCY")
         .ok()
@@ -282,6 +352,8 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         token,
         body_limit_bytes,
         trust_cf_access,
+        reconcile_interval_ms,
+        reconcile_batch_size,
         server: ServerConfig {
             runtime: RuntimeConfig {
                 registry: RegistryConfig {

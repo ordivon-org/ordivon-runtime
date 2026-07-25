@@ -8,9 +8,9 @@ mod supervisor;
 mod types;
 
 pub use doctor::{
-    inspect_runtime, RuntimeDoctorAttemptState, RuntimeDoctorCase, RuntimeDoctorConfig,
-    RuntimeDoctorJobState, RuntimeDoctorProposal, RuntimeDoctorReport,
-    RuntimeDoctorReservationState, RUNTIME_DOCTOR_SCHEMA_VERSION,
+    inspect_runtime, RuntimeDoctorAttemptState, RuntimeDoctorCapacityHolder, RuntimeDoctorCase,
+    RuntimeDoctorConfig, RuntimeDoctorJobState, RuntimeDoctorProposal, RuntimeDoctorReport,
+    RuntimeDoctorReservationState, RuntimeDoctorSummary, RUNTIME_DOCTOR_SCHEMA_VERSION,
 };
 pub use engine::{ReconciliationFailure, ReconciliationReport, Runtime, RuntimeConfig};
 pub use error::{RuntimeCapacity, RuntimeError, RuntimeErrorCode, RuntimeResult};
@@ -26,12 +26,13 @@ pub use repair::{
 pub use types::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,
-    CreatedAdmission, JobDesiredState, JobProjection, JobResolution, ReservationRecord,
-    ReservationState, RunnerIdentity, RuntimeArtifactRecord, RuntimeExecutionPlan,
-    RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult,
-    RuntimeJobRecord, RuntimeJobSummary, SubmitRequest, TaskCancelRequest, TaskObservation,
-    TaskObserveRequest, TaskRunRequest, TerminalCommit, UniversalExecutionRequest,
-    MAX_ARTIFACT_READ_BYTES, MAX_RUNTIME_LIST_LIMIT, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
+    CreatedAdmission, ExecutionBudget, JobDesiredState, JobProjection, JobResolution,
+    ReservationRecord, ReservationState, RunnerIdentity, RuntimeArtifactRecord,
+    RuntimeExecutionPlan, RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest,
+    RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary, SubmitRequest, TaskCancelRequest,
+    TaskObservation, TaskObserveRequest, TaskRunRequest, TerminalCommit, UniversalExecutionRequest,
+    MAX_ARTIFACT_READ_BYTES, MAX_CPU_QUOTA_PERCENT, MAX_MEMORY_MAX_BYTES, MAX_RUNTIME_LIST_LIMIT,
+    MAX_TASKS_MAX, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MIN_MEMORY_MAX_BYTES,
     RUNTIME_SCHEMA_VERSION,
 };
 

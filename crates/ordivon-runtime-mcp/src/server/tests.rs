@@ -93,6 +93,7 @@ fn submit(
                 timeout_ms: 1000,
                 stdout_limit_bytes: 1024,
                 stderr_limit_bytes: 1024,
+                budget: ordivon_runtime_core::ExecutionBudget::default(),
                 principal: "principal:mcp-test".to_string(),
             },
             global_limit: 4,
@@ -186,6 +187,22 @@ fn tool_catalog_uses_transactional_job_contract() {
         .pointer("/$defs/UniversalExecutionRequest/properties/cwdRelative/description")
         .and_then(Value::as_str)
         .is_some_and(|description| description.contains("relative to the Workspace root")));
+    assert_eq!(
+        exec_schema.pointer("/$defs/ExecutionBudget/properties/memoryMaxBytes/maximum"),
+        Some(&serde_json::json!(
+            ordivon_runtime_core::MAX_MEMORY_MAX_BYTES
+        ))
+    );
+    assert_eq!(
+        exec_schema.pointer("/$defs/ExecutionBudget/properties/tasksMax/maximum"),
+        Some(&serde_json::json!(ordivon_runtime_core::MAX_TASKS_MAX))
+    );
+    assert_eq!(
+        exec_schema.pointer("/$defs/ExecutionBudget/properties/cpuQuotaPercent/maximum"),
+        Some(&serde_json::json!(
+            ordivon_runtime_core::MAX_CPU_QUOTA_PERCENT
+        ))
+    );
     for server_owned in ["principal", "globalLimit", "profileLimit"] {
         assert!(
             !schema.contains(server_owned),

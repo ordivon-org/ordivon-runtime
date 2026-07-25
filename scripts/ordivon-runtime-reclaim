@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -15,6 +16,12 @@ from urllib.parse import quote
 
 SCHEMA_VERSION = 1
 MAX_DIRTY_PATHS = 20
+REQUIRED_REGISTRY_COLUMNS = {
+    "schema_migrations": {"version"},
+    "jobs": {"job_id", "workspace_id", "resolution", "created_at_ms"},
+    "attempts": {"attempt_id", "job_id", "state"},
+    "concurrency_reservations": {"attempt_id", "state"},
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,6 +33,11 @@ def parse_args() -> argparse.Namespace:
     inspect.add_argument("--workspace-root", type=absolute_path)
     inspect.add_argument("--busy-timeout-ms", type=positive_timeout, default=5_000)
     inspect.add_argument("--pretty", action="store_true")
+    inspect.add_argument(
+        "--measure-bytes",
+        action="store_true",
+        help="walk Workspace trees and include logical byte estimates",
+    )
     return parser.parse_args()
 
 
@@ -46,7 +58,7 @@ def positive_timeout(value: str) -> int:
 def inspect_workspaces(args: argparse.Namespace) -> dict[str, object]:
     workspace_root = args.workspace_root or args.runtime_store_root / "workspaces"
     records_root = args.runtime_store_root / "workspace-records"
-    connection = open_registry(args.database, args.busy_timeout_ms)
+    connection, registry_version = open_registry(args.database, args.busy_timeout_ms)
     record_ids: set[str] = set()
     candidates: list[dict[str, object]] = []
 
@@ -58,6 +70,7 @@ def inspect_workspaces(args: argparse.Namespace) -> dict[str, object]:
             record_path,
             workspace_root / workspace_id,
             workspace_id,
+            measure_bytes=args.measure_bytes,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -70,27 +83,60 @@ def inspect_workspaces(args: argparse.Namespace) -> dict[str, object]:
                         workspace_path.name,
                         "orphan_directory",
                         detail="physical Workspace has no identity record",
+                        estimated_bytes=workspace_bytes(workspace_path) if args.measure_bytes else None,
                     )
                 )
 
     connection.close()
     candidates.sort(key=lambda item: str(item["workspaceId"]))
+    counts: dict[str, int] = {}
+    estimated_bytes: dict[str, int] = {}
+    for item in candidates:
+        classification = str(item["classification"])
+        counts[classification] = counts.get(classification, 0) + 1
+        if isinstance(item.get("estimatedBytes"), int):
+            estimated_bytes[classification] = estimated_bytes.get(classification, 0) + int(
+                item["estimatedBytes"]
+            )
     return {
         "schemaVersion": SCHEMA_VERSION,
         "generatedAtMs": int(time.time() * 1000),
+        "registryVersion": registry_version,
+        "releaseTool": "workspace.close",
+        "summary": {
+            "counts": dict(sorted(counts.items())),
+            "estimatedBytes": dict(sorted(estimated_bytes.items())),
+        },
         "candidates": candidates,
     }
 
 
-def open_registry(database: Path, busy_timeout_ms: int) -> sqlite3.Connection:
+def open_registry(database: Path, busy_timeout_ms: int) -> tuple[sqlite3.Connection, int | None]:
     uri = f"file:{quote(str(database))}?mode=ro"
     connection = sqlite3.connect(uri, uri=True, timeout=busy_timeout_ms / 1000)
     connection.execute("PRAGMA query_only=ON")
     connection.execute("PRAGMA trusted_schema=OFF")
+    validate_registry_capabilities(connection)
     version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    if version is not None and version > 3:
-        raise RuntimeError("Runtime Registry is newer than this reclaim inspector")
-    return connection
+    return connection, int(version) if version is not None else None
+
+
+def validate_registry_capabilities(connection: sqlite3.Connection) -> None:
+    missing: list[str] = []
+    for table, required_columns in REQUIRED_REGISTRY_COLUMNS.items():
+        columns = {
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if not columns:
+            missing.append(f"table:{table}")
+            continue
+        for column in sorted(required_columns - columns):
+            missing.append(f"column:{table}.{column}")
+    if missing:
+        raise RuntimeError(
+            "Runtime Registry lacks reclaim capabilities: " + ", ".join(missing)
+        )
 
 
 def classify_record(
@@ -98,18 +144,28 @@ def classify_record(
     record_path: Path,
     workspace_path: Path,
     workspace_id: str,
+    *,
+    measure_bytes: bool,
 ) -> dict[str, object] | None:
     try:
         value = json.loads(record_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return candidate(workspace_id, "unknown", detail="workspace record cannot be decoded")
 
+    estimated_bytes = workspace_bytes(workspace_path) if measure_bytes and workspace_path.exists() else None
+    metadata = {
+        "sourceRepo": value.get("sourceRepo"),
+        "sourceRevision": value.get("sourceRevision"),
+        "createdUnixMs": value.get("createdUnixMs"),
+    }
     if value.get("state") == "closed":
         if workspace_path.exists():
             return candidate(
                 workspace_id,
                 "unknown",
                 detail="closed record still has a physical Workspace",
+                estimated_bytes=estimated_bytes,
+                **metadata,
             )
         return None
 
@@ -122,24 +178,50 @@ def classify_record(
             workspace_id,
             "unknown",
             detail="workspace identity or path does not match its record",
+            estimated_bytes=estimated_bytes,
+            **metadata,
         )
     if not workspace_path.is_dir():
         return candidate(
             workspace_id,
             "stale_record",
             detail="active record has no physical Workspace",
+            **metadata,
         )
 
     active_job_ids = query_active_job_ids(connection, workspace_id)
     if active_job_ids:
-        return candidate(workspace_id, "blocked_active", active_job_ids=active_job_ids)
+        return candidate(
+            workspace_id,
+            "blocked_active",
+            active_job_ids=active_job_ids,
+            estimated_bytes=estimated_bytes,
+            **metadata,
+        )
     try:
         dirty_paths = git_dirty_paths(workspace_path)
     except RuntimeError:
-        return candidate(workspace_id, "unknown", detail="Workspace Git state cannot be read")
+        return candidate(
+            workspace_id,
+            "unknown",
+            detail="Workspace Git state cannot be read",
+            estimated_bytes=estimated_bytes,
+            **metadata,
+        )
     if dirty_paths:
-        return candidate(workspace_id, "blocked_dirty", dirty_paths=dirty_paths)
-    return candidate(workspace_id, "closable")
+        return candidate(
+            workspace_id,
+            "blocked_dirty",
+            dirty_paths=dirty_paths,
+            estimated_bytes=estimated_bytes,
+            **metadata,
+        )
+    return candidate(
+        workspace_id,
+        "closable",
+        estimated_bytes=estimated_bytes,
+        **metadata,
+    )
 
 
 def query_active_job_ids(connection: sqlite3.Connection, workspace_id: str) -> list[str]:
@@ -193,6 +275,23 @@ def git_bytes(workspace: Path, arguments: Sequence[str]) -> bytes:
     return result.stdout
 
 
+def workspace_bytes(workspace: Path) -> int:
+    total = 0
+    for root, directories, files in os.walk(workspace, followlinks=False):
+        root_path = Path(root)
+        directories[:] = [
+            name for name in directories if not (root_path / name).is_symlink()
+        ]
+        for name in files:
+            path = root_path / name
+            try:
+                if not path.is_symlink() and path.is_file():
+                    total += path.stat().st_size
+            except FileNotFoundError:
+                continue
+    return total
+
+
 def candidate(
     workspace_id: str,
     classification: str,
@@ -200,6 +299,10 @@ def candidate(
     active_job_ids: list[str] | None = None,
     dirty_paths: list[str] | None = None,
     detail: str | None = None,
+    estimated_bytes: int | None = None,
+    sourceRepo: object = None,
+    sourceRevision: object = None,
+    createdUnixMs: object = None,
 ) -> dict[str, object]:
     result: dict[str, object] = {
         "workspaceId": workspace_id,
@@ -211,6 +314,14 @@ def candidate(
         result["dirtyPaths"] = dirty_paths
     if detail:
         result["detail"] = detail
+    if estimated_bytes is not None:
+        result["estimatedBytes"] = estimated_bytes
+    if isinstance(sourceRepo, str):
+        result["sourceRepo"] = sourceRepo
+    if isinstance(sourceRevision, str):
+        result["sourceRevision"] = sourceRevision
+    if isinstance(createdUnixMs, int):
+        result["createdUnixMs"] = createdUnixMs
     return result
 
 

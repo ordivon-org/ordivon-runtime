@@ -16,7 +16,8 @@ use super::{
 };
 use crate::universal::sha256_bytes;
 
-pub const RUNTIME_DOCTOR_SCHEMA_VERSION: u32 = 1;
+pub const RUNTIME_DOCTOR_SCHEMA_VERSION: u32 = 2;
+const MAX_DOCTOR_CAPACITY_HOLDERS: usize = 50;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeDoctorConfig {
@@ -35,9 +36,35 @@ pub struct RuntimeDoctorReport {
     pub migration_version: i64,
     pub integrity_check: String,
     pub fingerprint: String,
+    pub summary: RuntimeDoctorSummary,
     pub violation_count: usize,
     pub violations: Vec<RuntimeInvariantViolation>,
     pub cases: Vec<RuntimeDoctorCase>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDoctorSummary {
+    pub status: String,
+    pub jobs_total: u64,
+    pub unresolved_jobs: u64,
+    pub attempts_by_state: BTreeMap<String, u64>,
+    pub reservations_by_state: BTreeMap<String, u64>,
+    pub recovery_required_attempts: u64,
+    pub artifacts_total: u64,
+    pub artifact_bytes: u64,
+    pub capacity_holders: Vec<RuntimeDoctorCapacityHolder>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDoctorCapacityHolder {
+    pub job_id: String,
+    pub workspace_id: String,
+    pub attempt_id: String,
+    pub attempt_state: AttemptState,
+    pub reservation_state: ReservationState,
+    pub recovery_required: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -223,6 +250,21 @@ pub fn inspect_runtime(config: &RuntimeDoctorConfig) -> RuntimeResult<RuntimeDoc
         });
     }
 
+    let mut summary = inspect_summary(&connection)?;
+    summary.status = if violations.is_empty()
+        && summary.recovery_required_attempts == 0
+        && summary
+            .reservations_by_state
+            .get("held_orphaned")
+            .copied()
+            .unwrap_or(0)
+            == 0
+    {
+        "healthy".to_string()
+    } else {
+        "attention".to_string()
+    };
+
     let report_fingerprint = sha256_bytes(
         &serde_json::to_vec(&serde_json::json!({
             "schemaVersion": RUNTIME_DOCTOR_SCHEMA_VERSION,
@@ -230,6 +272,7 @@ pub fn inspect_runtime(config: &RuntimeDoctorConfig) -> RuntimeResult<RuntimeDoc
             "storeRoot": config.store_root,
             "migrationVersion": migration_version,
             "integrityCheck": integrity_check,
+            "summary": summary,
             "violations": violations,
             "cases": cases.iter().map(|case| &case.fingerprint).collect::<Vec<_>>(),
         }))
@@ -251,10 +294,115 @@ pub fn inspect_runtime(config: &RuntimeDoctorConfig) -> RuntimeResult<RuntimeDoc
         migration_version,
         integrity_check,
         fingerprint: report_fingerprint,
+        summary,
         violation_count: violations.len(),
         violations,
         cases,
     })
+}
+
+fn inspect_summary(connection: &Connection) -> RuntimeResult<RuntimeDoctorSummary> {
+    let jobs_total = count_query(connection, "SELECT COUNT(*) FROM jobs", "count Jobs")?;
+    let unresolved_jobs = count_query(
+        connection,
+        "SELECT COUNT(*) FROM jobs WHERE resolution IS NULL",
+        "count unresolved Jobs",
+    )?;
+    let recovery_required_attempts = count_query(
+        connection,
+        "SELECT COUNT(*) FROM attempt_conditions WHERE condition_type='recovery_required' AND status='true'",
+        "count recovery-required Attempts",
+    )?;
+    let artifacts_total = count_query(
+        connection,
+        "SELECT COUNT(*) FROM artifacts",
+        "count Artifacts",
+    )?;
+    let artifact_bytes = count_query(
+        connection,
+        "SELECT COALESCE(SUM(byte_length),0) FROM artifacts",
+        "sum Artifact bytes",
+    )?;
+    let attempts_by_state = grouped_counts(
+        connection,
+        "SELECT state,COUNT(*) FROM attempts GROUP BY state ORDER BY state",
+        "count Attempts by state",
+    )?;
+    let reservations_by_state = grouped_counts(
+        connection,
+        "SELECT state,COUNT(*) FROM concurrency_reservations GROUP BY state ORDER BY state",
+        "count reservations by state",
+    )?;
+
+    let mut statement = connection
+        .prepare(
+            "SELECT j.job_id,j.workspace_id,a.attempt_id,a.state,r.state,EXISTS(SELECT 1 FROM attempt_conditions c WHERE c.attempt_id=a.attempt_id AND c.condition_type='recovery_required' AND c.status='true') FROM concurrency_reservations r JOIN attempts a ON a.attempt_id=r.attempt_id JOIN jobs j ON j.job_id=a.job_id WHERE r.state IN ('active','held_orphaned') ORDER BY r.acquired_at_ms,j.job_id LIMIT ?1",
+        )
+        .map_err(|error| RuntimeError::from_sql(error, "prepare capacity-holder summary"))?;
+    let rows = statement
+        .query_map([MAX_DOCTOR_CAPACITY_HOLDERS as u64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, bool>(5)?,
+            ))
+        })
+        .map_err(|error| RuntimeError::from_sql(error, "query capacity-holder summary"))?;
+    let mut capacity_holders = Vec::new();
+    for row in rows {
+        let (job_id, workspace_id, attempt_id, attempt_state, reservation_state, recovery_required) =
+            row.map_err(|error| RuntimeError::from_sql(error, "decode capacity-holder summary"))?;
+        capacity_holders.push(RuntimeDoctorCapacityHolder {
+            job_id,
+            workspace_id,
+            attempt_id,
+            attempt_state: AttemptState::parse(&attempt_state)?,
+            reservation_state: ReservationState::parse(&reservation_state)?,
+            recovery_required,
+        });
+    }
+
+    Ok(RuntimeDoctorSummary {
+        status: String::new(),
+        jobs_total,
+        unresolved_jobs,
+        attempts_by_state,
+        reservations_by_state,
+        recovery_required_attempts,
+        artifacts_total,
+        artifact_bytes,
+        capacity_holders,
+    })
+}
+
+fn count_query(connection: &Connection, sql: &str, context: &str) -> RuntimeResult<u64> {
+    connection
+        .query_row(sql, [], |row| row.get(0))
+        .map_err(|error| RuntimeError::from_sql(error, context))
+}
+
+fn grouped_counts(
+    connection: &Connection,
+    sql: &str,
+    context: &str,
+) -> RuntimeResult<BTreeMap<String, u64>> {
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| RuntimeError::from_sql(error, context))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })
+        .map_err(|error| RuntimeError::from_sql(error, context))?;
+    let mut result = BTreeMap::new();
+    for row in rows {
+        let (state, count) = row.map_err(|error| RuntimeError::from_sql(error, context))?;
+        result.insert(state, count);
+    }
+    Ok(result)
 }
 
 fn validate_config(config: &RuntimeDoctorConfig) -> RuntimeResult<()> {

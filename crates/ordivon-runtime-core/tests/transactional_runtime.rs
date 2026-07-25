@@ -2,8 +2,8 @@
 
 use ordivon_runtime_core::{
     create_git_workspace, remove_git_workspace, write_workspace_text, ArtifactReadRequest,
-    AttemptState, GitWorkspaceCreateRequest, RegistryConfig, Runtime, RuntimeConfig,
-    RuntimeExecutionPlan, RuntimeJobListRequest, SubmitRequest, TaskCancelRequest,
+    AttemptState, ExecutionBudget, GitWorkspaceCreateRequest, RegistryConfig, Runtime,
+    RuntimeConfig, RuntimeExecutionPlan, RuntimeJobListRequest, SubmitRequest, TaskCancelRequest,
     TaskObserveRequest, TaskRunRequest, UniversalExecutionRequest, UniversalExecutorConfig,
     WorkspaceCloseRequest, WorkspaceWriteRequest, MAX_UNIVERSAL_OUTPUT_BYTES,
     MAX_UNIVERSAL_RUNTIME_MS, RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
@@ -119,6 +119,7 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
             timeout_ms: 10_000,
             stdout_limit_bytes: 65_536,
             stderr_limit_bytes: 65_536,
+            budget: ordivon_runtime_core::ExecutionBudget::default(),
         },
         wait_ms: 30_000,
         stdout_tail_bytes: 4096,
@@ -283,6 +284,7 @@ impl IntegrationContext {
                 timeout_ms: 60_000,
                 stdout_limit_bytes: 1_048_576,
                 stderr_limit_bytes: 1_048_576,
+                budget: ordivon_runtime_core::ExecutionBudget::default(),
             },
             wait_ms,
             stdout_tail_bytes: 8192,
@@ -320,6 +322,98 @@ impl Drop for IntegrationContext {
         }
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_resource_budget_is_enforced_by_the_attempt_cgroup() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("resource-budget");
+    context.write(
+        "runtime_resource_budget.py",
+        "import time\nprint('RESOURCE_BUDGET_READY', flush=True)\ntime.sleep(30)\n",
+    );
+    let runtime = context.runtime(2_000);
+    let mut request = context.request("runtime_resource_budget.py", 0);
+    request.execution.budget = ExecutionBudget {
+        memory_max_bytes: Some(128 * 1024 * 1024),
+        tasks_max: Some(32),
+        cpu_quota_percent: Some(200),
+    };
+    let started = runtime.run_task(&request).unwrap();
+    assert!(matches!(started.status.as_str(), "queued" | "working"));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let attempt = loop {
+        let attempt = runtime
+            .registry()
+            .get_latest_attempt(&started.job_id)
+            .unwrap()
+            .unwrap();
+        if attempt.state == AttemptState::Running
+            && attempt.control_group.is_some()
+            && attempt.invocation_id.is_some()
+        {
+            break attempt;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Attempt did not bind to systemd in time"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    let properties = command_output(
+        "systemctl",
+        &[
+            "show",
+            &attempt.unit_name,
+            "--property=MemoryMax,TasksMax,CPUQuotaPerSecUSec",
+        ],
+        &context.repo,
+    );
+    assert!(properties.contains("MemoryMax=134217728"), "{properties}");
+    assert!(properties.contains("TasksMax=32"), "{properties}");
+    assert!(
+        properties
+            .lines()
+            .find(|line| line.starts_with("CPUQuotaPerSecUSec="))
+            .is_some_and(|line| line != "CPUQuotaPerSecUSec=infinity"),
+        "{properties}"
+    );
+
+    let cgroup = PathBuf::from("/sys/fs/cgroup").join(
+        attempt
+            .control_group
+            .as_deref()
+            .unwrap()
+            .trim_start_matches('/'),
+    );
+    assert_eq!(
+        fs::read_to_string(cgroup.join("memory.max"))
+            .unwrap()
+            .trim(),
+        "134217728"
+    );
+    assert_eq!(
+        fs::read_to_string(cgroup.join("pids.max")).unwrap().trim(),
+        "32"
+    );
+    assert_eq!(
+        fs::read_to_string(cgroup.join("cpu.max")).unwrap().trim(),
+        "200000 100000"
+    );
+
+    let cancelled = runtime
+        .cancel_task(&TaskCancelRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: started.job_id,
+        })
+        .unwrap();
+    assert_eq!(cancelled.status, "cancelled");
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }
 
 #[test]
@@ -789,6 +883,7 @@ impl IntegrationContext {
                 timeout_ms: 10_000,
                 stdout_limit_bytes: 65_536,
                 stderr_limit_bytes: 65_536,
+                budget: ordivon_runtime_core::ExecutionBudget::default(),
                 principal: "principal:integration".to_string(),
             },
             global_limit,

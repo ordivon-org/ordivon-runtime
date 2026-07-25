@@ -258,6 +258,33 @@ impl ReservationState {
     }
 }
 
+pub const MIN_MEMORY_MAX_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_MEMORY_MAX_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+pub const MAX_TASKS_MAX: u32 = 1_000_000;
+pub const MAX_CPU_QUOTA_PERCENT: u32 = 10_000;
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = MIN_MEMORY_MAX_BYTES, max = MAX_MEMORY_MAX_BYTES))]
+    pub memory_max_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = MAX_TASKS_MAX))]
+    pub tasks_max: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = MAX_CPU_QUOTA_PERCENT))]
+    pub cpu_quota_percent: Option<u32>,
+}
+
+impl ExecutionBudget {
+    pub fn is_empty(&self) -> bool {
+        self.memory_max_bytes.is_none()
+            && self.tasks_max.is_none()
+            && self.cpu_quota_percent.is_none()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeExecutionPlan {
@@ -279,6 +306,8 @@ pub struct RuntimeExecutionPlan {
     pub stdout_limit_bytes: u64,
     #[schemars(range(min = 1, max = crate::MAX_UNIVERSAL_OUTPUT_BYTES))]
     pub stderr_limit_bytes: u64,
+    #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
+    pub budget: ExecutionBudget,
     pub principal: String,
 }
 
@@ -558,6 +587,8 @@ pub struct UniversalExecutionRequest {
     pub timeout_ms: u64,
     pub stdout_limit_bytes: u64,
     pub stderr_limit_bytes: u64,
+    #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
+    pub budget: ExecutionBudget,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

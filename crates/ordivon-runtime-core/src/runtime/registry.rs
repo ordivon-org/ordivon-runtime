@@ -1514,6 +1514,34 @@ impl Registry {
         }
     }
 
+    pub fn list_maintenance_attempts_bounded(
+        &self,
+        limit: u32,
+    ) -> RuntimeResult<Vec<AttemptRecord>> {
+        if limit == 0 || limit > MAX_RUNTIME_LIST_LIMIT {
+            return Err(RuntimeError::invalid(
+                format!("limit must be in 1..={MAX_RUNTIME_LIST_LIMIT}"),
+                "limit",
+            ));
+        }
+        let connection = self.open_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT a.attempt_id,a.job_id,a.attempt_number,a.state,a.termination_intent,a.launch_token_digest,a.bundle_path,a.bundle_digest,a.boot_id,a.unit_name,a.invocation_id,a.control_group,a.main_pid,a.process_start_identity,a.runner_start_digest,a.result_digest,a.exit_code,a.infrastructure_error_digest,a.created_at_ms,a.started_at_ms,a.finished_at_ms,a.row_version FROM attempts a LEFT JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.state NOT IN ('succeeded','failed','timed_out','cancelled','lost','orphaned') OR (a.state='orphaned' AND r.state='held_orphaned') OR EXISTS(SELECT 1 FROM attempt_conditions c WHERE c.attempt_id=a.attempt_id AND c.condition_type='recovery_required' AND c.status='true') ORDER BY CASE WHEN EXISTS(SELECT 1 FROM attempt_conditions c WHERE c.attempt_id=a.attempt_id AND c.condition_type='recovery_required' AND c.status='true') THEN 0 WHEN a.state='orphaned' AND r.state='held_orphaned' THEN 1 ELSE 2 END,a.created_at_ms,a.attempt_id LIMIT ?1",
+            )
+            .map_err(|error| RuntimeError::from_sql(error, "cannot prepare maintenance reconciliation scan"))?;
+        let rows = statement
+            .query_map([limit], raw_attempt_from_row)
+            .map_err(|error| RuntimeError::from_sql(error, "cannot scan maintenance Attempts"))?;
+        rows.map(|row| {
+            row.map_err(|error| {
+                RuntimeError::from_sql(error, "cannot decode maintenance Attempt row")
+            })?
+            .into_record()
+        })
+        .collect()
+    }
+
     pub fn list_held_orphaned_attempts(&self) -> RuntimeResult<Vec<AttemptRecord>> {
         let connection = self.open_connection()?;
         let mut statement = connection
@@ -2782,6 +2810,7 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
             "plan",
         ));
     }
+    validate_plan_budget(&request.plan.budget)?;
     if request.plan.args.len() > 128 || request.plan.env.len() > 64 {
         return Err(RuntimeError::invalid(
             "execution args or environment exceed runtime bounds",
@@ -2799,6 +2828,36 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
         return Err(RuntimeError::invalid(
             "execution args or environment contain invalid values",
             "plan",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_plan_budget(budget: &super::ExecutionBudget) -> RuntimeResult<()> {
+    if budget.memory_max_bytes.is_some_and(|value| {
+        !(super::MIN_MEMORY_MAX_BYTES..=super::MAX_MEMORY_MAX_BYTES).contains(&value)
+    }) {
+        return Err(RuntimeError::invalid(
+            "plan memoryMaxBytes is outside Runtime bounds",
+            "plan.budget.memoryMaxBytes",
+        ));
+    }
+    if budget
+        .tasks_max
+        .is_some_and(|value| value == 0 || value > super::MAX_TASKS_MAX)
+    {
+        return Err(RuntimeError::invalid(
+            "plan tasksMax is outside Runtime bounds",
+            "plan.budget.tasksMax",
+        ));
+    }
+    if budget
+        .cpu_quota_percent
+        .is_some_and(|value| value == 0 || value > super::MAX_CPU_QUOTA_PERCENT)
+    {
+        return Err(RuntimeError::invalid(
+            "plan cpuQuotaPercent is outside Runtime bounds",
+            "plan.budget.cpuQuotaPercent",
         ));
     }
     Ok(())
