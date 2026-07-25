@@ -407,6 +407,7 @@ pub fn workspace_diff(
     })
 }
 
+#[cfg(any(feature = "transactional-runtime", test))]
 pub fn workspace_source_state_digest(
     config: &UniversalExecutorConfig,
     workspace_id: &str,
@@ -915,6 +916,7 @@ pub(crate) fn resolve_existing_workspace_path(
     Ok(canonical)
 }
 
+#[cfg(feature = "transactional-runtime")]
 pub(crate) fn resolve_workspace_cwd(
     record: &WorkspaceRecord,
     relative: &str,

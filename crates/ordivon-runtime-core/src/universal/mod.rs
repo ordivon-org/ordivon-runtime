@@ -28,9 +28,11 @@ pub use types::{
     WorkspaceReadRequest, WorkspaceReadResult, WorkspaceReadSliceRequest, WorkspaceReadSliceResult,
     WorkspaceRecord, WorkspaceWriteRequest, WorkspaceWriteResult,
 };
+#[cfg(any(feature = "transactional-runtime", test))]
+pub use workspace::workspace_source_state_digest;
 pub use workspace::{
     create_git_workspace, load_workspace_record, read_workspace_text, remove_git_workspace,
-    workspace_diff, workspace_source_state_digest, write_workspace_text,
+    workspace_diff, write_workspace_text,
 };
 
 pub(crate) use config::canonical_directory;
@@ -42,9 +44,11 @@ pub(crate) use types::{
     CapturedOutput, RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskRequest, RunnerTaskResult,
     TaskTerminalStatus,
 };
+#[cfg(feature = "transactional-runtime")]
+pub(crate) use workspace::resolve_workspace_cwd;
 pub(crate) use workspace::{
     preflight_workspace_write_path, remove_workspace_file, resolve_existing_workspace_path,
-    resolve_workspace_cwd, workspace_source_state_digest_at,
+    workspace_source_state_digest_at,
 };
 
 #[cfg(test)]
