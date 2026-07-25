@@ -81,6 +81,31 @@ This loop does not redispatch ambiguous work or retry failed commands. It only c
 
 `ordivon-runtime-reclaim inspect` validates the Registry capabilities it actually reads instead of copying a migration-version ceiling. It may measure logical Workspace bytes and classify active, dirty, stale, orphan-directory, and closable cases. It never deletes a Workspace. `workspace.close` remains the only physical release path, preserving dirty-state checks, active-Job exclusion, rescue refs, tombstones, and idempotent retries.
 
+## Completion and experience semantics
+
+The Runtime uses five separate terms rather than one overloaded notion of completion:
+
+- **Execution completion**: an Attempt has conclusive terminal execution evidence.
+- **State convergence**: the Job has a resolution, every relevant Attempt is terminal, reservations are released, and no recovery condition remains active.
+- **Client reattachment**: a caller reconnects to the same durable Job through its Job identity. Transport disconnects are not Attempt states.
+- **Workspace closure**: the Git Workspace is independently proven closable and is removed through `workspace.close`, with rescue-ref and tombstone semantics.
+- **Semantic completion**: an Agent or human concludes that the user's actual objective is satisfied. The Runtime does not adjudicate this claim.
+
+A successful process exit is execution evidence, not proof of semantic completion. An Artifact is retained evidence, not proof that a claim is correct. A closed Workspace does not change Job resolution, and client reconnection does not change Attempt state.
+
+## Read-only experience projection
+
+The append-only Runtime Registry remains the only task-fact database. `ordivon-runtime-inspect` derives bounded reports without adding tables, events, or a second history store:
+
+```text
+ordivon-runtime-inspect job --database <registry> --job-id <job> --pretty
+ordivon-runtime-inspect summary --database <registry> --since-ms <unix-ms> --pretty
+```
+
+The Job report projects Attempts, reservations, conditions, Artifact volume, recovery/cancellation episodes, and a bounded event timeline. The summary reports mechanical convergence, resolutions, recovery convergence, duplicate physical dispatch, cancellation outcomes, duration percentiles, Artifact volume, and terminal reasons. Both reports explicitly state that semantic completion is not evaluated.
+
+These metrics are diagnostic references for Runtime changes. They do not score model reasoning, user satisfaction, context quality, or user rework, and they do not create a new MCP tool.
+
 ## Extension boundary
 
 Use existing host executables through `workspace.exec` unless repeated real use proves that a stable operation needs a dedicated structured Tool contract. Untrusted workloads require an external isolation boundary, not an alternate execution mode inside Ordivon Runtime.

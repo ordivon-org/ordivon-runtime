@@ -21,6 +21,15 @@ scripts/local-acceptance run
 
 `check` is portable and verifies that the repository still contains the local-only acceptance entry points. `run` requires the trusted local root/systemd/cgroup-v2 environment and executes the real systemd suites plus MCP end-to-end acceptance.
 
+Inspect one durable Job or summarize Runtime-owned experience without mutation:
+
+```text
+ordivon-runtime-inspect job --database <registry> --job-id <job> --pretty
+ordivon-runtime-inspect summary --database <registry> --since-ms <unix-ms> --pretty
+```
+
+The inspection binary reads the current Registry schema through the shared Rust Core. It never writes recovery decisions, creates a second trajectory database, or evaluates semantic task completion.
+
 Inspect Workspace lifecycle without mutation with:
 
 ```text
