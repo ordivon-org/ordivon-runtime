@@ -3,6 +3,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde::{Deserialize, Serialize};
+
 use super::{
     canonical_directory, invalid, io_error, now_unix_ms, sha256_bytes, sha256_file,
     validate_relative_path, write_bytes_atomic, write_json_atomic, GitWorkspaceCreateRequest,
@@ -11,6 +13,20 @@ use super::{
     WorkspaceReadResult, WorkspaceRecord, WorkspaceWriteRequest, WorkspaceWriteResult,
     UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ClosedWorkspaceRecord {
+    schema_version: u32,
+    state: String,
+    workspace_id: String,
+    source_repo: String,
+    source_revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_head: Option<String>,
+    closed_unix_ms: u128,
+    removal_result: String,
+}
 
 pub fn create_git_workspace(
     config: &UniversalExecutorConfig,
@@ -96,30 +112,17 @@ pub fn load_workspace_record(
 ) -> Result<WorkspaceRecord, UniversalExecError> {
     super::validate_id(workspace_id, "workspaceId")?;
     let path = config.workspace_record_path(workspace_id);
-    let bytes = fs::read(&path).map_err(|error| {
-        UniversalExecError::new(
-            UniversalExecErrorCode::WorkspaceNotFound,
-            format!("cannot read workspace record: {error}"),
-            Some("workspaceId"),
-            false,
-        )
-    })?;
-    let record: WorkspaceRecord = serde_json::from_slice(&bytes).map_err(|error| {
-        UniversalExecError::new(
-            UniversalExecErrorCode::MetadataCorrupt,
-            format!("invalid workspace record: {error}"),
-            Some("workspaceId"),
-            false,
-        )
-    })?;
-    if record.workspace_id != workspace_id {
+    let bytes = read_workspace_record_bytes(&path)?;
+    if let Some(closed) = decode_closed_workspace_record(&bytes)? {
+        validate_closed_identity(&closed, workspace_id)?;
         return Err(UniversalExecError::new(
-            UniversalExecErrorCode::MetadataCorrupt,
-            "workspace record identity mismatch",
+            UniversalExecErrorCode::WorkspaceNotFound,
+            "workspace is closed",
             Some("workspaceId"),
             false,
         ));
     }
+    let record = decode_open_workspace_record(&bytes, workspace_id)?;
     let expected = canonical_directory(&config.workspace_path(workspace_id), "workspacePath")?;
     let recorded = canonical_directory(Path::new(&record.workspace_path), "workspacePath")?;
     if expected != recorded {
@@ -131,6 +134,91 @@ pub fn load_workspace_record(
         ));
     }
     Ok(record)
+}
+
+fn read_workspace_record_bytes(path: &Path) -> Result<Vec<u8>, UniversalExecError> {
+    fs::read(path).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::WorkspaceNotFound,
+            format!("cannot read workspace record: {error}"),
+            Some("workspaceId"),
+            false,
+        )
+    })
+}
+
+fn decode_closed_workspace_record(
+    bytes: &[u8],
+) -> Result<Option<ClosedWorkspaceRecord>, UniversalExecError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::MetadataCorrupt,
+            format!("invalid workspace record: {error}"),
+            Some("workspaceId"),
+            false,
+        )
+    })?;
+    if value.get("state").and_then(serde_json::Value::as_str) != Some("closed") {
+        return Ok(None);
+    }
+    serde_json::from_value(value).map(Some).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::MetadataCorrupt,
+            format!("invalid closed workspace record: {error}"),
+            Some("workspaceId"),
+            false,
+        )
+    })
+}
+
+fn decode_open_workspace_record(
+    bytes: &[u8],
+    workspace_id: &str,
+) -> Result<WorkspaceRecord, UniversalExecError> {
+    let record: WorkspaceRecord = serde_json::from_slice(bytes).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::MetadataCorrupt,
+            format!("invalid workspace record: {error}"),
+            Some("workspaceId"),
+            false,
+        )
+    })?;
+    validate_open_identity(&record, workspace_id)?;
+    Ok(record)
+}
+
+fn validate_open_identity(
+    record: &WorkspaceRecord,
+    workspace_id: &str,
+) -> Result<(), UniversalExecError> {
+    if record.schema_version != UNIVERSAL_EXEC_SCHEMA_VERSION || record.workspace_id != workspace_id
+    {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::MetadataCorrupt,
+            "workspace record identity mismatch",
+            Some("workspaceId"),
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_closed_identity(
+    record: &ClosedWorkspaceRecord,
+    workspace_id: &str,
+) -> Result<(), UniversalExecError> {
+    if record.schema_version != UNIVERSAL_EXEC_SCHEMA_VERSION
+        || record.state != "closed"
+        || record.workspace_id != workspace_id
+    {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::MetadataCorrupt,
+            "closed workspace record identity mismatch",
+            Some("workspaceId"),
+            false,
+        ));
+    }
+    Ok(())
 }
 
 pub fn read_workspace_text(
@@ -303,9 +391,73 @@ pub fn remove_git_workspace(
     request: &WorkspaceCloseRequest,
 ) -> Result<WorkspaceCloseResult, UniversalExecError> {
     request.validate_shape()?;
-    let record = load_workspace_record(config, &request.workspace_id)?;
+    config.ensure_store()?;
+    let record_path = config.workspace_record_path(&request.workspace_id);
+    let target = config.workspace_path(&request.workspace_id);
+
+    if !record_path.exists() {
+        if target.exists() {
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::MetadataCorrupt,
+                "workspace directory exists without an identity record",
+                Some("workspaceId"),
+                false,
+            ));
+        }
+        return Ok(WorkspaceCloseResult {
+            workspace_id: request.workspace_id.clone(),
+            removed: false,
+        });
+    }
+
+    let bytes = read_workspace_record_bytes(&record_path)?;
+    if let Some(closed) = decode_closed_workspace_record(&bytes)? {
+        validate_closed_identity(&closed, &request.workspace_id)?;
+        return Ok(WorkspaceCloseResult {
+            workspace_id: request.workspace_id.clone(),
+            removed: false,
+        });
+    }
+    let record = decode_open_workspace_record(&bytes, &request.workspace_id)?;
+
+    if !target.exists() {
+        if Path::new(&record.workspace_path) != target {
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::MetadataCorrupt,
+                "workspace record path mismatch",
+                Some("workspacePath"),
+                false,
+            ));
+        }
+        let final_head = recover_missing_workspace_head(&record)?;
+        if let Some(head) = final_head
+            .as_deref()
+            .filter(|head| *head != record.source_revision)
+        {
+            let source_repo = Path::new(&record.source_repo);
+            if source_repo.is_dir() {
+                ensure_rescue_ref(source_repo, &request.workspace_id, head)?;
+            }
+        }
+        write_closed_workspace_record(&record_path, &record, final_head, "already_missing")?;
+        return Ok(WorkspaceCloseResult {
+            workspace_id: request.workspace_id.clone(),
+            removed: false,
+        });
+    }
+
+    let expected = canonical_directory(&target, "workspacePath")?;
+    let recorded = canonical_directory(Path::new(&record.workspace_path), "workspacePath")?;
+    if expected != recorded {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::MetadataCorrupt,
+            "workspace record path mismatch",
+            Some("workspacePath"),
+            false,
+        ));
+    }
     if !request.force {
-        let dirty = workspace_dirty_paths(Path::new(&record.workspace_path))?;
+        let dirty = workspace_dirty_paths(&recorded)?;
         if !dirty.is_empty() {
             return Err(UniversalExecError::new(
                 UniversalExecErrorCode::WorkspaceDirty,
@@ -318,19 +470,170 @@ pub fn remove_git_workspace(
             ));
         }
     }
-    remove_git_worktree(
-        Path::new(&record.source_repo),
-        Path::new(&record.workspace_path),
-        request.force,
-    )?;
-    let record_path = config.workspace_record_path(&request.workspace_id);
-    if record_path.exists() {
-        fs::remove_file(&record_path).map_err(|error| io_error(&record_path, "remove", error))?;
+
+    let final_head = git_output(&recorded, ["rev-parse", "HEAD"])?
+        .trim()
+        .to_string();
+    if final_head != record.source_revision {
+        ensure_rescue_ref(&recorded, &request.workspace_id, &final_head)?;
     }
+    remove_git_worktree_from_workspace(&recorded, request.force)?;
+    write_closed_workspace_record(&record_path, &record, Some(final_head), "removed")?;
     Ok(WorkspaceCloseResult {
         workspace_id: request.workspace_id.clone(),
         removed: true,
     })
+}
+
+fn write_closed_workspace_record(
+    record_path: &Path,
+    open: &WorkspaceRecord,
+    final_head: Option<String>,
+    removal_result: &str,
+) -> Result<(), UniversalExecError> {
+    let closed = ClosedWorkspaceRecord {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        state: "closed".to_string(),
+        workspace_id: open.workspace_id.clone(),
+        source_repo: open.source_repo.clone(),
+        source_revision: open.source_revision.clone(),
+        final_head,
+        closed_unix_ms: now_unix_ms()?,
+        removal_result: removal_result.to_string(),
+    };
+    write_json_atomic(record_path, &closed)
+}
+
+fn ensure_rescue_ref(
+    git_root: &Path,
+    workspace_id: &str,
+    final_head: &str,
+) -> Result<(), UniversalExecError> {
+    let reference = format!("refs/ordivon/closed/{workspace_id}");
+    let existing = Command::new("git")
+        .arg("-C")
+        .arg(git_root)
+        .args(["rev-parse", "--verify", "--quiet", &reference])
+        .output()
+        .map_err(|error| tool_unavailable("git rev-parse rescue ref", error))?;
+    if existing.status.success() {
+        let observed = String::from_utf8(existing.stdout).map_err(|error| {
+            UniversalExecError::new(
+                UniversalExecErrorCode::ToolFailed,
+                format!("git rescue ref output is not UTF-8: {error}"),
+                None,
+                false,
+            )
+        })?;
+        if observed.trim() == final_head {
+            return Ok(());
+        }
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::RevisionMismatch,
+            "workspace rescue ref already points to a different commit",
+            Some("workspaceId"),
+            false,
+        ));
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(git_root)
+        .args(["update-ref", &reference, final_head])
+        .output()
+        .map_err(|error| tool_unavailable("git update-ref", error))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(tool_failed("git update-ref", &output.stderr))
+    }
+}
+
+fn recover_missing_workspace_head(
+    record: &WorkspaceRecord,
+) -> Result<Option<String>, UniversalExecError> {
+    let source_repo = Path::new(&record.source_repo);
+    if !source_repo.is_dir() {
+        return Ok(None);
+    }
+    let rescue_ref = format!("refs/ordivon/closed/{}", record.workspace_id);
+    let rescued = Command::new("git")
+        .arg("-C")
+        .arg(source_repo)
+        .args(["rev-parse", "--verify", "--quiet", &rescue_ref])
+        .output()
+        .map_err(|error| tool_unavailable("git rev-parse rescue ref", error))?;
+    if rescued.status.success() {
+        return String::from_utf8(rescued.stdout)
+            .map(|value| Some(value.trim().to_string()))
+            .map_err(|error| {
+                UniversalExecError::new(
+                    UniversalExecErrorCode::ToolFailed,
+                    format!("git rescue ref output is not UTF-8: {error}"),
+                    None,
+                    false,
+                )
+            });
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(source_repo)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .map_err(|error| tool_unavailable("git worktree list", error))?;
+    if !output.status.success() {
+        return Err(tool_failed("git worktree list", &output.stderr));
+    }
+    let wanted = Path::new(&record.workspace_path);
+    let text = String::from_utf8(output.stdout).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::ToolFailed,
+            format!("git worktree list output is not UTF-8: {error}"),
+            None,
+            false,
+        )
+    })?;
+    let mut matched = false;
+    for line in text.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            matched = Path::new(path) == wanted;
+        } else if matched {
+            if let Some(head) = line.strip_prefix("HEAD ") {
+                return Ok(Some(head.to_string()));
+            }
+            if line.is_empty() {
+                matched = false;
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn remove_git_worktree_from_workspace(
+    workspace: &Path,
+    force: bool,
+) -> Result<(), UniversalExecError> {
+    let common_dir = git_output(
+        workspace,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let common_dir = PathBuf::from(common_dir.trim());
+    let mut command = Command::new("git");
+    command
+        .arg("--git-dir")
+        .arg(common_dir)
+        .args(["worktree", "remove"]);
+    if force {
+        command.arg("--force");
+    }
+    let output = command
+        .arg(workspace)
+        .output()
+        .map_err(|error| tool_unavailable("git worktree remove", error))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(tool_failed("git worktree remove", &output.stderr))
+    }
 }
 
 pub(crate) fn resolve_existing_workspace_path(
@@ -590,15 +893,14 @@ fn tool_unavailable(operation: &str, error: impl std::fmt::Display) -> Universal
 }
 
 fn tool_failed(operation: &str, stderr: &[u8]) -> UniversalExecError {
-    UniversalExecError::new(
-        UniversalExecErrorCode::ToolFailed,
-        format!(
-            "{operation} failed: {}",
-            String::from_utf8_lossy(stderr).trim()
-        ),
-        None,
-        false,
-    )
+    let message = String::from_utf8_lossy(stderr).trim().to_string();
+    let code =
+        if message.contains("No space left on device") || message.contains("Disk quota exceeded") {
+            UniversalExecErrorCode::WorkspaceCapacityExceeded
+        } else {
+            UniversalExecErrorCode::ToolFailed
+        };
+    UniversalExecError::new(code, format!("{operation} failed: {message}"), None, false)
 }
 
 fn transfer_workspace_ownership(root: &Path, uid: u32, gid: u32) -> Result<(), UniversalExecError> {

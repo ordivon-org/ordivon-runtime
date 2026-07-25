@@ -138,7 +138,7 @@ impl Runtime {
     }
 
     pub fn run_task(&self, request: &TaskRunRequest) -> RuntimeResult<TaskObservation> {
-        validate_run_request(request)?;
+        validate_run_request(request, self.executor.max_output_bytes)?;
         let job_id = {
             let _guard = self.lifecycle_lock.lock().map_err(|_| {
                 RuntimeError::new(
@@ -1351,7 +1351,7 @@ fn artifact_descriptor(
     }
 }
 
-fn validate_run_request(request: &TaskRunRequest) -> RuntimeResult<()> {
+fn validate_run_request(request: &TaskRunRequest, max_output_bytes: u64) -> RuntimeResult<()> {
     if request.schema_version != RUNTIME_SCHEMA_VERSION {
         return Err(RuntimeError::invalid(
             "unsupported runtime schema version",
@@ -1408,6 +1408,18 @@ fn validate_run_request(request: &TaskRunRequest) -> RuntimeResult<()> {
         return Err(RuntimeError::invalid(
             "runtime and output limits must be positive",
             "execution",
+        ));
+    }
+    if request.execution.stdout_limit_bytes > max_output_bytes {
+        return Err(RuntimeError::invalid(
+            format!("stdoutLimitBytes exceeds configured maximum {max_output_bytes}"),
+            "execution.stdoutLimitBytes",
+        ));
+    }
+    if request.execution.stderr_limit_bytes > max_output_bytes {
+        return Err(RuntimeError::invalid(
+            format!("stderrLimitBytes exceeds configured maximum {max_output_bytes}"),
+            "execution.stderrLimitBytes",
         ));
     }
     if request.execution.args.len() > 128 || request.execution.env.len() > 64 {
@@ -1986,6 +1998,9 @@ fn serialization_error(error: serde_json::Error) -> RuntimeError {
 fn map_universal_error(error: crate::UniversalExecError) -> RuntimeError {
     let code = match error.code {
         crate::UniversalExecErrorCode::WorkspaceDirty => RuntimeErrorCode::WorkspaceDirty,
+        crate::UniversalExecErrorCode::WorkspaceCapacityExceeded => {
+            RuntimeErrorCode::WorkspaceCapacityExceeded
+        }
         _ => RuntimeErrorCode::InvalidRequest,
     };
     RuntimeError::new(code, error.message, error.field.as_deref(), error.retryable)
@@ -2012,6 +2027,7 @@ fn tool_error(context: &str, error: std::io::Error) -> RuntimeError {
 #[cfg(test)]
 mod trusted_systemd_command_tests {
     use super::*;
+    use crate::UniversalExecutionRequest;
     use proptest::prelude::*;
 
     proptest! {
@@ -2115,6 +2131,32 @@ mod trusted_systemd_command_tests {
         assert_eq!(second.content, "x");
         assert_eq!(second.next_offset, 5);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configured_output_limit_is_enforced_before_admission() {
+        let request = TaskRunRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            client_request_id: "request:output-limit".to_string(),
+            principal: "principal:test".to_string(),
+            global_limit: 1,
+            execution: UniversalExecutionRequest {
+                workspace_id: "workspace-output-limit".to_string(),
+                executable: "/usr/bin/true".to_string(),
+                args: Vec::new(),
+                cwd_relative: ".".to_string(),
+                env: BTreeMap::new(),
+                timeout_ms: 1_000,
+                stdout_limit_bytes: 1_025,
+                stderr_limit_bytes: 1_024,
+            },
+            wait_ms: 0,
+            stdout_tail_bytes: 0,
+            stderr_tail_bytes: 0,
+        };
+        let error = validate_run_request(&request, 1_024).unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+        assert_eq!(error.field.as_deref(), Some("execution.stdoutLimitBytes"));
     }
 
     #[test]
