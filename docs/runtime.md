@@ -61,7 +61,7 @@ Other exact limits, states, fields, transitions, Tool arguments, and configurati
 
 Reconciliation compares Registry state with runner evidence and systemd/cgroup reality. It may run at startup, observation, listing, admission, or Workspace boundaries. One Job's recoverable inconsistency must not expand into a service-wide failure.
 
-A verified terminal result can defeat a later cancellation race because observed completion is stronger evidence than delayed intent. Missing or identity-conflicting evidence remains unresolved for explicit recovery rather than being inferred.
+A verified terminal result can defeat a later cancellation race because observed completion is stronger evidence than delayed intent. An identity-uncertain Attempt remains `orphaned` and retains its reservation while its recorded unit, process identity, or cgroup may still own a live process tree. When all three are proven absent, reconciliation converges it to `lost`, `timed_out`, or `cancelled` according to persisted intent and releases the reservation atomically. A late identity-bound runner Result still takes precedence when available.
 
 ## Extension boundary
 

@@ -57,11 +57,11 @@ pub(crate) fn classify_supervisor_recovery(
         return Ok(SupervisorRecoveryDisposition::Lost);
     }
     match observation.unit_state {
-        SupervisorUnitState::Running => match identity_mismatch(expected, observation) {
+        SupervisorUnitState::Running => match running_identity_mismatch(expected, observation) {
             Some(reason) => Ok(SupervisorRecoveryDisposition::Orphaned(reason)),
             None => Ok(SupervisorRecoveryDisposition::Running),
         },
-        SupervisorUnitState::Terminal => match identity_mismatch(expected, observation) {
+        SupervisorUnitState::Terminal => match terminal_identity_mismatch(expected, observation) {
             Some(reason) => Ok(SupervisorRecoveryDisposition::Orphaned(reason)),
             None => Ok(SupervisorRecoveryDisposition::Terminal(
                 classify_terminal_state(
@@ -125,7 +125,24 @@ fn validate_identity(identity: &SupervisorIdentity) -> RuntimeResult<()> {
     Ok(())
 }
 
-fn identity_mismatch(
+fn terminal_identity_mismatch(
+    expected: &SupervisorIdentity,
+    observed: &SupervisorObservation,
+) -> Option<String> {
+    if observed.invocation_id.as_deref() != Some(expected.invocation_id.as_str()) {
+        return Some("invocationId does not match persisted supervisor identity".to_string());
+    }
+    if observed
+        .control_group
+        .as_deref()
+        .is_some_and(|actual| actual != expected.control_group)
+    {
+        return Some("controlGroup does not match persisted supervisor identity".to_string());
+    }
+    None
+}
+
+fn running_identity_mismatch(
     expected: &SupervisorIdentity,
     observed: &SupervisorObservation,
 ) -> Option<String> {
@@ -207,6 +224,24 @@ mod tests {
                 .unwrap(),
             SupervisorRecoveryDisposition::Orphaned(_)
         ));
+    }
+
+    #[test]
+    fn terminal_pid_reuse_does_not_orphan_matching_invocation() {
+        let mut observation = running();
+        observation.unit_state = SupervisorUnitState::Terminal;
+        observation.main_pid = Some(84);
+        observation.main_process_start_identity = Some("replacement-process".into());
+        observation.recorded_pid_alive = false;
+        observation.recorded_pid_start_identity = Some("replacement-process".into());
+        observation.result = Some("success".into());
+        observation.exec_main_code = Some(1);
+        observation.exec_main_status = Some(0);
+        assert_eq!(
+            classify_supervisor_recovery(&expected(), &observation, TerminationIntent::Natural)
+                .unwrap(),
+            SupervisorRecoveryDisposition::Terminal(AttemptState::Succeeded)
+        );
     }
 
     #[test]
