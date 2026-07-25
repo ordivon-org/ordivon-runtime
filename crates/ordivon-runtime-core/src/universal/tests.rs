@@ -163,6 +163,179 @@ fn workspace_round_trip_is_isolated_and_digest_guarded() {
 }
 
 #[test]
+fn workspace_source_state_digest_tracks_source_but_ignores_ignored_cache() {
+    let sandbox = Sandbox::new("source-state");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    fs::write(source.join(".gitignore"), "*.cache\n").unwrap();
+    run_git(&source, ["add", ".gitignore"]);
+    run_git(&source, ["commit", "-qm", "ignore cache"]);
+    let config = sandbox.config();
+    let workspace_id = "workspace-source-state";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+
+    let baseline = workspace_source_state_digest(&config, workspace_id).unwrap();
+    fs::write(workspace.join("compiler.cache"), "ignored bytes").unwrap();
+    assert_eq!(
+        workspace_source_state_digest(&config, workspace_id).unwrap(),
+        baseline
+    );
+
+    fs::write(workspace.join("README.md"), "tracked change\n").unwrap();
+    let unstaged = workspace_source_state_digest(&config, workspace_id).unwrap();
+    assert_ne!(unstaged, baseline);
+    run_git(&workspace, ["add", "README.md"]);
+    let staged = workspace_source_state_digest(&config, workspace_id).unwrap();
+    assert_ne!(staged, unstaged);
+    run_git(&workspace, ["reset", "-q", "HEAD", "--", "README.md"]);
+    assert_eq!(
+        workspace_source_state_digest(&config, workspace_id).unwrap(),
+        unstaged
+    );
+
+    fs::write(workspace.join("new-source.txt"), "first").unwrap();
+    let untracked_first = workspace_source_state_digest(&config, workspace_id).unwrap();
+    assert_ne!(untracked_first, unstaged);
+    fs::write(workspace.join("new-source.txt"), "second").unwrap();
+    let untracked_second = workspace_source_state_digest(&config, workspace_id).unwrap();
+    assert_ne!(untracked_second, untracked_first);
+
+    symlink("README.md", workspace.join("source-link")).unwrap();
+    assert_ne!(
+        workspace_source_state_digest(&config, workspace_id).unwrap(),
+        untracked_second
+    );
+}
+
+#[test]
+fn workspace_source_state_cannot_be_blinded_by_git_index_flags() {
+    let sandbox = Sandbox::new("source-state-index-flags");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-source-state-index-flags";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    let baseline = workspace_source_state_digest(&config, workspace_id).unwrap();
+
+    run_git(
+        &workspace,
+        ["update-index", "--assume-unchanged", "README.md"],
+    );
+    let assume_flag = workspace_source_state_digest(&config, workspace_id).unwrap();
+    assert_ne!(assume_flag, baseline);
+    fs::write(
+        workspace.join("README.md"),
+        "hidden assume-unchanged bytes\n",
+    )
+    .unwrap();
+    let hidden_assume = workspace_source_state_digest(&config, workspace_id).unwrap();
+    assert_ne!(hidden_assume, assume_flag);
+
+    run_git(
+        &workspace,
+        ["update-index", "--no-assume-unchanged", "README.md"],
+    );
+    run_git(&workspace, ["reset", "--hard", "-q", "HEAD"]);
+    let restored = workspace_source_state_digest(&config, workspace_id).unwrap();
+    assert_eq!(restored, baseline);
+
+    run_git(&workspace, ["update-index", "--skip-worktree", "README.md"]);
+    let skip_flag = workspace_source_state_digest(&config, workspace_id).unwrap();
+    assert_ne!(skip_flag, baseline);
+    fs::write(workspace.join("README.md"), "hidden skip-worktree bytes\n").unwrap();
+    let hidden_skip = workspace_source_state_digest(&config, workspace_id).unwrap();
+    assert_ne!(hidden_skip, skip_flag);
+}
+
+#[test]
+fn runner_rejects_workspace_source_drift_before_spawning_target() {
+    let sandbox = Sandbox::new("runner-source-drift");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-runner-source-drift";
+    let record = create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = PathBuf::from(&record.workspace_path);
+    fs::write(
+        workspace.join("effect.py"),
+        "from pathlib import Path\nPath('effect-marker').write_text('spawned')\n",
+    )
+    .unwrap();
+    let committed = workspace_source_state_digest(&config, workspace_id).unwrap();
+    fs::write(workspace.join("README.md"), "drifted after admission\n").unwrap();
+
+    let task_dir = sandbox.root.join("task-source-drift");
+    fs::create_dir_all(&task_dir).unwrap();
+    let executable = real_executable("/usr/bin/python3");
+    let request = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        payload: None,
+        inherit_host_environment: true,
+        task_id: "task-source-drift".to_string(),
+        workspace_id: workspace_id.to_string(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: Some(committed),
+        executable: executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&executable).unwrap(),
+        args: vec!["effect.py".to_string()],
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        timeout_ms: 2_000,
+        stdout_limit_bytes: 1_024,
+        stderr_limit_bytes: 1_024,
+    };
+    write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
+    run_task_runner(&task_dir).unwrap();
+
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result.status, TaskTerminalStatus::Failed);
+    assert!(result.exit_code.is_none());
+    assert_eq!(
+        result.infrastructure_error_code.as_deref(),
+        Some("WORKSPACE_STATE_MISMATCH")
+    );
+    assert!(result
+        .infrastructure_error
+        .as_deref()
+        .is_some_and(|message| message.contains("WorkspaceStateMismatch")));
+    assert!(!workspace.join("effect-marker").exists());
+}
+
+#[test]
 fn workspace_close_rejects_dirty_state_unless_force_is_explicit() {
     let sandbox = Sandbox::new("safe-close");
     let source = sandbox.root.join("source");
@@ -751,6 +924,7 @@ fn runner_executes_model_authored_script_and_bounds_output() {
         task_id: "task-runner".to_string(),
         workspace_id: "workspace-runner".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
         executable: executable.to_string_lossy().into_owned(),
         executable_digest: sha256_file(&executable).unwrap(),
         args: vec!["tool.py".to_string()],
@@ -800,6 +974,7 @@ fn runner_timeout_is_a_durable_failed_result() {
         task_id: "task-timeout".to_string(),
         workspace_id: "workspace-timeout".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
         executable: executable.to_string_lossy().into_owned(),
         executable_digest: sha256_file(&executable).unwrap(),
         args: vec!["tool.py".to_string()],

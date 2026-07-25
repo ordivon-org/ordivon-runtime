@@ -50,18 +50,29 @@ The Job expresses desired state and final resolution. The Attempt expresses one 
 ## Irreducible invariants
 
 - Repeating the same authenticated client request is idempotent.
+- A candidate Agent action is not physical commitment until durably admitted.
+- One Attempt crosses the physical dispatch boundary at most once.
 - An ambiguous dispatch is never speculatively repeated.
 - One Attempt owns the complete command process tree through one cgroup.
-- After that process tree is proven gone, a complete identity-bound runner Result is terminal truth.
+- After that process tree is proven gone, a complete identity-bound Runner Result is terminal execution truth.
+- Execution truth is not automatically an external-effect receipt or semantic-completion proof.
 - Work that cannot be proven running or terminal becomes `lost` or `orphaned`; it is not guessed successful, guessed failed, or automatically redispatched.
 
-Other exact limits, states, fields, transitions, Tool arguments, and configuration belong to source, migrations, tests, generated schemas, and the live Runtime.
+The complete Agent Effect Commit Kernel contract, current proof boundary, costs, and implementation gate are in [`effect-kernel.md`](effect-kernel.md). Other exact limits, states, fields, transitions, Tool arguments, and configuration belong to source, migrations, tests, generated schemas, and the live Runtime.
 
 ## Reconciliation
 
 Reconciliation compares Registry state with runner evidence and systemd/cgroup reality. It may run at startup, observation, listing, admission, or Workspace boundaries. One Job's recoverable inconsistency must not expand into a service-wide failure.
 
 A verified terminal result can defeat a later cancellation race because observed completion is stronger evidence than delayed intent. An identity-uncertain Attempt remains `orphaned` and retains its reservation while its recorded unit, process identity, or cgroup may still own a live process tree. When all three are proven absent, reconciliation converges it to `lost`, `timed_out`, or `cancelled` according to persisted intent and releases the reservation atomically. A late identity-bound runner Result still takes precedence when available.
+
+## Workspace source commitment
+
+A `clientRequestId` binds the stable operation request separately from the observed Workspace. Replaying the same request returns the original durable Job without resolving the current Workspace again, including after that Workspace has changed or closed. The initial admission then binds a digest of the Workspace's Git source state: current `HEAD`, the semantic Git index including index flags, every tracked path's actual file or symlink bytes and mode, recursively initialized submodule source state, and sorted nonignored untracked files or symlinks. Ignored caches and build outputs are deliberately excluded. The digest participates in operation identity and is checked again by the Runner immediately before the target executable is spawned.
+
+The Runtime also rejects `workspace.mutate` while an active or held Job owns that Workspace. This prevents Ordivon-mediated mutations from changing the committed source world during execution. The cost is deliberate: editing and execution that must overlap use separate Workspaces rather than weakening one Job's source precondition.
+
+This is a trusted-local pre-spawn commitment, not an immutable filesystem snapshot. A host process with the same authority can still write directly outside the Runtime, including in the interval after Runner validation, and a running command may intentionally modify its own Workspace. Ignored files, inherited host environment, time, network state, and other ambient dependencies are not included. Stronger immutability would require a separate snapshot or isolation design and its merge-back cost; it is not claimed here.
 
 ## Execution budgets
 
@@ -108,4 +119,4 @@ These metrics are diagnostic references for Runtime changes. They do not score m
 
 ## Extension boundary
 
-Use existing host executables through `workspace.exec` unless repeated real use proves that a stable operation needs a dedicated structured Tool contract. Untrusted workloads require an external isolation boundary, not an alternate execution mode inside Ordivon Runtime.
+Use existing host executables through `workspace.exec` unless repeated real use proves that a stable operation needs a dedicated structured Tool contract. Arbitrary execution is effect-opaque: a caller may not promote it to read-only, idempotent, or reconcilable by declaration. A structured effect adapter is justified only when it owns canonical identity, enforceable preconditions, receipt or state proof, reconciliation, and ambiguity behavior. Untrusted workloads require an external isolation boundary, not an alternate execution mode inside Ordivon Runtime.

@@ -33,6 +33,10 @@ pub use repair::{
     apply_runtime_repair, RuntimeRepairAction, RuntimeRepairActionKind, RuntimeRepairConfig,
     RuntimeRepairReport, RuntimeRepairRequest, RUNTIME_REPAIR_SCHEMA_VERSION,
 };
+pub(crate) use types::{
+    operation_request_identity_digest, operation_request_identity_digest_from_plan,
+    REQUEST_IDENTITY_PREFIX,
+};
 pub use types::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,

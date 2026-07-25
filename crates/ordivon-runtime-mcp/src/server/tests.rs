@@ -80,11 +80,13 @@ fn submit(
         .submit(&SubmitRequest {
             schema_version: RUNTIME_SCHEMA_VERSION,
             client_request_id: client_request_id.to_string(),
+            request_identity_digest: None,
             plan: RuntimeExecutionPlan {
                 schema_version: RUNTIME_SCHEMA_VERSION,
                 workspace_id: "workspace:mcp-test".to_string(),
                 workspace_path: workspace.clone(),
                 source_revision: "revision:test".to_string(),
+                workspace_source_digest: None,
                 executable: "/usr/bin/true".to_string(),
                 executable_digest: format!("sha256:{}", "a".repeat(64)),
                 args: Vec::new(),
@@ -171,6 +173,12 @@ fn tool_catalog_uses_transactional_job_contract() {
         .find(|tool| tool.name.as_ref() == "workspace.exec")
         .unwrap();
     assert_eq!(exec.task_support(), TaskSupport::Optional);
+    assert_eq!(
+        exec.annotations
+            .as_ref()
+            .and_then(|annotations| annotations.idempotent_hint),
+        Some(false)
+    );
     assert!(tools
         .iter()
         .filter(|tool| tool.name.as_ref() != "workspace.exec")

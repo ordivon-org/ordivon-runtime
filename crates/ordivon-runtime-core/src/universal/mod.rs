@@ -30,7 +30,7 @@ pub use types::{
 };
 pub use workspace::{
     create_git_workspace, load_workspace_record, read_workspace_text, remove_git_workspace,
-    workspace_diff, write_workspace_text,
+    workspace_diff, workspace_source_state_digest, write_workspace_text,
 };
 
 pub(crate) use config::canonical_directory;
@@ -44,7 +44,7 @@ pub(crate) use types::{
 };
 pub(crate) use workspace::{
     preflight_workspace_write_path, remove_workspace_file, resolve_existing_workspace_path,
-    resolve_workspace_cwd,
+    resolve_workspace_cwd, workspace_source_state_digest_at,
 };
 
 #[cfg(test)]
