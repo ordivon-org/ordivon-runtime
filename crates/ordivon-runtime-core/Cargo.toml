@@ -1,5 +1,5 @@
 [package]
-name = "ordivon-exec"
+name = "ordivon-runtime-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,13 +11,13 @@ universal-executor = ["dep:libc"]
 transactional-runtime = ["universal-executor", "dep:rusqlite", "dep:uuid"]
 
 [[bin]]
-name = "ordivon-job-fixture"
-path = "src/bin/ordivon-job-fixture.rs"
+name = "ordivon-runtime-job-fixture"
+path = "src/bin/ordivon-runtime-job-fixture.rs"
 required-features = ["systemd-supervisor"]
 
 [[bin]]
-name = "ordivon-task-runner"
-path = "src/bin/ordivon-task-runner.rs"
+name = "ordivon-runtime-runner"
+path = "src/bin/ordivon-runtime-runner.rs"
 required-features = ["universal-executor"]
 
 [[bin]]

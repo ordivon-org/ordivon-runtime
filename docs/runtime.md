@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The Agent reasons and chooses actions. Ordivon executes, owns the resulting process tree, records non-reconstructable execution truth, and reconciles that truth after interruption.
+The Agent reasons and chooses actions. Ordivon Runtime executes, owns the resulting process tree, records non-reconstructable execution truth, and reconciles that truth after interruption.
 
 ## Execution path
 
@@ -65,4 +65,4 @@ A verified terminal result can defeat a later cancellation race because observed
 
 ## Extension boundary
 
-Use existing host executables through `workspace.exec` unless repeated real use proves that a stable operation needs a dedicated structured Tool contract. Untrusted workloads require an external isolation boundary, not an alternate Ordivon execution mode.
+Use existing host executables through `workspace.exec` unless repeated real use proves that a stable operation needs a dedicated structured Tool contract. Untrusted workloads require an external isolation boundary, not an alternate execution mode inside Ordivon Runtime.

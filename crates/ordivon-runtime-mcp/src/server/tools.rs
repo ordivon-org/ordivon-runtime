@@ -1,7 +1,7 @@
 use super::*;
 
 #[tool_router(vis = "pub(super)")]
-impl OrdivonServer {
+impl RuntimeServer {
     #[tool(
         name = "workspace.open",
         description = "Resolve a revision already present in the local source repository, create one detached Git workspace at that exact commit, and return the resolved commit SHA. This tool does not fetch or update remote refs and does not isolate host authority.",

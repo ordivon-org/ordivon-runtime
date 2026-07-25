@@ -1,4 +1,4 @@
-title = "Ordivon gitleaks policy"
+title = "Ordivon Runtime gitleaks policy"
 
 [extend]
 useDefault = true

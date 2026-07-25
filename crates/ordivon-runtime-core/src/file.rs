@@ -313,8 +313,8 @@ mod tests {
     impl TestDir {
         fn new() -> Self {
             let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("ordivon-exec-{}-{id}", std::process::id()));
+            let path = std::env::temp_dir()
+                .join(format!("ordivon-runtime-core-{}-{id}", std::process::id()));
             fs::create_dir_all(&path).unwrap();
             Self { path }
         }

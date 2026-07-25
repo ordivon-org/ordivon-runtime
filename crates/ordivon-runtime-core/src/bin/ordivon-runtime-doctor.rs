@@ -1,4 +1,4 @@
-use ordivon_exec::{inspect_runtime, RuntimeDoctorConfig};
+use ordivon_runtime_core::{inspect_runtime, RuntimeDoctorConfig};
 use std::env;
 use std::path::PathBuf;
 

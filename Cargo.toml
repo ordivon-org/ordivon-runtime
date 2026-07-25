@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "crates/ordivon-mcp",
-    "crates/ordivon-exec",
+    "crates/ordivon-runtime-mcp",
+    "crates/ordivon-runtime-core",
 ]
 resolver = "2"
 

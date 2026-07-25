@@ -1,7 +1,7 @@
 use super::*;
 
 #[tool_handler]
-impl ServerHandler for OrdivonServer {
+impl ServerHandler for RuntimeServer {
     fn get_info(&self) -> ServerInfo {
         let mut tools_task = ToolsTaskCapability::default();
         tools_task.call = Some(JsonObject::new());
@@ -18,11 +18,11 @@ impl ServerHandler for OrdivonServer {
                 .build(),
         )
         .with_server_info(
-            Implementation::new("ordivon-mcp", env!("CARGO_PKG_VERSION"))
-                .with_title("Ordivon MCP"),
+            Implementation::new("ordivon-runtime-mcp", env!("CARGO_PKG_VERSION"))
+                .with_title("Ordivon Runtime"),
         )
         .with_instructions(
-            "Local transactional Ordivon runtime. workspace.open isolates the code tree and Git state; it is not a host security sandbox. workspace.exec inherits the installed service user's trusted-local authority. The server owns execution identity, durable Job and Attempt state, cancellation, and recovery.",
+            "Local transactional Ordivon Runtime. workspace.open isolates the code tree and Git state; it is not a host security sandbox. workspace.exec inherits the installed service user's trusted-local authority. The server owns execution identity, durable Job and Attempt state, cancellation, and recovery.",
         )
     }
 
@@ -73,7 +73,7 @@ impl ServerHandler for OrdivonServer {
         let job_id = request.task_id.clone();
         let observation = tokio::task::spawn_blocking(move || {
             runtime.observe_task(&TaskObserveRequest {
-                schema_version: ordivon_exec::RUNTIME_SCHEMA_VERSION,
+                schema_version: ordivon_runtime_core::RUNTIME_SCHEMA_VERSION,
                 job_id,
                 wait_ms: 0,
                 stdout_tail_bytes: 4096,
@@ -113,7 +113,7 @@ impl ServerHandler for OrdivonServer {
         let job_id = request.task_id.clone();
         tokio::task::spawn_blocking(move || {
             runtime.cancel_task(&TaskCancelRequest {
-                schema_version: ordivon_exec::RUNTIME_SCHEMA_VERSION,
+                schema_version: ordivon_runtime_core::RUNTIME_SCHEMA_VERSION,
                 job_id,
             })
         })
@@ -154,13 +154,13 @@ impl ServerHandler for OrdivonServer {
     }
 }
 
-impl OrdivonServer {
+impl RuntimeServer {
     async fn load_mcp_task(&self, job_id: &str) -> Result<Task, McpError> {
         let runtime = self.state.runtime.clone();
         let job_id_owned = job_id.to_string();
         let (job, attempt, projection) = tokio::task::spawn_blocking(move || {
             runtime.observe_task(&TaskObserveRequest {
-                schema_version: ordivon_exec::RUNTIME_SCHEMA_VERSION,
+                schema_version: ordivon_runtime_core::RUNTIME_SCHEMA_VERSION,
                 job_id: job_id_owned.clone(),
                 wait_ms: 0,
                 stdout_tail_bytes: 0,
@@ -184,9 +184,9 @@ impl OrdivonServer {
 }
 
 pub(super) fn task_from_job(
-    job: ordivon_exec::RuntimeJobRecord,
-    attempt: Option<&ordivon_exec::AttemptRecord>,
-    projection: ordivon_exec::JobProjection,
+    job: ordivon_runtime_core::RuntimeJobRecord,
+    attempt: Option<&ordivon_runtime_core::AttemptRecord>,
+    projection: ordivon_runtime_core::JobProjection,
 ) -> Result<Task, McpError> {
     let updated_at_ms = attempt
         .and_then(|attempt| attempt.finished_at_ms.or(attempt.started_at_ms))

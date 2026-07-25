@@ -1,12 +1,16 @@
 [package]
-name = "ordivon-mcp"
+name = "ordivon-runtime-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "ordivon-runtime"
+path = "src/main.rs"
+
 [dependencies]
 axum.workspace = true
-ordivon-exec = { path = "../ordivon-exec" }
+ordivon-runtime-core = { path = "../ordivon-runtime-core" }
 rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 schemars.workspace = true
 serde.workspace = true

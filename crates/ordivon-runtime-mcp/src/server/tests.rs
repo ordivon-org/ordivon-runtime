@@ -1,6 +1,6 @@
 use super::tasks::task_from_job;
 use super::*;
-use ordivon_exec::{
+use ordivon_runtime_core::{
     AdmissionOutcome, ArtifactDescriptor, RegistryConfig, RuntimeExecutionPlan, SubmitRequest,
     TaskObservation, RUNTIME_SCHEMA_VERSION,
 };
@@ -22,15 +22,15 @@ impl Sandbox {
             .unwrap()
             .join("target/ordivon-tests")
             .join(format!(
-                "ordivon-mcp-{label}-{}-{unique}",
+                "ordivon-runtime-mcp-{label}-{}-{unique}",
                 std::process::id()
             ));
         fs::create_dir_all(&root).unwrap();
         Self { root }
     }
 
-    fn server(&self) -> OrdivonServer {
-        OrdivonServer::new(ServerConfig {
+    fn server(&self) -> RuntimeServer {
+        RuntimeServer::new(ServerConfig {
             runtime: RuntimeConfig {
                 registry: RegistryConfig {
                     db_path: self.root.join("registry/registry.sqlite3"),
@@ -65,10 +65,13 @@ impl Drop for Sandbox {
     }
 }
 
-fn submit(server: &OrdivonServer, client_request_id: &str) -> ordivon_exec::CreatedAdmission {
+fn submit(
+    server: &RuntimeServer,
+    client_request_id: &str,
+) -> ordivon_runtime_core::CreatedAdmission {
     let workspace = std::env::current_dir()
         .unwrap()
-        .join("target/ordivon-tests/ordivon-mcp-workspace");
+        .join("target/ordivon-tests/ordivon-runtime-mcp-workspace");
     let workspace = workspace.to_string_lossy().into_owned();
     let outcome = server
         .state
@@ -99,6 +102,20 @@ fn submit(server: &OrdivonServer, client_request_id: &str) -> ordivon_exec::Crea
         AdmissionOutcome::Created(created) => *created,
         AdmissionOutcome::Existing { .. } => panic!("expected a new Job"),
     }
+}
+
+#[test]
+fn server_identity_names_the_runtime_component() {
+    let sandbox = Sandbox::new("identity");
+    let info = serde_json::to_value(sandbox.server().get_info()).unwrap();
+    assert_eq!(
+        info.pointer("/serverInfo/name").and_then(Value::as_str),
+        Some("ordivon-runtime-mcp")
+    );
+    assert_eq!(
+        info.pointer("/serverInfo/title").and_then(Value::as_str),
+        Some("Ordivon Runtime")
+    );
 }
 
 #[test]

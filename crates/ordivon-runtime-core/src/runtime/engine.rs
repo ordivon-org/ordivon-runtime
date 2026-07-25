@@ -2198,7 +2198,7 @@ mod trusted_systemd_command_tests {
             "ordivon-test.service",
             Path::new("/usr/bin/true"),
             Path::new("/var/lib/ordivon/attempts/attempt-test"),
-            Path::new("/root/projects/Ordivon"),
+            Path::new("/root/projects/ordivon-runtime"),
             10_000,
         )
         .unwrap();
@@ -2227,6 +2227,8 @@ mod trusted_systemd_command_tests {
         assert!(args.contains("RuntimeMaxSec=10000ms"));
         assert!(valid_environment_name("GITHUB_TOKEN"));
         assert!(valid_environment_name("CARGO_BIN_EXE_ordivon_job_fixture"));
-        assert!(!valid_environment_name("CARGO_BIN_EXE_ordivon-job-fixture"));
+        assert!(!valid_environment_name(
+            "CARGO_BIN_EXE_ordivon-runtime-job-fixture"
+        ));
     }
 }

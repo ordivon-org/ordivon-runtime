@@ -1,6 +1,6 @@
 #![cfg(feature = "transactional-runtime")]
 
-use ordivon_exec::{
+use ordivon_runtime_core::{
     create_git_workspace, remove_git_workspace, write_workspace_text, ArtifactReadRequest,
     AttemptState, GitWorkspaceCreateRequest, RegistryConfig, Runtime, RuntimeConfig,
     RuntimeExecutionPlan, RuntimeJobListRequest, SubmitRequest, TaskCancelRequest,
@@ -96,7 +96,7 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
     )
     .unwrap();
     let runtime = Runtime::new(RuntimeConfig {
-        registry: ordivon_exec::RegistryConfig {
+        registry: ordivon_runtime_core::RegistryConfig {
             db_path: root.join("registry/registry.sqlite3"),
             store_root: root.join("registry"),
             busy_timeout_ms: 5000,
@@ -348,7 +348,7 @@ fn runtime_incremental_observe_and_safe_close_preserve_active_work() {
         .unwrap_err();
     assert_eq!(
         close_error.code,
-        ordivon_exec::RuntimeErrorCode::WorkspaceBusy
+        ordivon_runtime_core::RuntimeErrorCode::WorkspaceBusy
     );
 
     let mut stdout_offset = 0;
@@ -528,7 +528,7 @@ fn runtime_reconcile_all_isolates_one_broken_job_and_converges_another() {
     assert_eq!(report.failures.len(), 1);
     assert_eq!(
         report.failures[0].code,
-        ordivon_exec::RuntimeErrorCode::JobAlreadyResolved
+        ordivon_runtime_core::RuntimeErrorCode::JobAlreadyResolved
     );
     assert_eq!(report.failures[0].job_id, bad.job_id);
     assert_eq!(
@@ -796,10 +796,12 @@ impl IntegrationContext {
     }
 }
 
-fn created_admission(outcome: ordivon_exec::AdmissionOutcome) -> ordivon_exec::CreatedAdmission {
+fn created_admission(
+    outcome: ordivon_runtime_core::AdmissionOutcome,
+) -> ordivon_runtime_core::CreatedAdmission {
     match outcome {
-        ordivon_exec::AdmissionOutcome::Created(created) => *created,
-        ordivon_exec::AdmissionOutcome::Existing { .. } => {
+        ordivon_runtime_core::AdmissionOutcome::Created(created) => *created,
+        ordivon_runtime_core::AdmissionOutcome::Existing { .. } => {
             panic!("expected a new admission")
         }
     }
@@ -891,7 +893,7 @@ fn runtime_live_unit_without_launch_token_is_orphaned_and_holds_capacity() {
             .get_reservation(&attempt.attempt_id)
             .unwrap()
             .state,
-        ordivon_exec::ReservationState::HeldOrphaned
+        ordivon_runtime_core::ReservationState::HeldOrphaned
     );
     let _ = Command::new("systemctl")
         .args(["stop", &attempt.unit_name])
@@ -987,7 +989,7 @@ fn runtime_corrupt_runner_result_is_orphaned_and_quarantined() {
             .get_reservation(&attempt.attempt_id)
             .unwrap()
             .state,
-        ordivon_exec::ReservationState::HeldOrphaned
+        ordivon_runtime_core::ReservationState::HeldOrphaned
     );
 }
 

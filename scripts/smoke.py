@@ -15,7 +15,7 @@ PROTOCOL_VERSION = "2025-06-18"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Initialize a running local Ordivon MCP server.")
+    parser = argparse.ArgumentParser(description="Initialize a running local Ordivon Runtime server.")
     parser.add_argument("--endpoint", default=os.environ.get("ORDIVON_ENDPOINT", "http://127.0.0.1:8897/mcp"))
     parser.add_argument("--token", default=os.environ.get("ORDIVON_BEARER_TOKEN"))
     parser.add_argument("--timeout", type=float, default=5.0)

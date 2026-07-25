@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create an external, consistent Ordivon control-root snapshot."""
+"""Create an external, consistent Ordivon Runtime control-root snapshot."""
 
 from __future__ import annotations
 

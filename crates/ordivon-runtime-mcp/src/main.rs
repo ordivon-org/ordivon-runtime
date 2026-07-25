@@ -12,8 +12,8 @@ use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use ordivon_exec::{RegistryConfig, Runtime, RuntimeConfig, UniversalExecutorConfig};
-use ordivon_mcp::server::{ExecutionContext, OrdivonServer, ServerConfig};
+use ordivon_runtime_core::{RegistryConfig, Runtime, RuntimeConfig, UniversalExecutorConfig};
+use ordivon_runtime_mcp::server::{ExecutionContext, RuntimeServer, ServerConfig};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ordivon_mcp=info,rmcp=warn".into()),
+                .unwrap_or_else(|_| "ordivon_runtime_mcp=info,rmcp=warn".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .try_init();
@@ -87,10 +87,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = listener.local_addr()?;
     let cancellation = CancellationToken::new();
     let server_config = app.server.clone();
-    let service: StreamableHttpService<OrdivonServer, LocalSessionManager> =
+    let service: StreamableHttpService<RuntimeServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
-                OrdivonServer::new(server_config.clone())
+                RuntimeServer::new(server_config.clone())
                     .map_err(|error| std::io::Error::other(error.message))
             },
             Default::default(),
@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bind = %address,
         endpoint = %format!("http://{address}/mcp"),
         execution_mode = "trusted-local",
-        "Ordivon MCP listening"
+        "Ordivon Runtime listening"
     );
 
     let shutdown = cancellation.clone();

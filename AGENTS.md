@@ -1,4 +1,4 @@
-# Ordivon Agent Entry
+# Ordivon Runtime Agent Entry
 
 ## Start from reality
 
@@ -18,11 +18,15 @@ Read [`docs/recovery.md`](docs/recovery.md) only when operating on Registry inte
 - Result and Artifact files own their Digest-bound bytes.
 - Current tools, configuration, deployment, and health must be queried from the live system rather than copied into prose.
 
+## Component boundary
+
+This repository implements **Ordivon Runtime**, not the complete Ordivon system. Cognition, planning, memory, coordination, and product interfaces remain outside this repository unless a concrete Runtime contract requires them.
+
 ## Change rule
 
 Every persistent addition must solve an observed failure or repeatedly missing operation and state what existing path it replaces or extends. Prefer mature host CLIs through `workspace.exec` over bespoke adapters. Preserve unrelated user changes, use isolated Git Workspaces for substantial work, and keep one execution path.
 
-Ordivon is trusted-local. Put untrusted code behind an external isolation boundary rather than adding a second policy or sandbox Runtime inside Ordivon.
+Ordivon Runtime is trusted-local. Put untrusted code behind an external isolation boundary rather than adding a second policy or sandbox Runtime inside it.
 
 ## Verification
 
