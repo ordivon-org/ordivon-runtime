@@ -164,13 +164,13 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.exec",
-        description = "Run one command inside a workspace with the installed service user's trusted-local authority. execution.executable must be an absolute host path and execution.cwdRelative must be relative to the Workspace root. The server owns identity, concurrency, Job IDs, and Attempt IDs; duplicate clientRequestId values are idempotent.",
+        description = "Run one effect-opaque command inside a workspace with the installed service user's trusted-local authority. execution.executable must be an absolute host path and execution.cwdRelative must be relative to the Workspace root. The server makes duplicate clientRequestId admission idempotent and binds current Git source state, but it does not claim the command's external effects are idempotent.",
         execution(task_support = "optional"),
         annotations(
             title = "Execute transactional workspace job",
             read_only_hint = false,
             destructive_hint = true,
-            idempotent_hint = true,
+            idempotent_hint = false,
             open_world_hint = false
         )
     )]

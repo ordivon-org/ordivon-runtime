@@ -12,6 +12,7 @@ pub enum UniversalExecErrorCode {
     WorkspacePathDenied,
     RevisionNotFound,
     RevisionMismatch,
+    WorkspaceStateMismatch,
     WorkspaceMutationIncomplete,
     TaskExists,
     TaskNotFound,
@@ -25,6 +26,35 @@ pub enum UniversalExecErrorCode {
     IoError,
     WorkspaceCapacityExceeded,
     MetadataCorrupt,
+}
+
+impl UniversalExecErrorCode {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "INVALID_REQUEST",
+            Self::WorkspaceExists => "WORKSPACE_EXISTS",
+            Self::WorkspaceNotFound => "WORKSPACE_NOT_FOUND",
+            Self::WorkspacePathNotFound => "WORKSPACE_PATH_NOT_FOUND",
+            Self::WorkspaceDirty => "WORKSPACE_DIRTY",
+            Self::WorkspacePathDenied => "WORKSPACE_PATH_DENIED",
+            Self::RevisionNotFound => "REVISION_NOT_FOUND",
+            Self::RevisionMismatch => "REVISION_MISMATCH",
+            Self::WorkspaceStateMismatch => "WORKSPACE_STATE_MISMATCH",
+            Self::WorkspaceMutationIncomplete => "WORKSPACE_MUTATION_INCOMPLETE",
+            Self::TaskExists => "TASK_EXISTS",
+            Self::TaskNotFound => "TASK_NOT_FOUND",
+            Self::TaskStartFailed => "TASK_START_FAILED",
+            Self::TaskStateUnavailable => "TASK_STATE_UNAVAILABLE",
+            Self::ArtifactNotFound => "ARTIFACT_NOT_FOUND",
+            Self::ArtifactNotUtf8 => "ARTIFACT_NOT_UTF8",
+            Self::OutputLimitExceeded => "OUTPUT_LIMIT_EXCEEDED",
+            Self::ToolUnavailable => "TOOL_UNAVAILABLE",
+            Self::ToolFailed => "TOOL_FAILED",
+            Self::IoError => "IO_ERROR",
+            Self::WorkspaceCapacityExceeded => "WORKSPACE_CAPACITY_EXCEEDED",
+            Self::MetadataCorrupt => "METADATA_CORRUPT",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

@@ -7,7 +7,7 @@ use crate::universal::{
 use proptest::prelude::*;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -109,6 +109,7 @@ fn write_completed_runner_result(attempt: &AttemptRecord, finished_at_ms: u128) 
         status: TaskTerminalStatus::Completed,
         exit_code: Some(0),
         timed_out: false,
+        infrastructure_error_code: None,
         infrastructure_error: None,
         started_unix_ms: finished_at_ms.saturating_sub(1),
         finished_unix_ms: finished_at_ms,
@@ -168,11 +169,13 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
     SubmitRequest {
         schema_version: RUNTIME_SCHEMA_VERSION,
         client_request_id: client_request_id.to_string(),
+        request_identity_digest: None,
         plan: RuntimeExecutionPlan {
             schema_version: RUNTIME_SCHEMA_VERSION,
             workspace_id: "workspace:test".to_string(),
             workspace_path: sandbox.workspace().to_string_lossy().into_owned(),
             source_revision: "test-revision".to_string(),
+            workspace_source_digest: None,
             executable: executable.to_string_lossy().into_owned(),
             executable_digest: file_digest(&executable),
             args: Vec::new(),
@@ -193,6 +196,79 @@ fn created(outcome: AdmissionOutcome) -> CreatedAdmission {
         AdmissionOutcome::Created(created) => *created,
         AdmissionOutcome::Existing { .. } => panic!("expected newly created admission"),
     }
+}
+
+#[test]
+fn workspace_source_drift_is_persisted_as_precondition_failure() {
+    let sandbox = Sandbox::new("source-drift-evidence", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:source-drift-evidence", 4))
+            .unwrap(),
+    );
+    let bundle = Path::new(&created.attempt.bundle_path);
+    fs::create_dir_all(bundle).unwrap();
+    let stdout = b"";
+    let stderr = b"";
+    fs::write(bundle.join("stdout.log"), stdout).unwrap();
+    fs::write(bundle.join("stderr.log"), stderr).unwrap();
+    let result = RunnerTaskResult {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        task_id: created.attempt.attempt_id.clone(),
+        job_id: Some(created.job.job_id.clone()),
+        attempt_id: Some(created.attempt.attempt_id.clone()),
+        launch_token_digest: Some(created.attempt.launch_token_digest.clone()),
+        payload_uid: None,
+        payload_gid: None,
+        status: TaskTerminalStatus::Failed,
+        exit_code: None,
+        timed_out: false,
+        infrastructure_error_code: Some("WORKSPACE_STATE_MISMATCH".to_string()),
+        infrastructure_error: Some(
+            "WorkspaceStateMismatch: Workspace source state changed after operation admission"
+                .to_string(),
+        ),
+        started_unix_ms: u128::from(created.attempt.created_at_ms),
+        finished_unix_ms: u128::from(created.attempt.created_at_ms + 1),
+        stdout: CapturedOutput {
+            artifact_id: format!("{}.stdout", created.attempt.attempt_id),
+            file_name: "stdout.log".to_string(),
+            digest: digest(stdout),
+            retained_bytes: 0,
+            dropped_bytes: 0,
+            truncated: false,
+        },
+        stderr: CapturedOutput {
+            artifact_id: format!("{}.stderr", created.attempt.attempt_id),
+            file_name: "stderr.log".to_string(),
+            digest: digest(stderr),
+            retained_bytes: 0,
+            dropped_bytes: 0,
+            truncated: false,
+        },
+    };
+    fs::write(
+        bundle.join("result.json"),
+        serde_json::to_vec(&result).unwrap(),
+    )
+    .unwrap();
+
+    let terminal = super::evidence::prepare_runner_terminal_from_bundle(&created.attempt).unwrap();
+    assert_eq!(terminal.state, AttemptState::Failed);
+    assert_eq!(terminal.exit_code, None);
+    assert_eq!(terminal.reason_code, "WORKSPACE_SOURCE_PRECONDITION_DRIFT");
+    sandbox.registry.commit_terminal(&terminal).unwrap();
+
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    let reason: String = connection
+        .query_row(
+            "SELECT reason_code FROM job_events WHERE job_id=?1 AND event_type='JOB_TERMINAL'",
+            [&created.job.job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reason, "WORKSPACE_SOURCE_PRECONDITION_DRIFT");
 }
 
 #[test]
@@ -357,6 +433,101 @@ fn execution_budget_is_validated_and_part_of_idempotent_identity() {
     changed.plan.budget.tasks_max = Some(65);
     let error = sandbox.registry.submit(&changed).unwrap_err();
     assert_eq!(error.code, RuntimeErrorCode::IdempotencyConflict);
+}
+
+#[test]
+fn request_identity_excludes_observation_preferences_and_capacity_policy() {
+    let base = TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: "request:identity-boundary".to_string(),
+        principal: "principal:test".to_string(),
+        global_limit: 4,
+        execution: UniversalExecutionRequest {
+            workspace_id: "workspace:test".to_string(),
+            executable: "/usr/bin/../bin/true".to_string(),
+            args: vec!["argument".to_string()],
+            cwd_relative: "subdir/../subdir".to_string(),
+            env: BTreeMap::from([("KEY".to_string(), "VALUE".to_string())]),
+            timeout_ms: 10_000,
+            stdout_limit_bytes: 65_536,
+            stderr_limit_bytes: 65_536,
+            budget: ExecutionBudget::default(),
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    let digest = operation_request_identity_digest(&base).unwrap();
+
+    let mut observation_only = base.clone();
+    observation_only.global_limit = 99;
+    observation_only.wait_ms = 30_000;
+    observation_only.stdout_tail_bytes = 8_192;
+    observation_only.stderr_tail_bytes = 8_192;
+    assert_eq!(
+        operation_request_identity_digest(&observation_only).unwrap(),
+        digest
+    );
+
+    let mut normalized_paths = base.clone();
+    normalized_paths.execution.executable = "/usr/bin/true".to_string();
+    normalized_paths.execution.cwd_relative = "subdir".to_string();
+    assert_eq!(
+        operation_request_identity_digest(&normalized_paths).unwrap(),
+        digest
+    );
+
+    let mut changed = base;
+    changed.execution.args.push("different".to_string());
+    assert_ne!(operation_request_identity_digest(&changed).unwrap(), digest);
+}
+
+#[test]
+fn request_identity_replays_across_world_change_but_operation_identity_binds_world() {
+    let sandbox = Sandbox::new("request-world-identity", 5000);
+    let proposal = format!("{}{}", REQUEST_IDENTITY_PREFIX, digest(b"same proposal"));
+    let mut first = request(&sandbox, "request:request-world-identity", 4);
+    first.request_identity_digest = Some(proposal.clone());
+    first.plan.workspace_source_digest = Some(digest(b"source-state-one"));
+    let created = created(sandbox.registry.submit(&first).unwrap());
+    let first_operation = created.job.operation_digest.clone();
+
+    let mut same_request_new_world = first.clone();
+    same_request_new_world.plan.workspace_source_digest = Some(digest(b"source-state-two"));
+    let replay = sandbox.registry.submit(&same_request_new_world).unwrap();
+    let replay_job = match replay {
+        AdmissionOutcome::Existing { job } => job,
+        AdmissionOutcome::Created(_) => panic!("same request identity must replay"),
+    };
+    assert_eq!(replay_job.job_id, created.job.job_id);
+    assert_eq!(replay_job.operation_digest, first_operation);
+
+    let mut changed_request = same_request_new_world;
+    changed_request.request_identity_digest = Some(format!(
+        "{}{}",
+        REQUEST_IDENTITY_PREFIX,
+        digest(b"different proposal")
+    ));
+    let error = sandbox.registry.submit(&changed_request).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::IdempotencyConflict);
+}
+
+#[test]
+fn legacy_job_request_identity_is_derived_from_stored_plan() {
+    let sandbox = Sandbox::new("legacy-request-identity", 5000);
+    let legacy = request(&sandbox, "request:legacy-request-identity", 4);
+    let created = created(sandbox.registry.submit(&legacy).unwrap());
+    assert!(!created
+        .job
+        .request_digest
+        .starts_with(REQUEST_IDENTITY_PREFIX));
+    let derived = operation_request_identity_digest_from_plan(&legacy.plan).unwrap();
+    let found = sandbox
+        .registry
+        .find_idempotent_job(&legacy.plan.principal, &legacy.client_request_id, &derived)
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.job_id, created.job.job_id);
 }
 
 #[test]

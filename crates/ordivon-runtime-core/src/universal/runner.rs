@@ -9,9 +9,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::{
-    canonical_directory, now_unix_ms, sha256_file, write_json_atomic, CapturedOutput,
-    RunnerStartEvidence, RunnerTaskRequest, RunnerTaskResult, TaskTerminalStatus,
-    UniversalExecError, UniversalExecErrorCode, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    canonical_directory, now_unix_ms, sha256_file, workspace_source_state_digest_at,
+    write_json_atomic, CapturedOutput, RunnerStartEvidence, RunnerTaskRequest, RunnerTaskResult,
+    TaskTerminalStatus, UniversalExecError, UniversalExecErrorCode, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
 const REQUEST_FILE: &str = "request.json";
@@ -28,33 +28,89 @@ pub fn run_task_runner(task_dir: &Path) -> Result<(), UniversalExecError> {
     let task_dir = canonical_directory(task_dir, "taskDir")?;
     let request = load_request(&task_dir)?;
     let started_unix_ms = now_unix_ms()?;
-    let execution = validate_request_identity(&request)
-        .and_then(|()| write_runner_start(&task_dir, &request, started_unix_ms))
-        .and_then(|()| execute_request(&task_dir, &request, started_unix_ms));
+    let execution = validate_request_identity(&request).and_then(|()| {
+        let observed_workspace_source_digest = observe_workspace_source(&request)?;
+        write_runner_start(
+            &task_dir,
+            &request,
+            observed_workspace_source_digest.as_deref(),
+            started_unix_ms,
+        )?;
+        validate_workspace_source_commitment(
+            &request,
+            observed_workspace_source_digest.as_deref(),
+        )?;
+        execute_request(&task_dir, &request, started_unix_ms)
+    });
     let result = execution.unwrap_or_else(|error| {
-        failure_result(&task_dir, &request, started_unix_ms, error.to_string()).unwrap_or_else(
-            |secondary| RunnerTaskResult {
-                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-                task_id: request.task_id.clone(),
-                job_id: request.job_id.clone(),
-                attempt_id: request.attempt_id.clone(),
-                launch_token_digest: request.launch_token.as_deref().map(sha256_text),
-                payload_uid: request.payload.as_ref().map(|payload| payload.uid),
-                payload_gid: request.payload.as_ref().map(|payload| payload.gid),
-                status: TaskTerminalStatus::Failed,
-                exit_code: None,
-                timed_out: false,
-                infrastructure_error: Some(format!(
-                    "runner failure: {error}; result construction failure: {secondary}"
-                )),
-                started_unix_ms,
-                finished_unix_ms: started_unix_ms,
-                stdout: empty_output(&request.task_id, true),
-                stderr: empty_output(&request.task_id, false),
-            },
+        let infrastructure_error_code = error.code.as_str().to_string();
+        failure_result(
+            &task_dir,
+            &request,
+            started_unix_ms,
+            infrastructure_error_code.clone(),
+            error.to_string(),
         )
+        .unwrap_or_else(|secondary| RunnerTaskResult {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            task_id: request.task_id.clone(),
+            job_id: request.job_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            launch_token_digest: request.launch_token.as_deref().map(sha256_text),
+            payload_uid: request.payload.as_ref().map(|payload| payload.uid),
+            payload_gid: request.payload.as_ref().map(|payload| payload.gid),
+            status: TaskTerminalStatus::Failed,
+            exit_code: None,
+            timed_out: false,
+            infrastructure_error_code: Some(infrastructure_error_code),
+            infrastructure_error: Some(format!(
+                "runner failure: {error}; result construction failure: {secondary}"
+            )),
+            started_unix_ms,
+            finished_unix_ms: started_unix_ms,
+            stdout: empty_output(&request.task_id, true),
+            stderr: empty_output(&request.task_id, false),
+        })
     });
     write_json_atomic(&task_dir.join(RESULT_FILE), &result)
+}
+
+fn observe_workspace_source(
+    request: &RunnerTaskRequest,
+) -> Result<Option<String>, UniversalExecError> {
+    if request.workspace_source_digest.is_none() {
+        return Ok(None);
+    }
+    let workspace = canonical_directory(
+        Path::new(
+            request
+                .payload
+                .as_ref()
+                .map(|payload| payload.workspace_view.as_str())
+                .unwrap_or(request.workspace_path.as_str()),
+        ),
+        "workspacePath",
+    )?;
+    workspace_source_state_digest_at(&workspace).map(Some)
+}
+
+fn validate_workspace_source_commitment(
+    request: &RunnerTaskRequest,
+    observed: Option<&str>,
+) -> Result<(), UniversalExecError> {
+    match (request.workspace_source_digest.as_deref(), observed) {
+        (None, None) => Ok(()),
+        (Some(expected), Some(observed)) if expected == observed => Ok(()),
+        (Some(_), Some(_)) => Err(UniversalExecError::new(
+            UniversalExecErrorCode::WorkspaceStateMismatch,
+            "Workspace source state changed after operation admission",
+            Some("workspaceSourceDigest"),
+            false,
+        )),
+        _ => Err(runner_error(
+            "Workspace source observation is inconsistent with the Runner request",
+        )),
+    }
 }
 
 fn execute_request(
@@ -208,6 +264,7 @@ fn execute_request(
         status: terminal_status,
         exit_code: status.code(),
         timed_out,
+        infrastructure_error_code: None,
         infrastructure_error: None,
         started_unix_ms,
         finished_unix_ms: now_unix_ms()?,
@@ -397,6 +454,7 @@ fn failure_result(
     task_dir: &Path,
     request: &RunnerTaskRequest,
     started_unix_ms: u128,
+    infrastructure_error_code: String,
     message: String,
 ) -> Result<RunnerTaskResult, UniversalExecError> {
     Ok(RunnerTaskResult {
@@ -410,6 +468,7 @@ fn failure_result(
         status: TaskTerminalStatus::Failed,
         exit_code: None,
         timed_out: false,
+        infrastructure_error_code: Some(infrastructure_error_code),
         infrastructure_error: Some(message),
         started_unix_ms,
         finished_unix_ms: now_unix_ms()?,
@@ -493,6 +552,7 @@ fn sha256_text(value: &str) -> String {
 fn write_runner_start(
     task_dir: &Path,
     request: &RunnerTaskRequest,
+    observed_workspace_source_digest: Option<&str>,
     observed_unix_ms: u128,
 ) -> Result<(), UniversalExecError> {
     let identity = match (
@@ -525,6 +585,8 @@ fn write_runner_start(
                 namespace_process_start_identity: read_process_start_identity(std::process::id())?,
                 payload_uid: request.payload.as_ref().map(|payload| payload.uid),
                 payload_gid: request.payload.as_ref().map(|payload| payload.gid),
+                observed_workspace_source_digest: observed_workspace_source_digest
+                    .map(ToString::to_string),
                 observed_unix_ms,
             }
         }

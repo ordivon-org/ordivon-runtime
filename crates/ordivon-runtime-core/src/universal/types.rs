@@ -424,6 +424,8 @@ pub(crate) struct RunnerTaskRequest {
     pub task_id: String,
     pub workspace_id: String,
     pub workspace_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_source_digest: Option<String>,
     pub executable: String,
     pub executable_digest: String,
     pub args: Vec<String>,
@@ -450,6 +452,8 @@ pub(crate) struct RunnerStartEvidence {
     pub payload_uid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_gid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_workspace_source_digest: Option<String>,
     pub observed_unix_ms: u128,
 }
 
@@ -491,6 +495,8 @@ pub(crate) struct RunnerTaskResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     pub timed_out: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infrastructure_error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub infrastructure_error: Option<String>,
     pub started_unix_ms: u128,

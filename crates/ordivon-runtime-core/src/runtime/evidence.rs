@@ -57,6 +57,14 @@ pub(crate) fn prepare_runner_terminal_from_bundle(
         TaskTerminalStatus::Failed if result.timed_out => {
             (AttemptState::TimedOut, "DEADLINE_EXCEEDED")
         }
+        TaskTerminalStatus::Failed
+            if result.infrastructure_error_code.as_deref() == Some("WORKSPACE_STATE_MISMATCH") =>
+        {
+            (AttemptState::Failed, "WORKSPACE_SOURCE_PRECONDITION_DRIFT")
+        }
+        TaskTerminalStatus::Failed if result.infrastructure_error_code.is_some() => {
+            (AttemptState::Failed, "RUNNER_INFRASTRUCTURE_FAILURE")
+        }
         TaskTerminalStatus::Failed => (AttemptState::Failed, "PROCESS_EXIT_NONZERO"),
         TaskTerminalStatus::Cancelled => (AttemptState::Cancelled, "STOP_REQUESTED"),
     };

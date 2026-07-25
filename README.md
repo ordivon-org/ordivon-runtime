@@ -1,6 +1,6 @@
 # Ordivon Runtime
 
-Ordivon Runtime is the trusted-local execution and recovery subsystem of **Ordivon**. It is not the complete Ordivon system.
+Ordivon Runtime is the trusted-local effect execution and recovery subsystem of **Ordivon**. It is not the complete Ordivon system.
 
 ```text
 human intent
@@ -11,7 +11,7 @@ human intent
 → recovery or continuation
 ```
 
-The Runtime owns the deterministic execution boundary: Git Workspaces, request identity, Jobs and Attempts, process-tree ownership, bounded Artifacts, cancellation, reconciliation, and recovery. Higher-level cognition, planning, memory, coordination, and product interfaces belong to Ordivon or other components above the Runtime.
+The Runtime owns the deterministic commitment boundary between Agent decisions and reality: Git Workspaces, stable operation identity, Jobs and Attempts, at-most-once physical dispatch, process-tree ownership, bounded evidence, cancellation, reconciliation, and recovery. Higher-level cognition, planning, memory, coordination, and product interfaces belong to Ordivon or other components above the Runtime. The kernel contract is defined in [`docs/effect-kernel.md`](docs/effect-kernel.md).
 
 An authenticated Agent receives the installed service user's trusted-local authority. Ordivon Runtime preserves execution facts that cannot be reconstructed after interruption; it is not a sandbox for untrusted code. Run untrusted workloads behind a separate VM or container boundary.
 

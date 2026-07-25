@@ -6,7 +6,7 @@ Do not preload the documentation tree. Confirm the exact Git state, then inspect
 
 Read [`docs/runtime.md`](docs/runtime.md) only when changing or diagnosing cross-component execution semantics: Workspace, request identity, Job, Attempt, reservation, runner bundle, process ownership, terminal result, Artifact, or reconciliation.
 
-Read [`docs/recovery.md`](docs/recovery.md) only when operating on Registry integrity, backups, administrative repair, or restore.
+Read [`docs/recovery.md`](docs/recovery.md) only when operating on Registry integrity, backups, administrative repair, or restore. Read [`docs/effect-kernel.md`](docs/effect-kernel.md) before adding an operation identity field, retry path, external receipt, authority contract, world precondition, or structured effect adapter.
 
 ## Truth and responsibility
 
@@ -24,7 +24,7 @@ This repository implements **Ordivon Runtime**, not the complete Ordivon system.
 
 ## Change rule
 
-Every persistent addition must solve an observed failure or repeatedly missing operation and state what existing path it replaces or extends. Prefer mature host CLIs through `workspace.exec` over bespoke adapters. Preserve unrelated user changes, use isolated Git Workspaces for substantial work, and keep one execution path.
+Every persistent addition must solve an observed failure or repeatedly missing operation and state what existing path it replaces or extends. Effect semantics must be enforceable by a structured adapter; never trust a caller-declared effect class for arbitrary execution. Prefer mature host CLIs through `workspace.exec` over bespoke adapters, while treating arbitrary execution as opaque. Preserve unrelated user changes, use isolated Git Workspaces for substantial work, and keep one execution path.
 
 Ordivon Runtime is trusted-local. Put untrusted code behind an external isolation boundary rather than adding a second policy or sandbox Runtime inside it.
 

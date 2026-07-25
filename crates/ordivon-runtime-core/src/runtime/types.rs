@@ -1,8 +1,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
-use super::{RuntimeError, RuntimeResult};
+use super::{RuntimeError, RuntimeErrorCode, RuntimeResult};
 
 pub const RUNTIME_SCHEMA_VERSION: u32 = 1;
 pub const MAX_RUNTIME_LIST_LIMIT: u32 = 100;
@@ -292,6 +293,8 @@ pub struct RuntimeExecutionPlan {
     pub workspace_id: String,
     pub workspace_path: String,
     pub source_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_source_digest: Option<String>,
     pub executable: String,
     pub executable_digest: String,
     #[serde(default)]
@@ -316,8 +319,128 @@ pub struct RuntimeExecutionPlan {
 pub struct SubmitRequest {
     pub schema_version: u32,
     pub client_request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_identity_digest: Option<String>,
     pub plan: RuntimeExecutionPlan,
     pub global_limit: u32,
+}
+
+pub(crate) const REQUEST_IDENTITY_PREFIX: &str = "runtime-request-v1:";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationRequestIdentity {
+    schema_version: u32,
+    principal: String,
+    workspace_id: String,
+    executable: String,
+    args: Vec<String>,
+    cwd_relative: String,
+    env: BTreeMap<String, String>,
+    timeout_ms: u64,
+    stdout_limit_bytes: u64,
+    stderr_limit_bytes: u64,
+    budget: ExecutionBudget,
+}
+
+pub(crate) fn operation_request_identity_digest(request: &TaskRunRequest) -> RuntimeResult<String> {
+    operation_request_identity_digest_from_parts(OperationRequestIdentity {
+        schema_version: request.schema_version,
+        principal: request.principal.clone(),
+        workspace_id: request.execution.workspace_id.clone(),
+        executable: normalize_path_text(&request.execution.executable),
+        args: request.execution.args.clone(),
+        cwd_relative: normalize_relative_path_text(&request.execution.cwd_relative),
+        env: request.execution.env.clone(),
+        timeout_ms: request.execution.timeout_ms,
+        stdout_limit_bytes: request.execution.stdout_limit_bytes,
+        stderr_limit_bytes: request.execution.stderr_limit_bytes,
+        budget: request.execution.budget.clone(),
+    })
+}
+
+pub(crate) fn operation_request_identity_digest_from_plan(
+    plan: &RuntimeExecutionPlan,
+) -> RuntimeResult<String> {
+    let cwd = Path::new(&plan.cwd)
+        .strip_prefix(&plan.workspace_path)
+        .map_err(|_| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "stored execution cwd is outside its Workspace",
+                Some("executionPlan"),
+                false,
+            )
+        })?;
+    operation_request_identity_digest_from_parts(OperationRequestIdentity {
+        schema_version: plan.schema_version,
+        principal: plan.principal.clone(),
+        workspace_id: plan.workspace_id.clone(),
+        executable: normalize_path_text(&plan.executable),
+        args: plan.args.clone(),
+        cwd_relative: normalize_relative_path_text(&cwd.to_string_lossy()),
+        env: plan.env.clone(),
+        timeout_ms: plan.timeout_ms,
+        stdout_limit_bytes: plan.stdout_limit_bytes,
+        stderr_limit_bytes: plan.stderr_limit_bytes,
+        budget: plan.budget.clone(),
+    })
+}
+
+fn operation_request_identity_digest_from_parts(
+    identity: OperationRequestIdentity,
+) -> RuntimeResult<String> {
+    let bytes = serde_json::to_vec(&identity).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::InvalidRequest,
+            format!("cannot serialize operation request identity: {error}"),
+            None,
+            false,
+        )
+    })?;
+    Ok(format!(
+        "{REQUEST_IDENTITY_PREFIX}{}",
+        crate::universal::sha256_bytes(&bytes)
+    ))
+}
+
+fn normalize_path_text(value: &str) -> String {
+    use std::path::Component;
+
+    let path = Path::new(value);
+    let absolute = path.is_absolute();
+    let mut normalized = if absolute {
+        PathBuf::from("/")
+    } else {
+        PathBuf::new()
+    };
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => {
+                let can_pop = normalized
+                    .file_name()
+                    .is_some_and(|name| name != std::ffi::OsStr::new(".."));
+                if can_pop {
+                    normalized.pop();
+                } else if !absolute {
+                    normalized.push("..");
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized.to_string_lossy().into_owned()
+}
+
+fn normalize_relative_path_text(value: &str) -> String {
+    let normalized = normalize_path_text(value);
+    if normalized.is_empty() {
+        ".".to_string()
+    } else {
+        normalized
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

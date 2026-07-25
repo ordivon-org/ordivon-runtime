@@ -26,11 +26,11 @@ use super::{
 };
 use crate::universal::{
     canonical_directory, create_git_workspace_compact, load_workspace_record, mutate_workspace,
-    remove_git_workspace, resolve_workspace_cwd, sha256_bytes, sha256_file, write_json_atomic,
-    CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerPayloadConfig,
-    RunnerStartEvidence, RunnerTaskRequest, RunnerTaskResult, UniversalExecutorConfig,
-    WorkspaceCloseRequest, WorkspaceCloseResult, WorkspaceMutateRequest, WorkspaceMutateResult,
-    UNIVERSAL_EXEC_SCHEMA_VERSION,
+    remove_git_workspace, resolve_workspace_cwd, sha256_bytes, sha256_file,
+    workspace_source_state_digest, write_json_atomic, CompactWorkspaceOpenResult,
+    GitWorkspaceCreateRequest, RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskRequest,
+    RunnerTaskResult, UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
+    WorkspaceMutateRequest, WorkspaceMutateResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
 const RUNNER_REQUEST_FILE: &str = "request.json";
@@ -150,22 +150,32 @@ impl Runtime {
                     true,
                 )
             })?;
-            self.reconcile_recoverable_orphans()?;
-            let _ = self.reconcile_workspace(&request.execution.workspace_id)?;
-            let plan = self.resolve_plan(request)?;
-            let submit = SubmitRequest {
-                schema_version: RUNTIME_SCHEMA_VERSION,
-                client_request_id: request.client_request_id.clone(),
-                plan,
-                global_limit: request.global_limit,
-            };
-            match self.registry.submit(&submit)? {
-                AdmissionOutcome::Created(created) => {
-                    let job_id = created.job.job_id.clone();
-                    self.ensure_attempt_dispatched(&created.attempt)?;
-                    job_id
+            let request_identity_digest = super::operation_request_identity_digest(request)?;
+            if let Some(existing) = self.registry.find_idempotent_job(
+                &request.principal,
+                &request.client_request_id,
+                &request_identity_digest,
+            )? {
+                existing.job_id
+            } else {
+                self.reconcile_recoverable_orphans()?;
+                let _ = self.reconcile_workspace(&request.execution.workspace_id)?;
+                let plan = self.resolve_plan(request)?;
+                let submit = SubmitRequest {
+                    schema_version: RUNTIME_SCHEMA_VERSION,
+                    client_request_id: request.client_request_id.clone(),
+                    request_identity_digest: Some(request_identity_digest),
+                    plan,
+                    global_limit: request.global_limit,
+                };
+                match self.registry.submit(&submit)? {
+                    AdmissionOutcome::Created(created) => {
+                        let job_id = created.job.job_id.clone();
+                        self.ensure_attempt_dispatched(&created.attempt)?;
+                        job_id
+                    }
+                    AdmissionOutcome::Existing { job } => job.job_id.clone(),
                 }
-                AdmissionOutcome::Existing { job } => job.job_id.clone(),
             }
         };
         self.observe_task(&TaskObserveRequest {
@@ -192,6 +202,21 @@ impl Runtime {
         request: &WorkspaceMutateRequest,
     ) -> RuntimeResult<WorkspaceMutateResult> {
         let _guard = self.lock_lifecycle()?;
+        let _ = self.reconcile_workspace(&request.workspace_id)?;
+        let active = self
+            .registry
+            .active_job_ids_for_workspace(&request.workspace_id, 20)?;
+        if !active.is_empty() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::WorkspaceBusy,
+                format!(
+                    "workspace source state is committed by active or held Jobs: {}",
+                    active.join(", ")
+                ),
+                Some("workspaceId"),
+                true,
+            ));
+        }
         mutate_workspace(&self.executor, request).map_err(map_universal_error)
     }
 
@@ -229,6 +254,10 @@ impl Runtime {
             workspace_id: request.execution.workspace_id.clone(),
             workspace_path: workspace_path.to_string_lossy().into_owned(),
             source_revision: record.source_revision,
+            workspace_source_digest: Some(
+                workspace_source_state_digest(&self.executor, &request.execution.workspace_id)
+                    .map_err(map_universal_error)?,
+            ),
             executable: executable.to_string_lossy().into_owned(),
             executable_digest: sha256_file(&executable).map_err(map_universal_error)?,
             args: request.execution.args.clone(),
@@ -329,6 +358,7 @@ impl Runtime {
             task_id: attempt.attempt_id.clone(),
             workspace_id: plan.workspace_id.clone(),
             workspace_path: plan.workspace_path.clone(),
+            workspace_source_digest: plan.workspace_source_digest.clone(),
             executable: plan.executable.clone(),
             executable_digest: plan.executable_digest.clone(),
             args: plan.args.clone(),

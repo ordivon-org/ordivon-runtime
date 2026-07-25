@@ -5,12 +5,14 @@ use ordivon_runtime_core::{
     AttemptState, ExecutionBudget, GitWorkspaceCreateRequest, RegistryConfig, Runtime,
     RuntimeConfig, RuntimeExecutionPlan, RuntimeJobListRequest, SubmitRequest, TaskCancelRequest,
     TaskObserveRequest, TaskRunRequest, UniversalExecutionRequest, UniversalExecutorConfig,
-    WorkspaceCloseRequest, WorkspaceWriteRequest, MAX_UNIVERSAL_OUTPUT_BYTES,
-    MAX_UNIVERSAL_RUNTIME_MS, RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    WorkspaceCloseRequest, WorkspaceMutateRequest, WorkspaceMutation, WorkspaceMutationMode,
+    WorkspaceWriteRequest, MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS,
+    RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -322,6 +324,257 @@ impl Drop for IntegrationContext {
         }
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_replays_same_request_after_effect_changes_or_workspace_closure() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("request-replay-world-change");
+    context.write(
+        "source_identity.py",
+        "from pathlib import Path\nPath('self-effect.txt').write_text('changed by command')\nprint('FIRST_WORLD', flush=True)\n",
+    );
+    let runtime = context.runtime(2_000);
+    let request = context.request("source_identity.py", 30_000);
+    let first = runtime.run_task(&request).unwrap();
+    assert_eq!(first.status, "succeeded");
+    assert!(first.stdout_tail.contains("FIRST_WORLD"));
+    let job = runtime.registry().get_job(&first.job_id).unwrap();
+    assert!(job.request_digest.starts_with("runtime-request-v1:"));
+    let plan: RuntimeExecutionPlan = serde_json::from_str(&job.execution_plan_json).unwrap();
+    let committed_source = plan
+        .workspace_source_digest
+        .clone()
+        .expect("new Jobs must commit Workspace source state");
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&first.job_id)
+        .unwrap()
+        .unwrap();
+    let runner_request: serde_json::Value = serde_json::from_slice(
+        &fs::read(Path::new(&attempt.bundle_path).join("request.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        runner_request
+            .get("workspaceSourceDigest")
+            .and_then(serde_json::Value::as_str),
+        Some(committed_source.as_str())
+    );
+
+    let replay_after_self_effect = runtime.run_task(&request).unwrap();
+    assert_eq!(replay_after_self_effect.job_id, first.job_id);
+    assert!(replay_after_self_effect.stdout_tail.contains("FIRST_WORLD"));
+
+    let script = context
+        .executor
+        .store_root
+        .join("workspaces")
+        .join(&context.workspace_id)
+        .join("source_identity.py");
+    let expected_digest = file_digest(&script);
+    runtime
+        .mutate_workspace(&WorkspaceMutateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: context.workspace_id.clone(),
+            mutations: vec![WorkspaceMutation {
+                relative_path: "source_identity.py".to_string(),
+                mode: WorkspaceMutationMode::Write,
+                content: "print('SECOND_WORLD', flush=True)\n".to_string(),
+                expected_digest: Some(expected_digest),
+                expected_text: None,
+            }],
+        })
+        .unwrap();
+    let replay_after_later_mutation = runtime.run_task(&request).unwrap();
+    assert_eq!(replay_after_later_mutation.job_id, first.job_id);
+    assert!(replay_after_later_mutation
+        .stdout_tail
+        .contains("FIRST_WORLD"));
+
+    let mut changed_request = request.clone();
+    changed_request
+        .execution
+        .args
+        .push("different-request".to_string());
+    let error = runtime.run_task(&changed_request).unwrap_err();
+    assert_eq!(
+        error.code,
+        ordivon_runtime_core::RuntimeErrorCode::IdempotencyConflict
+    );
+
+    runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: context.workspace_id.clone(),
+            force: true,
+        })
+        .unwrap();
+    let replay_after_close = runtime.run_task(&request).unwrap();
+    assert_eq!(replay_after_close.job_id, first.job_id);
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_blocks_workspace_mutation_while_source_state_is_committed_by_active_job() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("active-source-commitment");
+    context.write(
+        "active_source.py",
+        "import time\nprint('SOURCE_COMMITTED', flush=True)\ntime.sleep(30)\n",
+    );
+    let runtime = context.runtime(2_000);
+    let request = context.request("active_source.py", 0);
+    let started = runtime.run_task(&request).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let attempt = runtime
+            .registry()
+            .get_latest_attempt(&started.job_id)
+            .unwrap()
+            .unwrap();
+        if attempt.state == AttemptState::Running {
+            break;
+        }
+        assert!(Instant::now() < deadline, "Attempt did not become running");
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    let error = runtime
+        .mutate_workspace(&WorkspaceMutateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: context.workspace_id.clone(),
+            mutations: vec![WorkspaceMutation {
+                relative_path: "should-not-exist.txt".to_string(),
+                mode: WorkspaceMutationMode::Write,
+                content: "blocked".to_string(),
+                expected_digest: None,
+                expected_text: None,
+            }],
+        })
+        .unwrap_err();
+    assert_eq!(
+        error.code,
+        ordivon_runtime_core::RuntimeErrorCode::WorkspaceBusy
+    );
+    assert!(!context
+        .executor
+        .store_root
+        .join("workspaces")
+        .join(&context.workspace_id)
+        .join("should-not-exist.txt")
+        .exists());
+
+    let cancelled = runtime
+        .cancel_task(&TaskCancelRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: started.job_id,
+        })
+        .unwrap();
+    assert_eq!(cancelled.status, "cancelled");
+    runtime
+        .mutate_workspace(&WorkspaceMutateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: context.workspace_id.clone(),
+            mutations: vec![WorkspaceMutation {
+                relative_path: "after-terminal.txt".to_string(),
+                mode: WorkspaceMutationMode::Write,
+                content: "allowed".to_string(),
+                expected_digest: None,
+                expected_text: None,
+            }],
+        })
+        .unwrap();
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_systemd_path_rejects_source_drift_before_target_spawn() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("systemd-source-drift");
+    context.write(
+        "source_drift.py",
+        "from pathlib import Path\nPath('effect-marker').write_text('spawned')\n",
+    );
+    let real_runner = context.executor.runner_path.clone();
+    let delayed_runner = context.root.join("delayed-runner.sh");
+    let workspace = context
+        .executor
+        .store_root
+        .join("workspaces")
+        .join(&context.workspace_id);
+    fs::write(
+        &delayed_runner,
+        format!(
+            "#!/bin/sh\nprintf 'trusted-host drift\n' > '{}/README.md'\nexec '{}' \"$@\"\n",
+            workspace.display(),
+            real_runner.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&delayed_runner).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&delayed_runner, permissions).unwrap();
+
+    let mut executor = context.executor.clone();
+    executor.runner_path = delayed_runner;
+    let runtime = Runtime::new(RuntimeConfig {
+        registry: context.registry.clone(),
+        executor,
+        startup_grace_ms: 10_000,
+    })
+    .unwrap();
+    let request = context.request("source_drift.py", 10_000);
+    let observed = runtime.run_task(&request).unwrap();
+    assert_eq!(observed.status, "failed");
+    assert_eq!(observed.exit_code, None);
+    assert!(observed
+        .error_summary
+        .as_deref()
+        .is_some_and(|message| message.contains("WorkspaceStateMismatch")));
+    assert!(!workspace.join("effect-marker").exists());
+
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&observed.job_id)
+        .unwrap()
+        .unwrap();
+    let runner_start: serde_json::Value = serde_json::from_slice(
+        &fs::read(Path::new(&attempt.bundle_path).join("runner-start.json")).unwrap(),
+    )
+    .unwrap();
+    let runner_observed_source = runner_start
+        .get("observedWorkspaceSourceDigest")
+        .and_then(serde_json::Value::as_str)
+        .expect("Runner start must record observed Workspace source state");
+    let job = runtime.registry().get_job(&observed.job_id).unwrap();
+    let plan: RuntimeExecutionPlan = serde_json::from_str(&job.execution_plan_json).unwrap();
+    assert_ne!(
+        runner_observed_source,
+        plan.workspace_source_digest
+            .as_deref()
+            .expect("Job must commit Workspace source state")
+    );
+
+    let connection = Connection::open(&context.registry.db_path).unwrap();
+    let reason: String = connection
+        .query_row(
+            "SELECT reason_code FROM job_events WHERE job_id=?1 AND event_type='JOB_TERMINAL'",
+            [&observed.job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reason, "WORKSPACE_SOURCE_PRECONDITION_DRIFT");
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }
 
 #[test]
@@ -870,11 +1123,13 @@ impl IntegrationContext {
         SubmitRequest {
             schema_version: RUNTIME_SCHEMA_VERSION,
             client_request_id: client_request_id.to_string(),
+            request_identity_digest: None,
             plan: RuntimeExecutionPlan {
                 schema_version: RUNTIME_SCHEMA_VERSION,
                 workspace_id: self.workspace_id.clone(),
                 workspace_path: workspace.to_string_lossy().into_owned(),
                 source_revision: self.revision.clone(),
+                workspace_source_digest: None,
                 executable: executable.to_string_lossy().into_owned(),
                 executable_digest: file_digest(&executable),
                 args: Vec::new(),

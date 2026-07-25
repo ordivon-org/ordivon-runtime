@@ -10,12 +10,13 @@ use uuid::Uuid;
 
 use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::{
-    AdmissionOutcome, ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent,
-    ConditionUpdate, CreatedAdmission, JobDesiredState, JobProjection, JobResolution,
-    ReservationRecord, ReservationState, RunnerIdentity, RuntimeArtifactRecord, RuntimeError,
-    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeInvariantViolation, RuntimeJobListCursor,
-    RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary,
-    RuntimeResult, SubmitRequest, TerminalCommit, MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
+    operation_request_identity_digest_from_plan, AdmissionOutcome, ArtifactRegistration,
+    AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate, CreatedAdmission,
+    JobDesiredState, JobProjection, JobResolution, ReservationRecord, ReservationState,
+    RunnerIdentity, RuntimeArtifactRecord, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
+    RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult,
+    RuntimeJobRecord, RuntimeJobSummary, RuntimeResult, SubmitRequest, TerminalCommit,
+    MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
 };
 
 const MIGRATION_V1: i64 = 1;
@@ -321,6 +322,34 @@ impl Registry {
         Ok(())
     }
 
+    pub fn find_idempotent_job(
+        &self,
+        principal: &str,
+        client_request_id: &str,
+        request_identity_digest: &str,
+    ) -> RuntimeResult<Option<RuntimeJobRecord>> {
+        validate_identifier(principal, "principal")?;
+        validate_identifier(client_request_id, "clientRequestId")?;
+        validate_request_identity_digest(request_identity_digest)?;
+        let connection = self.open_connection()?;
+        let job_id: Option<String> = connection
+            .query_row(
+                "SELECT job_id FROM idempotency_keys WHERE principal=?1 AND client_request_id=?2",
+                params![principal, client_request_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| RuntimeError::from_sql(error, "cannot find idempotent Job"))?;
+        let Some(job_id) = job_id else {
+            return Ok(None);
+        };
+        let job = load_job(&connection, &job_id)?;
+        if job_request_identity_digest(&job)? != request_identity_digest {
+            return Err(idempotency_conflict());
+        }
+        Ok(Some(job))
+    }
+
     pub fn submit(&self, request: &SubmitRequest) -> RuntimeResult<AdmissionOutcome> {
         validate_submit(request)?;
         let created_at_ms = now_ms()?;
@@ -340,16 +369,21 @@ impl Registry {
                 false,
             )
         })?;
-        let request_digest = sha256_bytes(&request_json);
+        let legacy_request_digest = sha256_bytes(&request_json);
+        let request_digest = request
+            .request_identity_digest
+            .clone()
+            .unwrap_or(legacy_request_digest);
         let plan_digest = sha256_bytes(plan_json.as_bytes());
         let workspace_snapshot_json = serde_json::json!({
             "workspaceId": request.plan.workspace_id,
             "workspacePath": request.plan.workspace_path,
             "sourceRevision": request.plan.source_revision,
+            "workspaceSourceDigest": request.plan.workspace_source_digest,
         })
         .to_string();
         let operation_digest = sha256_bytes(
-            format!("runtime-operation-v2\0{request_digest}\0{plan_digest}").as_bytes(),
+            format!("runtime-operation-v3\0{request_digest}\0{plan_digest}").as_bytes(),
         );
         let job_id = format!("job-{}", Uuid::now_v7());
         let attempt_id = format!("attempt-{}", Uuid::now_v7());
@@ -419,7 +453,7 @@ impl Registry {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| RuntimeError::from_sql(error, "cannot begin admission transaction"))?;
 
-        if let Some((existing_digest, existing_job_id)) = transaction
+        if let Some((existing_operation_digest, existing_job_id)) = transaction
             .query_row(
                 "SELECT operation_digest, job_id FROM idempotency_keys WHERE principal=?1 AND client_request_id=?2",
                 params![request.plan.principal, request.client_request_id],
@@ -428,15 +462,17 @@ impl Registry {
             .optional()
             .map_err(|error| RuntimeError::from_sql(error, "cannot check idempotency key"))?
         {
-            if existing_digest != operation_digest {
-                return Err(RuntimeError::new(
-                    RuntimeErrorCode::IdempotencyConflict,
-                    "clientRequestId is already bound to a different operation",
-                    Some("clientRequestId"),
-                    false,
-                ));
-            }
             let existing = load_job(&transaction, &existing_job_id)?;
+            let matches = if let Some(request_identity_digest) =
+                request.request_identity_digest.as_deref()
+            {
+                job_request_identity_digest(&existing)? == request_identity_digest
+            } else {
+                existing_operation_digest == operation_digest
+            };
+            if !matches {
+                return Err(idempotency_conflict());
+            }
             transaction
                 .commit()
                 .map_err(|error| RuntimeError::from_sql(error, "cannot close replay transaction"))?;
@@ -2757,6 +2793,47 @@ fn project_job(job: &RuntimeJobRecord, attempt: Option<&AttemptRecord>) -> JobPr
     }
 }
 
+fn job_request_identity_digest(job: &RuntimeJobRecord) -> RuntimeResult<String> {
+    if job
+        .request_digest
+        .starts_with(super::REQUEST_IDENTITY_PREFIX)
+    {
+        validate_request_identity_digest(&job.request_digest)?;
+        return Ok(job.request_digest.clone());
+    }
+    let plan: RuntimeExecutionPlan =
+        serde_json::from_str(&job.execution_plan_json).map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                format!("stored execution plan is invalid: {error}"),
+                Some("executionPlan"),
+                false,
+            )
+        })?;
+    operation_request_identity_digest_from_plan(&plan)
+}
+
+fn validate_request_identity_digest(value: &str) -> RuntimeResult<()> {
+    let digest = value
+        .strip_prefix(super::REQUEST_IDENTITY_PREFIX)
+        .ok_or_else(|| {
+            RuntimeError::invalid(
+                "unsupported request identity digest",
+                "requestIdentityDigest",
+            )
+        })?;
+    validate_digest(digest, "requestIdentityDigest")
+}
+
+fn idempotency_conflict() -> RuntimeError {
+    RuntimeError::new(
+        RuntimeErrorCode::IdempotencyConflict,
+        "clientRequestId is already bound to a different operation request",
+        Some("clientRequestId"),
+        false,
+    )
+}
+
 fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
     if request.schema_version != RUNTIME_SCHEMA_VERSION
         || request.plan.schema_version != RUNTIME_SCHEMA_VERSION
@@ -2767,6 +2844,9 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
         ));
     }
     validate_identifier(&request.client_request_id, "clientRequestId")?;
+    if let Some(digest) = request.request_identity_digest.as_deref() {
+        validate_request_identity_digest(digest)?;
+    }
     validate_identifier(&request.plan.principal, "plan.principal")?;
     validate_identifier(&request.plan.workspace_id, "plan.workspaceId")?;
     if request.global_limit == 0 {
@@ -2795,6 +2875,9 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
         ));
     }
     validate_digest(&request.plan.executable_digest, "plan.executableDigest")?;
+    if let Some(digest) = request.plan.workspace_source_digest.as_deref() {
+        validate_digest(digest, "plan.workspaceSourceDigest")?;
+    }
     if request.plan.source_revision.is_empty() || request.plan.source_revision.len() > 256 {
         return Err(RuntimeError::invalid(
             "sourceRevision must be non-empty and bounded",
