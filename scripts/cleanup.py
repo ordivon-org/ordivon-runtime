@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Remove only stale Ordivon temporary files and staging directories."""
+"""Remove only stale Ordivon Runtime temporary files and staging directories."""
 
 from __future__ import annotations
 

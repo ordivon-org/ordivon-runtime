@@ -707,7 +707,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
-name = "ordivon-exec"
+name = "ordivon-runtime-core"
 version = "0.1.0"
 dependencies = [
  "hex",
@@ -722,11 +722,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "ordivon-mcp"
+name = "ordivon-runtime-mcp"
 version = "0.1.0"
 dependencies = [
  "axum",
- "ordivon-exec",
+ "ordivon-runtime-core",
  "rmcp",
  "schemars",
  "serde",

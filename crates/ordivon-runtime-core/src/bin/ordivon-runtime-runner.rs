@@ -1,11 +1,11 @@
-use ordivon_exec::run_task_runner;
+use ordivon_runtime_core::run_task_runner;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let Some(flag) = args.next() else {
-        eprintln!("usage: ordivon-task-runner --task-dir <absolute-path>");
+        eprintln!("usage: ordivon-runtime-runner --task-dir <absolute-path>");
         return ExitCode::from(64);
     };
     if flag != "--task-dir" {

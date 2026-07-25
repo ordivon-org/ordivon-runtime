@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only inspection of reclaimable Ordivon Workspaces."""
+"""Read-only inspection of reclaimable Ordivon Runtime Workspaces."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ MAX_DIRTY_PATHS = 20
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="ordivon-workspace-reclaim")
+    parser = argparse.ArgumentParser(prog="ordivon-runtime-reclaim")
     subparsers = parser.add_subparsers(dest="command", required=True)
     inspect = subparsers.add_parser("inspect", help="classify Workspace reclaim candidates")
     inspect.add_argument("--database", type=absolute_path, required=True)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restore a verified Ordivon snapshot into a new destination."""
+"""Restore a verified Ordivon Runtime snapshot into a new destination."""
 
 from __future__ import annotations
 

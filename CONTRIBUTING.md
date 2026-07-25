@@ -1,6 +1,8 @@
-# Contributing to Ordivon
+# Contributing to Ordivon Runtime
 
 Read [`AGENTS.md`](AGENTS.md) and begin from the exact source, Git, test, and live state relevant to the change.
+
+This repository contains the Runtime subsystem of Ordivon. Contributions should remain inside execution, durable state, process ownership, recovery, Artifact, or MCP projection boundaries unless a broader dependency is unavoidable and explicit.
 
 A contribution should identify:
 

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use ordivon_exec::{
+use ordivon_runtime_core::{
     read_workspace_slice_compact, read_workspace_text_compact, workspace_diff_compact,
     ArtifactReadRequest, ArtifactReadResult, CompactWorkspaceDiffResult,
     CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, Runtime, RuntimeCapacity, RuntimeConfig,
@@ -127,7 +127,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Clone)]
-pub struct OrdivonServer {
+pub struct RuntimeServer {
     state: Arc<ServerState>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
@@ -140,7 +140,7 @@ struct ServerState {
     trace_path: Option<PathBuf>,
 }
 
-impl OrdivonServer {
+impl RuntimeServer {
     pub fn new(config: ServerConfig) -> Result<Self, ToolError> {
         let executor = config.runtime.executor.clone();
         executor.ensure_store().map_err(ToolError::from)?;
@@ -289,7 +289,7 @@ where
     }
 }
 
-impl OrdivonServer {
+impl RuntimeServer {
     async fn run_core<T, F>(&self, tool: &'static str, operation: F) -> ToolOutcome<T>
     where
         T: Serialize + JsonSchema + Send + 'static,
@@ -403,13 +403,13 @@ fn format_unix_ms(value: u64) -> Result<String, McpError> {
         })
 }
 
-fn encode_cursor(cursor: &ordivon_exec::RuntimeJobListCursor) -> String {
+fn encode_cursor(cursor: &ordivon_runtime_core::RuntimeJobListCursor) -> String {
     format!("{}:{}", cursor.created_at_ms, cursor.job_id)
 }
 
 fn decode_cursor(
     value: Option<String>,
-) -> Result<Option<ordivon_exec::RuntimeJobListCursor>, McpError> {
+) -> Result<Option<ordivon_runtime_core::RuntimeJobListCursor>, McpError> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -419,7 +419,7 @@ fn decode_cursor(
     let created_at_ms = created
         .parse()
         .map_err(|_| McpError::invalid_params("invalid task cursor timestamp", None))?;
-    Ok(Some(ordivon_exec::RuntimeJobListCursor {
+    Ok(Some(ordivon_runtime_core::RuntimeJobListCursor {
         created_at_ms,
         job_id: job_id.to_string(),
     }))

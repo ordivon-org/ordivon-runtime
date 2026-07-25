@@ -1,4 +1,4 @@
-use ordivon_exec::{
+use ordivon_runtime_core::{
     apply_runtime_repair, RuntimeDoctorConfig, RuntimeRepairConfig, RuntimeRepairRequest,
 };
 use std::collections::BTreeSet;

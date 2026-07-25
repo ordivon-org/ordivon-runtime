@@ -156,7 +156,7 @@ fn launch(label: &str, hold_ms: u64, exit_code: u8, tree: bool) -> SpikeUnit {
             "--property=StandardOutput=journal",
             "--property=StandardError=journal",
         ])
-        .arg(env!("CARGO_BIN_EXE_ordivon-job-fixture"))
+        .arg(env!("CARGO_BIN_EXE_ordivon-runtime-job-fixture"))
         .args(["--role", "root", "--marker-dir"])
         .arg(&marker_dir)
         .args([

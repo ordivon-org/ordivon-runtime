@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a real public-protocol Ordivon MCP end-to-end journey."""
+"""Run a real public-protocol Ordivon Runtime end-to-end journey."""
 
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ class McpClient:
             {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "ordivon-mcp-e2e", "version": "1"},
+                "clientInfo": {"name": "ordivon-runtime-mcp-e2e", "version": "1"},
             },
         )
 
@@ -169,7 +169,7 @@ def wait_for_server(process: subprocess.Popen[str], endpoint: str, token: str, l
     while time.monotonic() < deadline:
         if process.poll() is not None:
             log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
-            raise RuntimeError(f"ordivon-mcp exited early with {process.returncode}:\n{log[-8000:]}")
+            raise RuntimeError(f"ordivon-runtime exited early with {process.returncode}:\n{log[-8000:]}")
         client = McpClient(endpoint, token)
         try:
             client.initialize()
@@ -177,7 +177,7 @@ def wait_for_server(process: subprocess.Popen[str], endpoint: str, token: str, l
         except (OSError, ValueError, urllib.error.URLError) as error:
             last_error = error
             time.sleep(0.1)
-    raise RuntimeError(f"ordivon-mcp did not become ready: {last_error}")
+    raise RuntimeError(f"ordivon-runtime did not become ready: {last_error}")
 
 
 def start_server(repo: Path, root: Path, port: int, token: str) -> ServerProcess:
@@ -186,17 +186,17 @@ def start_server(repo: Path, root: Path, port: int, token: str) -> ServerProcess
     env = os.environ.copy()
     env.update(
         {
-            "RUST_LOG": "ordivon_mcp=info,rmcp=warn",
+            "RUST_LOG": "ordivon_runtime_mcp=info,rmcp=warn",
             "ORDIVON_BIND": f"127.0.0.1:{port}",
             "ORDIVON_BEARER_TOKEN": token,
             "ORDIVON_STORE_ROOT": str(root / "store"),
             "ORDIVON_REGISTRY_ROOT": str(root / "registry"),
-            "ORDIVON_RUNNER_PATH": str(repo / "target/debug/ordivon-task-runner"),
+            "ORDIVON_RUNNER_PATH": str(repo / "target/debug/ordivon-runtime-runner"),
             "ORDIVON_TRACE_PATH": str(root / "registry/runtime-trace.jsonl"),
         }
     )
     process = subprocess.Popen(
-        [str(repo / "target/debug/ordivon-mcp")],
+        [str(repo / "target/debug/ordivon-runtime")],
         cwd=repo,
         env=env,
         text=True,
@@ -246,8 +246,8 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
     if Path("/proc/1/comm").read_text(encoding="utf-8").strip() != "systemd":
         raise ValueError("MCP E2E requires systemd as PID 1")
     repo = repo.resolve()
-    command("cargo", "build", "-p", "ordivon-exec", "--bin", "ordivon-task-runner", cwd=repo)
-    command("cargo", "build", "-p", "ordivon-mcp", cwd=repo)
+    command("cargo", "build", "-p", "ordivon-runtime-core", "--bin", "ordivon-runtime-runner", cwd=repo)
+    command("cargo", "build", "-p", "ordivon-runtime-mcp", cwd=repo)
 
     root = Path("/root/.local/share/ordivon-acceptance") / f"mcp-e2e-{uuid.uuid4()}"
     root.mkdir(parents=True)
@@ -273,7 +273,9 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
     try:
         client = wait_for_server(server.process, endpoint, token, server.log_path)
         initialized = client.initialize()
-        check("initialize", initialized.get("serverInfo", {}).get("name") == "ordivon-mcp", initialized)
+        server_info = initialized.get("serverInfo", {})
+        check("initialize-name", server_info.get("name") == "ordivon-runtime-mcp", server_info)
+        check("initialize-title", server_info.get("title") == "Ordivon Runtime", server_info)
 
         listed = client.request("tools/list")
         tool_entries = {
@@ -676,7 +678,7 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the real Ordivon MCP and systemd execution journey.")
+    parser = argparse.ArgumentParser(description="Run the real Ordivon Runtime and systemd execution journey.")
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--output", type=Path)
     parser.add_argument("--keep", action="store_true")
