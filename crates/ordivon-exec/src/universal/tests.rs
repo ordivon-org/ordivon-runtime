@@ -237,6 +237,228 @@ fn clean_workspace_close_succeeds_without_force() {
 }
 
 #[test]
+fn workspace_close_preserves_changed_head_and_is_idempotent() {
+    let sandbox = Sandbox::new("close-rescue-ref");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-close-rescue";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    fs::write(
+        workspace.join("README.md"),
+        "committed result
+",
+    )
+    .unwrap();
+    run_git(&workspace, ["add", "README.md"]);
+    run_git(&workspace, ["commit", "-qm", "detached result"]);
+    let final_head = git_text(&workspace, ["rev-parse", "HEAD"]);
+
+    let first = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: false,
+        },
+    )
+    .unwrap();
+    assert!(first.removed);
+    assert!(!workspace.exists());
+    assert_eq!(
+        git_text(
+            &source,
+            ["rev-parse", "refs/ordivon/closed/workspace-close-rescue"]
+        ),
+        final_head
+    );
+    let tombstone: serde_json::Value =
+        serde_json::from_slice(&fs::read(config.workspace_record_path(workspace_id)).unwrap())
+            .unwrap();
+    assert_eq!(tombstone["state"], "closed");
+    assert_eq!(tombstone["finalHead"], final_head);
+    assert_eq!(tombstone["removalResult"], "removed");
+
+    let second = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: false,
+        },
+    )
+    .unwrap();
+    assert!(!second.removed);
+    assert_eq!(
+        create_git_workspace(
+            &config,
+            &GitWorkspaceCreateRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: workspace_id.to_string(),
+                source_repo: source.to_string_lossy().into_owned(),
+                source_revision: "HEAD".to_string(),
+            },
+        )
+        .unwrap_err()
+        .code,
+        UniversalExecErrorCode::WorkspaceExists
+    );
+}
+
+#[test]
+fn workspace_close_recovers_final_head_after_physical_removal() {
+    let sandbox = Sandbox::new("close-crash-window");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-crash-window";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    fs::write(workspace.join("README.md"), "detached result\n").unwrap();
+    run_git(&workspace, ["add", "README.md"]);
+    run_git(&workspace, ["commit", "-qm", "detached result"]);
+    let final_head = git_text(&workspace, ["rev-parse", "HEAD"]);
+    run_git(
+        &source,
+        [
+            "update-ref",
+            "refs/ordivon/closed/workspace-crash-window",
+            &final_head,
+        ],
+    );
+    run_git(
+        &source,
+        ["worktree", "remove", "--force", workspace.to_str().unwrap()],
+    );
+
+    let closed = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: false,
+        },
+    )
+    .unwrap();
+    assert!(!closed.removed);
+    let tombstone: serde_json::Value =
+        serde_json::from_slice(&fs::read(config.workspace_record_path(workspace_id)).unwrap())
+            .unwrap();
+    assert_eq!(tombstone["state"], "closed");
+    assert_eq!(tombstone["finalHead"], final_head);
+    assert_eq!(tombstone["removalResult"], "already_missing");
+}
+
+#[test]
+fn workspace_close_repairs_missing_directory_but_rejects_orphan_directory() {
+    let sandbox = Sandbox::new("close-missing-directory");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-missing-directory";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    run_git(
+        &source,
+        ["worktree", "remove", "--force", workspace.to_str().unwrap()],
+    );
+    let repaired = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: false,
+        },
+    )
+    .unwrap();
+    assert!(!repaired.removed);
+    let tombstone: serde_json::Value =
+        serde_json::from_slice(&fs::read(config.workspace_record_path(workspace_id)).unwrap())
+            .unwrap();
+    assert_eq!(tombstone["state"], "closed");
+    assert_eq!(tombstone["removalResult"], "already_missing");
+
+    let orphan_id = "workspace-orphan-directory";
+    config.ensure_store().unwrap();
+    fs::create_dir_all(config.workspace_path(orphan_id)).unwrap();
+    assert_eq!(
+        remove_git_workspace(
+            &config,
+            &WorkspaceCloseRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: orphan_id.to_string(),
+                force: false,
+            },
+        )
+        .unwrap_err()
+        .code,
+        UniversalExecErrorCode::MetadataCorrupt
+    );
+}
+
+#[test]
+fn workspace_close_uses_live_git_identity_when_source_record_drifts() {
+    let sandbox = Sandbox::new("close-source-drift");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-source-drift";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let record_path = config.workspace_record_path(workspace_id);
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    record["sourceRepo"] = serde_json::Value::String("/missing/legacy/source".to_string());
+    write_json_atomic(&record_path, &record).unwrap();
+    let closed = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: false,
+        },
+    )
+    .unwrap();
+    assert!(closed.removed);
+}
+
+#[test]
 fn mutation_failures_identify_the_exact_batch_item() {
     let sandbox = Sandbox::new("mutation-index");
     let source = sandbox.root.join("source");
@@ -726,6 +948,21 @@ fn init_git_repo(path: &Path) {
     fs::write(path.join("README.md"), "baseline\n").unwrap();
     run_git(path, ["add", "README.md"]);
     run_git(path, ["commit", "-qm", "baseline"]);
+}
+
+fn git_text<'a>(path: &Path, args: impl IntoIterator<Item = &'a str>) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
 fn run_git<'a>(path: &Path, args: impl IntoIterator<Item = &'a str>) {

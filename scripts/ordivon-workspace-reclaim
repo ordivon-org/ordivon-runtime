@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Read-only inspection of reclaimable Ordivon Workspaces."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import subprocess
+import sys
+import time
+from collections.abc import Sequence
+from pathlib import Path
+from urllib.parse import quote
+
+SCHEMA_VERSION = 1
+MAX_DIRTY_PATHS = 20
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="ordivon-workspace-reclaim")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    inspect = subparsers.add_parser("inspect", help="classify Workspace reclaim candidates")
+    inspect.add_argument("--database", type=absolute_path, required=True)
+    inspect.add_argument("--runtime-store-root", type=absolute_path, required=True)
+    inspect.add_argument("--workspace-root", type=absolute_path)
+    inspect.add_argument("--busy-timeout-ms", type=positive_timeout, default=5_000)
+    inspect.add_argument("--pretty", action="store_true")
+    return parser.parse_args()
+
+
+def absolute_path(value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("path must be absolute")
+    return path
+
+
+def positive_timeout(value: str) -> int:
+    timeout = int(value)
+    if not 1 <= timeout <= 60_000:
+        raise argparse.ArgumentTypeError("timeout must be in 1..=60000")
+    return timeout
+
+
+def inspect_workspaces(args: argparse.Namespace) -> dict[str, object]:
+    workspace_root = args.workspace_root or args.runtime_store_root / "workspaces"
+    records_root = args.runtime_store_root / "workspace-records"
+    connection = open_registry(args.database, args.busy_timeout_ms)
+    record_ids: set[str] = set()
+    candidates: list[dict[str, object]] = []
+
+    for record_path in sorted(records_root.glob("*.json")) if records_root.exists() else []:
+        workspace_id = record_path.stem
+        record_ids.add(workspace_id)
+        candidate = classify_record(
+            connection,
+            record_path,
+            workspace_root / workspace_id,
+            workspace_id,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+
+    if workspace_root.exists():
+        for workspace_path in sorted(path for path in workspace_root.iterdir() if path.is_dir()):
+            if workspace_path.name not in record_ids:
+                candidates.append(
+                    candidate(
+                        workspace_path.name,
+                        "orphan_directory",
+                        detail="physical Workspace has no identity record",
+                    )
+                )
+
+    connection.close()
+    candidates.sort(key=lambda item: str(item["workspaceId"]))
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "generatedAtMs": int(time.time() * 1000),
+        "candidates": candidates,
+    }
+
+
+def open_registry(database: Path, busy_timeout_ms: int) -> sqlite3.Connection:
+    uri = f"file:{quote(str(database))}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=busy_timeout_ms / 1000)
+    connection.execute("PRAGMA query_only=ON")
+    connection.execute("PRAGMA trusted_schema=OFF")
+    version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+    if version is not None and version > 3:
+        raise RuntimeError("Runtime Registry is newer than this reclaim inspector")
+    return connection
+
+
+def classify_record(
+    connection: sqlite3.Connection,
+    record_path: Path,
+    workspace_path: Path,
+    workspace_id: str,
+) -> dict[str, object] | None:
+    try:
+        value = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return candidate(workspace_id, "unknown", detail="workspace record cannot be decoded")
+
+    if value.get("state") == "closed":
+        if workspace_path.exists():
+            return candidate(
+                workspace_id,
+                "unknown",
+                detail="closed record still has a physical Workspace",
+            )
+        return None
+
+    if (
+        value.get("schemaVersion") != 1
+        or value.get("workspaceId") != workspace_id
+        or value.get("workspacePath") != str(workspace_path)
+    ):
+        return candidate(
+            workspace_id,
+            "unknown",
+            detail="workspace identity or path does not match its record",
+        )
+    if not workspace_path.is_dir():
+        return candidate(
+            workspace_id,
+            "stale_record",
+            detail="active record has no physical Workspace",
+        )
+
+    active_job_ids = query_active_job_ids(connection, workspace_id)
+    if active_job_ids:
+        return candidate(workspace_id, "blocked_active", active_job_ids=active_job_ids)
+    try:
+        dirty_paths = git_dirty_paths(workspace_path)
+    except RuntimeError:
+        return candidate(workspace_id, "unknown", detail="Workspace Git state cannot be read")
+    if dirty_paths:
+        return candidate(workspace_id, "blocked_dirty", dirty_paths=dirty_paths)
+    return candidate(workspace_id, "closable")
+
+
+def query_active_job_ids(connection: sqlite3.Connection, workspace_id: str) -> list[str]:
+    rows = connection.execute(
+        """
+        SELECT DISTINCT jobs.job_id
+        FROM jobs
+        LEFT JOIN attempts ON attempts.job_id=jobs.job_id
+        LEFT JOIN concurrency_reservations
+          ON concurrency_reservations.attempt_id=attempts.attempt_id
+        WHERE jobs.workspace_id=?
+          AND (
+            jobs.resolution IS NULL
+            OR concurrency_reservations.state IN ('active','held_orphaned')
+          )
+        ORDER BY jobs.created_at_ms DESC,jobs.job_id DESC
+        LIMIT 20
+        """,
+        (workspace_id,),
+    )
+    return [str(row[0]) for row in rows]
+
+
+def git_dirty_paths(workspace: Path) -> list[str]:
+    tracked = git_bytes(workspace, ["diff", "--name-only", "-z", "HEAD", "--"])
+    untracked = git_bytes(
+        workspace,
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+    )
+    paths: list[str] = []
+    for raw_path in tracked.split(b"\0") + untracked.split(b"\0"):
+        if not raw_path:
+            continue
+        path = raw_path.decode("utf-8", errors="replace")
+        if path not in paths:
+            paths.append(path)
+        if len(paths) == MAX_DIRTY_PATHS:
+            paths.append("…")
+            break
+    return paths
+
+
+def git_bytes(workspace: Path, arguments: Sequence[str]) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(workspace), *arguments],
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip())
+    return result.stdout
+
+
+def candidate(
+    workspace_id: str,
+    classification: str,
+    *,
+    active_job_ids: list[str] | None = None,
+    dirty_paths: list[str] | None = None,
+    detail: str | None = None,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "workspaceId": workspace_id,
+        "classification": classification,
+    }
+    if active_job_ids:
+        result["activeJobIds"] = active_job_ids
+    if dirty_paths:
+        result["dirtyPaths"] = dirty_paths
+    if detail:
+        result["detail"] = detail
+    return result
+
+
+def main() -> int:
+    try:
+        args = parse_args()
+        report = inspect_workspaces(args)
+        print(json.dumps(report, indent=2 if args.pretty else None, sort_keys=args.pretty))
+        return 0
+    except (OSError, RuntimeError, sqlite3.Error) as error:
+        print(f"workspace reclaim inspection failed: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

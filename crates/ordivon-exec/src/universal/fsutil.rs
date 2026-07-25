@@ -187,13 +187,15 @@ pub(crate) fn sync_directory(path: &Path) -> Result<(), UniversalExecError> {
         .map_err(|error| io_error(path, "sync directory", error))
 }
 
-pub(crate) fn io_error(
-    path: &Path,
-    operation: &str,
-    error: impl std::fmt::Display,
-) -> UniversalExecError {
+pub(crate) fn io_error(path: &Path, operation: &str, error: std::io::Error) -> UniversalExecError {
+    let code = match error.raw_os_error() {
+        Some(libc::ENOSPC) | Some(libc::EDQUOT) => {
+            UniversalExecErrorCode::WorkspaceCapacityExceeded
+        }
+        _ => UniversalExecErrorCode::IoError,
+    };
     UniversalExecError::new(
-        UniversalExecErrorCode::IoError,
+        code,
         format!("cannot {operation} {}: {error}", path.display()),
         None,
         false,

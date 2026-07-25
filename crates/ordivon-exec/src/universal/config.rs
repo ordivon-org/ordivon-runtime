@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{invalid, UniversalExecError, UniversalExecErrorCode};
+use super::{invalid, io_error, UniversalExecError, UniversalExecErrorCode};
 
 pub const UNIVERSAL_EXEC_SCHEMA_VERSION: u32 = 1;
 pub const MAX_UNIVERSAL_ARGS: usize = 128;
@@ -88,14 +88,7 @@ impl UniversalExecutorConfig {
             self.workspace_records_root(),
             self.tasks_root(),
         ] {
-            fs::create_dir_all(&path).map_err(|error| {
-                UniversalExecError::new(
-                    UniversalExecErrorCode::IoError,
-                    format!("cannot create {}: {error}", path.display()),
-                    Some("storeRoot"),
-                    false,
-                )
-            })?;
+            fs::create_dir_all(&path).map_err(|error| io_error(&path, "create", error))?;
         }
         Ok(())
     }

@@ -23,6 +23,7 @@ pub enum UniversalExecErrorCode {
     ToolUnavailable,
     ToolFailed,
     IoError,
+    WorkspaceCapacityExceeded,
     MetadataCorrupt,
 }
 
