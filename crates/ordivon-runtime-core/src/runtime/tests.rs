@@ -1,7 +1,8 @@
 use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::*;
 use crate::universal::{
-    CapturedOutput, RunnerTaskResult, TaskTerminalStatus, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    CapturedOutput, RunnerTaskResult, TaskTerminalStatus, UniversalExecutorConfig,
+    UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use proptest::prelude::*;
 use rusqlite::Connection;
@@ -55,6 +56,23 @@ fn digest(bytes: &[u8]) -> String {
 
 fn file_digest(path: &Path) -> String {
     digest(&fs::read(path).unwrap())
+}
+
+fn runtime_config(sandbox: &Sandbox) -> RuntimeConfig {
+    RuntimeConfig {
+        registry: sandbox.registry.config().clone(),
+        executor: UniversalExecutorConfig {
+            store_root: sandbox.root.join("runtime"),
+            workspace_root: None,
+            workspace_uid: None,
+            workspace_gid: None,
+            runner_path: PathBuf::from("/usr/bin/true"),
+            allowed_executable_roots: vec![PathBuf::from("/")],
+            max_runtime_ms: 60_000,
+            max_output_bytes: 1_048_576,
+        },
+        startup_grace_ms: 2_000,
+    }
 }
 
 fn doctor_config(sandbox: &Sandbox) -> RuntimeDoctorConfig {
@@ -1474,13 +1492,287 @@ fn orphaned_terminal_keeps_capacity_reserved() {
 }
 
 #[test]
+fn orphaned_cancel_intent_is_persisted_without_unsafe_release() {
+    let sandbox = Sandbox::new("orphan-cancel-intent", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:orphan-cancel-intent", 1))
+            .unwrap(),
+    );
+    sandbox
+        .registry
+        .commit_terminal(&TerminalCommit {
+            attempt_id: created.attempt.attempt_id.clone(),
+            expected_row_version: created.attempt.row_version,
+            state: AttemptState::Orphaned,
+            result_digest: digest(b"orphan-control"),
+            exit_code: None,
+            infrastructure_error_digest: Some(digest(b"identity-uncertain")),
+            finished_at_ms: 20,
+            artifacts: Vec::new(),
+            reason_code: "SUPERVISOR_IDENTITY_ORPHANED".to_string(),
+        })
+        .unwrap();
+
+    let projection = sandbox
+        .registry
+        .request_cancel(&created.job.job_id, 21)
+        .unwrap();
+    assert_eq!(projection.status, "orphaned");
+    assert_eq!(
+        sandbox
+            .registry
+            .get_job(&created.job.job_id)
+            .unwrap()
+            .desired_state,
+        JobDesiredState::Cancelled
+    );
+    assert_eq!(
+        sandbox
+            .registry
+            .get_attempt(&created.attempt.attempt_id)
+            .unwrap()
+            .termination_intent,
+        AttemptTerminationIntent::StopRequested
+    );
+    assert_eq!(
+        sandbox
+            .registry
+            .get_reservation(&created.attempt.attempt_id)
+            .unwrap()
+            .state,
+        ReservationState::HeldOrphaned
+    );
+    assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 1);
+}
+
+#[test]
+fn absent_orphan_can_converge_to_lost_and_release_capacity() {
+    let sandbox = Sandbox::new("orphan-lost-convergence", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:orphan-lost-convergence", 1))
+            .unwrap(),
+    );
+    sandbox
+        .registry
+        .commit_terminal(&TerminalCommit {
+            attempt_id: created.attempt.attempt_id.clone(),
+            expected_row_version: created.attempt.row_version,
+            state: AttemptState::Orphaned,
+            result_digest: digest(b"orphan-control"),
+            exit_code: None,
+            infrastructure_error_digest: Some(digest(b"identity-uncertain")),
+            finished_at_ms: 20,
+            artifacts: Vec::new(),
+            reason_code: "SUPERVISOR_IDENTITY_ORPHANED".to_string(),
+        })
+        .unwrap();
+    let orphaned = sandbox
+        .registry
+        .get_attempt(&created.attempt.attempt_id)
+        .unwrap();
+
+    let projection = sandbox
+        .registry
+        .recover_orphaned_terminal(&TerminalCommit {
+            attempt_id: orphaned.attempt_id.clone(),
+            expected_row_version: orphaned.row_version,
+            state: AttemptState::Lost,
+            result_digest: digest(b"orphan-process-tree-gone"),
+            exit_code: None,
+            infrastructure_error_digest: Some(digest(b"process-tree-gone")),
+            finished_at_ms: 21,
+            artifacts: Vec::new(),
+            reason_code: "ORPHANED_PROCESS_TREE_GONE".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(projection.status, "lost");
+    assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
+    assert_eq!(
+        sandbox
+            .registry
+            .get_reservation(&created.attempt.attempt_id)
+            .unwrap()
+            .state,
+        ReservationState::Released
+    );
+    assert_eq!(
+        sandbox
+            .registry
+            .get_attempt(&created.attempt.attempt_id)
+            .unwrap()
+            .state,
+        AttemptState::Lost
+    );
+    assert_eq!(
+        sandbox
+            .registry
+            .get_job(&created.job.job_id)
+            .unwrap()
+            .resolution,
+        Some(JobResolution::Lost)
+    );
+}
+
+#[test]
+fn runtime_startup_reclaims_absent_orphan_and_reopens_workspace_slot() {
+    let sandbox = Sandbox::new("runtime-orphan-startup", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:runtime-orphan-startup", 1))
+            .unwrap(),
+    );
+    fs::create_dir_all(&created.attempt.bundle_path).unwrap();
+    fs::write(
+        Path::new(&created.attempt.bundle_path).join("stdout.log"),
+        b"partial\n",
+    )
+    .unwrap();
+    fs::write(
+        Path::new(&created.attempt.bundle_path).join("stderr.log"),
+        b"",
+    )
+    .unwrap();
+    sandbox
+        .registry
+        .commit_terminal(&TerminalCommit {
+            attempt_id: created.attempt.attempt_id.clone(),
+            expected_row_version: created.attempt.row_version,
+            state: AttemptState::Orphaned,
+            result_digest: digest(b"runtime-orphan-control"),
+            exit_code: None,
+            infrastructure_error_digest: Some(digest(b"identity-uncertain")),
+            finished_at_ms: 20,
+            artifacts: Vec::new(),
+            reason_code: "SUPERVISOR_IDENTITY_ORPHANED".to_string(),
+        })
+        .unwrap();
+    assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 1);
+
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let attempt = runtime
+        .registry()
+        .get_attempt(&created.attempt.attempt_id)
+        .unwrap();
+    assert_eq!(attempt.state, AttemptState::Lost);
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    assert_eq!(
+        runtime
+            .registry()
+            .get_reservation(&created.attempt.attempt_id)
+            .unwrap()
+            .state,
+        ReservationState::Released
+    );
+    assert!(Path::new(&attempt.bundle_path)
+        .join("orphan-remediation.json")
+        .is_file());
+    runtime
+        .registry()
+        .get_artifact(
+            &created.job.job_id,
+            &format!("{}.orphan-remediation", created.attempt.attempt_id),
+        )
+        .unwrap();
+
+    let admitted = runtime
+        .registry()
+        .submit(&request(&sandbox, "request:after-orphan-reclaim", 1))
+        .unwrap();
+    assert!(matches!(admitted, AdmissionOutcome::Created(_)));
+}
+
+#[test]
+fn task_cancel_reclaims_absent_orphan_as_cancelled() {
+    let sandbox = Sandbox::new("runtime-orphan-cancel", 5000);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let created = created(
+        runtime
+            .registry()
+            .submit(&request(&sandbox, "request:runtime-orphan-cancel", 1))
+            .unwrap(),
+    );
+    fs::create_dir_all(&created.attempt.bundle_path).unwrap();
+    fs::write(
+        Path::new(&created.attempt.bundle_path).join("stdout.log"),
+        b"partial\n",
+    )
+    .unwrap();
+    fs::write(
+        Path::new(&created.attempt.bundle_path).join("stderr.log"),
+        b"",
+    )
+    .unwrap();
+    runtime
+        .registry()
+        .commit_terminal(&TerminalCommit {
+            attempt_id: created.attempt.attempt_id.clone(),
+            expected_row_version: created.attempt.row_version,
+            state: AttemptState::Orphaned,
+            result_digest: digest(b"runtime-orphan-cancel-control"),
+            exit_code: None,
+            infrastructure_error_digest: Some(digest(b"identity-uncertain")),
+            finished_at_ms: 20,
+            artifacts: Vec::new(),
+            reason_code: "SUPERVISOR_IDENTITY_ORPHANED".to_string(),
+        })
+        .unwrap();
+
+    let observation = runtime
+        .cancel_task(&TaskCancelRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: created.job.job_id.clone(),
+        })
+        .unwrap();
+    assert_eq!(observation.status, "cancelled");
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    assert_eq!(
+        runtime
+            .registry()
+            .get_attempt(&created.attempt.attempt_id)
+            .unwrap()
+            .state,
+        AttemptState::Cancelled
+    );
+    assert_eq!(
+        runtime
+            .registry()
+            .get_job(&created.job.job_id)
+            .unwrap()
+            .desired_state,
+        JobDesiredState::Cancelled
+    );
+    assert_eq!(
+        runtime
+            .registry()
+            .get_reservation(&created.attempt.attempt_id)
+            .unwrap()
+            .state,
+        ReservationState::Released
+    );
+
+    let replay = runtime
+        .cancel_task(&TaskCancelRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: created.job.job_id.clone(),
+        })
+        .unwrap();
+    assert_eq!(replay.status, "cancelled");
+}
+
+#[test]
 fn newer_schema_and_checksum_drift_fail_closed() {
     let newer = Sandbox::new("newer-schema", 5000);
     let connection = Connection::open(&newer.registry.config().db_path).unwrap();
     connection
         .execute(
             "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,'future','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0)",
-            [4],
+            [5],
         )
         .unwrap();
     drop(connection);
@@ -1509,6 +1801,18 @@ fn newer_schema_and_checksum_drift_fail_closed() {
         .unwrap();
     drop(connection);
     let error = Registry::initialize(terminal_drift.registry.config().clone()).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::MigrationChecksumMismatch);
+
+    let reclaim_drift = Sandbox::new("orphan-reclaim-checksum-drift", 5000);
+    let connection = Connection::open(&reclaim_drift.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE schema_migrations SET checksum='sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' WHERE version=4",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let error = Registry::initialize(reclaim_drift.registry.config().clone()).unwrap_err();
     assert_eq!(error.code, RuntimeErrorCode::MigrationChecksumMismatch);
 }
 
@@ -1710,7 +2014,7 @@ fn late_identity_bound_result_corrects_orphan_and_releases_capacity() {
 }
 
 #[test]
-fn existing_v1_registry_upgrades_to_terminal_repair_schema() {
+fn existing_v1_registry_upgrades_to_orphan_reclaim_schema() {
     let root = std::env::temp_dir().join(format!(
         "ordivon-v1-upgrade-{}-{}",
         std::process::id(),
@@ -1743,7 +2047,7 @@ fn existing_v1_registry_upgrades_to_terminal_repair_schema() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(max_version, 3);
+    assert_eq!(max_version, 4);
     let checksum: String = connection
         .query_row(
             "SELECT checksum FROM schema_migrations WHERE version=2",
@@ -1760,6 +2064,14 @@ fn existing_v1_registry_upgrades_to_terminal_repair_schema() {
         )
         .unwrap();
     assert_eq!(repair_checksum, RUNTIME_TERMINAL_REPAIR_MIGRATION_CHECKSUM);
+    let reclaim_checksum: String = connection
+        .query_row(
+            "SELECT checksum FROM schema_migrations WHERE version=4",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reclaim_checksum, RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM);
     drop(connection);
     fs::remove_dir_all(root).unwrap();
 }

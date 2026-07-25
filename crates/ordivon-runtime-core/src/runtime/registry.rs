@@ -33,7 +33,12 @@ const MIGRATION_V3_NAME: &str = "0003_terminal_repair";
 const MIGRATION_V3_SQL: &str = include_str!("../../migrations/runtime/0003_terminal_repair.sql");
 pub const RUNTIME_TERMINAL_REPAIR_MIGRATION_CHECKSUM: &str =
     "sha256:464c9b769dacd10f7302d7a371f5b36a7553eda0b0b112bae35b901d00a67f0d";
-pub(crate) const MAX_MIGRATION_VERSION: i64 = 3;
+const MIGRATION_V4: i64 = 4;
+const MIGRATION_V4_NAME: &str = "0004_orphan_reclaim";
+const MIGRATION_V4_SQL: &str = include_str!("../../migrations/runtime/0004_orphan_reclaim.sql");
+pub const RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM: &str =
+    "sha256:b76afbfaf70645b60456b08ad257e5ac2be1f63499f24a555cbf0157791e19ad";
+pub(crate) const MAX_MIGRATION_VERSION: i64 = 4;
 const WORKSPACE_EXECUTION_LIMIT: u32 = 1;
 
 #[derive(Clone, Debug)]
@@ -254,6 +259,36 @@ impl Registry {
             MIGRATION_V3,
             RUNTIME_TERMINAL_REPAIR_MIGRATION_CHECKSUM,
             "terminal-repair migration",
+        )?;
+        if max_version < MIGRATION_V4 {
+            let transaction = immediate(connection, "orphan-reclaim migration")?;
+            transaction
+                .execute_batch(MIGRATION_V4_SQL)
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot apply orphan-reclaim migration")
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,?2,?3,?4)",
+                    params![
+                        MIGRATION_V4,
+                        MIGRATION_V4_NAME,
+                        RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM,
+                        now_ms()?
+                    ],
+                )
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot record orphan-reclaim migration")
+                })?;
+            transaction.commit().map_err(|error| {
+                RuntimeError::from_sql(error, "cannot commit orphan-reclaim migration")
+            })?;
+        }
+        validate_migration_checksum(
+            connection,
+            MIGRATION_V4,
+            RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM,
+            "orphan-reclaim migration",
         )?;
 
         Ok(())
@@ -1114,6 +1149,68 @@ impl Registry {
         let transaction = immediate(&mut connection, "cancel-intent transaction")?;
         let job = load_job(&transaction, job_id)?;
         if job.resolution.is_some() {
+            if job.resolution == Some(JobResolution::Orphaned) {
+                let attempt_id: String = transaction
+                    .query_row(
+                        "SELECT attempt_id FROM attempts WHERE job_id=?1 ORDER BY attempt_number DESC LIMIT 1",
+                        [job_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot load orphaned Job Attempt"))?
+                    .ok_or_else(|| {
+                        RuntimeError::new(
+                            RuntimeErrorCode::RegistryCorrupt,
+                            "orphaned Job has no Attempt",
+                            Some("jobId"),
+                            false,
+                        )
+                    })?;
+                let attempt = load_attempt(&transaction, &attempt_id)?;
+                let reservation = load_reservation(&transaction, &attempt_id)?;
+                if attempt.state != AttemptState::Orphaned
+                    || reservation.state != ReservationState::HeldOrphaned
+                {
+                    return Err(RuntimeError::new(
+                        RuntimeErrorCode::ReconciliationRequired,
+                        "orphaned Job is not backed by a held orphaned Attempt",
+                        Some("jobId"),
+                        false,
+                    ));
+                }
+                let intent_changed = job.desired_state != JobDesiredState::Cancelled
+                    || attempt.termination_intent != AttemptTerminationIntent::StopRequested;
+                transaction
+                    .execute(
+                        "UPDATE jobs SET desired_state='cancelled',row_version=row_version+1 WHERE job_id=?1 AND resolution='orphaned' AND desired_state!='cancelled'",
+                        [job_id],
+                    )
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot persist orphan cancel intent"))?;
+                transaction
+                    .execute(
+                        "UPDATE attempts SET termination_intent='stop_requested',row_version=row_version+1 WHERE attempt_id=?1 AND state='orphaned' AND termination_intent!='stop_requested'",
+                        [&attempt_id],
+                    )
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot persist orphan stop intent"))?;
+                if intent_changed {
+                    append_event(
+                        &transaction,
+                        job_id,
+                        Some(&attempt_id),
+                        "STOP_REQUESTED",
+                        "SYSTEM_DERIVED",
+                        Some(AttemptState::Orphaned),
+                        Some(AttemptState::Orphaned),
+                        "ORPHAN_CANCEL_INTENT_COMMITTED",
+                        serde_json::json!({}),
+                        observed_at_ms,
+                    )?;
+                }
+                transaction.commit().map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot commit orphan cancel intent")
+                })?;
+                return Ok(load_job_snapshot(&connection, job_id)?.projection);
+            }
             transaction.commit().map_err(|error| {
                 RuntimeError::from_sql(error, "cannot close terminal cancel replay")
             })?;
@@ -1446,9 +1543,10 @@ impl Registry {
                 | AttemptState::Failed
                 | AttemptState::TimedOut
                 | AttemptState::Cancelled
+                | AttemptState::Lost
         ) {
             return Err(RuntimeError::invalid(
-                "orphan recovery requires a Runner terminal state",
+                "orphan recovery requires a conclusive terminal state",
                 "state",
             ));
         }

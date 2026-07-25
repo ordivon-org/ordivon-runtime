@@ -17,11 +17,12 @@ use super::supervisor::{
 };
 use super::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
-    ArtifactRegistration, AttemptRecord, AttemptState, JobResolution, Registry, RegistryConfig,
-    RunnerIdentity, RuntimeArtifactRecord, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
-    RuntimeJobListRequest, RuntimeJobListResult, RuntimeResult, SubmitRequest, TaskCancelRequest,
-    TaskObservation, TaskObserveRequest, TaskRunRequest, TerminalCommit, MAX_ARTIFACT_READ_BYTES,
-    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
+    ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, JobDesiredState,
+    JobResolution, Registry, RegistryConfig, RunnerIdentity, RuntimeArtifactRecord, RuntimeError,
+    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeJobListRequest, RuntimeJobListResult,
+    RuntimeResult, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
+    TaskRunRequest, TerminalCommit, MAX_ARTIFACT_READ_BYTES, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
+    RUNTIME_SCHEMA_VERSION,
 };
 use crate::universal::{
     canonical_directory, create_git_workspace_compact, load_workspace_record, mutate_workspace,
@@ -41,6 +42,7 @@ const STDOUT_FILE: &str = "stdout.log";
 const STDERR_FILE: &str = "stderr.log";
 const CANCEL_FILE: &str = "cancel-requested.json";
 const CONTROL_RESULT_FILE: &str = "control-result.json";
+const ORPHAN_REMEDIATION_FILE: &str = "orphan-remediation.json";
 const INTERACTIVE_RECONCILIATION_LIMIT: u32 = 32;
 
 #[derive(Clone, Debug)]
@@ -764,7 +766,7 @@ impl Runtime {
         if snapshot.job.resolution.is_some() {
             if snapshot.job.resolution == Some(JobResolution::Orphaned) {
                 if let Some(attempt) = snapshot.attempt {
-                    let _ = self.recover_orphaned_runner_result(&attempt)?;
+                    let _ = self.reconcile_orphaned_attempt(&attempt)?;
                 }
             }
             return Ok(());
@@ -840,10 +842,9 @@ impl Runtime {
     ) -> RuntimeResult<()> {
         report.inspected += 1;
         let before = attempt.state;
-        let recovering_orphan_result = attempt.state == AttemptState::Orphaned
-            && Path::new(&attempt.bundle_path).join(RESULT_FILE).is_file();
-        let result = if recovering_orphan_result {
-            self.recover_orphaned_runner_result(attempt)
+        let reconciling_orphan = attempt.state == AttemptState::Orphaned;
+        let result = if reconciling_orphan {
+            self.reconcile_orphaned_attempt(attempt)
         } else if attempt.state.is_terminal() {
             self.registry
                 .converge_terminal_reservation(&attempt.attempt_id, now_ms()?)
@@ -855,8 +856,8 @@ impl Runtime {
         match result {
             Ok(changed) => {
                 let current = self.registry.get_attempt(&attempt.attempt_id)?;
-                let orphan_converged = recovering_orphan_result
-                    && (changed || current.state != AttemptState::Orphaned);
+                let orphan_converged =
+                    reconciling_orphan && (changed || current.state != AttemptState::Orphaned);
                 if orphan_converged {
                     report.recovered_orphans += 1;
                 } else if current.state == AttemptState::Orphaned
@@ -868,7 +869,7 @@ impl Runtime {
                 } else {
                     report.unchanged += 1;
                 }
-                if !recovering_orphan_result || orphan_converged {
+                if !reconciling_orphan || orphan_converged {
                     self.registry
                         .clear_reconciliation_failure(&attempt.attempt_id, now_ms()?)?;
                 }
@@ -899,6 +900,122 @@ impl Runtime {
             message: error.message,
         });
         Ok(())
+    }
+
+    fn reconcile_orphaned_attempt(&self, attempt: &AttemptRecord) -> RuntimeResult<bool> {
+        let current = self.registry.get_attempt(&attempt.attempt_id)?;
+        if current.state != AttemptState::Orphaned {
+            return Ok(false);
+        }
+        if Path::new(&current.bundle_path).join(RESULT_FILE).is_file() {
+            return self.recover_orphaned_runner_result(&current);
+        }
+        if self.orphan_process_tree_alive(&current)? {
+            return Ok(false);
+        }
+        if Path::new(&current.bundle_path).join(RESULT_FILE).is_file() {
+            return self.recover_orphaned_runner_result(&current);
+        }
+        let job = self.registry.get_job(&current.job_id)?;
+        let (state, reason) = match current.termination_intent {
+            AttemptTerminationIntent::StopRequested => (
+                AttemptState::Cancelled,
+                "ORPHAN_CANCELLED_PROCESS_TREE_GONE",
+            ),
+            AttemptTerminationIntent::DeadlineExceeded => {
+                (AttemptState::TimedOut, "ORPHAN_DEADLINE_PROCESS_TREE_GONE")
+            }
+            AttemptTerminationIntent::Natural
+                if job.desired_state == JobDesiredState::Cancelled =>
+            {
+                (
+                    AttemptState::Cancelled,
+                    "ORPHAN_CANCELLED_PROCESS_TREE_GONE",
+                )
+            }
+            AttemptTerminationIntent::Natural => (AttemptState::Lost, "ORPHANED_PROCESS_TREE_GONE"),
+        };
+        self.resolve_absent_orphan(&current, state, reason)?;
+        Ok(true)
+    }
+
+    fn resolve_absent_orphan(
+        &self,
+        attempt: &AttemptRecord,
+        state: AttemptState,
+        reason_code: &str,
+    ) -> RuntimeResult<()> {
+        // Interactive reconciliation paths may inspect the same orphan concurrently. Derive
+        // one stable logical observation time from the orphan terminal record so every writer
+        // produces identical remediation evidence bytes and Digest.
+        let observed_at_ms = attempt
+            .finished_at_ms
+            .unwrap_or(attempt.created_at_ms)
+            .saturating_add(1);
+        let evidence = ControlTerminalEvidence {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: attempt.job_id.clone(),
+            attempt_id: attempt.attempt_id.clone(),
+            status: state.as_db().to_string(),
+            reason_code: reason_code.to_string(),
+            detail: Some(
+                "the persisted unit, process identity, and cgroup no longer own a live process tree"
+                    .to_string(),
+            ),
+            observed_at_ms,
+        };
+        let evidence_path = Path::new(&attempt.bundle_path).join(ORPHAN_REMEDIATION_FILE);
+        write_json_atomic(&evidence_path, &evidence).map_err(map_universal_error)?;
+        let result_digest = sha256_file(&evidence_path).map_err(map_universal_error)?;
+        let existing_artifacts = self
+            .registry
+            .job_snapshot(&attempt.job_id)?
+            .projection
+            .artifacts;
+        let mut artifacts = vec![ArtifactRegistration {
+            artifact_id: format!("{}.orphan-remediation", attempt.attempt_id),
+            kind: "control_result".to_string(),
+            relative_path: ORPHAN_REMEDIATION_FILE.to_string(),
+            digest: result_digest.clone(),
+            media_type: "application/json".to_string(),
+            byte_length: fs::metadata(&evidence_path)
+                .map_err(|error| io_error("inspect orphan remediation evidence", error))?
+                .len(),
+            truncated: false,
+        }];
+        for (file_name, kind) in [(STDOUT_FILE, "stdout"), (STDERR_FILE, "stderr")] {
+            let artifact_id = format!("{}.{}", attempt.attempt_id, kind);
+            let path = Path::new(&attempt.bundle_path).join(file_name);
+            if path.is_file()
+                && !existing_artifacts
+                    .iter()
+                    .any(|artifact| artifact.artifact_id == artifact_id)
+            {
+                artifacts.push(ArtifactRegistration {
+                    artifact_id,
+                    kind: kind.to_string(),
+                    relative_path: file_name.to_string(),
+                    digest: sha256_file(&path).map_err(map_universal_error)?,
+                    media_type: "text/plain; charset=utf-8".to_string(),
+                    byte_length: fs::metadata(&path)
+                        .map_err(|error| io_error("inspect orphan output", error))?
+                        .len(),
+                    truncated: false,
+                });
+            }
+        }
+        self.registry.recover_orphaned_terminal(&TerminalCommit {
+            attempt_id: attempt.attempt_id.clone(),
+            expected_row_version: attempt.row_version,
+            state,
+            result_digest,
+            exit_code: None,
+            infrastructure_error_digest: Some(sha256_bytes(reason_code.as_bytes())),
+            finished_at_ms: observed_at_ms,
+            artifacts,
+            reason_code: reason_code.to_string(),
+        })?;
+        self.cleanup_payload_view(&attempt.attempt_id)
     }
 
     fn recover_orphaned_runner_result(&self, attempt: &AttemptRecord) -> RuntimeResult<bool> {
@@ -1168,6 +1285,30 @@ impl Runtime {
                 "unsupported runtime schema version",
                 "schemaVersion",
             ));
+        }
+        let snapshot = self.registry.job_snapshot(&request.job_id)?;
+        if snapshot.job.resolution == Some(JobResolution::Orphaned) {
+            if let Some(attempt) = snapshot.attempt {
+                if Path::new(&attempt.bundle_path).join(RESULT_FILE).is_file()
+                    && self.recover_orphaned_runner_result(&attempt)?
+                {
+                    return self.observation_from_registry(&request.job_id, 4096, 4096);
+                }
+                let _ = self.registry.request_cancel(&request.job_id, now_ms()?)?;
+                let current = self.registry.get_attempt(&attempt.attempt_id)?;
+                if !self.orphan_process_tree_alive(&current)? {
+                    if Path::new(&current.bundle_path).join(RESULT_FILE).is_file() {
+                        let _ = self.recover_orphaned_runner_result(&current)?;
+                    } else {
+                        self.resolve_absent_orphan(
+                            &current,
+                            AttemptState::Cancelled,
+                            "ORPHAN_CANCELLED_PROCESS_TREE_GONE",
+                        )?;
+                    }
+                }
+                return self.observation_from_registry(&request.job_id, 4096, 4096);
+            }
         }
         self.reconcile_job(&request.job_id)?;
         let projection = self.registry.request_cancel(&request.job_id, now_ms()?)?;
