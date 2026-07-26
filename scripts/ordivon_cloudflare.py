@@ -78,6 +78,16 @@ def parse_scalar(raw: str) -> Any:
         return raw
 
 
+def normalize_api_token(raw: str) -> str:
+    """Normalize common copy/paste wrappers without changing the token itself."""
+    token = raw.strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'}:
+        token = token[1:-1].strip()
+    return token
+
+
 def normalize_dns_name(name: str, zone_name: str) -> str:
     value = name.strip().rstrip(".")
     zone = zone_name.rstrip(".")
@@ -257,15 +267,30 @@ def command_setup(args: argparse.Namespace) -> int:
         raise CloudflareError(f"Configuration already exists: {path}. Use --force to replace it.")
 
     if args.token_stdin:
-        token = sys.stdin.readline().strip()
+        token = normalize_api_token(sys.stdin.readline())
     else:
-        token = getpass.getpass("Cloudflare API token: ").strip()
+        token = normalize_api_token(getpass.getpass("Cloudflare API token: "))
     if not token:
         raise CloudflareError("Token cannot be empty")
+    if any(character.isspace() for character in token):
+        raise CloudflareError("The pasted credential contains internal whitespace and is not a valid Cloudflare API token")
 
     bootstrap = Config(api_token=token, account_id="", zone_id="", zone_name=args.zone)
     client = CloudflareClient(bootstrap)
-    verification = client.request("GET", "/user/tokens/verify")
+    try:
+        verification = client.request("GET", "/user/tokens/verify")
+    except CloudflareError as exc:
+        if exc.status == 401:
+            raise CloudflareError(
+                "Cloudflare rejected this credential as an invalid API token. Create a token under "
+                "Cloudflare Dashboard > My Profile > API Tokens (or Manage Account > API Tokens). "
+                "Paste the one-time token secret, not a token name/ID, Global API Key, Tunnel token, "
+                "or Zero Trust Access Service Token client ID/secret.",
+                status=exc.status,
+                errors=exc.errors,
+                payload=exc.payload,
+            ) from exc
+        raise
     status = (verification.get("result") or {}).get("status")
     if status not in {None, "active"}:
         raise CloudflareError(f"Cloudflare token is not active: {status}")

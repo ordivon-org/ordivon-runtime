@@ -22,6 +22,12 @@ class CloudflareControlTests(unittest.TestCase):
         self.assertEqual(cf.parse_scalar('{"a":1}'), {"a": 1})
         self.assertEqual(cf.parse_scalar("strict"), "strict")
 
+    def test_normalize_api_token(self) -> None:
+        self.assertEqual(cf.normalize_api_token("  abc  "), "abc")
+        self.assertEqual(cf.normalize_api_token("Bearer abc"), "abc")
+        self.assertEqual(cf.normalize_api_token('"abc"'), "abc")
+        self.assertEqual(cf.normalize_api_token("'abc'"), "abc")
+
     def test_normalize_dns_name(self) -> None:
         self.assertEqual(cf.normalize_dns_name("@", "ordivon.com"), "ordivon.com")
         self.assertEqual(cf.normalize_dns_name("www", "ordivon.com"), "www.ordivon.com")
