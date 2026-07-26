@@ -1,0 +1,749 @@
+#!/usr/bin/env python3
+"""Transactional local deployment and rollback for Ordivon Runtime binaries."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.request
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+SCHEMA_VERSION = 1
+DEFAULT_BINARIES = (
+    "ordivon-runtime",
+    "ordivon-runtime-runner",
+    "ordivon-runtime-doctor",
+    "ordivon-runtime-inspect",
+    "ordivon-runtime-repair",
+)
+DEFAULT_REQUIRED_TOOLS = (
+    "workspace.patch",
+    "workspace.execPlan",
+    "workspace.get",
+    "workspace.list",
+)
+COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+ATTEMPT_UNIT_PATTERN = re.compile(r"/ordivon-(attempt-[^.\s/]+)\.service(?:$|/)")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="ordivon-runtime-deploy")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    prepare = subparsers.add_parser(
+        "prepare", help="build one exact clean commit and write a digest-bound candidate manifest"
+    )
+    prepare.add_argument("--source-repo", type=absolute_path, required=True)
+    prepare.add_argument("--commit", type=exact_commit, required=True)
+    prepare.add_argument("--candidate-dir", type=absolute_path, required=True)
+    prepare.add_argument("--candidate-manifest", type=absolute_path, required=True)
+    prepare.add_argument("--cargo", type=absolute_path, required=True)
+    prepare.add_argument("--binary", action="append", dest="binaries")
+    prepare.add_argument("--pretty", action="store_true")
+
+    plan = subparsers.add_parser("plan", help="validate a candidate deployment without mutation")
+    add_deployment_arguments(plan, require_confirmation=False)
+    plan.add_argument("--pretty", action="store_true")
+
+    apply = subparsers.add_parser("apply", help="atomically install, restart, probe, and receipt")
+    add_deployment_arguments(apply, require_confirmation=True)
+
+    rollback = subparsers.add_parser("rollback", help="restore binaries retained by one deployment receipt")
+    rollback.add_argument("--receipt", type=absolute_path, required=True)
+    rollback.add_argument("--install-dir", type=absolute_path, required=True)
+    rollback.add_argument("--service", default="ordivon-runtime.service")
+    rollback.add_argument("--env-file", type=absolute_path, required=True)
+    rollback.add_argument("--systemctl", type=absolute_path, default=Path("/usr/bin/systemctl"))
+    rollback.add_argument("--lock-file", type=absolute_path, default=Path("/run/ordivon-runtime-deploy.lock"))
+    rollback.add_argument("--wait-seconds", type=positive_float, default=15.0)
+    rollback.add_argument("--confirm-receipt", type=absolute_path, required=True)
+    return parser.parse_args()
+
+
+def add_deployment_arguments(parser: argparse.ArgumentParser, *, require_confirmation: bool) -> None:
+    parser.add_argument("--source-repo", type=absolute_path, required=True)
+    parser.add_argument("--commit", type=exact_commit, required=True)
+    parser.add_argument("--candidate-dir", type=absolute_path, required=True)
+    parser.add_argument("--candidate-manifest", type=absolute_path, required=True)
+    parser.add_argument("--install-dir", type=absolute_path, required=True)
+    parser.add_argument("--database", type=absolute_path, required=True)
+    parser.add_argument("--env-file", type=absolute_path, required=True)
+    parser.add_argument("--receipt-root", type=absolute_path, required=True)
+    parser.add_argument("--service", default="ordivon-runtime.service")
+    parser.add_argument("--systemctl", type=absolute_path, default=Path("/usr/bin/systemctl"))
+    parser.add_argument("--git", type=absolute_path, default=Path("/usr/bin/git"))
+    parser.add_argument("--lock-file", type=absolute_path, default=Path("/run/ordivon-runtime-deploy.lock"))
+    parser.add_argument("--binary", action="append", dest="binaries")
+    parser.add_argument("--required-tool", action="append", dest="required_tools")
+    parser.add_argument("--expected-tool-count", type=nonnegative_int)
+    parser.add_argument("--require-ref", default="origin/main")
+    parser.add_argument("--wait-seconds", type=positive_float, default=15.0)
+    if require_confirmation:
+        parser.add_argument("--confirm-commit", type=exact_commit, required=True)
+
+
+def absolute_path(value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("path must be absolute")
+    return path
+
+
+def exact_commit(value: str) -> str:
+    if not COMMIT_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError("commit must be exactly 40 lowercase hexadecimal characters")
+    return value
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if not 0.1 <= parsed <= 300:
+        raise argparse.ArgumentTypeError("value must be in 0.1..=300")
+    return parsed
+
+
+def nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be nonnegative")
+    return parsed
+
+
+def binaries(args: argparse.Namespace) -> tuple[str, ...]:
+    values = tuple(args.binaries or DEFAULT_BINARIES)
+    if not values or len(values) != len(set(values)):
+        raise RuntimeError("binary names must be nonempty and unique")
+    for value in values:
+        if value in {".", ".."} or "/" in value or chr(0) in value:
+            raise RuntimeError(f"invalid binary name: {value}")
+    return values
+
+
+def required_tools(args: argparse.Namespace) -> tuple[str, ...]:
+    values = tuple(args.required_tools or DEFAULT_REQUIRED_TOOLS)
+    if len(values) != len(set(values)) or any(not value.strip() for value in values):
+        raise RuntimeError("required tool names must be nonempty and unique")
+    return values
+
+
+def run(
+    command: list[str], *, check: bool = True, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        command, text=True, capture_output=True, check=False, cwd=cwd
+    )
+    if check and result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise RuntimeError(f"command failed ({' '.join(command)}): {detail}")
+    return result
+
+
+def git_text(git: Path, repo: Path, arguments: list[str]) -> str:
+    return run([str(git), "-C", str(repo), *arguments]).stdout.strip()
+
+
+def current_attempt_id() -> str | None:
+    try:
+        cgroup = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = ATTEMPT_UNIT_PATTERN.search(cgroup)
+    return match.group(1) if match else None
+
+
+def active_job_ids(database: Path) -> tuple[list[str], str | None]:
+    uri = f"file:{quote(str(database))}?mode=ro"
+    with sqlite3.connect(uri, uri=True, timeout=5) as connection:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+        required = {
+            "jobs": {"job_id", "resolution"},
+            "attempts": {"attempt_id", "job_id"},
+            "concurrency_reservations": {"attempt_id", "state"},
+        }
+        for table, columns in required.items():
+            present = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+            missing = columns - present
+            if missing:
+                raise RuntimeError(
+                    "Runtime Registry lacks deployment capabilities: "
+                    + ", ".join(f"{table}.{column}" for column in sorted(missing))
+                )
+        attempt_id = current_attempt_id()
+        current_job_id = None
+        if attempt_id is not None:
+            row = connection.execute(
+                "SELECT job_id FROM attempts WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            current_job_id = str(row[0]) if row is not None else None
+        rows = connection.execute(
+            """
+            SELECT DISTINCT jobs.job_id
+            FROM jobs
+            LEFT JOIN attempts ON attempts.job_id=jobs.job_id
+            LEFT JOIN concurrency_reservations
+              ON concurrency_reservations.attempt_id=attempts.attempt_id
+            WHERE jobs.resolution IS NULL
+               OR concurrency_reservations.state IN ('active','held_orphaned')
+            ORDER BY jobs.job_id
+            LIMIT 100
+            """
+        ).fetchall()
+    jobs = [str(row[0]) for row in rows]
+    if current_job_id is not None:
+        jobs = [job_id for job_id in jobs if job_id != current_job_id]
+    return jobs, current_job_id
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def binary_description(path: Path, name: str) -> dict[str, object]:
+    if path.is_symlink() or not path.is_file() or not os.access(path, os.X_OK):
+        raise RuntimeError(f"candidate binary is missing or not executable: {path}")
+    return {
+        "name": name,
+        "path": str(path),
+        "bytes": path.stat().st_size,
+        "digest": sha256(path),
+    }
+
+
+def prepare_candidate(args: argparse.Namespace) -> dict[str, object]:
+    names = binaries(args)
+    head = git_text(Path("/usr/bin/git"), args.source_repo, ["rev-parse", "HEAD"])
+    status = git_text(Path("/usr/bin/git"), args.source_repo, ["status", "--porcelain"])
+    if head != args.commit:
+        raise RuntimeError(f"source HEAD {head} does not equal requested commit {args.commit}")
+    if status:
+        raise RuntimeError("candidate source repository is dirty")
+    if args.candidate_dir.name != "release":
+        raise RuntimeError("candidate-dir must be the release directory under one Cargo target root")
+    run(
+        [
+            str(args.cargo),
+            "build",
+            "--release",
+            "--workspace",
+            "--all-features",
+            "--target-dir",
+            str(args.candidate_dir.parent),
+        ],
+        cwd=args.source_repo,
+    )
+    candidate = [binary_description(args.candidate_dir / name, name) for name in names]
+    manifest = {
+        "schemaVersion": SCHEMA_VERSION,
+        "commit": args.commit,
+        "sourceRepo": str(args.source_repo.resolve()),
+        "candidateDir": str(args.candidate_dir.resolve()),
+        "builtAtMs": int(time.time() * 1000),
+        "cargo": str(args.cargo),
+        "binaries": candidate,
+    }
+    write_json_atomic(args.candidate_manifest, manifest)
+    return {**manifest, "candidateManifest": str(args.candidate_manifest.resolve())}
+
+
+def validate_candidate_manifest(
+    args: argparse.Namespace, candidate: list[dict[str, object]]
+) -> tuple[dict[str, object], list[str]]:
+    manifest = json.loads(args.candidate_manifest.read_text(encoding="utf-8"))
+    blockers: list[str] = []
+    if manifest.get("schemaVersion") != SCHEMA_VERSION:
+        blockers.append("candidate manifest schemaVersion is unsupported")
+    if manifest.get("commit") != args.commit:
+        blockers.append("candidate manifest commit does not match requested commit")
+    if Path(str(manifest.get("candidateDir"))).resolve() != args.candidate_dir.resolve():
+        blockers.append("candidate manifest directory does not match candidate-dir")
+    manifest_by_name = {
+        str(item.get("name")): item
+        for item in manifest.get("binaries", [])
+        if isinstance(item, dict)
+    }
+    for item in candidate:
+        recorded = manifest_by_name.get(str(item["name"]))
+        if recorded is None:
+            blockers.append(f"candidate manifest lacks binary {item['name']}")
+            continue
+        if recorded.get("digest") != item["digest"] or recorded.get("bytes") != item["bytes"]:
+            blockers.append(f"candidate binary does not match manifest: {item['name']}")
+    if set(manifest_by_name) != {str(item["name"]) for item in candidate}:
+        blockers.append("candidate manifest binary set does not match requested binary set")
+    summary = {
+        "path": str(args.candidate_manifest.resolve()),
+        "commit": manifest.get("commit"),
+        "sourceRepo": manifest.get("sourceRepo"),
+        "candidateDir": manifest.get("candidateDir"),
+        "builtAtMs": manifest.get("builtAtMs"),
+    }
+    return summary, blockers
+
+
+def deployment_plan(args: argparse.Namespace) -> dict[str, object]:
+    names = binaries(args)
+    head = git_text(args.git, args.source_repo, ["rev-parse", "HEAD"])
+    status = git_text(args.git, args.source_repo, ["status", "--porcelain"])
+    required_ref = git_text(args.git, args.source_repo, ["rev-parse", args.require_ref])
+    jobs, ignored_current_job_id = active_job_ids(args.database)
+    candidate = [binary_description(args.candidate_dir / name, name) for name in names]
+    candidate_manifest, manifest_blockers = validate_candidate_manifest(args, candidate)
+    installed: list[dict[str, object]] = []
+    for name in names:
+        path = args.install_dir / name
+        present = path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)
+        installed.append(
+            {
+                "name": name,
+                "path": str(path),
+                "present": present,
+                "digest": sha256(path) if present else None,
+                "bytes": path.stat().st_size if present else None,
+            }
+        )
+    blockers: list[str] = list(manifest_blockers)
+    if head != args.commit:
+        blockers.append(f"source HEAD {head} does not equal requested commit {args.commit}")
+    if required_ref != args.commit:
+        blockers.append(f"required ref {args.require_ref} resolves to {required_ref}")
+    if status:
+        blockers.append("source repository is dirty")
+    if jobs:
+        blockers.append("active or held Jobs exist other than the deployment Job")
+    if any(not item["present"] for item in installed):
+        blockers.append("one or more installed binaries are missing")
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "commit": args.commit,
+        "sourceRepo": str(args.source_repo),
+        "sourceHead": head,
+        "requiredRef": args.require_ref,
+        "requiredRefCommit": required_ref,
+        "sourceClean": not bool(status),
+        "activeJobIds": jobs,
+        "ignoredCurrentJobId": ignored_current_job_id,
+        "service": args.service,
+        "candidate": candidate,
+        "candidateManifest": candidate_manifest,
+        "installed": installed,
+        "eligible": not blockers,
+        "blockers": blockers,
+    }
+
+
+def load_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise RuntimeError(f"invalid environment line in {path}: {raw_line}")
+        key, value = line.split("=", 1)
+        values[key] = value.strip().strip('"').strip("'")
+    return values
+
+
+def parse_mcp_response(text: str, content_type: str) -> dict[str, Any]:
+    if "text/event-stream" in content_type:
+        events = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
+        if not events:
+            raise RuntimeError("MCP probe returned an empty event stream")
+        text = events[-1]
+    value = json.loads(text)
+    if "error" in value:
+        raise RuntimeError(f"MCP probe error: {value['error']}")
+    result = value.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("MCP probe response lacks an object result")
+    return result
+
+
+def mcp_call(endpoint: str, token: str, request_id: int, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
+    if params is not None:
+        payload["params"] = params
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2025-06-18",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return parse_mcp_response(
+            response.read().decode("utf-8"),
+            response.headers.get("Content-Type", ""),
+        )
+
+
+def probe_mcp(
+    env_file: Path,
+    *,
+    expected_tool_count: int | None,
+    required: tuple[str, ...],
+    wait_seconds: float,
+) -> dict[str, object]:
+    environment = load_env_file(env_file)
+    bind = environment.get("ORDIVON_BIND")
+    token = environment.get("ORDIVON_BEARER_TOKEN")
+    if not bind or not token:
+        raise RuntimeError("environment file must define ORDIVON_BIND and ORDIVON_BEARER_TOKEN")
+    endpoint = f"http://{bind}/mcp"
+    deadline = time.monotonic() + wait_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            initialized = mcp_call(
+                endpoint,
+                token,
+                1,
+                "initialize",
+                {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "ordivon-runtime-deploy", "version": "1"},
+                },
+            )
+            tools = mcp_call(endpoint, token, 2, "tools/list").get("tools")
+            if not isinstance(tools, list):
+                raise RuntimeError("MCP tools/list lacks a tools array")
+            names = {str(tool.get("name")) for tool in tools if isinstance(tool, dict)}
+            if expected_tool_count is not None and len(names) != expected_tool_count:
+                raise RuntimeError(
+                    f"MCP tool count {len(names)} does not equal expected {expected_tool_count}"
+                )
+            missing = sorted(set(required) - names)
+            if missing:
+                raise RuntimeError("MCP probe is missing required tools: " + ", ".join(missing))
+            return {
+                "endpoint": endpoint,
+                "serverInfo": initialized.get("serverInfo"),
+                "toolCount": len(names),
+                "requiredTools": sorted(required),
+            }
+        except Exception as error:
+            last_error = error
+            time.sleep(0.2)
+    raise RuntimeError(f"MCP readiness probe failed: {last_error}")
+
+
+def service_active(systemctl: Path, service: str) -> bool:
+    return run([str(systemctl), "is-active", service], check=False).stdout.strip() == "active"
+
+
+def wait_service_active(systemctl: Path, service: str, wait_seconds: float) -> None:
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        if service_active(systemctl, service):
+            return
+        time.sleep(0.2)
+    raise RuntimeError(f"service did not become active: {service}")
+
+
+def atomic_copy(source: Path, destination: Path, *, mode: int = 0o755) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + f".tmp-{os.getpid()}")
+    try:
+        shutil.copy2(source, temporary)
+        os.chmod(temporary, mode)
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_json_atomic(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".tmp-{os.getpid()}")
+    try:
+        temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def exclusive_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError(f"deployment lock is already held: {path}") from error
+        yield
+
+
+def receipt_path(root: Path, commit: str) -> Path:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    candidate = root / f"{stamp}-{commit[:12]}"
+    suffix = 1
+    while candidate.exists():
+        candidate = root / f"{stamp}-{commit[:12]}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def restore_previous(
+    previous: Path,
+    install_dir: Path,
+    names: tuple[str, ...],
+    systemctl: Path,
+    service: str,
+    env_file: Path,
+    wait_seconds: float,
+) -> dict[str, object]:
+    run([str(systemctl), "stop", service], check=False)
+    for name in names:
+        source = previous / name
+        if source.is_symlink() or not source.is_file():
+            raise RuntimeError(f"rollback binary is missing or unsafe: {source}")
+        atomic_copy(source, install_dir / name)
+    run([str(systemctl), "start", service])
+    wait_service_active(systemctl, service, wait_seconds)
+    probe = probe_mcp(env_file, expected_tool_count=None, required=(), wait_seconds=wait_seconds)
+    return {"serviceActive": True, "probe": probe}
+
+
+def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
+    if args.confirm_commit != args.commit:
+        raise RuntimeError("confirm-commit must exactly equal commit")
+    with exclusive_lock(args.lock_file):
+        plan = deployment_plan(args)
+        if not plan["eligible"]:
+            raise RuntimeError("deployment is not eligible: " + "; ".join(plan["blockers"]))
+        names = binaries(args)
+        receipt = receipt_path(args.receipt_root, args.commit)
+        previous = receipt / "previous"
+        previous.mkdir(parents=True)
+        write_json_atomic(receipt / "plan.json", plan)
+        commit_started = False
+        stopped = False
+        try:
+            for name in names:
+                atomic_copy(args.install_dir / name, previous / name)
+                atomic_copy(args.install_dir / name, args.install_dir / f"{name}.previous")
+                atomic_copy(args.candidate_dir / name, args.install_dir / f"{name}.next")
+            write_json_atomic(
+                receipt / "manifest.json",
+                {
+                    "schemaVersion": SCHEMA_VERSION,
+                    "commit": args.commit,
+                    "service": args.service,
+                    "binaries": list(names),
+                    "installDir": str(args.install_dir),
+                    "envFile": str(args.env_file),
+                    "previous": [binary_description(previous / name, name) for name in names],
+                    "candidate": plan["candidate"],
+                },
+            )
+            run([str(args.systemctl), "stop", args.service])
+            stopped = True
+            race_jobs, _ = active_job_ids(args.database)
+            if race_jobs:
+                raise RuntimeError(
+                    "active or held Jobs appeared after service stop: "
+                    + ", ".join(race_jobs)
+                )
+            commit_started = True
+            for name in names:
+                os.replace(args.install_dir / f"{name}.next", args.install_dir / name)
+            run([str(args.systemctl), "start", args.service])
+            wait_service_active(args.systemctl, args.service, args.wait_seconds)
+            probe = probe_mcp(
+                args.env_file,
+                expected_tool_count=args.expected_tool_count,
+                required=required_tools(args),
+                wait_seconds=args.wait_seconds,
+            )
+            result = {
+                "schemaVersion": SCHEMA_VERSION,
+                "status": "deployed",
+                "commit": args.commit,
+                "finishedAtMs": int(time.time() * 1000),
+                "serviceActive": True,
+                "probe": probe,
+                "installed": [binary_description(args.install_dir / name, name) for name in names],
+                "receipt": str(receipt),
+            }
+            write_json_atomic(receipt / "result.json", result)
+            return result
+        except Exception as deployment_error:
+            for name in names:
+                (args.install_dir / f"{name}.next").unlink(missing_ok=True)
+            rollback_error: Exception | None = None
+            if commit_started:
+                try:
+                    rollback = restore_previous(
+                        previous,
+                        args.install_dir,
+                        names,
+                        args.systemctl,
+                        args.service,
+                        args.env_file,
+                        args.wait_seconds,
+                    )
+                except Exception as error:
+                    rollback_error = error
+                    rollback = {"serviceActive": service_active(args.systemctl, args.service)}
+                status = "rolled_back" if rollback_error is None else "rollback_failed"
+            else:
+                rollback = None
+                status = "not_committed"
+            result = {
+                "schemaVersion": SCHEMA_VERSION,
+                "status": status,
+                "commit": args.commit,
+                "finishedAtMs": int(time.time() * 1000),
+                "deploymentError": str(deployment_error),
+                "rollbackError": str(rollback_error) if rollback_error else None,
+                "rollback": rollback,
+                "serviceWasStopped": stopped,
+                "receipt": str(receipt),
+            }
+            write_json_atomic(receipt / "result.json", result)
+            raise RuntimeError(
+                f"deployment failed and {status}: {deployment_error}"
+                + (f"; rollback: {rollback_error}" if rollback_error else "")
+            ) from deployment_error
+
+
+def rollback_deployment(args: argparse.Namespace) -> dict[str, object]:
+    receipt = args.receipt.resolve()
+    if args.confirm_receipt.resolve() != receipt:
+        raise RuntimeError("confirm-receipt must exactly equal receipt")
+    manifest = json.loads((receipt / "manifest.json").read_text(encoding="utf-8"))
+    names = tuple(str(name) for name in manifest.get("binaries", []))
+    if not names:
+        raise RuntimeError("deployment receipt has no binaries")
+    if manifest.get("installDir") != str(args.install_dir):
+        raise RuntimeError("install-dir does not match the deployment receipt")
+    if manifest.get("service") != args.service:
+        raise RuntimeError("service does not match the deployment receipt")
+    if manifest.get("envFile") != str(args.env_file):
+        raise RuntimeError("env-file does not match the deployment receipt")
+    previous_by_name = {
+        str(item.get("name")): item
+        for item in manifest.get("previous", [])
+        if isinstance(item, dict)
+    }
+    for name in names:
+        previous = receipt / "previous" / name
+        expected = previous_by_name.get(name, {}).get("digest")
+        if not isinstance(expected, str) or sha256(previous) != expected:
+            raise RuntimeError(f"previous binary digest does not match receipt: {name}")
+    with exclusive_lock(args.lock_file):
+        current = receipt / f"rollback-current-{int(time.time() * 1000)}"
+        current.mkdir()
+        for name in names:
+            atomic_copy(args.install_dir / name, current / name)
+        try:
+            outcome = restore_previous(
+                receipt / "previous",
+                args.install_dir,
+                names,
+                args.systemctl,
+                args.service,
+                args.env_file,
+                args.wait_seconds,
+            )
+        except Exception as rollback_error:
+            current_restore_error: Exception | None = None
+            try:
+                current_outcome = restore_previous(
+                    current,
+                    args.install_dir,
+                    names,
+                    args.systemctl,
+                    args.service,
+                    args.env_file,
+                    args.wait_seconds,
+                )
+            except Exception as error:
+                current_restore_error = error
+                current_outcome = {"serviceActive": service_active(args.systemctl, args.service)}
+            failed = {
+                "schemaVersion": SCHEMA_VERSION,
+                "status": (
+                    "rollback_failed_current_restored"
+                    if current_restore_error is None
+                    else "rollback_failed_current_restore_failed"
+                ),
+                "receipt": str(receipt),
+                "finishedAtMs": int(time.time() * 1000),
+                "rollbackError": str(rollback_error),
+                "currentRestoreError": str(current_restore_error) if current_restore_error else None,
+                "currentBackup": str(current),
+                "currentRestore": current_outcome,
+            }
+            write_json_atomic(receipt / "rollback-result.json", failed)
+            raise RuntimeError(
+                f"explicit rollback failed: {rollback_error}"
+                + (
+                    f"; current restore also failed: {current_restore_error}"
+                    if current_restore_error
+                    else "; current deployment was restored"
+                )
+            ) from rollback_error
+        result = {
+            "schemaVersion": SCHEMA_VERSION,
+            "status": "restored_previous",
+            "receipt": str(receipt),
+            "finishedAtMs": int(time.time() * 1000),
+            "currentBackup": str(current),
+            **outcome,
+        }
+        write_json_atomic(receipt / "rollback-result.json", result)
+        return result
+
+
+def main() -> int:
+    try:
+        args = parse_args()
+        if args.command == "prepare":
+            value = prepare_candidate(args)
+            print(json.dumps(value, indent=2 if args.pretty else None, sort_keys=args.pretty))
+            return 0
+        if args.command == "plan":
+            value = deployment_plan(args)
+            print(json.dumps(value, indent=2 if args.pretty else None, sort_keys=args.pretty))
+            return 0 if value["eligible"] else 2
+        if args.command == "apply":
+            print(json.dumps(apply_deployment(args), sort_keys=True))
+            return 0
+        if args.command == "rollback":
+            print(json.dumps(rollback_deployment(args), sort_keys=True))
+            return 0
+        raise RuntimeError(f"unsupported command: {args.command}")
+    except (OSError, RuntimeError, sqlite3.Error, json.JSONDecodeError) as error:
+        print(f"runtime deployment failed: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

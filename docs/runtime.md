@@ -90,7 +90,7 @@ This loop does not redispatch ambiguous work or retry failed commands. It only c
 
 `ordivon-runtime-doctor inspect` remains read-only and reports invariant violations, recovery cases, state counts, capacity holders, Artifact volume, and whether the Runtime is `healthy` or needs `attention`. The summary explains current blocking facts; it does not invent a second control plane.
 
-`ordivon-runtime-reclaim inspect` validates the Registry capabilities it actually reads instead of copying a migration-version ceiling. It may measure logical Workspace bytes and classify active, dirty, stale, orphan-directory, and closable cases. It never deletes a Workspace. `workspace.close` remains the only physical release path, preserving dirty-state checks, active-Job exclusion, rescue refs, tombstones, and idempotent retries.
+`ordivon-runtime-reclaim inspect` validates the Registry capabilities it actually reads instead of copying a migration-version ceiling. It may measure logical Workspace bytes and classify active, dirty, stale, orphan-directory, and closable cases. `ordivon-runtime-reclaim apply` can archive and delete sufficiently old `stale_record` identities and can release sufficiently old `closable` Workspaces only through `workspace.close`. Active, dirty, unknown, and orphan-directory cases are never automatic. The policy executor is locked, age-bounded, explicitly confirmed, and receipted; scheduling remains separate user policy. `workspace.close` remains the only physical Workspace release path, preserving dirty-state checks, active-Job exclusion, rescue refs, tombstones, and idempotent retries. Deployment and rollback contracts are documented in [`operations.md`](operations.md).
 
 ## Completion and experience semantics
 
