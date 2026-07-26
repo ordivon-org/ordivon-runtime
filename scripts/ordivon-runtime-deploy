@@ -249,6 +249,11 @@ def prepare_candidate(args: argparse.Namespace) -> dict[str, object]:
         ],
         cwd=args.source_repo,
     )
+    post_build_status = git_text(
+        Path("/usr/bin/git"), args.source_repo, ["status", "--porcelain"]
+    )
+    if post_build_status:
+        raise RuntimeError("candidate build changed the source repository")
     candidate = [binary_description(args.candidate_dir / name, name) for name in names]
     manifest = {
         "schemaVersion": SCHEMA_VERSION,
@@ -272,6 +277,8 @@ def validate_candidate_manifest(
         blockers.append("candidate manifest schemaVersion is unsupported")
     if manifest.get("commit") != args.commit:
         blockers.append("candidate manifest commit does not match requested commit")
+    if Path(str(manifest.get("sourceRepo"))).resolve() != args.source_repo.resolve():
+        blockers.append("candidate manifest source repository does not match source-repo")
     if Path(str(manifest.get("candidateDir"))).resolve() != args.candidate_dir.resolve():
         blockers.append("candidate manifest directory does not match candidate-dir")
     manifest_by_name = {

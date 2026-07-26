@@ -4,9 +4,10 @@ Operational tools are narrow wrappers around existing truth owners. They do not 
 
 ## Local deployment
 
-`scripts/ordivon-runtime-deploy` replaces the ad hoc deployment shell used during development. It has three commands:
+`scripts/ordivon-runtime-deploy` replaces the ad hoc deployment shell used during development. It has four commands:
 
 ```text
+prepare   build one exact clean Commit and write a digest-bound candidate manifest
 plan      read-only eligibility and digest report
 apply     lock, retain previous binaries, install, restart, probe, receipt
 rollback  restore the exact previous binaries from one receipt
@@ -15,11 +16,12 @@ rollback  restore the exact previous binaries from one receipt
 A normal production deployment is:
 
 ```bash
-commit=$(git rev-parse HEAD)
-manifest="$PWD/target/release/ordivon-deployment-manifest.json"
+repo=$(git rev-parse --show-toplevel)
+commit=$(git -C "$repo" rev-parse HEAD)
+manifest="$repo/target/release/ordivon-deployment-manifest.json"
 
 scripts/ordivon-runtime-deploy prepare \
-  --source-repo "$PWD" \
+  --source-repo "$repo" \
   --commit "$commit" \
   --candidate-dir "$repo/target/release" \
   --candidate-manifest "$manifest" \
@@ -54,11 +56,13 @@ Eligibility requires:
 
 - the source repository `HEAD` and `origin/main` equal the exact requested commit;
 - the source repository is clean;
-- the candidate directory is inside the exact verified source worktree, and every candidate and currently installed binary is a regular executable file;
+- `prepare` proves the source is clean both before and after the build;
+- the candidate manifest binds the exact source repository, Commit, candidate directory, binary set, sizes, and digests;
+- every candidate and currently installed binary is a regular executable file;
 - no active or held Job exists, except the deployment Job itself when the tool can prove its own Attempt identity from cgroup and Registry state;
 - the confirmation commit exactly matches the requested commit.
 
-The tool stages `.next` files, retains both receipt-local previous binaries and installed `.previous` binaries, restarts the service, waits for `active`, initializes MCP, verifies the tool catalog, and records candidate and installed digests. A failed service or MCP probe automatically restores the receipt-local previous binaries. There is no general active-Job override in the normal deployment contract.
+The tool stages `.next` files, retains both receipt-local previous binaries and installed `.previous` binaries, stops admission, rechecks that no other active or held Job appeared, installs the candidate, waits for `active`, initializes MCP, verifies the tool catalog, and records candidate and installed digests. A failed service or MCP probe automatically restores the receipt-local previous binaries. There is no general active-Job override in the normal deployment contract.
 
 Rollback is explicit and receipt-bound:
 

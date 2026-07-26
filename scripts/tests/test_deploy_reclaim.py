@@ -134,7 +134,11 @@ def write_executable(path: Path, content: str) -> None:
 
 
 def write_candidate_manifest(
-    path: Path, candidate: Path, commit: str, names: tuple[str, ...]
+    path: Path,
+    candidate: Path,
+    commit: str,
+    names: tuple[str, ...],
+    source_repo: Path,
 ) -> None:
     binaries = []
     for name in names:
@@ -152,7 +156,7 @@ def write_candidate_manifest(
             {
                 "schemaVersion": 1,
                 "commit": commit,
-                "sourceRepo": "/test/source",
+                "sourceRepo": str(source_repo.resolve()),
                 "candidateDir": str(candidate.resolve()),
                 "builtAtMs": 1,
                 "cargo": "/test/cargo",
@@ -228,6 +232,53 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual(report["commit"], commit)
             self.assertEqual(report["binaries"][0]["name"], "runtime")
             self.assertEqual(json.loads(manifest.read_text())["commit"], commit)
+
+    def test_deploy_prepare_rejects_build_that_changes_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            commit = initialize_git_repository(repo, remote=False)
+            candidate = root / "target/release"
+            manifest = root / "candidate-manifest.json"
+            cargo = root / "cargo"
+            write_executable(
+                cargo,
+                "#!/bin/sh\n"
+                "target=''\n"
+                "while [ $# -gt 0 ]; do\n"
+                "  if [ \"$1\" = --target-dir ]; then target=$2; shift 2; else shift; fi\n"
+                "done\n"
+                "mkdir -p \"$target/release\"\n"
+                "printf 'built\n' > \"$target/release/runtime\"\n"
+                "chmod 755 \"$target/release/runtime\"\n"
+                "printf 'changed\n' > README.md\n",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-deploy",
+                    "prepare",
+                    "--source-repo",
+                    str(repo),
+                    "--commit",
+                    commit,
+                    "--candidate-dir",
+                    str(candidate),
+                    "--candidate-manifest",
+                    str(manifest),
+                    "--cargo",
+                    str(cargo),
+                    "--binary",
+                    "runtime",
+                ],
+                cwd=REPO,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("build changed the source repository", result.stderr)
+            self.assertFalse(manifest.exists())
 
     def test_reclaim_missing_workspace_with_active_job_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -444,6 +495,66 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual(report["actions"][0]["action"], "workspace_closed")
             self.assertFalse(workspace.exists())
 
+    def test_deploy_plan_rejects_candidate_manifest_source_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            other_repo = root / "other-repo"
+            commit = initialize_git_repository(repo, remote=True)
+            initialize_git_repository(other_repo, remote=False)
+            candidate = root / "candidate"
+            install = root / "install"
+            candidate.mkdir()
+            install.mkdir()
+            write_executable(candidate / "runtime", "candidate\n")
+            write_executable(install / "runtime", "old\n")
+            manifest = root / "candidate-manifest.json"
+            write_candidate_manifest(manifest, candidate, commit, ("runtime",), other_repo)
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            env_file = root / "runtime.env"
+            env_file.write_text(
+                "ORDIVON_BIND=127.0.0.1:1\nORDIVON_BEARER_TOKEN=test\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-deploy",
+                    "plan",
+                    "--source-repo",
+                    str(repo),
+                    "--commit",
+                    commit,
+                    "--candidate-dir",
+                    str(candidate),
+                    "--candidate-manifest",
+                    str(manifest),
+                    "--install-dir",
+                    str(install),
+                    "--database",
+                    str(database),
+                    "--env-file",
+                    str(env_file),
+                    "--receipt-root",
+                    str(root / "receipts"),
+                    "--git",
+                    shutil.which("git") or "/usr/bin/git",
+                    "--binary",
+                    "runtime",
+                ],
+                cwd=REPO,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 2)
+            plan = json.loads(result.stdout)
+            self.assertIn(
+                "candidate manifest source repository does not match source-repo",
+                plan["blockers"],
+            )
+
     def test_deploy_plan_rejects_candidate_manifest_digest_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -456,7 +567,7 @@ class DeployReclaimTests(unittest.TestCase):
             write_executable(candidate / "runtime", "manifest-version\n")
             write_executable(install / "runtime", "old\n")
             manifest = root / "candidate-manifest.json"
-            write_candidate_manifest(manifest, candidate, commit, ("runtime",))
+            write_candidate_manifest(manifest, candidate, commit, ("runtime",), repo)
             write_executable(candidate / "runtime", "changed-after-manifest\n")
             database = root / "registry.sqlite3"
             initialize_registry(database)
@@ -517,7 +628,7 @@ class DeployReclaimTests(unittest.TestCase):
                 write_executable(candidate / name, f"new-{name}\n")
                 write_executable(install / name, f"old-{name}\n")
             manifest = root / "candidate-manifest.json"
-            write_candidate_manifest(manifest, candidate, commit, ("runtime", "runner"))
+            write_candidate_manifest(manifest, candidate, commit, ("runtime", "runner"), repo)
             database = root / "registry.sqlite3"
             initialize_registry(database)
             systemctl = fake_systemctl(root)
@@ -621,7 +732,7 @@ class DeployReclaimTests(unittest.TestCase):
             write_executable(candidate / "runtime", "new\n")
             write_executable(install / "runtime", "old\n")
             manifest = root / "candidate-manifest.json"
-            write_candidate_manifest(manifest, candidate, commit, ("runtime",))
+            write_candidate_manifest(manifest, candidate, commit, ("runtime",), repo)
             database = root / "registry.sqlite3"
             initialize_registry(database)
             systemctl = fake_systemctl(root)
@@ -717,7 +828,7 @@ class DeployReclaimTests(unittest.TestCase):
             write_executable(candidate / "runtime", "new\n")
             write_executable(install / "runtime", "old\n")
             manifest = root / "candidate-manifest.json"
-            write_candidate_manifest(manifest, candidate, commit, ("runtime",))
+            write_candidate_manifest(manifest, candidate, commit, ("runtime",), repo)
             database = root / "registry.sqlite3"
             initialize_registry(database)
             systemctl = fake_systemctl(root)
