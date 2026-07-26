@@ -71,8 +71,8 @@
       "instruction": "Restore conflict detection when one principal reuses a clientRequestId for a different operation request.",
       "kind": "regression",
       "mutation": {
-        "after": "        if false && job_request_identity_digest(&job)? != request_identity_digest {\n            return Err(idempotency_conflict());\n        }",
-        "before": "        if job_request_identity_digest(&job)? != request_identity_digest {\n            return Err(idempotency_conflict());\n        }",
+        "after": "            if false && !matches {\n                return Err(idempotency_conflict());\n            }",
+        "before": "            if !matches {\n                return Err(idempotency_conflict());\n            }",
         "path": "crates/ordivon-runtime-core/src/runtime/registry.rs"
       }
     },
