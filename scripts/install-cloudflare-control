@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ZONE="${ORDIVON_CLOUDFLARE_ZONE:-ordivon.com}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="${SCRIPT_DIR}/ordivon_cloudflare.py"
+
+if [[ ! -f "${SOURCE}" ]]; then
+  printf 'Missing source CLI: %s\n' "${SOURCE}" >&2
+  exit 1
+fi
+
+if [[ "${EUID}" -eq 0 ]]; then
+  BIN_DIR="/usr/local/bin"
+else
+  BIN_DIR="${HOME}/.local/bin"
+fi
+
+mkdir -p "${BIN_DIR}"
+install -m 0755 "${SOURCE}" "${BIN_DIR}/ordivon-cloudflare"
+
+printf 'Installed: %s\n' "${BIN_DIR}/ordivon-cloudflare"
+if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
+  printf 'Note: add %s to PATH.\n' "${BIN_DIR}"
+fi
+
+exec "${BIN_DIR}/ordivon-cloudflare" setup --zone "${ZONE}" "$@"
