@@ -156,6 +156,10 @@ impl RuntimeServer {
             tool_router: Self::tool_router(),
         })
     }
+
+    pub fn runtime_handle(&self) -> Runtime {
+        self.state.runtime.clone()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]

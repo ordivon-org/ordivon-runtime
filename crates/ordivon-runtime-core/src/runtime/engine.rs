@@ -44,6 +44,22 @@ const CANCEL_FILE: &str = "cancel-requested.json";
 const CONTROL_RESULT_FILE: &str = "control-result.json";
 const ORPHAN_REMEDIATION_FILE: &str = "orphan-remediation.json";
 const INTERACTIVE_RECONCILIATION_LIMIT: u32 = 32;
+const ADAPTIVE_POLL_DELAYS_MS: [u64; 5] = [2, 5, 10, 20, 50];
+
+fn adaptive_poll_delay(poll_index: usize) -> Duration {
+    Duration::from_millis(
+        ADAPTIVE_POLL_DELAYS_MS[poll_index.min(ADAPTIVE_POLL_DELAYS_MS.len() - 1)],
+    )
+}
+
+fn sleep_until_poll(deadline: Instant, poll_index: &mut usize) {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return;
+    }
+    thread::sleep(adaptive_poll_delay(*poll_index).min(remaining));
+    *poll_index = poll_index.saturating_add(1);
+}
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -476,6 +492,7 @@ impl Runtime {
 
     fn await_launch_evidence(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
         let deadline = Instant::now() + Duration::from_millis(self.startup_grace_ms);
+        let mut poll_index = 0;
         loop {
             if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
                 return self.reconcile_runner_result(attempt);
@@ -506,7 +523,7 @@ impl Runtime {
             if Instant::now() >= deadline {
                 break;
             }
-            thread::sleep(Duration::from_millis(20));
+            sleep_until_poll(deadline, &mut poll_index);
         }
         self.reconcile_attempt(&attempt.attempt_id)
     }
@@ -651,6 +668,7 @@ impl Runtime {
     pub fn observe_task(&self, request: &TaskObserveRequest) -> RuntimeResult<TaskObservation> {
         validate_observe_request(request)?;
         let deadline = Instant::now() + Duration::from_millis(request.wait_ms);
+        let mut poll_index = 0;
         loop {
             self.reconcile_job(&request.job_id)?;
             let snapshot = self.registry.job_snapshot(&request.job_id)?;
@@ -660,7 +678,7 @@ impl Runtime {
             {
                 return self.observation_from_snapshot(snapshot, request);
             }
-            thread::sleep(Duration::from_millis(50));
+            sleep_until_poll(deadline, &mut poll_index);
         }
     }
 
@@ -1380,6 +1398,7 @@ impl Runtime {
             .output()
             .map_err(|error| tool_error("cannot execute systemctl stop", error))?;
         let deadline = Instant::now() + Duration::from_secs(3);
+        let mut poll_index = 0;
         loop {
             if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
                 return self.commit_runner_result(&attempt);
@@ -1404,7 +1423,7 @@ impl Runtime {
             if Instant::now() >= deadline {
                 break;
             }
-            thread::sleep(Duration::from_millis(50));
+            sleep_until_poll(deadline, &mut poll_index);
         }
         self.reconcile_attempt(&attempt.attempt_id)?;
         self.observation_from_registry(&request.job_id, 4096, 4096)
@@ -2391,6 +2410,14 @@ mod trusted_systemd_command_tests {
         let error = validate_run_request(&request, 1_024).unwrap_err();
         assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
         assert_eq!(error.field.as_deref(), Some("execution.stdoutLimitBytes"));
+    }
+
+    #[test]
+    fn adaptive_polling_starts_fast_and_caps_at_fifty_milliseconds() {
+        let observed = (0..8)
+            .map(|index| adaptive_poll_delay(index).as_millis())
+            .collect::<Vec<_>>();
+        assert_eq!(observed, vec![2, 5, 10, 20, 50, 50, 50, 50]);
     }
 
     #[test]

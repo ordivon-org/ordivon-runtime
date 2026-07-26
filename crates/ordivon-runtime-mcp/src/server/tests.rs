@@ -108,6 +108,14 @@ fn submit(
 }
 
 #[test]
+fn server_clones_share_one_runtime_state() {
+    let sandbox = Sandbox::new("shared-state");
+    let server = sandbox.server();
+    let cloned = server.clone();
+    assert!(Arc::ptr_eq(&server.state, &cloned.state));
+}
+
+#[test]
 fn server_identity_names_the_runtime_component() {
     let sandbox = Sandbox::new("identity");
     let info = serde_json::to_value(sandbox.server().get_info()).unwrap();
