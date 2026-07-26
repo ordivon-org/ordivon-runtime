@@ -49,7 +49,7 @@ pub use runtime::{
     RuntimeInvariantViolation, RuntimeJobInspection, RuntimeJobListCursor, RuntimeJobListRequest,
     RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary, RuntimeRepairAction,
     RuntimeRepairActionKind, RuntimeRepairConfig, RuntimeRepairReport, RuntimeRepairRequest,
-    RuntimeResult, RuntimeWorkspaceGetRequest, RuntimeWorkspaceListRequest,
+    RuntimeResult, RuntimeWorkspaceGetRequest, RuntimeWorkspaceIssue, RuntimeWorkspaceListRequest,
     RuntimeWorkspaceListResult, RuntimeWorkspaceSummary, SubmitRequest, TaskCancelRequest,
     TaskObservation, TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest, TerminalCommit,
     UniversalExecutionRequest, UniversalExecutionStep, DEFAULT_INSPECTION_EVENT_LIMIT,

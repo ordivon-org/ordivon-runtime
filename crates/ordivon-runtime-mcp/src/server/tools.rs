@@ -71,7 +71,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.list",
-        description = "List newest open Workspaces with exact source commits, dirty state, detached-head mode, and active Jobs. Closed Workspaces are omitted. This is the recovery entry point after Host reconnection.",
+        description = "List newest healthy open Workspaces with exact source commits, dirty state, detached-head mode, and active Jobs. Missing historical records are omitted; existing but unusable Workspaces are isolated in issues instead of failing the whole recovery list.",
         annotations(
             title = "List open workspaces",
             read_only_hint = true,

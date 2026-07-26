@@ -44,12 +44,12 @@ pub use types::{
     ReservationRecord, ReservationState, RunnerIdentity, RuntimeArtifactRecord,
     RuntimeExecutionPlan, RuntimeExecutionStep, RuntimeInvariantViolation, RuntimeJobListCursor,
     RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary,
-    RuntimeWorkspaceGetRequest, RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult,
-    RuntimeWorkspaceSummary, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
-    TaskObserveWaitUntil, TaskRunRequest, TerminalCommit, UniversalExecutionRequest,
-    UniversalExecutionStep, MAX_ARTIFACT_READ_BYTES, MAX_CPU_QUOTA_PERCENT, MAX_MEMORY_MAX_BYTES,
-    MAX_RUNTIME_LIST_LIMIT, MAX_TASKS_MAX, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
-    MIN_MEMORY_MAX_BYTES, RUNTIME_SCHEMA_VERSION,
+    RuntimeWorkspaceGetRequest, RuntimeWorkspaceIssue, RuntimeWorkspaceListRequest,
+    RuntimeWorkspaceListResult, RuntimeWorkspaceSummary, SubmitRequest, TaskCancelRequest,
+    TaskObservation, TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest, TerminalCommit,
+    UniversalExecutionRequest, UniversalExecutionStep, MAX_ARTIFACT_READ_BYTES,
+    MAX_CPU_QUOTA_PERCENT, MAX_MEMORY_MAX_BYTES, MAX_RUNTIME_LIST_LIMIT, MAX_TASKS_MAX,
+    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MIN_MEMORY_MAX_BYTES, RUNTIME_SCHEMA_VERSION,
 };
 
 #[cfg(test)]

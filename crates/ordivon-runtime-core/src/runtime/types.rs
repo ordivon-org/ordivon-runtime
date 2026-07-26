@@ -693,8 +693,19 @@ pub struct RuntimeWorkspaceSummary {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeWorkspaceIssue {
+    pub workspace_id: String,
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeWorkspaceListResult {
     pub workspaces: Vec<RuntimeWorkspaceSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<RuntimeWorkspaceIssue>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

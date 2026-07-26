@@ -20,10 +20,11 @@ use super::{
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, JobDesiredState,
     JobResolution, Registry, RegistryConfig, RunnerIdentity, RuntimeArtifactRecord, RuntimeError,
     RuntimeErrorCode, RuntimeExecutionPlan, RuntimeExecutionStep, RuntimeJobListRequest,
-    RuntimeJobListResult, RuntimeResult, RuntimeWorkspaceGetRequest, RuntimeWorkspaceListRequest,
-    RuntimeWorkspaceListResult, RuntimeWorkspaceSummary, SubmitRequest, TaskCancelRequest,
-    TaskObservation, TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest, TerminalCommit,
-    MAX_ARTIFACT_READ_BYTES, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
+    RuntimeJobListResult, RuntimeResult, RuntimeWorkspaceGetRequest, RuntimeWorkspaceIssue,
+    RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
+    SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskObserveWaitUntil,
+    TaskRunRequest, TerminalCommit, MAX_ARTIFACT_READ_BYTES, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
+    RUNTIME_SCHEMA_VERSION,
 };
 use crate::universal::{
     canonical_directory, create_git_workspace_compact, list_workspace_records,
@@ -250,17 +251,43 @@ impl Runtime {
         let records =
             list_workspace_records(&self.executor, request.limit).map_err(map_universal_error)?;
         let mut workspaces = Vec::with_capacity(records.len());
+        let mut issues = Vec::new();
         for record in records {
             let _ = self.reconcile_workspace(&record.workspace_id)?;
-            workspaces.push(self.workspace_summary(&record)?);
+            let active_job_ids = self
+                .registry
+                .active_job_ids_for_workspace(&record.workspace_id, 20)?;
+            match crate::universal::workspace_diff(
+                &self.executor,
+                &WorkspaceDiffRequest {
+                    schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                    workspace_id: record.workspace_id.clone(),
+                    max_bytes: 1,
+                },
+            ) {
+                Ok(diff) => workspaces.push(Self::workspace_summary_from_parts(
+                    &record,
+                    diff.byte_length > 0 || !diff.untracked_paths.is_empty(),
+                    active_job_ids,
+                )),
+                Err(error) => issues.push(RuntimeWorkspaceIssue {
+                    workspace_id: record.workspace_id,
+                    code: error.code.as_str().to_string(),
+                    message: error.message,
+                    retryable: error.retryable,
+                }),
+            }
         }
-        Ok(RuntimeWorkspaceListResult { workspaces })
+        Ok(RuntimeWorkspaceListResult { workspaces, issues })
     }
 
     fn workspace_summary(
         &self,
         record: &crate::universal::WorkspaceRecord,
     ) -> RuntimeResult<RuntimeWorkspaceSummary> {
+        let active_job_ids = self
+            .registry
+            .active_job_ids_for_workspace(&record.workspace_id, 20)?;
         let diff = crate::universal::workspace_diff(
             &self.executor,
             &WorkspaceDiffRequest {
@@ -270,17 +297,26 @@ impl Runtime {
             },
         )
         .map_err(map_universal_error)?;
-        let active_job_ids = self
-            .registry
-            .active_job_ids_for_workspace(&record.workspace_id, 20)?;
-        Ok(RuntimeWorkspaceSummary {
+        Ok(Self::workspace_summary_from_parts(
+            record,
+            diff.byte_length > 0 || !diff.untracked_paths.is_empty(),
+            active_job_ids,
+        ))
+    }
+
+    fn workspace_summary_from_parts(
+        record: &crate::universal::WorkspaceRecord,
+        dirty: bool,
+        active_job_ids: Vec<String>,
+    ) -> RuntimeWorkspaceSummary {
+        RuntimeWorkspaceSummary {
             workspace_id: record.workspace_id.clone(),
             source_revision: record.source_revision.clone(),
             created_at_ms: u64::try_from(record.created_unix_ms).unwrap_or(u64::MAX),
             head_mode: "detached".to_string(),
-            dirty: diff.byte_length > 0 || !diff.untracked_paths.is_empty(),
+            dirty,
             active_job_ids,
-        })
+        }
     }
 
     pub fn mutate_workspace(
