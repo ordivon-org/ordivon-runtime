@@ -26,6 +26,8 @@ This repository implements **Ordivon Runtime**, not the complete Ordivon system.
 
 Every persistent addition must solve an observed failure or repeatedly missing operation and state what existing path it replaces or extends. Effect semantics must be enforceable by a structured adapter; never trust a caller-declared effect class for arbitrary execution. Prefer mature host CLIs through `workspace.exec` over bespoke adapters, while treating arbitrary execution as opaque. Preserve unrelated user changes, use isolated Git Workspaces for substantial work, and keep one execution path.
 
+Prefer an absolute executable and explicit arguments. Use `bash -c` only for a genuine compound command; use `bash -lc` only when the task explicitly requires login-shell initialization. Group related micro-checks into one logical Job rather than paying one durable admission per shell fragment.
+
 Ordivon Runtime is trusted-local. Put untrusted code behind an external isolation boundary rather than adding a second policy or sandbox Runtime inside it.
 
 ## Verification

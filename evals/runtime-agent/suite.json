@@ -1,0 +1,193 @@
+{
+  "baseRevision": "HEAD",
+  "schemaVersion": 1,
+  "suiteId": "ordivon-runtime-agent-regression-v1",
+  "taskCount": 8,
+  "tasks": [
+    {
+      "grader": {
+        "argv": [
+          "cargo",
+          "test",
+          "-p",
+          "ordivon-runtime-core",
+          "--no-default-features",
+          "--features",
+          "universal-executor",
+          "existing_mutation_requires_digest_before_exact_text_match",
+          "--",
+          "--nocapture"
+        ],
+        "timeoutSeconds": 180
+      },
+      "id": "digest-bound-mutation",
+      "instruction": "Restore the requirement that modifying an existing Workspace file must provide its current digest before any write is accepted.",
+      "kind": "regression",
+      "mutation": {
+        "after": "if false && mutation.expected_digest.is_none() && before_digest.is_some() {",
+        "before": "if mutation.expected_digest.is_none() && before_digest.is_some() {",
+        "path": "crates/ordivon-runtime-core/src/universal/mutation.rs"
+      }
+    },
+    {
+      "grader": {
+        "argv": [
+          "cargo",
+          "test",
+          "-p",
+          "ordivon-runtime-core",
+          "--no-default-features",
+          "--features",
+          "universal-executor",
+          "runner_rejects_workspace_source_drift_before_spawning_target",
+          "--",
+          "--nocapture"
+        ],
+        "timeoutSeconds": 180
+      },
+      "id": "source-drift-rejection",
+      "instruction": "Restore the Runner pre-spawn world check so a changed Workspace source digest prevents the target process from starting.",
+      "kind": "regression",
+      "mutation": {
+        "after": "        (Some(_), Some(_)) => Ok(()),",
+        "before": "        (Some(_), Some(_)) => Err(UniversalExecError::new(\n            UniversalExecErrorCode::WorkspaceStateMismatch,\n            \"Workspace source state changed after operation admission\",\n            Some(\"workspaceSourceDigest\"),\n            false,\n        )),",
+        "path": "crates/ordivon-runtime-core/src/universal/runner.rs"
+      }
+    },
+    {
+      "grader": {
+        "argv": [
+          "cargo",
+          "test",
+          "-p",
+          "ordivon-runtime-core",
+          "idempotent_replay_returns_one_job_and_conflict_rejects_change",
+          "--",
+          "--nocapture"
+        ],
+        "timeoutSeconds": 180
+      },
+      "id": "idempotency-conflict",
+      "instruction": "Restore conflict detection when one principal reuses a clientRequestId for a different operation request.",
+      "kind": "regression",
+      "mutation": {
+        "after": "        if false && job_request_identity_digest(&job)? != request_identity_digest {\n            return Err(idempotency_conflict());\n        }",
+        "before": "        if job_request_identity_digest(&job)? != request_identity_digest {\n            return Err(idempotency_conflict());\n        }",
+        "path": "crates/ordivon-runtime-core/src/runtime/registry.rs"
+      }
+    },
+    {
+      "grader": {
+        "argv": [
+          "cargo",
+          "test",
+          "-p",
+          "ordivon-runtime-core",
+          "cancel_before_dispatch_resolves_without_launch",
+          "--",
+          "--nocapture"
+        ],
+        "timeoutSeconds": 180
+      },
+      "id": "cancel-before-dispatch",
+      "instruction": "Restore atomic cancellation of an accepted Attempt so the Job resolves cancelled and its reservation is released without dispatch.",
+      "kind": "regression",
+      "mutation": {
+        "after": "        if false && attempt.state == AttemptState::Accepted {\n            let result_digest = sha256_bytes(",
+        "before": "        if attempt.state == AttemptState::Accepted {\n            let result_digest = sha256_bytes(",
+        "path": "crates/ordivon-runtime-core/src/runtime/registry.rs"
+      }
+    },
+    {
+      "grader": {
+        "argv": [
+          "cargo",
+          "test",
+          "-p",
+          "ordivon-runtime-core",
+          "terminal_commit_is_atomic_idempotent_and_releases_capacity",
+          "--",
+          "--nocapture"
+        ],
+        "timeoutSeconds": 180
+      },
+      "id": "terminal-releases-capacity",
+      "instruction": "Restore the rule that every non-orphan terminal Attempt releases its execution reservation atomically with terminal commit.",
+      "kind": "regression",
+      "mutation": {
+        "after": "if true || request.state == AttemptState::Orphaned {",
+        "before": "if request.state == AttemptState::Orphaned {",
+        "path": "crates/ordivon-runtime-core/src/runtime/registry.rs"
+      }
+    },
+    {
+      "grader": {
+        "argv": [
+          "cargo",
+          "test",
+          "-p",
+          "ordivon-runtime-core",
+          "workspace_execution_is_serialized_with_retry_guidance",
+          "--",
+          "--nocapture"
+        ],
+        "timeoutSeconds": 180
+      },
+      "id": "workspace-execution-serialization",
+      "instruction": "Restore the one-active-execution-per-Workspace admission invariant and its retryable workspace-scoped capacity error.",
+      "kind": "regression",
+      "mutation": {
+        "after": "if false && workspace_active >= WORKSPACE_EXECUTION_LIMIT {",
+        "before": "if workspace_active >= WORKSPACE_EXECUTION_LIMIT {",
+        "path": "crates/ordivon-runtime-core/src/runtime/registry.rs"
+      }
+    },
+    {
+      "grader": {
+        "argv": [
+          "cargo",
+          "test",
+          "-p",
+          "ordivon-runtime-core",
+          "runtime_startup_reclaims_absent_orphan_and_reopens_workspace_slot",
+          "--",
+          "--nocapture"
+        ],
+        "timeoutSeconds": 180
+      },
+      "id": "startup-orphan-recovery",
+      "instruction": "Restore bounded startup recovery of absent orphaned Attempts so stale capacity does not survive Runtime reconstruction.",
+      "kind": "regression",
+      "mutation": {
+        "after": "        if false {\n            runtime.reconcile_recoverable_orphans()?;\n        }\n        Ok(runtime)",
+        "before": "        runtime.reconcile_recoverable_orphans()?;\n        Ok(runtime)",
+        "path": "crates/ordivon-runtime-core/src/runtime/engine.rs"
+      }
+    },
+    {
+      "grader": {
+        "argv": [
+          "cargo",
+          "test",
+          "-p",
+          "ordivon-runtime-core",
+          "--no-default-features",
+          "--features",
+          "universal-executor",
+          "workspace_close_rejects_dirty_state_unless_force_is_explicit",
+          "--",
+          "--nocapture"
+        ],
+        "timeoutSeconds": 180
+      },
+      "id": "dirty-workspace-close",
+      "instruction": "Restore fail-closed Workspace removal: a dirty Workspace must be rejected unless force=true is explicit.",
+      "kind": "regression",
+      "mutation": {
+        "after": "    if false && !request.force {\n        let dirty = workspace_dirty_paths(&recorded)?;",
+        "before": "    if !request.force {\n        let dirty = workspace_dirty_paths(&recorded)?;",
+        "path": "crates/ordivon-runtime-core/src/universal/workspace.rs"
+      }
+    }
+  ]
+}

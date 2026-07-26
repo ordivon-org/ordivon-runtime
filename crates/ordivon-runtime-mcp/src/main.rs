@@ -12,7 +12,7 @@ use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use ordivon_runtime_core::{RegistryConfig, Runtime, RuntimeConfig, UniversalExecutorConfig};
+use ordivon_runtime_core::{RegistryConfig, RuntimeConfig, UniversalExecutorConfig};
 use ordivon_runtime_mcp::server::{ExecutionContext, RuntimeServer, ServerConfig};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -53,7 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = load_config()?;
     validate_loopback_bind(app.bind)?;
-    let startup_runtime = Runtime::new(app.server.runtime.clone())?;
+    let runtime_server = RuntimeServer::new(app.server.clone())
+        .map_err(|error| std::io::Error::other(error.message))?;
+    let startup_runtime = runtime_server.runtime_handle();
     let startup_reconciliation = startup_runtime.reconcile_all()?;
     if startup_reconciliation.failed > 0 {
         tracing::warn!(
@@ -88,13 +90,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(app.bind).await?;
     let address = listener.local_addr()?;
     let cancellation = CancellationToken::new();
-    let server_config = app.server.clone();
+    let service_server = runtime_server.clone();
     let service: StreamableHttpService<RuntimeServer, LocalSessionManager> =
         StreamableHttpService::new(
-            move || {
-                RuntimeServer::new(server_config.clone())
-                    .map_err(|error| std::io::Error::other(error.message))
-            },
+            move || Ok(service_server.clone()),
             Default::default(),
             transport_config(cancellation.child_token()),
         );
