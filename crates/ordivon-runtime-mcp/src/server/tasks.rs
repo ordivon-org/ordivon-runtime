@@ -31,16 +31,23 @@ impl ServerHandler for RuntimeServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CreateTaskResult, McpError> {
-        if request.name.as_ref() != "workspace.exec" {
-            return Err(McpError::invalid_params(
-                "only workspace.exec supports task-based invocation",
-                None,
-            ));
-        }
-        let mut run_request = self
-            .state
-            .execution
-            .bind(parse_workspace_exec(request.arguments)?);
+        let mut run_request = match request.name.as_ref() {
+            "workspace.exec" => self
+                .state
+                .execution
+                .bind(parse_workspace_exec(request.arguments)?),
+            "workspace.execPlan" => self
+                .state
+                .execution
+                .bind_plan(parse_workspace_exec_plan(request.arguments)?)
+                .map_err(mcp_error)?,
+            _ => {
+                return Err(McpError::invalid_params(
+                    "only workspace.exec and workspace.execPlan support task-based invocation",
+                    None,
+                ));
+            }
+        };
         run_request.wait_ms = 0;
         let runtime = self.state.runtime.clone();
         let observation = tokio::task::spawn_blocking(move || runtime.run_task(&run_request))
@@ -76,6 +83,7 @@ impl ServerHandler for RuntimeServer {
                 schema_version: ordivon_runtime_core::RUNTIME_SCHEMA_VERSION,
                 job_id,
                 wait_ms: 0,
+                wait_until: ordivon_runtime_core::TaskObserveWaitUntil::Terminal,
                 stdout_tail_bytes: 4096,
                 stderr_tail_bytes: 4096,
                 stdout_offset: None,
@@ -163,6 +171,7 @@ impl RuntimeServer {
                 schema_version: ordivon_runtime_core::RUNTIME_SCHEMA_VERSION,
                 job_id: job_id_owned.clone(),
                 wait_ms: 0,
+                wait_until: ordivon_runtime_core::TaskObserveWaitUntil::Terminal,
                 stdout_tail_bytes: 0,
                 stderr_tail_bytes: 0,
                 stdout_offset: None,
@@ -231,9 +240,16 @@ fn terminal_task_error(observation: &TaskObservation) -> ToolError {
             .error_summary
             .clone()
             .unwrap_or_else(|| default_message.to_string()),
-        field: Some("taskId".to_string()),
-        retryable: false,
-        retry_after_ms: None,
-        capacity: None,
+        context: Box::new(ToolErrorContext {
+            field: Some("taskId".to_string()),
+            origin: "runtime_core".to_string(),
+            retry_class: "never".to_string(),
+            commit_state: "committed".to_string(),
+            retryable: false,
+            retry_after_ms: None,
+            capacity: None,
+            trace_id: None,
+            operation_id: Some(observation.job_id.clone()),
+        }),
     }
 }

@@ -95,6 +95,7 @@ fn submit(
                 timeout_ms: 1000,
                 stdout_limit_bytes: 1024,
                 stderr_limit_bytes: 1024,
+                steps: Vec::new(),
                 budget: ordivon_runtime_core::ExecutionBudget::default(),
                 principal: "principal:mcp-test".to_string(),
             },
@@ -146,8 +147,12 @@ fn tool_catalog_uses_transactional_job_contract() {
             "workspace.close",
             "workspace.diff",
             "workspace.exec",
+            "workspace.execPlan",
+            "workspace.get",
+            "workspace.list",
             "workspace.mutate",
             "workspace.open",
+            "workspace.patch",
             "workspace.read",
         ]
     );
@@ -187,9 +192,14 @@ fn tool_catalog_uses_transactional_job_contract() {
             .and_then(|annotations| annotations.idempotent_hint),
         Some(false)
     );
+    let exec_plan = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "workspace.execPlan")
+        .unwrap();
+    assert_eq!(exec_plan.task_support(), TaskSupport::Optional);
     assert!(tools
         .iter()
-        .filter(|tool| tool.name.as_ref() != "workspace.exec")
+        .filter(|tool| !matches!(tool.name.as_ref(), "workspace.exec" | "workspace.execPlan"))
         .all(|tool| tool.task_support() == TaskSupport::Forbidden));
     let schema = serde_json::to_string(&exec.input_schema).unwrap();
     assert!(schema.contains("clientRequestId"));
@@ -322,6 +332,16 @@ fn task_observation_serializes_discoverable_artifacts() {
             truncated: false,
         }],
         poll_after_ms: None,
+        elapsed_ms: None,
+        last_output_at_ms: None,
+        progress_revision: None,
+        completed_steps: None,
+        total_steps: None,
+        current_step_id: None,
+        current_step_index: None,
+        current_step_elapsed_ms: None,
+        failed_step_id: None,
+        failed_step_index: None,
         error_summary: None,
     };
     let value = serde_json::to_value(observation).unwrap();
@@ -447,5 +467,116 @@ fn capacity_failure_preserves_retry_and_scope_metadata() {
     assert_eq!(
         value.pointer("/capacity/limit").and_then(Value::as_u64),
         Some(4)
+    );
+    assert_eq!(
+        value.pointer("/origin").and_then(Value::as_str),
+        Some("runtime_core")
+    );
+    assert_eq!(
+        value.pointer("/retryClass").and_then(Value::as_str),
+        Some("safe_same_request")
+    );
+    assert_eq!(
+        value.pointer("/commitState").and_then(Value::as_str),
+        Some("not_started")
+    );
+}
+
+#[test]
+fn unknown_dispatch_outcome_requires_reconciliation_before_retry() {
+    let error = RuntimeError::new(
+        ordivon_runtime_core::RuntimeErrorCode::DispatchOutcomeUnknown,
+        "launch response was lost after dispatch",
+        Some("clientRequestId"),
+        true,
+    );
+    let value = serde_json::to_value(ToolError::from(error)).unwrap();
+    assert_eq!(
+        value.pointer("/retryClass").and_then(Value::as_str),
+        Some("reconcile_first")
+    );
+    assert_eq!(
+        value.pointer("/commitState").and_then(Value::as_str),
+        Some("unknown")
+    );
+    assert_eq!(
+        value.pointer("/origin").and_then(Value::as_str),
+        Some("runtime_core")
+    );
+}
+
+#[test]
+fn workspace_open_schema_prefers_server_generated_handles() {
+    let sandbox = Sandbox::new("workspace-open-schema");
+    let server = sandbox.server();
+    let open = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .find(|tool| tool.name.as_ref() == "workspace.open")
+        .unwrap();
+    let schema = serde_json::to_value(&open.input_schema).unwrap();
+    let required = schema
+        .pointer("/required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(!required
+        .iter()
+        .any(|value| value.as_str() == Some("workspaceId")));
+    let bound = WorkspaceOpenRequest {
+        schema_version: 1,
+        workspace_id: None,
+        source_repo: "/tmp/repository".to_string(),
+        source_revision: "HEAD".to_string(),
+    }
+    .bind();
+    assert!(bound.workspace_id.starts_with("ws-"));
+    assert_eq!(bound.workspace_id.len(), 39);
+}
+
+#[test]
+fn typed_error_envelope_distinguishes_unknown_commit_state() {
+    let error = RuntimeError::new(
+        ordivon_runtime_core::RuntimeErrorCode::DispatchOutcomeUnknown,
+        "dispatch response was lost",
+        Some("operationId"),
+        true,
+    );
+    let value = serde_json::to_value(ToolError::from(error)).unwrap();
+    assert_eq!(
+        value.pointer("/origin").and_then(Value::as_str),
+        Some("runtime_core")
+    );
+    assert_eq!(
+        value.pointer("/retryClass").and_then(Value::as_str),
+        Some("reconcile_first")
+    );
+    assert_eq!(
+        value.pointer("/commitState").and_then(Value::as_str),
+        Some("unknown")
+    );
+    assert_eq!(
+        value.pointer("/retryable").and_then(Value::as_bool),
+        Some(true)
+    );
+}
+
+#[test]
+fn incomplete_workspace_rollback_requires_reconciliation() {
+    let error = UniversalExecError {
+        code: ordivon_runtime_core::UniversalExecErrorCode::WorkspaceMutationIncomplete,
+        message: "patch failed and rollback could not restore one file".to_string(),
+        field: Some("files".to_string()),
+        retryable: false,
+    };
+    let value = serde_json::to_value(ToolError::from(error)).unwrap();
+    assert_eq!(
+        value.pointer("/retryClass").and_then(Value::as_str),
+        Some("reconcile_first")
+    );
+    assert_eq!(
+        value.pointer("/commitState").and_then(Value::as_str),
+        Some("unknown")
     );
 }

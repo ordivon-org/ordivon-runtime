@@ -4,7 +4,7 @@ use super::*;
 impl RuntimeServer {
     #[tool(
         name = "workspace.open",
-        description = "Resolve a revision already present in the local source repository, create one detached Git workspace at that exact commit, and return the resolved commit SHA. This tool does not fetch or update remote refs and does not isolate host authority.",
+        description = "Resolve a local revision and create one detached Git Workspace. Omit workspaceId to receive a server-generated immutable ws-* handle; explicit IDs remain supported for compatibility. This tool does not fetch remote refs.",
         annotations(
             title = "Open isolated workspace",
             read_only_hint = false,
@@ -15,9 +15,10 @@ impl RuntimeServer {
     )]
     async fn workspace_open(
         &self,
-        Parameters(request): Parameters<GitWorkspaceCreateRequest>,
+        Parameters(request): Parameters<WorkspaceOpenRequest>,
     ) -> ToolOutcome<CompactWorkspaceOpenResult> {
         let runtime = self.state.runtime.clone();
+        let request = request.bind();
         self.run_core("workspace.open", move || {
             runtime.open_workspace(&request).map_err(ToolError::from)
         })
@@ -42,6 +43,50 @@ impl RuntimeServer {
         let runtime = self.state.runtime.clone();
         self.run_core("workspace.close", move || {
             runtime.close_workspace(&request).map_err(ToolError::from)
+        })
+        .await
+    }
+
+    #[tool(
+        name = "workspace.get",
+        description = "Return one Workspace's exact source commit, detached-head mode, dirty state, creation time, and active Job identities. Use this after reconnecting instead of reconstructing Workspace state from memory.",
+        annotations(
+            title = "Get workspace state",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_get(
+        &self,
+        Parameters(request): Parameters<RuntimeWorkspaceGetRequest>,
+    ) -> ToolOutcome<RuntimeWorkspaceSummary> {
+        let runtime = self.state.runtime.clone();
+        self.run_core("workspace.get", move || {
+            runtime.get_workspace(&request).map_err(ToolError::from)
+        })
+        .await
+    }
+
+    #[tool(
+        name = "workspace.list",
+        description = "List newest open Workspaces with exact source commits, dirty state, detached-head mode, and active Jobs. Closed Workspaces are omitted. This is the recovery entry point after Host reconnection.",
+        annotations(
+            title = "List open workspaces",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_list(
+        &self,
+        Parameters(request): Parameters<RuntimeWorkspaceListRequest>,
+    ) -> ToolOutcome<RuntimeWorkspaceListResult> {
+        let runtime = self.state.runtime.clone();
+        self.run_core("workspace.list", move || {
+            runtime.list_workspaces(&request).map_err(ToolError::from)
         })
         .await
     }
@@ -133,6 +178,28 @@ impl RuntimeServer {
     }
 
     #[tool(
+        name = "workspace.patch",
+        description = "Apply one atomic digest-guarded multi-file text patch. Every edit uses an exact one-based line, zero-based Unicode column range plus expectedText. All files are validated before any write, conflicts write nothing, and the result includes the final bounded diff.",
+        annotations(
+            title = "Patch workspace files",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_patch(
+        &self,
+        Parameters(request): Parameters<WorkspacePatchRequest>,
+    ) -> ToolOutcome<WorkspacePatchResult> {
+        let runtime = self.state.runtime.clone();
+        self.run_core("workspace.patch", move || {
+            runtime.patch_workspace(&request).map_err(ToolError::from)
+        })
+        .await
+    }
+
+    #[tool(
         name = "workspace.diff",
         description = "Return a bounded compact Git diff and untracked paths for an isolated workspace.",
         annotations(
@@ -181,6 +248,33 @@ impl RuntimeServer {
         let runtime = self.state.runtime.clone();
         let request = self.state.execution.bind(request);
         self.run_core("workspace.exec", move || {
+            runtime.run_task(&request).map_err(ToolError::from)
+        })
+        .await
+    }
+
+    #[tool(
+        name = "workspace.execPlan",
+        description = "Run an ordered structured execution plan inside one Workspace. Steps use absolute executables and explicit args, run sequentially, stop on the first failure by default, and continue only when that step explicitly sets continueOnError. The Job exposes current and failed step progress without parsing shell text.",
+        execution(task_support = "optional"),
+        annotations(
+            title = "Execute fail-fast workspace plan",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_exec_plan(
+        &self,
+        Parameters(request): Parameters<WorkspaceExecPlanRequest>,
+    ) -> ToolOutcome<TaskObservation> {
+        let runtime = self.state.runtime.clone();
+        let request = match self.state.execution.bind_plan(request) {
+            Ok(request) => request,
+            Err(error) => return ToolOutcome::Error(error),
+        };
+        self.run_core("workspace.execPlan", move || {
             runtime.run_task(&request).map_err(ToolError::from)
         })
         .await

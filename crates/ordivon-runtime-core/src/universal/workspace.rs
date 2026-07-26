@@ -242,6 +242,44 @@ fn validate_closed_identity(
     Ok(())
 }
 
+pub fn list_workspace_records(
+    config: &UniversalExecutorConfig,
+    limit: u32,
+) -> Result<Vec<WorkspaceRecord>, UniversalExecError> {
+    config.ensure_store()?;
+    if limit == 0 || limit > 100 {
+        return Err(invalid("limit must be in 1..=100", "limit"));
+    }
+    let records_root = config.workspace_records_root();
+    let mut records = Vec::new();
+    for entry in
+        fs::read_dir(&records_root).map_err(|error| io_error(&records_root, "list", error))?
+    {
+        let entry =
+            entry.map_err(|error| io_error(&records_root, "read directory entry", error))?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(workspace_id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        match load_workspace_record(config, workspace_id) {
+            Ok(record) => records.push(record),
+            Err(error) if error.code == UniversalExecErrorCode::WorkspaceNotFound => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    records.sort_by(|left, right| {
+        right
+            .created_unix_ms
+            .cmp(&left.created_unix_ms)
+            .then_with(|| left.workspace_id.cmp(&right.workspace_id))
+    });
+    records.truncate(limit as usize);
+    Ok(records)
+}
+
 pub fn read_workspace_text(
     config: &UniversalExecutorConfig,
     request: &WorkspaceReadRequest,
@@ -348,7 +386,7 @@ pub fn workspace_diff(
     let output = Command::new("git")
         .arg("-C")
         .arg(workspace)
-        .args(["diff", "--no-ext-diff", "--no-color", "--binary"])
+        .args(["diff", "HEAD", "--no-ext-diff", "--no-color", "--binary"])
         .output()
         .map_err(|error| tool_unavailable("git diff", error))?;
     if !output.status.success() {
@@ -405,6 +443,76 @@ pub fn workspace_diff(
         truncated: retained < total,
         untracked_paths,
     })
+}
+
+pub(crate) fn workspace_diff_paths(
+    config: &UniversalExecutorConfig,
+    workspace_id: &str,
+    relative_paths: &[&str],
+    max_bytes: u64,
+) -> Result<(String, bool), UniversalExecError> {
+    let record = load_workspace_record(config, workspace_id)?;
+    let workspace = Path::new(&record.workspace_path);
+    let mut combined = Vec::new();
+    for relative_path in relative_paths {
+        let tracked = Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(["ls-files", "--error-unmatch", "--"])
+            .arg(relative_path)
+            .output()
+            .map_err(|error| tool_unavailable("git ls-files", error))?;
+        let output = if tracked.status.success() {
+            Command::new("git")
+                .arg("-C")
+                .arg(workspace)
+                .args([
+                    "diff",
+                    "HEAD",
+                    "--no-ext-diff",
+                    "--no-color",
+                    "--binary",
+                    "--",
+                ])
+                .arg(relative_path)
+                .output()
+                .map_err(|error| tool_unavailable("git diff", error))?
+        } else {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(workspace)
+                .args([
+                    "diff",
+                    "--no-index",
+                    "--no-color",
+                    "--binary",
+                    "--",
+                    "/dev/null",
+                ])
+                .arg(relative_path)
+                .output()
+                .map_err(|error| tool_unavailable("git diff --no-index", error))?;
+            if !output.status.success() && output.status.code() != Some(1) {
+                return Err(tool_failed("git diff --no-index", &output.stderr));
+            }
+            output
+        };
+        if tracked.status.success() && !output.status.success() {
+            return Err(tool_failed("git diff", &output.stderr));
+        }
+        combined.extend_from_slice(&output.stdout);
+    }
+    let total = combined.len();
+    let retained = total.min(max_bytes as usize);
+    let diff = String::from_utf8(combined[..retained].to_vec()).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::ArtifactNotUtf8,
+            format!("git diff output is not UTF-8: {error}"),
+            None,
+            false,
+        )
+    })?;
+    Ok((diff, retained < total))
 }
 
 #[cfg(any(feature = "transactional-runtime", test))]

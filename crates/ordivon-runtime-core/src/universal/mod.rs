@@ -2,6 +2,7 @@ mod config;
 mod error;
 mod fsutil;
 mod mutation;
+mod patch;
 mod projection;
 mod runner;
 mod types;
@@ -15,6 +16,7 @@ pub use config::{
 };
 pub use error::{UniversalExecError, UniversalExecErrorCode};
 pub use mutation::{mutate_workspace, read_workspace_slice};
+pub use patch::patch_workspace;
 pub use projection::{
     create_git_workspace_compact, read_workspace_slice_compact, read_workspace_text_compact,
     workspace_diff_compact,
@@ -23,16 +25,19 @@ pub use runner::run_task_runner;
 pub use types::{
     CompactWorkspaceDiffResult, CompactWorkspaceOpenResult, CompactWorkspaceReadResult,
     CompactWorkspaceSliceResult, GitWorkspaceCreateRequest, WorkspaceCloseRequest,
-    WorkspaceCloseResult, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceMutateRequest,
-    WorkspaceMutateResult, WorkspaceMutation, WorkspaceMutationMode, WorkspaceMutationResult,
+    WorkspaceCloseResult, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceFilePatch,
+    WorkspaceMutateRequest, WorkspaceMutateResult, WorkspaceMutation, WorkspaceMutationMode,
+    WorkspaceMutationResult, WorkspacePatchRequest, WorkspacePatchResult, WorkspacePatchedFile,
     WorkspaceReadRequest, WorkspaceReadResult, WorkspaceReadSliceRequest, WorkspaceReadSliceResult,
-    WorkspaceRecord, WorkspaceWriteRequest, WorkspaceWriteResult,
+    WorkspaceRecord, WorkspaceTextEdit, WorkspaceTextPosition, WorkspaceTextRange,
+    WorkspaceWriteRequest, WorkspaceWriteResult, MAX_WORKSPACE_PATCH_EDITS_PER_FILE,
+    MAX_WORKSPACE_PATCH_FILES,
 };
 #[cfg(any(feature = "transactional-runtime", test))]
 pub use workspace::workspace_source_state_digest;
 pub use workspace::{
-    create_git_workspace, load_workspace_record, read_workspace_text, remove_git_workspace,
-    workspace_diff, write_workspace_text,
+    create_git_workspace, list_workspace_records, load_workspace_record, read_workspace_text,
+    remove_git_workspace, workspace_diff, write_workspace_text,
 };
 
 pub(crate) use config::canonical_directory;
@@ -41,14 +46,14 @@ pub(crate) use fsutil::{
     validate_id, validate_relative_path, write_bytes_atomic, write_json_atomic,
 };
 pub(crate) use types::{
-    CapturedOutput, RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskRequest, RunnerTaskResult,
-    TaskTerminalStatus,
+    CapturedOutput, RunnerExecutionStep, RunnerPayloadConfig, RunnerStartEvidence,
+    RunnerStepResult, RunnerTaskProgress, RunnerTaskRequest, RunnerTaskResult, TaskTerminalStatus,
 };
 #[cfg(feature = "transactional-runtime")]
 pub(crate) use workspace::resolve_workspace_cwd;
 pub(crate) use workspace::{
     preflight_workspace_write_path, remove_workspace_file, resolve_existing_workspace_path,
-    workspace_source_state_digest_at,
+    workspace_diff_paths, workspace_source_state_digest_at,
 };
 
 #[cfg(test)]

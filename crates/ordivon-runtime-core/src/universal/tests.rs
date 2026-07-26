@@ -163,6 +163,41 @@ fn workspace_round_trip_is_isolated_and_digest_guarded() {
 }
 
 #[test]
+fn workspace_diff_includes_staged_changes_and_workspace_listing_recovers_open_handles() {
+    let sandbox = Sandbox::new("workspace-list");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-list";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    fs::write(workspace.join("README.md"), "staged\n").unwrap();
+    run_git(&workspace, ["add", "README.md"]);
+    let diff = workspace_diff(
+        &config,
+        &WorkspaceDiffRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            max_bytes: 4096,
+        },
+    )
+    .unwrap();
+    assert!(diff.diff.contains("+staged"));
+    let listed = list_workspace_records(&config, 10).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].workspace_id, workspace_id);
+}
+
+#[test]
 fn workspace_source_state_digest_tracks_source_but_ignores_ignored_cache() {
     let sandbox = Sandbox::new("source-state");
     let source = sandbox.root.join("source");
@@ -313,6 +348,7 @@ fn runner_rejects_workspace_source_drift_before_spawning_target() {
         args: vec!["effect.py".to_string()],
         cwd: workspace.to_string_lossy().into_owned(),
         env: BTreeMap::new(),
+        steps: Vec::new(),
         timeout_ms: 2_000,
         stdout_limit_bytes: 1_024,
         stderr_limit_bytes: 1_024,
@@ -930,6 +966,7 @@ fn runner_executes_model_authored_script_and_bounds_output() {
         args: vec!["tool.py".to_string()],
         cwd: workspace.to_string_lossy().into_owned(),
         env: BTreeMap::new(),
+        steps: Vec::new(),
         timeout_ms: 2000,
         stdout_limit_bytes: 8,
         stderr_limit_bytes: 9,
@@ -980,6 +1017,7 @@ fn runner_timeout_is_a_durable_failed_result() {
         args: vec!["tool.py".to_string()],
         cwd: workspace.to_string_lossy().into_owned(),
         env: BTreeMap::new(),
+        steps: Vec::new(),
         timeout_ms: 50,
         stdout_limit_bytes: 1024,
         stderr_limit_bytes: 1024,
@@ -1156,4 +1194,130 @@ fn run_git<'a>(path: &Path, args: impl IntoIterator<Item = &'a str>) {
 
 fn real_executable(path: &str) -> PathBuf {
     fs::canonicalize(path).unwrap()
+}
+
+#[test]
+fn workspace_patch_is_multi_file_multi_hunk_and_preflights_atomically() {
+    let sandbox = Sandbox::new("patch-transaction");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-patch-transaction";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let read = read_workspace_text(
+        &config,
+        &WorkspaceReadRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            relative_path: "README.md".to_string(),
+            max_bytes: 1024,
+        },
+    )
+    .unwrap();
+
+    let conflict = WorkspacePatchRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        workspace_id: workspace_id.to_string(),
+        files: vec![
+            WorkspaceFilePatch {
+                relative_path: "README.md".to_string(),
+                expected_digest: Some(read.digest.clone()),
+                edits: vec![WorkspaceTextEdit {
+                    range: WorkspaceTextRange {
+                        start: WorkspaceTextPosition { line: 1, column: 0 },
+                        end: WorkspaceTextPosition { line: 1, column: 4 },
+                    },
+                    expected_text: "base".to_string(),
+                    replacement: "core".to_string(),
+                }],
+            },
+            WorkspaceFilePatch {
+                relative_path: "new.txt".to_string(),
+                expected_digest: None,
+                edits: vec![WorkspaceTextEdit {
+                    range: WorkspaceTextRange {
+                        start: WorkspaceTextPosition { line: 1, column: 0 },
+                        end: WorkspaceTextPosition { line: 1, column: 0 },
+                    },
+                    expected_text: "not-empty".to_string(),
+                    replacement: "created\n".to_string(),
+                }],
+            },
+        ],
+        max_diff_bytes: 16 * 1024,
+    };
+    let error = patch_workspace(&config, &conflict).unwrap_err();
+    assert_eq!(error.code, UniversalExecErrorCode::RevisionMismatch);
+    assert_eq!(
+        fs::read_to_string(config.workspace_path(workspace_id).join("README.md")).unwrap(),
+        "baseline\n"
+    );
+    assert!(!config.workspace_path(workspace_id).join("new.txt").exists());
+
+    let patched = patch_workspace(
+        &config,
+        &WorkspacePatchRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            files: vec![
+                WorkspaceFilePatch {
+                    relative_path: "README.md".to_string(),
+                    expected_digest: Some(read.digest),
+                    edits: vec![
+                        WorkspaceTextEdit {
+                            range: WorkspaceTextRange {
+                                start: WorkspaceTextPosition { line: 1, column: 0 },
+                                end: WorkspaceTextPosition { line: 1, column: 4 },
+                            },
+                            expected_text: "base".to_string(),
+                            replacement: "core".to_string(),
+                        },
+                        WorkspaceTextEdit {
+                            range: WorkspaceTextRange {
+                                start: WorkspaceTextPosition { line: 1, column: 8 },
+                                end: WorkspaceTextPosition { line: 1, column: 8 },
+                            },
+                            expected_text: String::new(),
+                            replacement: "!".to_string(),
+                        },
+                    ],
+                },
+                WorkspaceFilePatch {
+                    relative_path: "new.txt".to_string(),
+                    expected_digest: None,
+                    edits: vec![WorkspaceTextEdit {
+                        range: WorkspaceTextRange {
+                            start: WorkspaceTextPosition { line: 1, column: 0 },
+                            end: WorkspaceTextPosition { line: 1, column: 0 },
+                        },
+                        expected_text: String::new(),
+                        replacement: "created\n".to_string(),
+                    }],
+                },
+            ],
+            max_diff_bytes: 16 * 1024,
+        },
+    )
+    .unwrap();
+    assert_eq!(patched.files.len(), 2);
+    assert!(!patched.diff_truncated);
+    assert!(patched.diff.contains("README.md"));
+    assert!(patched.diff.contains("new.txt"));
+    assert_eq!(
+        fs::read_to_string(config.workspace_path(workspace_id).join("README.md")).unwrap(),
+        "coreline!\n"
+    );
+    assert_eq!(
+        fs::read_to_string(config.workspace_path(workspace_id).join("new.txt")).unwrap(),
+        "created\n"
+    );
 }

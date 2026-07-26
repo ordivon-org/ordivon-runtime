@@ -33,8 +33,12 @@ EXPECTED_TOOLS = {
     "workspace.close",
     "workspace.diff",
     "workspace.exec",
+    "workspace.execPlan",
+    "workspace.get",
+    "workspace.list",
     "workspace.mutate",
     "workspace.open",
+    "workspace.patch",
     "workspace.read",
 }
 TERMINAL = {"succeeded", "failed", "timed_out", "cancelled", "lost", "orphaned"}
@@ -315,6 +319,22 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             },
         )
         check("workspace-open", opened.get("sourceRevision") == revision, opened)
+        workspace_get = client.tool(
+            "workspace.get",
+            {"schemaVersion": SCHEMA_VERSION, "workspaceId": workspace_id},
+        )
+        check(
+            "workspace-get",
+            workspace_get.get("workspaceId") == workspace_id
+            and workspace_get.get("headMode") == "detached",
+            workspace_get,
+        )
+        workspace_list = client.tool("workspace.list", {"schemaVersion": SCHEMA_VERSION})
+        check(
+            "workspace-list",
+            any(item.get("workspaceId") == workspace_id for item in workspace_list.get("workspaces", [])),
+            workspace_list,
+        )
 
         full = client.tool(
             "workspace.read",
@@ -340,6 +360,47 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             },
         )
         check("workspace-read-slice", sliced.get("content") == "ell", sliced)
+        patched = client.tool(
+            "workspace.patch",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "workspaceId": workspace_id,
+                "files": [
+                    {
+                        "relativePath": "README.md",
+                        "expectedDigest": full["digest"],
+                        "edits": [
+                            {
+                                "range": {
+                                    "start": {"line": 1, "column": 0},
+                                    "end": {"line": 1, "column": 5},
+                                },
+                                "expectedText": "hello",
+                                "replacement": "hello patched",
+                            }
+                        ],
+                    }
+                ],
+                "maxDiffBytes": 65_536,
+            },
+        )
+        check(
+            "workspace-patch",
+            len(patched.get("files", [])) == 1 and "hello patched" in patched.get("diff", ""),
+            patched,
+        )
+        full = client.tool(
+            "workspace.read",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "workspaceId": workspace_id,
+                "relativePath": "README.md",
+                "mode": "FULL",
+                "offset": 0,
+                "maxBytes": 4096,
+            },
+        )
+        check("workspace-patch-readback", full.get("content") == "hello patched\n", full)
 
         missing_digest = client.tool_result(
             "workspace.mutate",
@@ -386,7 +447,7 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
                         "mode": "REPLACE_EXACT",
                         "content": "hello accepted\n",
                         "expectedDigest": full["digest"],
-                        "expectedText": "hello\n",
+                        "expectedText": "hello patched\n",
                     },
                 ],
             },
@@ -431,6 +492,61 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         attempt_id = str(submitted["attemptId"])
         attempt_ids.append(attempt_id)
         check("exec-stdout", submitted.get("stdoutTail") == expected_stdout, submitted)
+
+        exec_plan = client.tool(
+            "workspace.execPlan",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "clientRequestId": f"request:{uuid.uuid4()}",
+                "execution": {
+                    "workspaceId": workspace_id,
+                    "steps": [
+                        {
+                            "id": "prepare",
+                            "executable": "/usr/bin/python3",
+                            "args": ["-c", "print('PLAN_PREPARE', flush=True)"],
+                            "cwdRelative": ".",
+                            "env": {},
+                            "timeoutMs": 5_000,
+                        },
+                        {
+                            "id": "fail",
+                            "executable": "/usr/bin/python3",
+                            "args": ["-c", "print('PLAN_FAIL', flush=True); raise SystemExit(7)"],
+                            "cwdRelative": ".",
+                            "env": {},
+                            "timeoutMs": 5_000,
+                        },
+                        {
+                            "id": "must-not-run",
+                            "executable": "/usr/bin/python3",
+                            "args": ["-c", "print('PLAN_MUST_NOT_RUN', flush=True)"],
+                            "cwdRelative": ".",
+                            "env": {},
+                            "timeoutMs": 5_000,
+                        },
+                    ],
+                    "stdoutLimitBytes": 65_536,
+                    "stderrLimitBytes": 65_536,
+                },
+                "waitMs": 30_000,
+                "stdoutTailBytes": 8192,
+                "stderrTailBytes": 8192,
+            },
+        )
+        attempt_ids.append(str(exec_plan["attemptId"]))
+        check(
+            "workspace-exec-plan-fail-fast",
+            exec_plan.get("status") == "failed"
+            and exec_plan.get("failedStepId") == "fail"
+            and exec_plan.get("failedStepIndex") == 1
+            and exec_plan.get("completedSteps") == 1
+            and exec_plan.get("totalSteps") == 3
+            and "PLAN_PREPARE" in exec_plan.get("stdoutTail", "")
+            and "PLAN_FAIL" in exec_plan.get("stdoutTail", "")
+            and "PLAN_MUST_NOT_RUN" not in exec_plan.get("stdoutTail", ""),
+            exec_plan,
+        )
 
         probe_port, probe_thread = host_network_probe()
         docker_socket = next(

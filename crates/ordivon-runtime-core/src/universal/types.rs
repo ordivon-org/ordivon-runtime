@@ -7,6 +7,9 @@ use super::{
     MAX_WORKSPACE_MUTATIONS, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
+pub const MAX_WORKSPACE_PATCH_FILES: usize = 32;
+pub const MAX_WORKSPACE_PATCH_EDITS_PER_FILE: usize = 128;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitWorkspaceCreateRequest {
@@ -339,6 +342,144 @@ pub struct WorkspaceMutateResult {
     pub mutations: Vec<WorkspaceMutationResult>,
 }
 
+/// A one-based line and zero-based Unicode-scalar column in UTF-8 text.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceTextPosition {
+    #[schemars(range(min = 1))]
+    pub line: u32,
+    pub column: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceTextRange {
+    pub start: WorkspaceTextPosition,
+    pub end: WorkspaceTextPosition,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceTextEdit {
+    pub range: WorkspaceTextRange,
+    /// Exact text expected at range in the committed input file.
+    pub expected_text: String,
+    #[serde(default)]
+    pub replacement: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceFilePatch {
+    pub relative_path: String,
+    /// Required when the target exists; protects the complete file version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_digest: Option<String>,
+    #[schemars(length(min = 1, max = MAX_WORKSPACE_PATCH_EDITS_PER_FILE))]
+    pub edits: Vec<WorkspaceTextEdit>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspacePatchRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    pub schema_version: u32,
+    pub workspace_id: String,
+    #[schemars(length(min = 1, max = MAX_WORKSPACE_PATCH_FILES))]
+    pub files: Vec<WorkspaceFilePatch>,
+    #[serde(default = "default_patch_diff_bytes")]
+    #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
+    pub max_diff_bytes: u64,
+}
+
+impl WorkspacePatchRequest {
+    pub fn validate_shape(&self) -> Result<(), UniversalExecError> {
+        require_schema(self.schema_version)?;
+        validate_id(&self.workspace_id, "workspaceId")?;
+        if self.files.is_empty() || self.files.len() > MAX_WORKSPACE_PATCH_FILES {
+            return Err(invalid(
+                format!("files must contain 1..={MAX_WORKSPACE_PATCH_FILES} items"),
+                "files",
+            ));
+        }
+        if self.max_diff_bytes == 0 || self.max_diff_bytes > MAX_WORKSPACE_IO_BYTES {
+            return Err(invalid(
+                format!("maxDiffBytes must be in 1..={MAX_WORKSPACE_IO_BYTES}"),
+                "maxDiffBytes",
+            ));
+        }
+        let mut paths = BTreeSet::new();
+        for (file_index, file) in self.files.iter().enumerate() {
+            validate_relative_path(
+                &file.relative_path,
+                &format!("files[{file_index}].relativePath"),
+            )?;
+            if !paths.insert(&file.relative_path) {
+                return Err(invalid(
+                    "a patch cannot target the same path twice",
+                    format!("files[{file_index}].relativePath"),
+                ));
+            }
+            if file
+                .expected_digest
+                .as_ref()
+                .is_some_and(|digest| !valid_digest(digest))
+            {
+                return Err(invalid(
+                    "expectedDigest must be SHA-256",
+                    format!("files[{file_index}].expectedDigest"),
+                ));
+            }
+            if file.edits.is_empty() || file.edits.len() > MAX_WORKSPACE_PATCH_EDITS_PER_FILE {
+                return Err(invalid(
+                    format!("edits must contain 1..={MAX_WORKSPACE_PATCH_EDITS_PER_FILE} items"),
+                    format!("files[{file_index}].edits"),
+                ));
+            }
+            for (edit_index, edit) in file.edits.iter().enumerate() {
+                if edit.range.start.line == 0 || edit.range.end.line == 0 {
+                    return Err(invalid(
+                        "line numbers are one-based",
+                        format!("files[{file_index}].edits[{edit_index}].range"),
+                    ));
+                }
+                if edit.expected_text.len() as u64 > MAX_WORKSPACE_IO_BYTES
+                    || edit.replacement.len() as u64 > MAX_WORKSPACE_IO_BYTES
+                {
+                    return Err(invalid(
+                        "patch text exceeds the workspace limit",
+                        format!("files[{file_index}].edits[{edit_index}]"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspacePatchedFile {
+    pub relative_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_digest: Option<String>,
+    pub after_digest: String,
+    pub byte_length: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspacePatchResult {
+    pub files: Vec<WorkspacePatchedFile>,
+    pub diff: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub diff_truncated: bool,
+}
+
+fn default_patch_diff_bytes() -> u64 {
+    256 * 1024
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceReadSliceRequest {
@@ -407,6 +548,22 @@ pub(crate) struct RunnerPayloadConfig {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RunnerExecutionStep {
+    pub id: String,
+    pub executable: String,
+    pub executable_digest: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub cwd: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub continue_on_error: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RunnerTaskRequest {
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -431,6 +588,8 @@ pub(crate) struct RunnerTaskRequest {
     pub args: Vec<String>,
     pub cwd: String,
     pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<RunnerExecutionStep>,
     pub timeout_ms: u64,
     pub stdout_limit_bytes: u64,
     pub stderr_limit_bytes: u64,
@@ -478,6 +637,42 @@ pub(crate) struct CapturedOutput {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RunnerStepResult {
+    pub id: String,
+    pub index: u32,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub continued: bool,
+    pub started_unix_ms: u128,
+    pub finished_unix_ms: u128,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RunnerTaskProgress {
+    pub schema_version: u32,
+    pub task_id: String,
+    pub revision: u64,
+    pub status: String,
+    pub completed_steps: u32,
+    pub total_steps: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step_started_unix_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_step_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_step_index: Option<u32>,
+    pub updated_unix_ms: u128,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RunnerTaskResult {
     pub schema_version: u32,
     pub task_id: String,
@@ -501,6 +696,12 @@ pub(crate) struct RunnerTaskResult {
     pub infrastructure_error: Option<String>,
     pub started_unix_ms: u128,
     pub finished_unix_ms: u128,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<RunnerStepResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_step_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_step_index: Option<u32>,
     pub stdout: CapturedOutput,
     pub stderr: CapturedOutput,
 }

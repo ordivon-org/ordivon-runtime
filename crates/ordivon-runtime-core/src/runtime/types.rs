@@ -288,6 +288,41 @@ impl ExecutionBudget {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UniversalExecutionStep {
+    pub id: String,
+    /// Absolute host path to the executable; PATH lookup is intentionally not performed.
+    pub executable: String,
+    #[serde(default)]
+    #[schemars(length(max = 128))]
+    pub args: Vec<String>,
+    /// Working directory relative to the Workspace root.
+    pub cwd_relative: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[schemars(range(min = 1, max = crate::MAX_UNIVERSAL_RUNTIME_MS))]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub continue_on_error: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeExecutionStep {
+    pub id: String,
+    pub executable: String,
+    pub executable_digest: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub cwd: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub continue_on_error: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeExecutionPlan {
     pub schema_version: u32,
     pub workspace_id: String,
@@ -309,6 +344,8 @@ pub struct RuntimeExecutionPlan {
     pub stdout_limit_bytes: u64,
     #[schemars(range(min = 1, max = crate::MAX_UNIVERSAL_OUTPUT_BYTES))]
     pub stderr_limit_bytes: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<RuntimeExecutionStep>,
     #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
     pub budget: ExecutionBudget,
     pub principal: String,
@@ -340,6 +377,8 @@ struct OperationRequestIdentity {
     timeout_ms: u64,
     stdout_limit_bytes: u64,
     stderr_limit_bytes: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    steps: Vec<UniversalExecutionStep>,
     budget: ExecutionBudget,
 }
 
@@ -355,6 +394,7 @@ pub(crate) fn operation_request_identity_digest(request: &TaskRunRequest) -> Run
         timeout_ms: request.execution.timeout_ms,
         stdout_limit_bytes: request.execution.stdout_limit_bytes,
         stderr_limit_bytes: request.execution.stderr_limit_bytes,
+        steps: request.execution.steps.clone(),
         budget: request.execution.budget.clone(),
     })
 }
@@ -383,6 +423,22 @@ pub(crate) fn operation_request_identity_digest_from_plan(
         timeout_ms: plan.timeout_ms,
         stdout_limit_bytes: plan.stdout_limit_bytes,
         stderr_limit_bytes: plan.stderr_limit_bytes,
+        steps: plan
+            .steps
+            .iter()
+            .map(|step| UniversalExecutionStep {
+                id: step.id.clone(),
+                executable: normalize_path_text(&step.executable),
+                args: step.args.clone(),
+                cwd_relative: Path::new(&step.cwd)
+                    .strip_prefix(&plan.workspace_path)
+                    .map(|path| normalize_relative_path_text(&path.to_string_lossy()))
+                    .unwrap_or_else(|_| step.cwd.clone()),
+                env: step.env.clone(),
+                timeout_ms: step.timeout_ms,
+                continue_on_error: step.continue_on_error,
+            })
+            .collect(),
         budget: plan.budget.clone(),
     })
 }
@@ -607,6 +663,42 @@ pub struct JobProjection {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeWorkspaceGetRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    pub schema_version: u32,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeWorkspaceListRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    pub schema_version: u32,
+    #[serde(default = "default_runtime_list_limit")]
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeWorkspaceSummary {
+    pub workspace_id: String,
+    pub source_revision: String,
+    pub created_at_ms: u64,
+    pub head_mode: String,
+    pub dirty: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_job_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeWorkspaceListResult {
+    pub workspaces: Vec<RuntimeWorkspaceSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeJobListCursor {
     pub created_at_ms: u64,
     pub job_id: String,
@@ -710,6 +802,10 @@ pub struct UniversalExecutionRequest {
     pub timeout_ms: u64,
     pub stdout_limit_bytes: u64,
     pub stderr_limit_bytes: u64,
+    /// Optional ordered fail-fast steps. Empty preserves raw single-command execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 32))]
+    pub steps: Vec<UniversalExecutionStep>,
     #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
     pub budget: ExecutionBudget,
 }
@@ -734,6 +830,14 @@ pub struct TaskRunRequest {
     pub stderr_tail_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskObserveWaitUntil {
+    #[default]
+    Terminal,
+    ChangeOrTerminal,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskObserveRequest {
@@ -743,6 +847,8 @@ pub struct TaskObserveRequest {
     #[serde(default)]
     #[schemars(range(max = MAX_TASK_WAIT_MS))]
     pub wait_ms: u64,
+    #[serde(default)]
+    pub wait_until: TaskObserveWaitUntil,
     #[serde(default = "default_task_tail_bytes")]
     #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stdout_tail_bytes: u64,
@@ -802,6 +908,26 @@ pub struct TaskObservation {
     pub artifacts: Vec<ArtifactDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub poll_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_output_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_steps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_steps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step_elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_step_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_step_index: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_summary: Option<String>,
 }

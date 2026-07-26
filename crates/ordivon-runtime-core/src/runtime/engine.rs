@@ -19,18 +19,21 @@ use super::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, JobDesiredState,
     JobResolution, Registry, RegistryConfig, RunnerIdentity, RuntimeArtifactRecord, RuntimeError,
-    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeJobListRequest, RuntimeJobListResult,
-    RuntimeResult, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
-    TaskRunRequest, TerminalCommit, MAX_ARTIFACT_READ_BYTES, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
-    RUNTIME_SCHEMA_VERSION,
+    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeExecutionStep, RuntimeJobListRequest,
+    RuntimeJobListResult, RuntimeResult, RuntimeWorkspaceGetRequest, RuntimeWorkspaceListRequest,
+    RuntimeWorkspaceListResult, RuntimeWorkspaceSummary, SubmitRequest, TaskCancelRequest,
+    TaskObservation, TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest, TerminalCommit,
+    MAX_ARTIFACT_READ_BYTES, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
 };
 use crate::universal::{
-    canonical_directory, create_git_workspace_compact, load_workspace_record, mutate_workspace,
-    remove_git_workspace, resolve_workspace_cwd, sha256_bytes, sha256_file,
-    workspace_source_state_digest, write_json_atomic, CompactWorkspaceOpenResult,
-    GitWorkspaceCreateRequest, RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskRequest,
+    canonical_directory, create_git_workspace_compact, list_workspace_records,
+    load_workspace_record, mutate_workspace, patch_workspace, remove_git_workspace,
+    resolve_workspace_cwd, sha256_bytes, sha256_file, workspace_source_state_digest,
+    write_json_atomic, CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
+    RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskProgress, RunnerTaskRequest,
     RunnerTaskResult, UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
-    WorkspaceMutateRequest, WorkspaceMutateResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    WorkspaceDiffRequest, WorkspaceMutateRequest, WorkspaceMutateResult, WorkspacePatchRequest,
+    WorkspacePatchResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
 const RUNNER_REQUEST_FILE: &str = "request.json";
@@ -40,6 +43,7 @@ const RUNNER_START_FILE: &str = "runner-start.json";
 const RESULT_FILE: &str = "result.json";
 const STDOUT_FILE: &str = "stdout.log";
 const STDERR_FILE: &str = "stderr.log";
+const PROGRESS_FILE: &str = "progress.json";
 const CANCEL_FILE: &str = "cancel-requested.json";
 const CONTROL_RESULT_FILE: &str = "control-result.json";
 const ORPHAN_REMEDIATION_FILE: &str = "orphan-remediation.json";
@@ -198,6 +202,7 @@ impl Runtime {
             schema_version: RUNTIME_SCHEMA_VERSION,
             job_id,
             wait_ms: request.wait_ms,
+            wait_until: TaskObserveWaitUntil::Terminal,
             stdout_tail_bytes: request.stdout_tail_bytes,
             stderr_tail_bytes: request.stderr_tail_bytes,
             stdout_offset: None,
@@ -211,6 +216,71 @@ impl Runtime {
     ) -> RuntimeResult<CompactWorkspaceOpenResult> {
         let _guard = self.lock_lifecycle()?;
         create_git_workspace_compact(&self.executor, request).map_err(map_universal_error)
+    }
+
+    pub fn get_workspace(
+        &self,
+        request: &RuntimeWorkspaceGetRequest,
+    ) -> RuntimeResult<RuntimeWorkspaceSummary> {
+        if request.schema_version != RUNTIME_SCHEMA_VERSION {
+            return Err(RuntimeError::invalid(
+                "unsupported runtime schema version",
+                "schemaVersion",
+            ));
+        }
+        let _ = self.reconcile_workspace(&request.workspace_id)?;
+        let record = load_workspace_record(&self.executor, &request.workspace_id)
+            .map_err(map_universal_error)?;
+        self.workspace_summary(&record)
+    }
+
+    pub fn list_workspaces(
+        &self,
+        request: &RuntimeWorkspaceListRequest,
+    ) -> RuntimeResult<RuntimeWorkspaceListResult> {
+        if request.schema_version != RUNTIME_SCHEMA_VERSION {
+            return Err(RuntimeError::invalid(
+                "unsupported runtime schema version",
+                "schemaVersion",
+            ));
+        }
+        if request.limit == 0 || request.limit > 100 {
+            return Err(RuntimeError::invalid("limit must be in 1..=100", "limit"));
+        }
+        let records =
+            list_workspace_records(&self.executor, request.limit).map_err(map_universal_error)?;
+        let mut workspaces = Vec::with_capacity(records.len());
+        for record in records {
+            let _ = self.reconcile_workspace(&record.workspace_id)?;
+            workspaces.push(self.workspace_summary(&record)?);
+        }
+        Ok(RuntimeWorkspaceListResult { workspaces })
+    }
+
+    fn workspace_summary(
+        &self,
+        record: &crate::universal::WorkspaceRecord,
+    ) -> RuntimeResult<RuntimeWorkspaceSummary> {
+        let diff = crate::universal::workspace_diff(
+            &self.executor,
+            &WorkspaceDiffRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: record.workspace_id.clone(),
+                max_bytes: 1,
+            },
+        )
+        .map_err(map_universal_error)?;
+        let active_job_ids = self
+            .registry
+            .active_job_ids_for_workspace(&record.workspace_id, 20)?;
+        Ok(RuntimeWorkspaceSummary {
+            workspace_id: record.workspace_id.clone(),
+            source_revision: record.source_revision.clone(),
+            created_at_ms: u64::try_from(record.created_unix_ms).unwrap_or(u64::MAX),
+            head_mode: "detached".to_string(),
+            dirty: diff.byte_length > 0 || !diff.untracked_paths.is_empty(),
+            active_job_ids,
+        })
     }
 
     pub fn mutate_workspace(
@@ -234,6 +304,29 @@ impl Runtime {
             ));
         }
         mutate_workspace(&self.executor, request).map_err(map_universal_error)
+    }
+
+    pub fn patch_workspace(
+        &self,
+        request: &WorkspacePatchRequest,
+    ) -> RuntimeResult<WorkspacePatchResult> {
+        let _guard = self.lock_lifecycle()?;
+        let _ = self.reconcile_workspace(&request.workspace_id)?;
+        let active = self
+            .registry
+            .active_job_ids_for_workspace(&request.workspace_id, 20)?;
+        if !active.is_empty() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::WorkspaceBusy,
+                format!(
+                    "workspace source state is committed by active or held Jobs: {}",
+                    active.join(", ")
+                ),
+                Some("workspaceId"),
+                true,
+            ));
+        }
+        patch_workspace(&self.executor, request).map_err(map_universal_error)
     }
 
     pub fn close_workspace(
@@ -265,6 +358,22 @@ impl Runtime {
         let cwd = resolve_workspace_cwd(&record, &request.execution.cwd_relative)
             .map_err(map_universal_error)?;
         let executable = validate_executable(&self.executor, &request.execution.executable)?;
+        let mut steps = Vec::with_capacity(request.execution.steps.len());
+        for step in &request.execution.steps {
+            let step_cwd =
+                resolve_workspace_cwd(&record, &step.cwd_relative).map_err(map_universal_error)?;
+            let step_executable = validate_executable(&self.executor, &step.executable)?;
+            steps.push(RuntimeExecutionStep {
+                id: step.id.clone(),
+                executable: step_executable.to_string_lossy().into_owned(),
+                executable_digest: sha256_file(&step_executable).map_err(map_universal_error)?,
+                args: step.args.clone(),
+                cwd: step_cwd.to_string_lossy().into_owned(),
+                env: step.env.clone(),
+                timeout_ms: step.timeout_ms,
+                continue_on_error: step.continue_on_error,
+            });
+        }
         Ok(RuntimeExecutionPlan {
             schema_version: RUNTIME_SCHEMA_VERSION,
             workspace_id: request.execution.workspace_id.clone(),
@@ -282,6 +391,7 @@ impl Runtime {
             timeout_ms: request.execution.timeout_ms,
             stdout_limit_bytes: request.execution.stdout_limit_bytes,
             stderr_limit_bytes: request.execution.stderr_limit_bytes,
+            steps,
             budget: request.execution.budget.clone(),
             principal: request.principal.clone(),
         })
@@ -380,6 +490,20 @@ impl Runtime {
             args: plan.args.clone(),
             cwd: plan.cwd.clone(),
             env: plan.env.clone(),
+            steps: plan
+                .steps
+                .iter()
+                .map(|step| RunnerExecutionStep {
+                    id: step.id.clone(),
+                    executable: step.executable.clone(),
+                    executable_digest: step.executable_digest.clone(),
+                    args: step.args.clone(),
+                    cwd: step.cwd.clone(),
+                    env: step.env.clone(),
+                    timeout_ms: step.timeout_ms,
+                    continue_on_error: step.continue_on_error,
+                })
+                .collect(),
             timeout_ms: plan.timeout_ms,
             stdout_limit_bytes: plan.stdout_limit_bytes,
             stderr_limit_bytes: plan.stderr_limit_bytes,
@@ -669,12 +793,22 @@ impl Runtime {
         validate_observe_request(request)?;
         let deadline = Instant::now() + Duration::from_millis(request.wait_ms);
         let mut poll_index = 0;
+        let mut initial_signature = None;
         loop {
             self.reconcile_job(&request.job_id)?;
             let snapshot = self.registry.job_snapshot(&request.job_id)?;
+            let signature =
+                task_activity_signature(snapshot.attempt.as_ref(), &snapshot.projection)?;
+            let changed = initial_signature
+                .as_ref()
+                .is_some_and(|initial| initial != &signature);
+            if initial_signature.is_none() {
+                initial_signature = Some(signature);
+            }
             if snapshot.projection.result_available
                 || request.wait_ms == 0
                 || Instant::now() >= deadline
+                || (request.wait_until == TaskObserveWaitUntil::ChangeOrTerminal && changed)
             {
                 return self.observation_from_snapshot(snapshot, request);
             }
@@ -725,6 +859,33 @@ impl Runtime {
     ) -> RuntimeResult<TaskObservation> {
         let job_id = projection.job_id.clone();
         let terminal = projection.result_available;
+        let now = now_ms()?;
+        let progress = attempt
+            .as_ref()
+            .map(load_runner_progress_if_present)
+            .transpose()?
+            .flatten();
+        // Orphaned is the quarantine state for invalid or identity-conflicting Runner
+        // evidence. The corrupt file remains available for diagnosis, but observation must
+        // project the committed control result instead of reparsing quarantined evidence.
+        let result = if projection.status == "orphaned" {
+            None
+        } else {
+            attempt
+                .as_ref()
+                .map(load_runner_result_if_present)
+                .transpose()?
+                .flatten()
+        };
+        let control_error_summary = if result.is_none() {
+            attempt
+                .as_ref()
+                .map(load_control_error_summary_if_present)
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
         let (
             stdout_view,
             stderr_view,
@@ -732,6 +893,7 @@ impl Runtime {
             stderr_truncated,
             artifacts,
             error_summary,
+            last_output_at_ms,
         ) = if let Some(attempt) = &attempt {
             let stdout_view = read_output_text(
                 &Path::new(&attempt.bundle_path).join(STDOUT_FILE),
@@ -749,10 +911,6 @@ impl Runtime {
                 "stderrOffset",
                 "stderrTailBytes",
             )?;
-            let (result, result_error) = match load_runner_result_if_present(attempt) {
-                Ok(result) => (result, None),
-                Err(error) => (None, Some(error.to_string())),
-            };
             let stdout_truncated = result
                 .as_ref()
                 .is_some_and(|result| result.stdout.truncated);
@@ -768,7 +926,8 @@ impl Runtime {
             let error_summary = result
                 .as_ref()
                 .and_then(|result| result.infrastructure_error.clone())
-                .or(result_error);
+                .or(control_error_summary);
+            let last_output_at_ms = latest_output_modified_ms(attempt)?;
             (
                 stdout_view,
                 stderr_view,
@@ -776,6 +935,7 @@ impl Runtime {
                 stderr_truncated,
                 artifacts,
                 error_summary,
+                last_output_at_ms,
             )
         } else {
             (
@@ -785,12 +945,13 @@ impl Runtime {
                 false,
                 Vec::new(),
                 None,
+                None,
             )
         };
         Ok(TaskObservation {
             job_id,
             status: projection.status,
-            attempt_id: attempt.map(|attempt| attempt.attempt_id),
+            attempt_id: attempt.as_ref().map(|attempt| attempt.attempt_id.clone()),
             exit_code: projection.exit_code,
             stdout_tail: stdout_view.content,
             stderr_tail: stderr_view.content,
@@ -807,6 +968,41 @@ impl Runtime {
             artifacts_available: projection.artifacts_available,
             artifacts,
             poll_after_ms: projection.poll_after_ms,
+            elapsed_ms: attempt.as_ref().map(|attempt| {
+                now.saturating_sub(attempt.started_at_ms.unwrap_or(attempt.created_at_ms))
+            }),
+            last_output_at_ms,
+            progress_revision: progress.as_ref().map(|progress| progress.revision),
+            completed_steps: progress.as_ref().map(|progress| progress.completed_steps),
+            total_steps: progress.as_ref().map(|progress| progress.total_steps),
+            current_step_id: progress
+                .as_ref()
+                .and_then(|progress| progress.current_step_id.clone()),
+            current_step_index: progress
+                .as_ref()
+                .and_then(|progress| progress.current_step_index),
+            current_step_elapsed_ms: progress.as_ref().and_then(|progress| {
+                progress
+                    .current_step_started_unix_ms
+                    .and_then(|started| u64::try_from(started).ok())
+                    .map(|started| now.saturating_sub(started))
+            }),
+            failed_step_id: result
+                .as_ref()
+                .and_then(|result| result.failed_step_id.clone())
+                .or_else(|| {
+                    progress
+                        .as_ref()
+                        .and_then(|progress| progress.failed_step_id.clone())
+                }),
+            failed_step_index: result
+                .as_ref()
+                .and_then(|result| result.failed_step_index)
+                .or_else(|| {
+                    progress
+                        .as_ref()
+                        .and_then(|progress| progress.failed_step_index)
+                }),
             error_summary,
         })
     }
@@ -1628,6 +1824,49 @@ fn validate_run_request(request: &TaskRunRequest, max_output_bytes: u64) -> Runt
             "execution",
         ));
     }
+    if request.execution.steps.len() > 32 {
+        return Err(RuntimeError::invalid(
+            "steps exceed the maximum of 32",
+            "execution.steps",
+        ));
+    }
+    let mut step_ids = std::collections::BTreeSet::new();
+    let mut total_timeout = 0_u64;
+    for (index, step) in request.execution.steps.iter().enumerate() {
+        validate_text_id(&step.id, &format!("execution.steps[{index}].id"))?;
+        if !step_ids.insert(&step.id) {
+            return Err(RuntimeError::invalid(
+                "step ids must be unique",
+                &format!("execution.steps[{index}].id"),
+            ));
+        }
+        if step.executable.is_empty()
+            || !Path::new(&step.executable).is_absolute()
+            || step.cwd_relative.is_empty()
+            || Path::new(&step.cwd_relative).is_absolute()
+            || step.cwd_relative.split('/').any(|part| part == "..")
+        {
+            return Err(RuntimeError::invalid(
+                "step executable must be absolute and cwdRelative must be relative",
+                &format!("execution.steps[{index}]"),
+            ));
+        }
+        if step.timeout_ms == 0 || step.args.len() > 128 || step.env.len() > 64 {
+            return Err(RuntimeError::invalid(
+                "step runtime, args, or environment exceed bounds",
+                &format!("execution.steps[{index}]"),
+            ));
+        }
+        total_timeout = total_timeout.checked_add(step.timeout_ms).ok_or_else(|| {
+            RuntimeError::invalid("step timeout sum overflowed", "execution.steps")
+        })?;
+    }
+    if !request.execution.steps.is_empty() && total_timeout > request.execution.timeout_ms {
+        return Err(RuntimeError::invalid(
+            "sum of step timeoutMs values exceeds execution.timeoutMs",
+            "execution.timeoutMs",
+        ));
+    }
     Ok(())
 }
 
@@ -1985,6 +2224,116 @@ fn read_trimmed(path: &str) -> RuntimeResult<String> {
     fs::read_to_string(path)
         .map(|value| value.trim().to_string())
         .map_err(|error| io_error(&format!("read {path}"), error))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TaskActivitySignature {
+    status: String,
+    stdout_bytes: u64,
+    stderr_bytes: u64,
+    progress_revision: u64,
+}
+
+fn task_activity_signature(
+    attempt: Option<&AttemptRecord>,
+    projection: &super::JobProjection,
+) -> RuntimeResult<TaskActivitySignature> {
+    let Some(attempt) = attempt else {
+        return Ok(TaskActivitySignature {
+            status: projection.status.clone(),
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            progress_revision: 0,
+        });
+    };
+    let bundle = Path::new(&attempt.bundle_path);
+    let stdout_bytes = file_length_if_present(&bundle.join(STDOUT_FILE))?;
+    let stderr_bytes = file_length_if_present(&bundle.join(STDERR_FILE))?;
+    let progress_revision = load_runner_progress_if_present(attempt)?
+        .map(|progress| progress.revision)
+        .unwrap_or(0);
+    Ok(TaskActivitySignature {
+        status: projection.status.clone(),
+        stdout_bytes,
+        stderr_bytes,
+        progress_revision,
+    })
+}
+
+fn file_length_if_present(path: &Path) -> RuntimeResult<u64> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(io_error(&format!("inspect {}", path.display()), error)),
+    }
+}
+
+fn load_runner_progress_if_present(
+    attempt: &AttemptRecord,
+) -> RuntimeResult<Option<RunnerTaskProgress>> {
+    let path = Path::new(&attempt.bundle_path).join(PROGRESS_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).map_err(|error| io_error("read Runner progress", error))?;
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
+            format!("invalid Runner progress: {error}"),
+            Some("progress"),
+            false,
+        )
+    })
+}
+
+fn latest_output_modified_ms(attempt: &AttemptRecord) -> RuntimeResult<Option<u64>> {
+    let bundle = Path::new(&attempt.bundle_path);
+    let mut latest = None;
+    for path in [bundle.join(STDOUT_FILE), bundle.join(STDERR_FILE)] {
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error(&format!("inspect {}", path.display()), error)),
+        };
+        if metadata.len() == 0 {
+            continue;
+        }
+        let modified = metadata
+            .modified()
+            .map_err(|error| io_error(&format!("read {} mtime", path.display()), error))?;
+        let millis = modified
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let millis = u64::try_from(millis).unwrap_or(u64::MAX);
+        latest = Some(latest.map_or(millis, |value: u64| value.max(millis)));
+    }
+    Ok(latest)
+}
+
+fn load_control_error_summary_if_present(attempt: &AttemptRecord) -> RuntimeResult<Option<String>> {
+    let path = Path::new(&attempt.bundle_path).join(CONTROL_RESULT_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).map_err(|error| io_error("read control result", error))?;
+    let evidence: ControlTerminalEvidence = serde_json::from_slice(&bytes).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
+            format!("invalid control result: {error}"),
+            Some("controlResult"),
+            false,
+        )
+    })?;
+    if evidence.job_id != attempt.job_id || evidence.attempt_id != attempt.attempt_id {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::ResultIdentityConflict,
+            "control result identity does not match Attempt",
+            Some("controlResult"),
+            false,
+        ));
+    }
+    Ok(evidence.detail)
 }
 
 fn load_runner_result_if_present(
@@ -2401,6 +2750,7 @@ mod trusted_systemd_command_tests {
                 timeout_ms: 1_000,
                 stdout_limit_bytes: 1_025,
                 stderr_limit_bytes: 1_024,
+                steps: Vec::new(),
                 budget: crate::ExecutionBudget::default(),
             },
             wait_ms: 0,

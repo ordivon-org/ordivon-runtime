@@ -9,13 +9,16 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use ordivon_runtime_core::{
     read_workspace_slice_compact, read_workspace_text_compact, workspace_diff_compact,
     ArtifactReadRequest, ArtifactReadResult, CompactWorkspaceDiffResult,
-    CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, Runtime, RuntimeCapacity, RuntimeConfig,
-    RuntimeError, RuntimeJobListRequest, RuntimeJobListResult, TaskCancelRequest, TaskObservation,
-    TaskObserveRequest, TaskRunRequest, UniversalExecError, UniversalExecutionRequest,
+    CompactWorkspaceOpenResult, ExecutionBudget, GitWorkspaceCreateRequest, Runtime,
+    RuntimeCapacity, RuntimeConfig, RuntimeError, RuntimeJobListRequest, RuntimeJobListResult,
+    RuntimeWorkspaceGetRequest, RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult,
+    RuntimeWorkspaceSummary, TaskCancelRequest, TaskObservation, TaskObserveRequest,
+    TaskRunRequest, UniversalExecError, UniversalExecutionRequest, UniversalExecutionStep,
     UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
     WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceMutateRequest,
-    WorkspaceMutateResult, WorkspaceReadRequest as ExecWorkspaceReadRequest,
-    WorkspaceReadSliceRequest, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
+    WorkspaceMutateResult, WorkspacePatchRequest, WorkspacePatchResult,
+    WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
+    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::IntoCallToolResult;
@@ -26,9 +29,34 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 static GLOBAL_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static GLOBAL_TRACE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceOpenRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    pub source_repo: String,
+    pub source_revision: String,
+}
+
+impl WorkspaceOpenRequest {
+    fn bind(self) -> GitWorkspaceCreateRequest {
+        GitWorkspaceCreateRequest {
+            schema_version: self.schema_version,
+            workspace_id: self
+                .workspace_id
+                .unwrap_or_else(|| format!("ws-{}", Uuid::now_v7())),
+            source_repo: self.source_repo,
+            source_revision: self.source_revision,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -90,6 +118,36 @@ pub struct WorkspaceExecRequest {
     pub stderr_tail_bytes: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceExecPlanInput {
+    pub workspace_id: String,
+    #[schemars(length(min = 1, max = 32))]
+    pub steps: Vec<UniversalExecutionStep>,
+    pub stdout_limit_bytes: u64,
+    pub stderr_limit_bytes: u64,
+    #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
+    pub budget: ExecutionBudget,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceExecPlanRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    pub schema_version: u32,
+    pub client_request_id: String,
+    pub execution: WorkspaceExecPlanInput,
+    #[serde(default = "default_exec_wait_ms")]
+    #[schemars(range(max = MAX_TASK_WAIT_MS))]
+    pub wait_ms: u64,
+    #[serde(default = "default_exec_tail_bytes")]
+    #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
+    pub stdout_tail_bytes: u64,
+    #[serde(default = "default_exec_tail_bytes")]
+    #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
+    pub stderr_tail_bytes: u64,
+}
+
 #[derive(Clone)]
 pub struct ExecutionContext {
     pub principal: String,
@@ -108,6 +166,39 @@ impl ExecutionContext {
             stdout_tail_bytes: request.stdout_tail_bytes,
             stderr_tail_bytes: request.stderr_tail_bytes,
         }
+    }
+
+    fn bind_plan(&self, request: WorkspaceExecPlanRequest) -> Result<TaskRunRequest, ToolError> {
+        let first = request.execution.steps.first().ok_or_else(|| {
+            ToolError::invalid("steps must contain at least one item", "execution.steps")
+        })?;
+        let timeout_ms = request
+            .execution
+            .steps
+            .iter()
+            .try_fold(0_u64, |total, step| total.checked_add(step.timeout_ms))
+            .ok_or_else(|| ToolError::invalid("step timeout sum overflowed", "execution.steps"))?;
+        Ok(TaskRunRequest {
+            schema_version: request.schema_version,
+            client_request_id: request.client_request_id,
+            principal: self.principal.clone(),
+            global_limit: self.global_limit,
+            execution: UniversalExecutionRequest {
+                workspace_id: request.execution.workspace_id,
+                executable: first.executable.clone(),
+                args: first.args.clone(),
+                cwd_relative: first.cwd_relative.clone(),
+                env: first.env.clone(),
+                timeout_ms,
+                stdout_limit_bytes: request.execution.stdout_limit_bytes,
+                stderr_limit_bytes: request.execution.stderr_limit_bytes,
+                steps: request.execution.steps,
+                budget: request.execution.budget,
+            },
+            wait_ms: request.wait_ms,
+            stdout_tail_bytes: request.stdout_tail_bytes,
+            stderr_tail_bytes: request.stderr_tail_bytes,
+        })
     }
 }
 
@@ -175,13 +266,41 @@ pub struct TraceSummary {
 pub struct ToolError {
     pub code: String,
     pub message: String,
+    #[serde(flatten)]
+    context: Box<ToolErrorContext>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolErrorContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
+    pub origin: String,
+    pub retry_class: String,
+    pub commit_state: String,
     pub retryable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity: Option<Box<RuntimeCapacity>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+impl std::ops::Deref for ToolError {
+    type Target = ToolErrorContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.context
+    }
+}
+
+impl std::ops::DerefMut for ToolError {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.context
+    }
 }
 
 impl ToolError {
@@ -189,10 +308,17 @@ impl ToolError {
         Self {
             code: "INTERNAL_ERROR".to_string(),
             message: message.into(),
-            field: None,
-            retryable: true,
-            retry_after_ms: None,
-            capacity: None,
+            context: Box::new(ToolErrorContext {
+                field: None,
+                origin: "mcp_adapter".to_string(),
+                retry_class: "safe_same_request".to_string(),
+                commit_state: "not_started".to_string(),
+                retryable: true,
+                retry_after_ms: None,
+                capacity: None,
+                trace_id: None,
+                operation_id: None,
+            }),
         }
     }
 
@@ -200,10 +326,17 @@ impl ToolError {
         Self {
             code: "INVALID_REQUEST".to_string(),
             message: message.into(),
-            field: Some(field.to_string()),
-            retryable: false,
-            retry_after_ms: None,
-            capacity: None,
+            context: Box::new(ToolErrorContext {
+                field: Some(field.to_string()),
+                origin: "mcp_adapter".to_string(),
+                retry_class: "never".to_string(),
+                commit_state: "not_started".to_string(),
+                retryable: false,
+                retry_after_ms: None,
+                capacity: None,
+                trace_id: None,
+                operation_id: None,
+            }),
         }
     }
 }
@@ -214,13 +347,33 @@ impl From<RuntimeError> for ToolError {
             .ok()
             .and_then(|value| value.as_str().map(ToString::to_string))
             .unwrap_or_else(|| "EXECUTION_ERROR".to_string());
+        let (retry_class, commit_state) = match error.code {
+            ordivon_runtime_core::RuntimeErrorCode::DispatchOutcomeUnknown
+            | ordivon_runtime_core::RuntimeErrorCode::ReconciliationRequired => {
+                ("reconcile_first", "unknown")
+            }
+            ordivon_runtime_core::RuntimeErrorCode::ConcurrencyLimit
+            | ordivon_runtime_core::RuntimeErrorCode::RegistryBusy
+            | ordivon_runtime_core::RuntimeErrorCode::WorkspaceBusy => {
+                ("safe_same_request", "not_started")
+            }
+            _ if error.retryable => ("safe_same_request", "not_committed"),
+            _ => ("never", "not_committed"),
+        };
         Self {
             code,
             message: error.message,
-            field: error.field,
-            retryable: error.retryable,
-            retry_after_ms: error.retry_after_ms,
-            capacity: error.capacity,
+            context: Box::new(ToolErrorContext {
+                field: error.field,
+                origin: "runtime_core".to_string(),
+                retry_class: retry_class.to_string(),
+                commit_state: commit_state.to_string(),
+                retryable: error.retryable,
+                retry_after_ms: error.retry_after_ms,
+                capacity: error.capacity,
+                trace_id: None,
+                operation_id: None,
+            }),
         }
     }
 }
@@ -231,13 +384,34 @@ impl From<UniversalExecError> for ToolError {
             .ok()
             .and_then(|value| value.as_str().map(ToString::to_string))
             .unwrap_or_else(|| "UNIVERSAL_EXEC_ERROR".to_string());
+        let mutation_outcome_unknown = matches!(
+            error.code,
+            ordivon_runtime_core::UniversalExecErrorCode::WorkspaceMutationIncomplete
+        );
         Self {
             code,
             message: error.message,
-            field: error.field,
-            retryable: error.retryable,
-            retry_after_ms: None,
-            capacity: None,
+            context: Box::new(ToolErrorContext {
+                field: error.field,
+                origin: "workspace_executor".to_string(),
+                retry_class: if mutation_outcome_unknown {
+                    "reconcile_first".to_string()
+                } else if error.retryable {
+                    "safe_same_request".to_string()
+                } else {
+                    "never".to_string()
+                },
+                commit_state: if mutation_outcome_unknown {
+                    "unknown".to_string()
+                } else {
+                    "not_committed".to_string()
+                },
+                retryable: error.retryable,
+                retry_after_ms: None,
+                capacity: None,
+                trace_id: None,
+                operation_id: None,
+            }),
         }
     }
 }
@@ -318,7 +492,10 @@ impl RuntimeServer {
         self.record_trace(tool, &trace, result.is_ok());
         match result {
             Ok(value) => ToolOutcome::Success(value),
-            Err(error) => ToolOutcome::Error(error),
+            Err(mut error) => {
+                error.trace_id = Some(trace.trace_id);
+                ToolOutcome::Error(error)
+            }
         }
     }
 
@@ -379,6 +556,17 @@ fn parse_workspace_exec(arguments: Option<JsonObject>) -> Result<WorkspaceExecRe
     serde_json::from_value(Value::Object(arguments.unwrap_or_default())).map_err(|error| {
         McpError::invalid_params(
             format!("invalid workspace.exec task arguments: {error}"),
+            None,
+        )
+    })
+}
+
+fn parse_workspace_exec_plan(
+    arguments: Option<JsonObject>,
+) -> Result<WorkspaceExecPlanRequest, McpError> {
+    serde_json::from_value(Value::Object(arguments.unwrap_or_default())).map_err(|error| {
+        McpError::invalid_params(
+            format!("invalid workspace.execPlan task arguments: {error}"),
             None,
         )
     })
