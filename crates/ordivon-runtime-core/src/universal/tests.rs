@@ -192,6 +192,28 @@ fn workspace_diff_includes_staged_changes_and_workspace_listing_recovers_open_ha
     )
     .unwrap();
     assert!(diff.diff.contains("+staged"));
+
+    let stale_id = "workspace-list-stale";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: stale_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    run_git(
+        &source,
+        [
+            "worktree",
+            "remove",
+            "--force",
+            config.workspace_path(stale_id).to_str().unwrap(),
+        ],
+    );
+
     let listed = list_workspace_records(&config, 10).unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].workspace_id, workspace_id);

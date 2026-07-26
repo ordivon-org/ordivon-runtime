@@ -131,6 +131,24 @@ pub fn load_workspace_record(
     config: &UniversalExecutorConfig,
     workspace_id: &str,
 ) -> Result<WorkspaceRecord, UniversalExecError> {
+    let record = load_workspace_record_metadata(config, workspace_id)?;
+    let expected = canonical_directory(&config.workspace_path(workspace_id), "workspacePath")?;
+    let recorded = canonical_directory(Path::new(&record.workspace_path), "workspacePath")?;
+    if expected != recorded {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::MetadataCorrupt,
+            "workspace record path mismatch",
+            Some("workspacePath"),
+            false,
+        ));
+    }
+    Ok(record)
+}
+
+fn load_workspace_record_metadata(
+    config: &UniversalExecutorConfig,
+    workspace_id: &str,
+) -> Result<WorkspaceRecord, UniversalExecError> {
     super::validate_id(workspace_id, "workspaceId")?;
     let path = config.workspace_record_path(workspace_id);
     let bytes = read_workspace_record_bytes(&path)?;
@@ -143,18 +161,7 @@ pub fn load_workspace_record(
             false,
         ));
     }
-    let record = decode_open_workspace_record(&bytes, workspace_id)?;
-    let expected = canonical_directory(&config.workspace_path(workspace_id), "workspacePath")?;
-    let recorded = canonical_directory(Path::new(&record.workspace_path), "workspacePath")?;
-    if expected != recorded {
-        return Err(UniversalExecError::new(
-            UniversalExecErrorCode::MetadataCorrupt,
-            "workspace record path mismatch",
-            Some("workspacePath"),
-            false,
-        ));
-    }
-    Ok(record)
+    decode_open_workspace_record(&bytes, workspace_id)
 }
 
 fn read_workspace_record_bytes(path: &Path) -> Result<Vec<u8>, UniversalExecError> {
@@ -264,8 +271,33 @@ pub fn list_workspace_records(
         let Some(workspace_id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        match load_workspace_record(config, workspace_id) {
-            Ok(record) => records.push(record),
+        match load_workspace_record_metadata(config, workspace_id) {
+            Ok(record) => {
+                let expected_path = config.workspace_path(workspace_id);
+                if Path::new(&record.workspace_path) != expected_path {
+                    return Err(UniversalExecError::new(
+                        UniversalExecErrorCode::MetadataCorrupt,
+                        "workspace record path does not match its identity",
+                        Some("workspaceId"),
+                        false,
+                    ));
+                }
+                match fs::symlink_metadata(&expected_path) {
+                    Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                        records.push(record);
+                    }
+                    Ok(_) => {
+                        return Err(UniversalExecError::new(
+                            UniversalExecErrorCode::MetadataCorrupt,
+                            "workspace record target must be a non-symlink directory",
+                            Some("workspaceId"),
+                            false,
+                        ));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(io_error(&expected_path, "inspect", error)),
+                }
+            }
             Err(error) if error.code == UniversalExecErrorCode::WorkspaceNotFound => continue,
             Err(error) => return Err(error),
         }
