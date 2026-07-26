@@ -620,8 +620,29 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                     rollback = {"serviceActive": service_active(args.systemctl, args.service)}
                 status = "rolled_back" if rollback_error is None else "rollback_failed"
             else:
-                rollback = None
-                status = "not_committed"
+                recovery_error: Exception | None = None
+                recovery: dict[str, object] | None = None
+                if stopped or not service_active(args.systemctl, args.service):
+                    try:
+                        run([str(args.systemctl), "start", args.service])
+                        wait_service_active(args.systemctl, args.service, args.wait_seconds)
+                        recovery = {
+                            "serviceActive": True,
+                            "probe": probe_mcp(
+                                args.env_file,
+                                expected_tool_count=args.expected_tool_count,
+                                required=required_tools(args),
+                                wait_seconds=args.wait_seconds,
+                            ),
+                        }
+                    except Exception as error:
+                        recovery_error = error
+                        recovery = {
+                            "serviceActive": service_active(args.systemctl, args.service)
+                        }
+                rollback = recovery
+                rollback_error = recovery_error
+                status = "not_committed" if recovery_error is None else "recovery_failed"
             result = {
                 "schemaVersion": SCHEMA_VERSION,
                 "status": status,

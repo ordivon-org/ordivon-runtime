@@ -816,6 +816,106 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertIn("previous binary digest does not match receipt", rollback.stderr)
             self.assertEqual((install / "runtime").read_text(), "new\n")
 
+    def test_deploy_post_stop_job_race_restarts_original_without_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            commit = initialize_git_repository(repo, remote=True)
+            candidate = repo / "target" / "release"
+            install = root / "install"
+            candidate.mkdir(parents=True)
+            install.mkdir()
+            write_executable(candidate / "runtime", "new\n")
+            write_executable(install / "runtime", "old\n")
+            manifest = root / "candidate-manifest.json"
+            write_candidate_manifest(manifest, candidate, commit, ("runtime",), repo)
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            state = root / "service-state"
+            state.write_text("active\n", encoding="utf-8")
+            systemctl = root / "systemctl"
+            write_executable(
+                systemctl,
+                "#!/usr/bin/env python3\n"
+                "import sqlite3, sys\n"
+                "from pathlib import Path\n"
+                f"state = Path({str(state)!r})\n"
+                f"database = {str(database)!r}\n"
+                "command = sys.argv[1]\n"
+                "if command == 'is-active':\n"
+                "    print(state.read_text().strip())\n"
+                "elif command == 'stop':\n"
+                "    state.write_text('inactive\\n')\n"
+                "    with sqlite3.connect(database) as connection:\n"
+                "        connection.execute(\"INSERT INTO jobs VALUES ('job-race','other',NULL,2)\")\n"
+                "        connection.execute(\"INSERT INTO attempts VALUES ('attempt-race','job-race','running')\")\n"
+                "        connection.execute(\"INSERT INTO concurrency_reservations VALUES ('attempt-race','active')\")\n"
+                "        connection.commit()\n"
+                "elif command == 'start':\n"
+                "    state.write_text('active\\n')\n"
+                "else:\n"
+                "    raise SystemExit(1)\n",
+            )
+            with mcp_server(["workspace.patch"]) as port:
+                env_file = root / "runtime.env"
+                env_file.write_text(
+                    f"ORDIVON_BIND=127.0.0.1:{port}\nORDIVON_BEARER_TOKEN=test\n",
+                    encoding="utf-8",
+                )
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "scripts/ordivon-runtime-deploy",
+                        "apply",
+                        "--source-repo",
+                        str(repo),
+                        "--commit",
+                        commit,
+                        "--confirm-commit",
+                        commit,
+                        "--candidate-dir",
+                        str(candidate),
+                        "--candidate-manifest",
+                        str(manifest),
+                        "--install-dir",
+                        str(install),
+                        "--database",
+                        str(database),
+                        "--env-file",
+                        str(env_file),
+                        "--receipt-root",
+                        str(root / "receipts"),
+                        "--systemctl",
+                        str(systemctl),
+                        "--git",
+                        shutil.which("git") or "/usr/bin/git",
+                        "--lock-file",
+                        str(root / "deploy.lock"),
+                        "--binary",
+                        "runtime",
+                        "--required-tool",
+                        "workspace.patch",
+                        "--expected-tool-count",
+                        "1",
+                        "--wait-seconds",
+                        "2",
+                    ],
+                    cwd=REPO,
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("not_committed", result.stderr)
+            self.assertEqual((install / "runtime").read_text(), "old\n")
+            self.assertEqual(state.read_text(), "active\n")
+            self.assertFalse((install / "runtime.next").exists())
+            receipts = list((root / "receipts").iterdir())
+            self.assertEqual(len(receipts), 1)
+            receipt_result = json.loads((receipts[0] / "result.json").read_text())
+            self.assertEqual(receipt_result["status"], "not_committed")
+            self.assertTrue(receipt_result["rollback"]["serviceActive"])
+
     def test_deploy_probe_failure_automatically_restores_previous_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
