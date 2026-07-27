@@ -16,9 +16,8 @@ use ordivon_runtime_core::{
     TaskRunRequest, UniversalExecError, UniversalExecutionRequest, UniversalExecutionStep,
     UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
     WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceMutateRequest,
-    WorkspaceMutateResult, WorkspacePatchRequest, WorkspacePatchResult,
-    WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
-    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
+    WorkspaceMutateResult, WorkspaceReadRequest as ExecWorkspaceReadRequest,
+    WorkspaceReadSliceRequest, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::IntoCallToolResult;

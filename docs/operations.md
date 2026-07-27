@@ -35,8 +35,8 @@ scripts/ordivon-runtime-deploy plan \
   --install-dir /usr/local/libexec/ordivon \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --env-file /etc/ordivon/ordivon-runtime.env \
-  --receipt-root /var/lib/ordivon/runtime/deployments \
-  --expected-tool-count 14 \
+  --receipt-root /var/lib/ordivon/deployments \
+  --expected-tool-count 13 \
   --pretty
 
 scripts/ordivon-runtime-deploy apply \
@@ -48,8 +48,8 @@ scripts/ordivon-runtime-deploy apply \
   --install-dir /usr/local/libexec/ordivon \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --env-file /etc/ordivon/ordivon-runtime.env \
-  --receipt-root /var/lib/ordivon/runtime/deployments \
-  --expected-tool-count 14
+  --receipt-root /var/lib/ordivon/deployments \
+  --expected-tool-count 13
 ```
 
 Eligibility requires:
@@ -67,7 +67,7 @@ The tool stages `.next` files, retains both receipt-local previous binaries and 
 Rollback is explicit and receipt-bound:
 
 ```bash
-receipt=/var/lib/ordivon/runtime/deployments/<deployment-receipt>
+receipt=/var/lib/ordivon/deployments/<deployment-receipt>
 
 scripts/ordivon-runtime-deploy rollback \
   --receipt "$receipt" \
@@ -159,4 +159,16 @@ scripts/ordivon-runtime-lifecycle repair \
 
 ### Installation hygiene
 
-`ordivon-runtime-hygiene` identifies obsolete pre-release binaries, legacy executable names, and the exact zero-byte legacy `runtime.sqlite3`. Apply rechecks every digest and atomically moves each file into a receipt quarantine. Current binaries and current-name `.previous` rollback binaries are never selected. Target commands do not inherit the Runtime service environment. `ORDIVON_EXEC_PATH` and `ORDIVON_EXEC_HOME` explicitly retain trusted root toolchains, while request `env` values remain the only per-operation overrides. The trusted-local root authority model remains unchanged.
+The one-time pre-release installation hygiene pass is complete and remains available through Git history and its receipts rather than as a permanent Runtime subsystem. Target commands do not inherit the Runtime service environment. `ORDIVON_EXEC_PATH` and `ORDIVON_EXEC_HOME` explicitly retain trusted root toolchains, while request `env` values remain the only per-operation overrides. The trusted-local root authority model remains unchanged.
+
+## Secret-free status
+
+`scripts/ordivon-runtime-status` combines the latest successful deployment receipt, installed binary digests, systemd state, allowlisted numeric Runtime configuration, Registry summaries, Workspace consistency, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.
+
+```bash
+scripts/ordivon-runtime-status
+scripts/ordivon-runtime-status --json
+scripts/ordivon-runtime-status --json --expected-commit "$(git rev-parse HEAD)"
+```
+
+The command returns `0` for `healthy`, `1` when bounded facts require operator attention, and `2` for an invalid invocation or unreadable mandatory input. Output contains receipt identifiers and binary names, but not source paths, Workspace paths, command arguments, arbitrary environment values, or secret material. The deployment receipt remains the build-identity source of truth; the status command does not introduce another database or marker.

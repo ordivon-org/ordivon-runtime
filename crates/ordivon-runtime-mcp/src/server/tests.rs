@@ -152,7 +152,6 @@ fn tool_catalog_uses_transactional_job_contract() {
             "workspace.list",
             "workspace.mutate",
             "workspace.open",
-            "workspace.patch",
             "workspace.read",
         ]
     );

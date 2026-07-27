@@ -29,7 +29,6 @@ DEFAULT_BINARIES = (
     "ordivon-runtime-repair",
 )
 DEFAULT_REQUIRED_TOOLS = (
-    "workspace.patch",
     "workspace.execPlan",
     "workspace.get",
     "workspace.list",
@@ -446,7 +445,7 @@ def probe_mcp(
             if missing:
                 raise RuntimeError("MCP probe is missing required tools: " + ", ".join(missing))
             return {
-                "endpoint": endpoint,
+                "protocolVersion": "2025-06-18",
                 "serverInfo": initialized.get("serverInfo"),
                 "toolCount": len(names),
                 "requiredTools": sorted(required),
