@@ -1,4 +1,3 @@
-use super::registry::RUNTIME_JOB_CLIENT_REQUEST_LOOKUP_MIGRATION_CHECKSUM;
 use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::*;
 use crate::universal::{
@@ -2446,7 +2445,7 @@ fn newer_schema_and_checksum_drift_fail_closed() {
     connection
         .execute(
             "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,'future','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0)",
-            [6],
+            [5],
         )
         .unwrap();
     drop(connection);
@@ -2488,18 +2487,33 @@ fn newer_schema_and_checksum_drift_fail_closed() {
     drop(connection);
     let error = Registry::initialize(reclaim_drift.registry.config().clone()).unwrap_err();
     assert_eq!(error.code, RuntimeErrorCode::MigrationChecksumMismatch);
+}
 
-    let lookup_drift = Sandbox::new("lookup-checksum-drift", 5000);
-    let connection = Connection::open(&lookup_drift.registry.config().db_path).unwrap();
+#[test]
+fn query_index_is_recreated_without_advancing_schema_version() {
+    let sandbox = Sandbox::new("query-index-recreate", 5000);
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
     connection
-        .execute(
-            "UPDATE schema_migrations SET checksum='sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' WHERE version=5",
-            [],
-        )
+        .execute("DROP INDEX idx_jobs_client_request_id_created", [])
         .unwrap();
     drop(connection);
-    let error = Registry::initialize(lookup_drift.registry.config().clone()).unwrap_err();
-    assert_eq!(error.code, RuntimeErrorCode::MigrationChecksumMismatch);
+
+    Registry::initialize(sandbox.registry.config().clone()).unwrap();
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    let max_version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let lookup_index: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_jobs_client_request_id_created'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(max_version, 4);
+    assert_eq!(lookup_index, "idx_jobs_client_request_id_created");
 }
 
 #[test]
@@ -2700,7 +2714,7 @@ fn late_identity_bound_result_corrects_orphan_and_releases_capacity() {
 }
 
 #[test]
-fn existing_v1_registry_upgrades_to_client_request_lookup_schema() {
+fn existing_v1_registry_upgrades_and_ensures_lookup_index() {
     let root = std::env::temp_dir().join(format!(
         "ordivon-v1-upgrade-{}-{}",
         std::process::id(),
@@ -2733,7 +2747,7 @@ fn existing_v1_registry_upgrades_to_client_request_lookup_schema() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(max_version, 5);
+    assert_eq!(max_version, 4);
     let checksum: String = connection
         .query_row(
             "SELECT checksum FROM schema_migrations WHERE version=2",
@@ -2758,17 +2772,6 @@ fn existing_v1_registry_upgrades_to_client_request_lookup_schema() {
         )
         .unwrap();
     assert_eq!(reclaim_checksum, RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM);
-    let lookup_checksum: String = connection
-        .query_row(
-            "SELECT checksum FROM schema_migrations WHERE version=5",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        lookup_checksum,
-        RUNTIME_JOB_CLIENT_REQUEST_LOOKUP_MIGRATION_CHECKSUM
-    );
     let lookup_index: String = connection
         .query_row(
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_jobs_client_request_id_created'",

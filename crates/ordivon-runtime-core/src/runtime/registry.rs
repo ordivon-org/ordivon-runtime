@@ -39,13 +39,10 @@ const MIGRATION_V4_NAME: &str = "0004_orphan_reclaim";
 const MIGRATION_V4_SQL: &str = include_str!("../../migrations/runtime/0004_orphan_reclaim.sql");
 pub const RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM: &str =
     "sha256:b76afbfaf70645b60456b08ad257e5ac2be1f63499f24a555cbf0157791e19ad";
-const MIGRATION_V5: i64 = 5;
-const MIGRATION_V5_NAME: &str = "0005_job_client_request_lookup";
-const MIGRATION_V5_SQL: &str =
-    include_str!("../../migrations/runtime/0005_job_client_request_lookup.sql");
-pub const RUNTIME_JOB_CLIENT_REQUEST_LOOKUP_MIGRATION_CHECKSUM: &str =
-    "sha256:e563e385a346ed2ddb464a43ade0fda0e7932773cf06f140c35d1818d3238b89";
-pub(crate) const MAX_MIGRATION_VERSION: i64 = 5;
+pub(crate) const MAX_MIGRATION_VERSION: i64 = 4;
+const JOB_CLIENT_REQUEST_LOOKUP_INDEX: &str = "idx_jobs_client_request_id_created";
+const JOB_CLIENT_REQUEST_LOOKUP_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_jobs_client_request_id_created ON jobs(client_request_id, created_at_ms, job_id)";
 const WORKSPACE_EXECUTION_LIMIT: u32 = 1;
 
 #[derive(Clone, Debug)]
@@ -111,6 +108,7 @@ impl Registry {
         let mut connection = registry.open_connection()?;
         registry.ensure_wal_mode(&connection)?;
         registry.apply_migrations(&mut connection)?;
+        registry.ensure_query_indexes(&mut connection)?;
         registry.validate_database(&connection)?;
         set_private_file(&registry.config.db_path)?;
         Ok(registry)
@@ -297,43 +295,37 @@ impl Registry {
             RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM,
             "orphan-reclaim migration",
         )?;
-        if max_version < MIGRATION_V5 {
-            let transaction = immediate(connection, "Job client request lookup migration")?;
-            transaction
-                .execute_batch(MIGRATION_V5_SQL)
-                .map_err(|error| {
-                    RuntimeError::from_sql(
-                        error,
-                        "cannot apply Job client request lookup migration",
-                    )
-                })?;
-            transaction
-                .execute(
-                    "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,?2,?3,?4)",
-                    params![
-                        MIGRATION_V5,
-                        MIGRATION_V5_NAME,
-                        RUNTIME_JOB_CLIENT_REQUEST_LOOKUP_MIGRATION_CHECKSUM,
-                        now_ms()?
-                    ],
-                )
-                .map_err(|error| {
-                    RuntimeError::from_sql(
-                        error,
-                        "cannot record Job client request lookup migration",
-                    )
-                })?;
-            transaction.commit().map_err(|error| {
-                RuntimeError::from_sql(error, "cannot commit Job client request lookup migration")
-            })?;
-        }
-        validate_migration_checksum(
-            connection,
-            MIGRATION_V5,
-            RUNTIME_JOB_CLIENT_REQUEST_LOOKUP_MIGRATION_CHECKSUM,
-            "Job client request lookup migration",
-        )?;
 
+        Ok(())
+    }
+
+    fn ensure_query_indexes(&self, connection: &mut Connection) -> RuntimeResult<()> {
+        let transaction = immediate(connection, "Runtime query index maintenance")?;
+        transaction
+            .execute(JOB_CLIENT_REQUEST_LOOKUP_INDEX_SQL, [])
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot ensure Job client request lookup index")
+            })?;
+        transaction.commit().map_err(|error| {
+            RuntimeError::from_sql(error, "cannot commit Runtime query index maintenance")
+        })?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)",
+                [JOB_CLIENT_REQUEST_LOOKUP_INDEX],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot verify Job client request lookup index")
+            })?;
+        if !exists {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "Job client request lookup index is missing after maintenance",
+                None,
+                false,
+            ));
+        }
         Ok(())
     }
 

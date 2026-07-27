@@ -76,7 +76,7 @@ scripts/ordivon-runtime-deploy rollback \
   --env-file /etc/ordivon/ordivon-runtime.env
 ```
 
-Rollback validates the receipt-bound install directory, service, environment file, binary set, and previous digests. It preserves the displaced current binaries inside the same receipt before restoring the previous set. If restoring the previous set fails, it attempts to restore the displaced current set and receipts both outcomes.
+Rollback validates the receipt-bound install directory, service, environment file, binary set, and previous digests. It preserves the displaced current binaries inside the same receipt before restoring the previous set. If restoring the previous set fails, it attempts to restore the displaced current set and receipts both outcomes. Additive query indexes that do not change Registry semantics are maintained outside `schema_migrations`; this preserves previous-binary rollback compatibility while allowing the newer Runtime to recreate missing performance indexes idempotently.
 
 ## Workspace lifecycle and reclaim
 

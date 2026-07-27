@@ -106,7 +106,7 @@ A successful process exit is execution evidence, not proof of semantic completio
 
 ## Correlated Job lookup
 
-`task.list` retains newest-first cursor pagination and may additionally filter by an exact `clientRequestId`. The filter is a read-only projection over the durable Job Registry and its indexed request identity; it does not create a second idempotency store or change Job ownership. Recovery callers still consume every filtered page and reject conflicting Job identities rather than treating the newest match as sufficient proof.
+`task.list` retains newest-first cursor pagination and may additionally filter by an exact `clientRequestId`. The filter is a read-only projection over the durable Job Registry and its indexed request identity; it does not create a second idempotency store or change Job ownership. Recovery callers still consume every filtered page and reject conflicting Job identities rather than treating the newest match as sufficient proof. The lookup index is maintained idempotently as a non-semantic query capability rather than advancing the Registry schema version, so the previous Runtime binary can still open the same Registry during receipt-bound rollback.
 
 ## Read-only experience projection
 
