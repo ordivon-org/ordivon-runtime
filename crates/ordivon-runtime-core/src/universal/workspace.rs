@@ -783,6 +783,7 @@ pub fn remove_git_workspace(
                 false,
             ));
         }
+        cleanup_workspace_caches(config, &request.workspace_id)?;
         return Ok(WorkspaceCloseResult {
             workspace_id: request.workspace_id.clone(),
             removed: false,
@@ -792,6 +793,7 @@ pub fn remove_git_workspace(
     let bytes = read_workspace_record_bytes(&record_path)?;
     if let Some(closed) = decode_closed_workspace_record(&bytes)? {
         validate_closed_identity(&closed, &request.workspace_id)?;
+        cleanup_workspace_caches(config, &request.workspace_id)?;
         return Ok(WorkspaceCloseResult {
             workspace_id: request.workspace_id.clone(),
             removed: false,
@@ -818,6 +820,7 @@ pub fn remove_git_workspace(
                 ensure_rescue_ref(source_repo, &request.workspace_id, head)?;
             }
         }
+        cleanup_workspace_caches(config, &request.workspace_id)?;
         write_closed_workspace_record(&record_path, &record, final_head, "already_missing")?;
         return Ok(WorkspaceCloseResult {
             workspace_id: request.workspace_id.clone(),
@@ -856,12 +859,31 @@ pub fn remove_git_workspace(
     if final_head != record.source_revision {
         ensure_rescue_ref(&recorded, &request.workspace_id, &final_head)?;
     }
+    cleanup_workspace_caches(config, &request.workspace_id)?;
     remove_git_worktree_from_workspace(&recorded, request.force)?;
     write_closed_workspace_record(&record_path, &record, Some(final_head), "removed")?;
     Ok(WorkspaceCloseResult {
         workspace_id: request.workspace_id.clone(),
         removed: true,
     })
+}
+
+fn cleanup_workspace_caches(
+    config: &UniversalExecutorConfig,
+    workspace_id: &str,
+) -> Result<(), UniversalExecError> {
+    for path in [
+        config.workspace_cache_path(workspace_id),
+        config.workspace_build_cache_path(workspace_id),
+        config.workspace_tmp_path(workspace_id),
+    ] {
+        match fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(&path, "remove Workspace cache", error)),
+        }
+    }
+    Ok(())
 }
 
 fn write_closed_workspace_record(

@@ -455,16 +455,64 @@ fn clean_workspace_close_succeeds_without_force() {
         },
     )
     .unwrap();
+    let workspace_id = "workspace-clean-close";
+    for cache in [
+        config.workspace_cache_path(workspace_id),
+        config.workspace_build_cache_path(workspace_id),
+        config.workspace_tmp_path(workspace_id),
+    ] {
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("cached"), b"cache").unwrap();
+    }
     let closed = remove_git_workspace(
         &config,
         &WorkspaceCloseRequest {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-            workspace_id: "workspace-clean-close".to_string(),
+            workspace_id: workspace_id.to_string(),
             force: false,
         },
     )
     .unwrap();
     assert!(closed.removed);
+    assert!(!config.workspace_cache_path(workspace_id).exists());
+    assert!(!config.workspace_build_cache_path(workspace_id).exists());
+    assert!(!config.workspace_tmp_path(workspace_id).exists());
+}
+
+#[test]
+fn workspace_close_cache_failure_does_not_commit_closure() {
+    let sandbox = Sandbox::new("close-cache-failure");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-cache-failure";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let cache_path = config.workspace_cache_path(workspace_id);
+    fs::write(&cache_path, b"not-a-directory").unwrap();
+    let error = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: false,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, UniversalExecErrorCode::IoError);
+    assert!(config.workspace_path(workspace_id).is_dir());
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(config.workspace_record_path(workspace_id)).unwrap())
+            .unwrap();
+    assert_ne!(record["state"], "closed");
 }
 
 #[test]

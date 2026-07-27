@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Receipt and quarantine obsolete Ordivon Runtime installation debris."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import sys
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+SCHEMA_VERSION = 1
+CONFIRMATION = "QUARANTINE_OBSOLETE_RUNTIME_FILES"
+LEGACY_EXACT_NAMES = {
+    "ordivon-mcp.previous",
+    "ordivon-mcp.pre-runtime-rename",
+    "ordivon-task-runner.previous",
+    "ordivon-task-runner.pre-runtime-rename",
+    "ordivon-workspace-reclaim.pre-runtime-rename",
+}
+CURRENT_PREFIXES = {
+    "ordivon-runtime",
+    "ordivon-runtime-runner",
+    "ordivon-runtime-doctor",
+    "ordivon-runtime-inspect",
+    "ordivon-runtime-repair",
+    "ordivon-runtime-reclaim",
+}
+
+
+def absolute_path(value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("path must be absolute")
+    return path
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="ordivon-runtime-hygiene")
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("inspect", "apply"):
+        command = sub.add_parser(name)
+        command.add_argument("--install-dir", type=absolute_path, required=True)
+        command.add_argument("--runtime-store-root", type=absolute_path, required=True)
+        command.add_argument("--pretty", action="store_true")
+        if name == "apply":
+            command.add_argument("--receipt-root", type=absolute_path, required=True)
+            command.add_argument("--lock-file", type=absolute_path, required=True)
+            command.add_argument("--confirm-policy", required=True)
+    return parser.parse_args()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return "sha256:" + digest.hexdigest()
+
+
+def obsolete_install_name(name: str) -> bool:
+    if name in LEGACY_EXACT_NAMES:
+        return True
+    if ".pre-" in name:
+        prefix = name.split(".pre-", 1)[0]
+        return prefix in CURRENT_PREFIXES or prefix in {"ordivon-mcp", "ordivon-task-runner"}
+    return False
+
+
+def describe(path: Path, root: Path, kind: str) -> dict[str, object]:
+    stat = path.stat()
+    return {
+        "kind": kind,
+        "path": str(path),
+        "relativePath": str(path.relative_to(root)),
+        "bytes": stat.st_size,
+        "digest": sha256_file(path),
+        "modifiedUnixMs": int(stat.st_mtime * 1000),
+    }
+
+
+def inspect(args: argparse.Namespace) -> dict[str, object]:
+    candidates: list[dict[str, object]] = []
+    if args.install_dir.is_dir():
+        for path in sorted(args.install_dir.iterdir()):
+            if path.is_symlink() or not path.is_file():
+                continue
+            if obsolete_install_name(path.name):
+                candidates.append(describe(path, args.install_dir, "obsolete_binary"))
+    legacy_database = args.runtime_store_root / "runtime.sqlite3"
+    if (
+        legacy_database.exists()
+        and not legacy_database.is_symlink()
+        and legacy_database.is_file()
+        and legacy_database.stat().st_size == 0
+    ):
+        candidates.append(describe(legacy_database, args.runtime_store_root, "zero_byte_legacy_database"))
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "generatedAtMs": int(time.time() * 1000),
+        "summary": {
+            "count": len(candidates),
+            "bytes": sum(int(item["bytes"]) for item in candidates),
+        },
+        "candidates": candidates,
+    }
+
+
+@contextmanager
+def exclusive_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError(f"hygiene lock is already held: {path}") from error
+        yield
+
+
+def receipt_path(root: Path) -> Path:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    candidate = root / f"{stamp}-runtime-hygiene"
+    index = 1
+    while candidate.exists():
+        candidate = root / f"{stamp}-runtime-hygiene-{index}"
+        index += 1
+    candidate.mkdir(parents=True)
+    return candidate
+
+
+def write_json_atomic(path: Path, value: object) -> None:
+    temporary = path.with_name(path.name + f".tmp-{os.getpid()}")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def apply(args: argparse.Namespace) -> dict[str, object]:
+    if args.confirm_policy != CONFIRMATION:
+        raise RuntimeError(f"confirm-policy must equal {CONFIRMATION}")
+    with exclusive_lock(args.lock_file):
+        before = inspect(args)
+        receipt = receipt_path(args.receipt_root)
+        write_json_atomic(receipt / "before.json", before)
+        quarantine = receipt / "files"
+        quarantine.mkdir()
+        actions: list[dict[str, object]] = []
+        failures: list[dict[str, object]] = []
+        for item in before["candidates"]:
+            assert isinstance(item, dict)
+            source = Path(str(item["path"]))
+            try:
+                if source.is_symlink() or not source.is_file():
+                    raise RuntimeError("candidate is no longer a regular file")
+                if source.stat().st_size != int(item["bytes"]) or sha256_file(source) != item["digest"]:
+                    raise RuntimeError("candidate changed after inspection")
+                namespace = "install" if item["kind"] == "obsolete_binary" else "runtime-store"
+                target = quarantine / namespace / str(item["relativePath"])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(source, target)
+                actions.append(
+                    {
+                        "kind": item["kind"],
+                        "source": str(source),
+                        "quarantine": str(target),
+                        "bytes": item["bytes"],
+                        "digest": item["digest"],
+                    }
+                )
+            except Exception as error:
+                failures.append({"path": str(source), "error": str(error)})
+        after = inspect(args)
+        write_json_atomic(receipt / "after.json", after)
+        result = {
+            "schemaVersion": SCHEMA_VERSION,
+            "status": "completed" if not failures else "partial",
+            "receipt": str(receipt),
+            "actions": actions,
+            "failures": failures,
+            "remaining": after["summary"],
+        }
+        write_json_atomic(receipt / "result.json", result)
+        return result
+
+
+def main() -> int:
+    try:
+        args = parse_args()
+        value = inspect(args) if args.command == "inspect" else apply(args)
+        print(json.dumps(value, indent=2 if args.pretty else None, sort_keys=args.pretty))
+        return 0 if value.get("status") != "partial" else 2
+    except (OSError, RuntimeError, json.JSONDecodeError) as error:
+        print(f"runtime hygiene failed: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

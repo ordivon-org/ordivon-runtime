@@ -50,6 +50,8 @@ const CONTROL_RESULT_FILE: &str = "control-result.json";
 const ORPHAN_REMEDIATION_FILE: &str = "orphan-remediation.json";
 const INTERACTIVE_RECONCILIATION_LIMIT: u32 = 32;
 const ADAPTIVE_POLL_DELAYS_MS: [u64; 5] = [2, 5, 10, 20, 50];
+const DEFAULT_EXECUTION_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const DEFAULT_EXECUTION_HOME: &str = "/root";
 
 fn adaptive_poll_delay(poll_index: usize) -> Duration {
     Duration::from_millis(
@@ -78,6 +80,8 @@ pub struct Runtime {
     registry: Registry,
     executor: UniversalExecutorConfig,
     startup_grace_ms: u64,
+    execution_path: String,
+    execution_home: String,
     lifecycle_lock: Arc<Mutex<()>>,
 }
 
@@ -135,10 +139,14 @@ impl Runtime {
             ));
         }
         let registry = Registry::initialize(config.registry)?;
+        let execution_path = configured_execution_path()?;
+        let execution_home = configured_execution_home()?;
         let runtime = Self {
             registry,
             executor: config.executor,
             startup_grace_ms: config.startup_grace_ms,
+            execution_path,
+            execution_home,
             lifecycle_lock: Arc::new(Mutex::new(())),
         };
         runtime.reconcile_recoverable_orphans()?;
@@ -394,6 +402,7 @@ impl Runtime {
         let cwd = resolve_workspace_cwd(&record, &request.execution.cwd_relative)
             .map_err(map_universal_error)?;
         let executable = validate_executable(&self.executor, &request.execution.executable)?;
+        let base_environment = self.execution_environment(&request.execution.workspace_id)?;
         let mut steps = Vec::with_capacity(request.execution.steps.len());
         for step in &request.execution.steps {
             let step_cwd =
@@ -405,7 +414,7 @@ impl Runtime {
                 executable_digest: sha256_file(&step_executable).map_err(map_universal_error)?,
                 args: step.args.clone(),
                 cwd: step_cwd.to_string_lossy().into_owned(),
-                env: step.env.clone(),
+                env: merge_environment(&base_environment, &step.env),
                 timeout_ms: step.timeout_ms,
                 continue_on_error: step.continue_on_error,
             });
@@ -423,7 +432,7 @@ impl Runtime {
             executable_digest: sha256_file(&executable).map_err(map_universal_error)?,
             args: request.execution.args.clone(),
             cwd: cwd.to_string_lossy().into_owned(),
-            env: request.execution.env.clone(),
+            env: merge_environment(&base_environment, &request.execution.env),
             timeout_ms: request.execution.timeout_ms,
             stdout_limit_bytes: request.execution.stdout_limit_bytes,
             stderr_limit_bytes: request.execution.stderr_limit_bytes,
@@ -453,7 +462,49 @@ impl Runtime {
     }
 
     fn inherit_host_environment(&self) -> bool {
-        true
+        false
+    }
+
+    fn execution_environment(&self, workspace_id: &str) -> RuntimeResult<BTreeMap<String, String>> {
+        let workspace_cache = self.executor.workspace_cache_path(workspace_id);
+        let build_cache = self.executor.workspace_build_cache_path(workspace_id);
+        let workspace_tmp = self.executor.workspace_tmp_path(workspace_id);
+        let shared = self.executor.shared_caches_root();
+        for path in [&workspace_cache, &build_cache, &workspace_tmp, &shared] {
+            fs::create_dir_all(path).map_err(|error| {
+                io_error(&format!("create execution cache {}", path.display()), error)
+            })?;
+        }
+        let mut environment = BTreeMap::new();
+        environment.insert("PATH".to_string(), self.execution_path.clone());
+        environment.insert("HOME".to_string(), self.execution_home.clone());
+        environment.insert("LANG".to_string(), "C.UTF-8".to_string());
+        environment.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
+        environment.insert(
+            "TMPDIR".to_string(),
+            workspace_tmp.to_string_lossy().into_owned(),
+        );
+        environment.insert(
+            "XDG_CACHE_HOME".to_string(),
+            workspace_cache.to_string_lossy().into_owned(),
+        );
+        environment.insert(
+            "CARGO_TARGET_DIR".to_string(),
+            build_cache.join("cargo").to_string_lossy().into_owned(),
+        );
+        environment.insert(
+            "UV_CACHE_DIR".to_string(),
+            shared.join("uv").to_string_lossy().into_owned(),
+        );
+        environment.insert(
+            "PIP_CACHE_DIR".to_string(),
+            shared.join("pip").to_string_lossy().into_owned(),
+        );
+        environment.insert(
+            "npm_config_cache".to_string(),
+            shared.join("npm").to_string_lossy().into_owned(),
+        );
+        Ok(environment)
     }
 
     fn materialize_bundle(&self, attempt: &AttemptRecord) -> RuntimeResult<AttemptRecord> {
@@ -1763,6 +1814,54 @@ impl Runtime {
     }
 }
 
+fn configured_execution_path() -> RuntimeResult<String> {
+    let value =
+        std::env::var("ORDIVON_EXEC_PATH").unwrap_or_else(|_| DEFAULT_EXECUTION_PATH.to_string());
+    if value.is_empty()
+        || value.len() > 16 * 1024
+        || value.as_bytes().contains(&0)
+        || value
+            .split(':')
+            .any(|entry| entry.is_empty() || !Path::new(entry).is_absolute())
+    {
+        return Err(RuntimeError::invalid(
+            "ORDIVON_EXEC_PATH must be a bounded colon-separated list of absolute paths",
+            "ORDIVON_EXEC_PATH",
+        ));
+    }
+    Ok(value)
+}
+
+fn configured_execution_home() -> RuntimeResult<String> {
+    let value = std::env::var("ORDIVON_EXEC_HOME")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| DEFAULT_EXECUTION_HOME.to_string());
+    if value.is_empty()
+        || value.len() > 4096
+        || value.as_bytes().contains(&0)
+        || !Path::new(&value).is_absolute()
+    {
+        return Err(RuntimeError::invalid(
+            "ORDIVON_EXEC_HOME must be a bounded absolute path",
+            "ORDIVON_EXEC_HOME",
+        ));
+    }
+    Ok(value)
+}
+
+fn merge_environment(
+    base: &BTreeMap<String, String>,
+    explicit: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut merged = base.clone();
+    merged.extend(
+        explicit
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone())),
+    );
+    merged
+}
+
 fn artifact_descriptor(
     artifact: RuntimeArtifactRecord,
     result: Option<&RunnerTaskResult>,
@@ -2835,6 +2934,57 @@ mod trusted_systemd_command_tests {
             startup_grace_ms: 2_000,
         })
         .unwrap();
+        drop(runtime);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_builds_explicit_minimal_environment_and_external_cache_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "ordivon-runtime-environment-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime = Runtime::new(RuntimeConfig {
+            registry: RegistryConfig {
+                db_path: root.join("registry/registry.sqlite3"),
+                store_root: root.join("registry"),
+                busy_timeout_ms: 5_000,
+            },
+            executor: UniversalExecutorConfig {
+                store_root: root.join("runtime"),
+                workspace_root: None,
+                workspace_uid: None,
+                workspace_gid: None,
+                runner_path: PathBuf::from("/usr/bin/true"),
+                allowed_executable_roots: vec![PathBuf::from("/")],
+                max_runtime_ms: 60_000,
+                max_output_bytes: 1_048_576,
+            },
+            startup_grace_ms: 2_000,
+        })
+        .unwrap();
+        let environment = runtime.execution_environment("workspace-env").unwrap();
+        assert!(!runtime.inherit_host_environment());
+        assert_eq!(
+            environment.get("PATH").map(String::as_str),
+            Some(runtime.execution_path.as_str())
+        );
+        assert_eq!(
+            environment.get("HOME").map(String::as_str),
+            Some(runtime.execution_home.as_str())
+        );
+        let workspace_root = root.join("runtime/workspaces/workspace-env");
+        for name in ["XDG_CACHE_HOME", "CARGO_TARGET_DIR", "TMPDIR"] {
+            let value = Path::new(environment.get(name).unwrap());
+            assert!(value.starts_with(root.join("runtime/cache")));
+            assert!(!value.starts_with(&workspace_root));
+        }
+        assert!(Path::new(environment.get("XDG_CACHE_HOME").unwrap()).is_dir());
+        assert!(Path::new(environment.get("TMPDIR").unwrap()).is_dir());
         drop(runtime);
         fs::remove_dir_all(root).unwrap();
     }

@@ -1,0 +1,11 @@
+[Unit]
+Description=Ordivon Runtime Workspace lifecycle sweep
+After=ordivon-runtime.service
+Requires=ordivon-runtime.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/libexec/ordivon/ordivon-runtime-lifecycle sweep --database /var/lib/ordivon/registry/registry.sqlite3 --runtime-store-root /var/lib/ordivon/runtime --policy-file /etc/ordivon/workspace-retention.json --env-file /etc/ordivon/ordivon-runtime.env --receipt-root /var/lib/ordivon/runtime/lifecycle-receipts --lock-file /run/ordivon-runtime-lifecycle.lock --measure-bytes --confirm-policy APPLY_WORKSPACE_RETENTION_POLICY

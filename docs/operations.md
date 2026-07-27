@@ -120,3 +120,43 @@ scripts/ordivon-runtime-reclaim apply \
 The default policy is seven days and includes only `stale_record` and `closable`. A `stale_record` candidate carries a digest from inspection; apply requires the record to remain a regular file with the same digest, rechecks Workspace absence and active Jobs, copies it into the receipt, and only then deletes it. `closable` Workspaces are never removed directly; the tool calls the Runtime's `workspace.close` contract with `force=false`, preserving active-Job exclusion, dirty-state refusal, rescue refs, tombstones, and idempotency.
 
 The apply command is a policy executor, not a timer. Scheduling is intentionally separate because retention age and cadence are user policy. Failed items are recorded independently and produce a partial result instead of hiding successful actions or deleting a broader set.
+
+
+### Policy-driven lifecycle
+
+The low-level reclaim command remains the only release executor. `ordivon-runtime-lifecycle` adds the installed retention policy without creating another Workspace database. It derives the retention basis from Workspace creation and the latest durable Job/Attempt activity, treats active or held Jobs as leases, and classifies server-generated `ws-*` handles as `ephemeral`, explicit handles as `review`, or configured identities as `pinned`.
+
+```bash
+scripts/ordivon-runtime-lifecycle inspect \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --runtime-store-root /var/lib/ordivon/runtime \
+  --policy-file /etc/ordivon/workspace-retention.json \
+  --measure-bytes --pretty
+
+scripts/ordivon-runtime-lifecycle sweep \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --runtime-store-root /var/lib/ordivon/runtime \
+  --policy-file /etc/ordivon/workspace-retention.json \
+  --env-file /etc/ordivon/ordivon-runtime.env \
+  --receipt-root /var/lib/ordivon/runtime/lifecycle-receipts \
+  --lock-file /run/ordivon-runtime-lifecycle.lock \
+  --confirm-policy APPLY_WORKSPACE_RETENTION_POLICY --pretty
+```
+
+The packaged timer runs this sweep daily with a randomized delay. It can only select policy-expired `closable` and `stale_record` entries; dirty, active, pinned, unknown, and orphan-directory cases remain excluded. The subordinate reclaim receipt is linked from the lifecycle receipt.
+
+Repository renames can leave a healthy worktree registered in the new Git repository while its `.git` file and Runtime record still name the old path. The repair command accepts exact `sourceRepoAliases`, verifies the recorded commit in the mapped repository, runs `git worktree repair`, rechecks the exact HEAD, and updates only the record's source repository. Unrepairable data may be moved atomically to a quarantine directory and replaced by a valid closed tombstone only with a second explicit confirmation; bytes are preserved rather than deleted.
+
+```bash
+scripts/ordivon-runtime-lifecycle repair \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --runtime-store-root /var/lib/ordivon/runtime \
+  --policy-file /etc/ordivon/workspace-retention.json \
+  --receipt-root /var/lib/ordivon/runtime/lifecycle-receipts \
+  --lock-file /run/ordivon-runtime-lifecycle.lock \
+  --confirm-policy REPAIR_WORKSPACE_IDENTITIES --pretty
+```
+
+### Installation hygiene
+
+`ordivon-runtime-hygiene` identifies obsolete pre-release binaries, legacy executable names, and the exact zero-byte legacy `runtime.sqlite3`. Apply rechecks every digest and atomically moves each file into a receipt quarantine. Current binaries and current-name `.previous` rollback binaries are never selected. Target commands do not inherit the Runtime service environment. `ORDIVON_EXEC_PATH` and `ORDIVON_EXEC_HOME` explicitly retain trusted root toolchains, while request `env` values remain the only per-operation overrides. The trusted-local root authority model remains unchanged.

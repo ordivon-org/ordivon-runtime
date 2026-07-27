@@ -152,7 +152,7 @@ It does not yet prove:
 - tool-contract continuity between Agent decision and effect execution;
 - operation-scoped authority beyond the trusted-local principal;
 - external-world preconditions outside the Git Workspace;
-- inherited host environment, wall-clock time, network responses, ignored Workspace inputs, or other ambient process dependencies;
+- wall-clock time, network responses, ignored Workspace inputs, or other ambient process dependencies; target processes receive a committed configured execution environment plus explicit request overrides rather than inheriting the Runtime service environment;
 - effect-aware retry or reconciliation through a structured adapter.
 
 These are real gaps. They must not be hidden by process success, Artifact presence, tracing, or additional orchestration layers.

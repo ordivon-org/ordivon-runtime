@@ -1,0 +1,604 @@
+#!/usr/bin/env python3
+"""Policy-driven Workspace retention, repair, and quarantine for Ordivon Runtime."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from urllib.parse import quote
+
+SCHEMA_VERSION = 1
+SWEEP_CONFIRMATION = "APPLY_WORKSPACE_RETENTION_POLICY"
+REPAIR_CONFIRMATION = "REPAIR_WORKSPACE_IDENTITIES"
+QUARANTINE_CONFIRMATION = "QUARANTINE_BROKEN_WORKSPACES"
+DEFAULT_POLICY = {
+    "schemaVersion": 1,
+    "defaultClass": "review",
+    "classes": {
+        "ephemeral": {"retentionHours": 24.0},
+        "review": {"retentionHours": 168.0},
+        "pinned": {"retentionHours": None},
+    },
+    "rules": [{"prefix": "ws-", "class": "ephemeral"}],
+    "sourceRepoAliases": {},
+}
+
+
+def absolute_path(value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("path must be absolute")
+    return path
+
+
+def nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if not 0 <= parsed <= 24 * 3650:
+        raise argparse.ArgumentTypeError("hours must be in 0..=87600")
+    return parsed
+
+
+def positive_timeout(value: str) -> int:
+    parsed = int(value)
+    if not 1 <= parsed <= 60_000:
+        raise argparse.ArgumentTypeError("timeout must be in 1..=60000")
+    return parsed
+
+
+def add_common(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--database", type=absolute_path, required=True)
+    parser.add_argument("--runtime-store-root", type=absolute_path, required=True)
+    parser.add_argument("--workspace-root", type=absolute_path)
+    parser.add_argument("--policy-file", type=absolute_path)
+    parser.add_argument("--busy-timeout-ms", type=positive_timeout, default=5_000)
+    parser.add_argument("--measure-bytes", action="store_true")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="ordivon-runtime-lifecycle")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    inspect = sub.add_parser("inspect", help="enrich reclaim evidence with retention policy")
+    add_common(inspect)
+    inspect.add_argument("--pretty", action="store_true")
+
+    sweep = sub.add_parser("sweep", help="release policy-expired clean Workspaces")
+    add_common(sweep)
+    sweep.add_argument("--env-file", type=absolute_path, required=True)
+    sweep.add_argument("--receipt-root", type=absolute_path, required=True)
+    sweep.add_argument("--lock-file", type=absolute_path, required=True)
+    sweep.add_argument("--confirm-policy", required=True)
+    sweep.add_argument("--pretty", action="store_true")
+
+    repair = sub.add_parser("repair", help="repair renamed Git worktree identities")
+    add_common(repair)
+    repair.add_argument("--receipt-root", type=absolute_path, required=True)
+    repair.add_argument("--lock-file", type=absolute_path, required=True)
+    repair.add_argument("--workspace-id", action="append", dest="workspace_ids")
+    repair.add_argument("--minimum-age-hours", type=nonnegative_float, default=0.0)
+    repair.add_argument("--confirm-policy", required=True)
+    repair.add_argument("--quarantine-unrepairable", action="store_true")
+    repair.add_argument("--quarantine-root", type=absolute_path)
+    repair.add_argument("--confirm-quarantine")
+    repair.add_argument("--pretty", action="store_true")
+    return parser.parse_args()
+
+
+def reclaim_program() -> Path:
+    configured = os.environ.get("ORDIVON_RUNTIME_RECLAIM")
+    if configured:
+        return Path(configured)
+    sibling = Path(__file__).resolve().with_name("ordivon-runtime-reclaim")
+    if sibling.is_file():
+        return sibling
+    repository = Path(__file__).resolve().parents[1] / "scripts/ordivon-runtime-reclaim"
+    if repository.is_file():
+        return repository
+    raise RuntimeError("cannot locate ordivon-runtime-reclaim")
+
+
+def run_json(command: list[str], *, accepted_codes: tuple[int, ...] = (0,)) -> dict[str, object]:
+    result = subprocess.run(command, check=False, text=True, capture_output=True)
+    if result.returncode not in accepted_codes:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "command failed")
+    value = json.loads(result.stdout)
+    if not isinstance(value, dict):
+        raise RuntimeError("command did not return a JSON object")
+    return value
+
+
+def reclaim_inspect(args: argparse.Namespace) -> dict[str, object]:
+    command = [
+        sys.executable,
+        str(reclaim_program()),
+        "inspect",
+        "--database",
+        str(args.database),
+        "--runtime-store-root",
+        str(args.runtime_store_root),
+        "--busy-timeout-ms",
+        str(args.busy_timeout_ms),
+    ]
+    if args.workspace_root:
+        command.extend(["--workspace-root", str(args.workspace_root)])
+    if args.measure_bytes:
+        command.append("--measure-bytes")
+    return run_json(command)
+
+
+def load_policy(path: Path | None) -> dict[str, object]:
+    value = json.loads(json.dumps(DEFAULT_POLICY))
+    if path is not None:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise RuntimeError("retention policy must be a JSON object")
+        for key, loaded_value in loaded.items():
+            if key in {"classes", "sourceRepoAliases"} and isinstance(loaded_value, dict):
+                current = value.get(key)
+                if not isinstance(current, dict):
+                    current = {}
+                current.update(loaded_value)
+                value[key] = current
+            else:
+                value[key] = loaded_value
+    if value.get("schemaVersion") != SCHEMA_VERSION:
+        raise RuntimeError("unsupported retention policy schemaVersion")
+    classes = value.get("classes")
+    if not isinstance(classes, dict) or not classes:
+        raise RuntimeError("retention policy classes must be a non-empty object")
+    for name, definition in classes.items():
+        if not isinstance(name, str) or not isinstance(definition, dict):
+            raise RuntimeError("retention policy class definitions are invalid")
+        hours = definition.get("retentionHours")
+        if hours is not None and (not isinstance(hours, (int, float)) or hours < 0):
+            raise RuntimeError(f"retentionHours for {name} must be null or non-negative")
+    default_class = value.get("defaultClass")
+    if default_class not in classes:
+        raise RuntimeError("defaultClass must name a configured class")
+    rules = value.get("rules", [])
+    if not isinstance(rules, list):
+        raise RuntimeError("retention policy rules must be an array")
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("class") not in classes:
+            raise RuntimeError("retention policy rule must name a configured class")
+        selectors = [key for key in ("workspaceId", "prefix") if isinstance(rule.get(key), str)]
+        if len(selectors) != 1:
+            raise RuntimeError("each retention rule must contain exactly one workspaceId or prefix")
+    aliases = value.get("sourceRepoAliases", {})
+    if not isinstance(aliases, dict) or any(
+        not isinstance(old, str) or not isinstance(new, str) for old, new in aliases.items()
+    ):
+        raise RuntimeError("sourceRepoAliases must map strings to strings")
+    return value
+
+
+def retention_class(policy: dict[str, object], workspace_id: str) -> tuple[str, float | None]:
+    classes = policy["classes"]
+    assert isinstance(classes, dict)
+    selected = str(policy["defaultClass"])
+    for rule in policy.get("rules", []):
+        assert isinstance(rule, dict)
+        if rule.get("workspaceId") == workspace_id:
+            selected = str(rule["class"])
+            break
+        prefix = rule.get("prefix")
+        if isinstance(prefix, str) and workspace_id.startswith(prefix):
+            selected = str(rule["class"])
+            break
+    definition = classes[selected]
+    assert isinstance(definition, dict)
+    hours = definition.get("retentionHours")
+    return selected, float(hours) if isinstance(hours, (int, float)) else None
+
+
+def open_registry(database: Path, timeout_ms: int) -> sqlite3.Connection:
+    connection = sqlite3.connect(
+        f"file:{quote(str(database))}?mode=ro", uri=True, timeout=timeout_ms / 1000
+    )
+    connection.execute("PRAGMA query_only=ON")
+    connection.execute("PRAGMA trusted_schema=OFF")
+    return connection
+
+
+def last_activity_ms(connection: sqlite3.Connection, workspace_id: str) -> int | None:
+    row = connection.execute(
+        """
+        SELECT MAX(
+          CASE
+            WHEN attempts.finished_at_ms IS NOT NULL THEN attempts.finished_at_ms
+            WHEN attempts.started_at_ms IS NOT NULL THEN attempts.started_at_ms
+            WHEN attempts.created_at_ms IS NOT NULL THEN attempts.created_at_ms
+            ELSE jobs.created_at_ms
+          END
+        )
+        FROM jobs
+        LEFT JOIN attempts ON attempts.job_id=jobs.job_id
+        WHERE jobs.workspace_id=?
+        """,
+        (workspace_id,),
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def enrich_report(args: argparse.Namespace) -> dict[str, object]:
+    report = reclaim_inspect(args)
+    policy = load_policy(args.policy_file)
+    now_ms = int(time.time() * 1000)
+    connection = open_registry(args.database, args.busy_timeout_ms)
+    try:
+        enriched: list[dict[str, object]] = []
+        eligible_count = 0
+        eligible_bytes = 0
+        for raw in report.get("candidates", []):
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            workspace_id = str(item["workspaceId"])
+            class_name, retention_hours = retention_class(policy, workspace_id)
+            created_ms = item.get("createdUnixMs")
+            activity_ms = last_activity_ms(connection, workspace_id)
+            basis_values = [value for value in (created_ms, activity_ms) if isinstance(value, int)]
+            basis_ms = max(basis_values) if basis_values else None
+            eligible_at = (
+                int(basis_ms + retention_hours * 3_600_000)
+                if basis_ms is not None and retention_hours is not None
+                else None
+            )
+            eligible = (
+                item.get("classification") in {"closable", "stale_record"}
+                and eligible_at is not None
+                and eligible_at <= now_ms
+            )
+            item.update(
+                {
+                    "retentionClass": class_name,
+                    "retentionHours": retention_hours,
+                    "lastActivityUnixMs": activity_ms,
+                    "retentionBasisUnixMs": basis_ms,
+                    "eligibleAtUnixMs": eligible_at,
+                    "policyEligible": eligible,
+                }
+            )
+            if eligible:
+                eligible_count += 1
+                if isinstance(item.get("estimatedBytes"), int):
+                    eligible_bytes += int(item["estimatedBytes"])
+            enriched.append(item)
+    finally:
+        connection.close()
+    report["policy"] = policy
+    report["generatedAtMs"] = now_ms
+    report["candidates"] = enriched
+    summary = dict(report.get("summary", {}))
+    summary["policyEligible"] = eligible_count
+    summary["policyEligibleEstimatedBytes"] = eligible_bytes
+    report["summary"] = summary
+    return report
+
+
+@contextmanager
+def exclusive_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError(f"lifecycle lock is already held: {path}") from error
+        yield
+
+
+def receipt_path(root: Path, label: str) -> Path:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    candidate = root / f"{stamp}-{label}"
+    sequence = 1
+    while candidate.exists():
+        candidate = root / f"{stamp}-{label}-{sequence}"
+        sequence += 1
+    candidate.mkdir(parents=True)
+    return candidate
+
+
+def write_json_atomic(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".tmp-{os.getpid()}")
+    try:
+        temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def sweep(args: argparse.Namespace) -> dict[str, object]:
+    if args.confirm_policy != SWEEP_CONFIRMATION:
+        raise RuntimeError(f"confirm-policy must equal {SWEEP_CONFIRMATION}")
+    with exclusive_lock(args.lock_file):
+        before = enrich_report(args)
+        selected = [
+            str(item["workspaceId"])
+            for item in before.get("candidates", [])
+            if isinstance(item, dict) and item.get("policyEligible") is True
+        ]
+        receipt = receipt_path(args.receipt_root, "workspace-lifecycle")
+        write_json_atomic(receipt / "before.json", before)
+        if not selected:
+            result = {
+                "schemaVersion": SCHEMA_VERSION,
+                "status": "completed",
+                "actions": [],
+                "selectedWorkspaceIds": [],
+                "receipt": str(receipt),
+            }
+            write_json_atomic(receipt / "result.json", result)
+            return result
+        command = [
+            sys.executable,
+            str(reclaim_program()),
+            "apply",
+            "--database",
+            str(args.database),
+            "--runtime-store-root",
+            str(args.runtime_store_root),
+            "--busy-timeout-ms",
+            str(args.busy_timeout_ms),
+            "--env-file",
+            str(args.env_file),
+            "--receipt-root",
+            str(receipt / "reclaim"),
+            "--lock-file",
+            str(receipt / "reclaim.lock"),
+            "--minimum-age-hours",
+            "0",
+            "--confirm-policy",
+            "RECLAIM_ELIGIBLE_WORKSPACES",
+        ]
+        if args.workspace_root:
+            command.extend(["--workspace-root", str(args.workspace_root)])
+        for workspace_id in selected:
+            command.extend(["--workspace-id", workspace_id])
+        subordinate = run_json(command, accepted_codes=(0, 2))
+        after = enrich_report(args)
+        write_json_atomic(receipt / "after.json", after)
+        result = {
+            "schemaVersion": SCHEMA_VERSION,
+            "status": subordinate.get("status", "unknown"),
+            "selectedWorkspaceIds": selected,
+            "actions": subordinate.get("actions", []),
+            "failures": subordinate.get("failures", []),
+            "reclaimReceipt": subordinate.get("receipt"),
+            "receipt": str(receipt),
+        }
+        write_json_atomic(receipt / "result.json", result)
+        return result
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return "sha256:" + digest.hexdigest()
+
+
+def git(repository: Path, arguments: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if check and result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git failed")
+    return result
+
+
+def active_jobs(database: Path, timeout_ms: int, workspace_id: str) -> list[str]:
+    connection = open_registry(database, timeout_ms)
+    try:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT jobs.job_id
+            FROM jobs
+            LEFT JOIN attempts ON attempts.job_id=jobs.job_id
+            LEFT JOIN concurrency_reservations
+              ON concurrency_reservations.attempt_id=attempts.attempt_id
+            WHERE jobs.workspace_id=?
+              AND (jobs.resolution IS NULL OR concurrency_reservations.state IN ('active','held_orphaned'))
+            ORDER BY jobs.created_at_ms DESC,jobs.job_id DESC
+            """,
+            (workspace_id,),
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+    finally:
+        connection.close()
+
+
+def load_open_record(record_path: Path, workspace_id: str, workspace_path: Path) -> dict[str, object]:
+    if record_path.is_symlink() or not record_path.is_file():
+        raise RuntimeError("workspace record is not a regular file")
+    value = json.loads(record_path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise RuntimeError("workspace record is not an object")
+    if value.get("state") == "closed":
+        raise RuntimeError("workspace is already closed")
+    if (
+        value.get("schemaVersion") != SCHEMA_VERSION
+        or value.get("workspaceId") != workspace_id
+        or value.get("workspacePath") != str(workspace_path)
+    ):
+        raise RuntimeError("workspace record identity mismatch")
+    return value
+
+
+def verify_revision(repository: Path, revision: str) -> None:
+    resolved = git(repository, ["rev-parse", "--verify", f"{revision}^{{commit}}"])
+    if resolved.stdout.strip() != revision:
+        raise RuntimeError("mapped source repository does not contain the recorded revision")
+
+
+def repair_one(
+    args: argparse.Namespace,
+    policy: dict[str, object],
+    item: dict[str, object],
+    receipt: Path,
+) -> dict[str, object]:
+    workspace_id = str(item["workspaceId"])
+    workspace_root = args.workspace_root or args.runtime_store_root / "workspaces"
+    workspace_path = workspace_root / workspace_id
+    record_path = args.runtime_store_root / "workspace-records" / f"{workspace_id}.json"
+    before_digest = sha256_file(record_path)
+    record = load_open_record(record_path, workspace_id, workspace_path)
+    if active_jobs(args.database, args.busy_timeout_ms, workspace_id):
+        raise RuntimeError("workspace acquired an active or held Job")
+    aliases = policy.get("sourceRepoAliases", {})
+    assert isinstance(aliases, dict)
+    old_repo = str(record["sourceRepo"])
+    mapped = Path(str(aliases.get(old_repo, old_repo))).resolve()
+    if not mapped.is_dir():
+        raise RuntimeError(f"mapped source repository is unavailable: {mapped}")
+    verify_revision(mapped, str(record["sourceRevision"]))
+    git(mapped, ["worktree", "repair", str(workspace_path)])
+    probe = git(workspace_path, ["rev-parse", "HEAD"], check=False)
+    if probe.returncode != 0 or probe.stdout.strip() != str(record["sourceRevision"]):
+        raise RuntimeError("git worktree repair did not restore the recorded Workspace identity")
+    if sha256_file(record_path) != before_digest:
+        raise RuntimeError("workspace record changed during repair")
+    updated = dict(record)
+    updated["sourceRepo"] = str(mapped)
+    write_json_atomic(record_path, updated)
+    return {
+        "workspaceId": workspace_id,
+        "action": "worktree_repaired",
+        "sourceRepoBefore": old_repo,
+        "sourceRepoAfter": str(mapped),
+        "recordDigestBefore": before_digest,
+        "recordDigestAfter": sha256_file(record_path),
+    }
+
+
+def quarantine_one(
+    args: argparse.Namespace,
+    item: dict[str, object],
+    receipt: Path,
+) -> dict[str, object]:
+    if not args.quarantine_root:
+        raise RuntimeError("quarantine-root is required for quarantine")
+    workspace_id = str(item["workspaceId"])
+    workspace_root = args.workspace_root or args.runtime_store_root / "workspaces"
+    workspace_path = workspace_root / workspace_id
+    record_path = args.runtime_store_root / "workspace-records" / f"{workspace_id}.json"
+    record = load_open_record(record_path, workspace_id, workspace_path)
+    if active_jobs(args.database, args.busy_timeout_ms, workspace_id):
+        raise RuntimeError("workspace acquired an active or held Job")
+    args.quarantine_root.mkdir(parents=True, exist_ok=True)
+    target = args.quarantine_root / f"{int(time.time() * 1000)}-{workspace_id}"
+    if target.exists():
+        raise RuntimeError("quarantine target already exists")
+    backup = receipt / "records" / record_path.name
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(record_path, backup)
+    os.replace(workspace_path, target)
+    closed = {
+        "schemaVersion": SCHEMA_VERSION,
+        "state": "closed",
+        "workspaceId": workspace_id,
+        "sourceRepo": record["sourceRepo"],
+        "sourceRevision": record["sourceRevision"],
+        "finalHead": None,
+        "closedUnixMs": int(time.time() * 1000),
+        "removalResult": "quarantined_broken",
+    }
+    write_json_atomic(record_path, closed)
+    return {
+        "workspaceId": workspace_id,
+        "action": "workspace_quarantined",
+        "quarantinePath": str(target),
+        "recordBackup": str(backup),
+    }
+
+
+def repair(args: argparse.Namespace) -> dict[str, object]:
+    if args.confirm_policy != REPAIR_CONFIRMATION:
+        raise RuntimeError(f"confirm-policy must equal {REPAIR_CONFIRMATION}")
+    if args.quarantine_unrepairable and args.confirm_quarantine != QUARANTINE_CONFIRMATION:
+        raise RuntimeError(f"confirm-quarantine must equal {QUARANTINE_CONFIRMATION}")
+    policy = load_policy(args.policy_file)
+    requested = set(args.workspace_ids or [])
+    cutoff_ms = int((time.time() - args.minimum_age_hours * 3600) * 1000)
+    with exclusive_lock(args.lock_file):
+        before = enrich_report(args)
+        receipt = receipt_path(args.receipt_root, "workspace-repair")
+        write_json_atomic(receipt / "before.json", before)
+        actions: list[dict[str, object]] = []
+        failures: list[dict[str, object]] = []
+        for raw in before.get("candidates", []):
+            if not isinstance(raw, dict):
+                continue
+            workspace_id = str(raw["workspaceId"])
+            if requested and workspace_id not in requested:
+                continue
+            if raw.get("classification") != "unknown":
+                continue
+            created = raw.get("createdUnixMs")
+            if not isinstance(created, int) or created > cutoff_ms:
+                continue
+            try:
+                actions.append(repair_one(args, policy, raw, receipt))
+            except Exception as repair_error:
+                if args.quarantine_unrepairable:
+                    try:
+                        action = quarantine_one(args, raw, receipt)
+                        action["repairError"] = str(repair_error)
+                        actions.append(action)
+                    except Exception as quarantine_error:
+                        failures.append(
+                            {
+                                "workspaceId": workspace_id,
+                                "repairError": str(repair_error),
+                                "quarantineError": str(quarantine_error),
+                            }
+                        )
+                else:
+                    failures.append({"workspaceId": workspace_id, "error": str(repair_error)})
+        after = enrich_report(args)
+        write_json_atomic(receipt / "after.json", after)
+        result = {
+            "schemaVersion": SCHEMA_VERSION,
+            "status": "completed" if not failures else "partial",
+            "actions": actions,
+            "failures": failures,
+            "receipt": str(receipt),
+        }
+        write_json_atomic(receipt / "result.json", result)
+        return result
+
+
+def main() -> int:
+    try:
+        args = parse_args()
+        if args.command == "inspect":
+            value = enrich_report(args)
+        elif args.command == "sweep":
+            value = sweep(args)
+        elif args.command == "repair":
+            value = repair(args)
+        else:
+            raise RuntimeError(f"unsupported command: {args.command}")
+        print(json.dumps(value, indent=2 if args.pretty else None, sort_keys=args.pretty))
+        return 0 if value.get("status") != "partial" else 2
+    except (OSError, RuntimeError, sqlite3.Error, json.JSONDecodeError) as error:
+        print(f"workspace lifecycle failed: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

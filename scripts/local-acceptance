@@ -18,6 +18,11 @@ case "$mode" in
     test -f "$repo/crates/ordivon-runtime-core/tests/transactional_runtime.rs"
     test -f "$repo/scripts/mcp_e2e.py"
     test -f "$repo/crates/ordivon-runtime-core/src/bin/ordivon-runtime-inspect.rs"
+    test -x "$repo/scripts/ordivon-runtime-lifecycle"
+    test -x "$repo/scripts/ordivon-runtime-hygiene"
+    test -f "$repo/packaging/systemd/ordivon-runtime-lifecycle.service"
+    test -f "$repo/packaging/systemd/ordivon-runtime-lifecycle.timer"
+    test -f "$repo/packaging/systemd/ordivon-workspace-retention.json"
     grep -q 'requires root, systemd, cgroup v2' "$repo/crates/ordivon-runtime-core/tests/systemd_supervisor.rs"
     grep -q 'requires root, systemd, cgroup v2' "$repo/crates/ordivon-runtime-core/tests/transactional_runtime.rs"
     printf '%s\n' \

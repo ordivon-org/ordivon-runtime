@@ -87,6 +87,10 @@ impl UniversalExecutorConfig {
             self.workspaces_root(),
             self.workspace_records_root(),
             self.tasks_root(),
+            self.workspace_caches_root(),
+            self.build_caches_root(),
+            self.workspace_tmp_root(),
+            self.shared_caches_root(),
         ] {
             fs::create_dir_all(&path).map_err(|error| io_error(&path, "create", error))?;
         }
@@ -105,6 +109,38 @@ impl UniversalExecutorConfig {
 
     pub fn tasks_root(&self) -> PathBuf {
         self.store_root.join("tasks")
+    }
+
+    pub fn cache_root(&self) -> PathBuf {
+        self.store_root.join("cache")
+    }
+
+    pub fn workspace_caches_root(&self) -> PathBuf {
+        self.cache_root().join("workspaces")
+    }
+
+    pub fn build_caches_root(&self) -> PathBuf {
+        self.cache_root().join("build")
+    }
+
+    pub fn workspace_tmp_root(&self) -> PathBuf {
+        self.cache_root().join("tmp")
+    }
+
+    pub fn shared_caches_root(&self) -> PathBuf {
+        self.cache_root().join("shared")
+    }
+
+    pub(crate) fn workspace_cache_path(&self, workspace_id: &str) -> PathBuf {
+        self.workspace_caches_root().join(workspace_id)
+    }
+
+    pub(crate) fn workspace_build_cache_path(&self, workspace_id: &str) -> PathBuf {
+        self.build_caches_root().join(workspace_id)
+    }
+
+    pub(crate) fn workspace_tmp_path(&self, workspace_id: &str) -> PathBuf {
+        self.workspace_tmp_root().join(workspace_id)
     }
 
     pub(crate) fn workspace_path(&self, workspace_id: &str) -> PathBuf {
