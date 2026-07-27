@@ -291,6 +291,7 @@ fn tool_catalog_uses_transactional_job_contract() {
         list_schema.pointer("/properties/limit/default"),
         Some(&serde_json::json!(20))
     );
+    assert!(list_schema.pointer("/properties/clientRequestId").is_some());
 
     let close = tools
         .iter()

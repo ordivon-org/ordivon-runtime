@@ -723,6 +723,8 @@ pub struct RuntimeJobListRequest {
     pub limit: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<RuntimeJobListCursor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

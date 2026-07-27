@@ -104,6 +104,10 @@ The Runtime uses five separate terms rather than one overloaded notion of comple
 
 A successful process exit is execution evidence, not proof of semantic completion. An Artifact is retained evidence, not proof that a claim is correct. A closed Workspace does not change Job resolution, and client reconnection does not change Attempt state.
 
+## Correlated Job lookup
+
+`task.list` retains newest-first cursor pagination and may additionally filter by an exact `clientRequestId`. The filter is a read-only projection over the durable Job Registry and its indexed request identity; it does not create a second idempotency store or change Job ownership. Recovery callers still consume every filtered page and reject conflicting Job identities rather than treating the newest match as sufficient proof.
+
 ## Read-only experience projection
 
 The append-only Runtime Registry remains the only task-fact database. `ordivon-runtime-inspect` derives bounded reports without adding tables, events, or a second history store:

@@ -151,6 +151,7 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
         .list_jobs(&RuntimeJobListRequest {
             limit: 10,
             cursor: None,
+            client_request_id: None,
         })
         .unwrap();
     assert_eq!(listed.jobs.len(), 1);
@@ -1008,6 +1009,7 @@ fn runtime_interactive_list_reconciles_a_bounded_completed_job() {
         .list_jobs(&RuntimeJobListRequest {
             limit: 10,
             cursor: None,
+            client_request_id: None,
         })
         .unwrap();
     let job = listed

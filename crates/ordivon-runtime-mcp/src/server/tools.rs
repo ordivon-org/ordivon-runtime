@@ -326,7 +326,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "task.list",
-        description = "List newest Jobs first with semantic identity, Workspace, command summary, timestamps, duration, and Artifact count using a stable cursor.",
+        description = "List newest Jobs first with semantic identity, Workspace, command summary, timestamps, duration, and Artifact count using a stable cursor. Optionally filter by exact clientRequestId.",
         annotations(
             title = "List transactional jobs",
             read_only_hint = true,

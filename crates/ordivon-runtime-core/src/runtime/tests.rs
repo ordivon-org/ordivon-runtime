@@ -1,3 +1,4 @@
+use super::registry::RUNTIME_JOB_CLIENT_REQUEST_LOOKUP_MIGRATION_CHECKSUM;
 use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::*;
 use crate::universal::{
@@ -675,6 +676,7 @@ fn list_is_bounded_and_cursor_stable() {
         .list_jobs(&RuntimeJobListRequest {
             limit: 2,
             cursor: None,
+            client_request_id: None,
         })
         .unwrap();
     assert_eq!(first.jobs.len(), 2);
@@ -684,6 +686,7 @@ fn list_is_bounded_and_cursor_stable() {
         .list_jobs(&RuntimeJobListRequest {
             limit: 2,
             cursor: first.next_cursor,
+            client_request_id: None,
         })
         .unwrap();
     assert_eq!(second.jobs.len(), 1);
@@ -708,6 +711,7 @@ proptest! {
             let page = sandbox.registry.list_jobs(&RuntimeJobListRequest {
                 limit: page_size,
                 cursor,
+                client_request_id: None,
             }).unwrap();
             observed.extend(page.jobs.iter().map(|job| (
                 job.created_at_ms,
@@ -729,6 +733,97 @@ proptest! {
         let requests: std::collections::BTreeSet<_> = observed.iter().map(|(_, _, request)| request).collect();
         prop_assert_eq!(requests.len(), job_count);
     }
+}
+
+#[test]
+fn list_filters_by_exact_client_request_id() {
+    let sandbox = Sandbox::new("list-client-request", 5000);
+    let target_id = "request:list-client-request:target";
+    for index in 0..3 {
+        let request_id = if index == 1 {
+            target_id.to_string()
+        } else {
+            format!("request:list-client-request:{index}")
+        };
+        let mut list_request = request(&sandbox, &request_id, 8);
+        list_request.plan.workspace_id = format!("workspace:list-client-request:{index}");
+        sandbox.registry.submit(&list_request).unwrap();
+    }
+
+    let filtered = sandbox
+        .registry
+        .list_jobs(&RuntimeJobListRequest {
+            limit: 100,
+            cursor: None,
+            client_request_id: Some(target_id.to_string()),
+        })
+        .unwrap();
+    assert_eq!(filtered.jobs.len(), 1);
+    assert_eq!(filtered.jobs[0].client_request_id, target_id);
+    assert!(filtered.next_cursor.is_none());
+
+    let absent = sandbox
+        .registry
+        .list_jobs(&RuntimeJobListRequest {
+            limit: 100,
+            cursor: None,
+            client_request_id: Some("request:list-client-request:absent".to_string()),
+        })
+        .unwrap();
+    assert!(absent.jobs.is_empty());
+    assert!(absent.next_cursor.is_none());
+}
+
+#[test]
+fn filtered_list_paginates_same_request_across_principals() {
+    let sandbox = Sandbox::new("list-client-request-pagination", 5000);
+    let target_id = "request:list-client-request:shared";
+    for index in 0..3 {
+        let mut list_request = request(&sandbox, target_id, 8);
+        list_request.plan.principal = format!("principal:list-client-request:{index}");
+        list_request.plan.workspace_id =
+            format!("workspace:list-client-request-pagination:{index}");
+        sandbox.registry.submit(&list_request).unwrap();
+    }
+
+    let mut cursor = None;
+    let mut observed = Vec::new();
+    loop {
+        let page = sandbox
+            .registry
+            .list_jobs(&RuntimeJobListRequest {
+                limit: 1,
+                cursor,
+                client_request_id: Some(target_id.to_string()),
+            })
+            .unwrap();
+        observed.extend(page.jobs);
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(observed.len(), 3);
+    assert!(observed
+        .iter()
+        .all(|job| job.client_request_id == target_id));
+    let unique: BTreeSet<_> = observed.iter().map(|job| &job.job_id).collect();
+    assert_eq!(unique.len(), 3);
+}
+
+#[test]
+fn list_rejects_invalid_client_request_filter() {
+    let sandbox = Sandbox::new("list-client-request-invalid", 5000);
+    let error = sandbox
+        .registry
+        .list_jobs(&RuntimeJobListRequest {
+            limit: 100,
+            cursor: None,
+            client_request_id: Some(String::new()),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert_eq!(error.field.as_deref(), Some("clientRequestId"));
 }
 
 #[test]
@@ -2351,7 +2446,7 @@ fn newer_schema_and_checksum_drift_fail_closed() {
     connection
         .execute(
             "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,'future','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0)",
-            [5],
+            [6],
         )
         .unwrap();
     drop(connection);
@@ -2392,6 +2487,18 @@ fn newer_schema_and_checksum_drift_fail_closed() {
         .unwrap();
     drop(connection);
     let error = Registry::initialize(reclaim_drift.registry.config().clone()).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::MigrationChecksumMismatch);
+
+    let lookup_drift = Sandbox::new("lookup-checksum-drift", 5000);
+    let connection = Connection::open(&lookup_drift.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE schema_migrations SET checksum='sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' WHERE version=5",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let error = Registry::initialize(lookup_drift.registry.config().clone()).unwrap_err();
     assert_eq!(error.code, RuntimeErrorCode::MigrationChecksumMismatch);
 }
 
@@ -2593,7 +2700,7 @@ fn late_identity_bound_result_corrects_orphan_and_releases_capacity() {
 }
 
 #[test]
-fn existing_v1_registry_upgrades_to_orphan_reclaim_schema() {
+fn existing_v1_registry_upgrades_to_client_request_lookup_schema() {
     let root = std::env::temp_dir().join(format!(
         "ordivon-v1-upgrade-{}-{}",
         std::process::id(),
@@ -2626,7 +2733,7 @@ fn existing_v1_registry_upgrades_to_orphan_reclaim_schema() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(max_version, 4);
+    assert_eq!(max_version, 5);
     let checksum: String = connection
         .query_row(
             "SELECT checksum FROM schema_migrations WHERE version=2",
@@ -2651,6 +2758,25 @@ fn existing_v1_registry_upgrades_to_orphan_reclaim_schema() {
         )
         .unwrap();
     assert_eq!(reclaim_checksum, RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM);
+    let lookup_checksum: String = connection
+        .query_row(
+            "SELECT checksum FROM schema_migrations WHERE version=5",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        lookup_checksum,
+        RUNTIME_JOB_CLIENT_REQUEST_LOOKUP_MIGRATION_CHECKSUM
+    );
+    let lookup_index: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_jobs_client_request_id_created'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(lookup_index, "idx_jobs_client_request_id_created");
     drop(connection);
     fs::remove_dir_all(root).unwrap();
 }

@@ -144,7 +144,11 @@ impl ServerHandler for RuntimeServer {
         let cursor = decode_cursor(request.and_then(|params| params.cursor))?;
         let runtime = self.state.runtime.clone();
         let page = tokio::task::spawn_blocking(move || {
-            runtime.list_jobs(&RuntimeJobListRequest { limit: 100, cursor })
+            runtime.list_jobs(&RuntimeJobListRequest {
+                limit: 100,
+                cursor,
+                client_request_id: None,
+            })
         })
         .await
         .map_err(|error| {

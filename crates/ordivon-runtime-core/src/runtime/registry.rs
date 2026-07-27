@@ -39,7 +39,13 @@ const MIGRATION_V4_NAME: &str = "0004_orphan_reclaim";
 const MIGRATION_V4_SQL: &str = include_str!("../../migrations/runtime/0004_orphan_reclaim.sql");
 pub const RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM: &str =
     "sha256:b76afbfaf70645b60456b08ad257e5ac2be1f63499f24a555cbf0157791e19ad";
-pub(crate) const MAX_MIGRATION_VERSION: i64 = 4;
+const MIGRATION_V5: i64 = 5;
+const MIGRATION_V5_NAME: &str = "0005_job_client_request_lookup";
+const MIGRATION_V5_SQL: &str =
+    include_str!("../../migrations/runtime/0005_job_client_request_lookup.sql");
+pub const RUNTIME_JOB_CLIENT_REQUEST_LOOKUP_MIGRATION_CHECKSUM: &str =
+    "sha256:e563e385a346ed2ddb464a43ade0fda0e7932773cf06f140c35d1818d3238b89";
+pub(crate) const MAX_MIGRATION_VERSION: i64 = 5;
 const WORKSPACE_EXECUTION_LIMIT: u32 = 1;
 
 #[derive(Clone, Debug)]
@@ -290,6 +296,42 @@ impl Registry {
             MIGRATION_V4,
             RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM,
             "orphan-reclaim migration",
+        )?;
+        if max_version < MIGRATION_V5 {
+            let transaction = immediate(connection, "Job client request lookup migration")?;
+            transaction
+                .execute_batch(MIGRATION_V5_SQL)
+                .map_err(|error| {
+                    RuntimeError::from_sql(
+                        error,
+                        "cannot apply Job client request lookup migration",
+                    )
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,?2,?3,?4)",
+                    params![
+                        MIGRATION_V5,
+                        MIGRATION_V5_NAME,
+                        RUNTIME_JOB_CLIENT_REQUEST_LOOKUP_MIGRATION_CHECKSUM,
+                        now_ms()?
+                    ],
+                )
+                .map_err(|error| {
+                    RuntimeError::from_sql(
+                        error,
+                        "cannot record Job client request lookup migration",
+                    )
+                })?;
+            transaction.commit().map_err(|error| {
+                RuntimeError::from_sql(error, "cannot commit Job client request lookup migration")
+            })?;
+        }
+        validate_migration_checksum(
+            connection,
+            MIGRATION_V5,
+            RUNTIME_JOB_CLIENT_REQUEST_LOOKUP_MIGRATION_CHECKSUM,
+            "Job client request lookup migration",
         )?;
 
         Ok(())
@@ -804,41 +846,99 @@ impl Registry {
                 "limit",
             ));
         }
+        if let Some(client_request_id) = request.client_request_id.as_deref() {
+            validate_identifier(client_request_id, "clientRequestId")?;
+        }
         let connection = self.open_connection()?;
         let fetch_limit = request.limit + 1;
         let mut jobs = Vec::new();
-        if let Some(cursor) = &request.cursor {
-            let mut statement = connection
-                .prepare(
-                    "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE created_at_ms<?1 OR (created_at_ms=?1 AND job_id<?2) ORDER BY created_at_ms DESC,job_id DESC LIMIT ?3",
-                )
-                .map_err(|error| RuntimeError::from_sql(error, "cannot prepare Job list"))?;
-            let rows = statement
-                .query_map(
-                    params![cursor.created_at_ms, cursor.job_id, fetch_limit],
-                    raw_job_from_row,
-                )
-                .map_err(|error| RuntimeError::from_sql(error, "cannot query Job list"))?;
-            for row in rows {
-                jobs.push(
-                    row.map_err(|error| RuntimeError::from_sql(error, "cannot decode Job row"))?
+        match (&request.client_request_id, &request.cursor) {
+            (Some(client_request_id), Some(cursor)) => {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE client_request_id=?1 AND (created_at_ms<?2 OR (created_at_ms=?2 AND job_id<?3)) ORDER BY created_at_ms DESC,job_id DESC LIMIT ?4",
+                    )
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot prepare filtered Job list"))?;
+                let rows = statement
+                    .query_map(
+                        params![
+                            client_request_id,
+                            cursor.created_at_ms,
+                            cursor.job_id,
+                            fetch_limit
+                        ],
+                        raw_job_from_row,
+                    )
+                    .map_err(|error| {
+                        RuntimeError::from_sql(error, "cannot query filtered Job list")
+                    })?;
+                for row in rows {
+                    jobs.push(
+                        row.map_err(|error| {
+                            RuntimeError::from_sql(error, "cannot decode Job row")
+                        })?
                         .into_record()?,
-                );
+                    );
+                }
             }
-        } else {
-            let mut statement = connection
-                .prepare(
-                    "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs ORDER BY created_at_ms DESC,job_id DESC LIMIT ?1",
-                )
-                .map_err(|error| RuntimeError::from_sql(error, "cannot prepare Job list"))?;
-            let rows = statement
-                .query_map([fetch_limit], raw_job_from_row)
-                .map_err(|error| RuntimeError::from_sql(error, "cannot query Job list"))?;
-            for row in rows {
-                jobs.push(
-                    row.map_err(|error| RuntimeError::from_sql(error, "cannot decode Job row"))?
+            (Some(client_request_id), None) => {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE client_request_id=?1 ORDER BY created_at_ms DESC,job_id DESC LIMIT ?2",
+                    )
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot prepare filtered Job list"))?;
+                let rows = statement
+                    .query_map(params![client_request_id, fetch_limit], raw_job_from_row)
+                    .map_err(|error| {
+                        RuntimeError::from_sql(error, "cannot query filtered Job list")
+                    })?;
+                for row in rows {
+                    jobs.push(
+                        row.map_err(|error| {
+                            RuntimeError::from_sql(error, "cannot decode Job row")
+                        })?
                         .into_record()?,
-                );
+                    );
+                }
+            }
+            (None, Some(cursor)) => {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE created_at_ms<?1 OR (created_at_ms=?1 AND job_id<?2) ORDER BY created_at_ms DESC,job_id DESC LIMIT ?3",
+                    )
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot prepare Job list"))?;
+                let rows = statement
+                    .query_map(
+                        params![cursor.created_at_ms, cursor.job_id, fetch_limit],
+                        raw_job_from_row,
+                    )
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot query Job list"))?;
+                for row in rows {
+                    jobs.push(
+                        row.map_err(|error| {
+                            RuntimeError::from_sql(error, "cannot decode Job row")
+                        })?
+                        .into_record()?,
+                    );
+                }
+            }
+            (None, None) => {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs ORDER BY created_at_ms DESC,job_id DESC LIMIT ?1",
+                    )
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot prepare Job list"))?;
+                let rows = statement
+                    .query_map([fetch_limit], raw_job_from_row)
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot query Job list"))?;
+                for row in rows {
+                    jobs.push(
+                        row.map_err(|error| {
+                            RuntimeError::from_sql(error, "cannot decode Job row")
+                        })?
+                        .into_record()?,
+                    );
+                }
             }
         }
 
