@@ -1,0 +1,531 @@
+#!/usr/bin/env python3
+"""Report bounded, secret-free Ordivon Runtime identity and health facts."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+SCHEMA_VERSION = 1
+COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+TERMINAL_ATTEMPT_STATES = ("succeeded", "failed", "timed_out", "cancelled", "lost", "orphaned")
+DEFAULT_DATABASE = Path("/var/lib/ordivon/registry/registry.sqlite3")
+DEFAULT_STORE_ROOT = Path("/var/lib/ordivon/runtime")
+DEFAULT_DEPLOYMENT_ROOT = Path("/var/lib/ordivon/deployments")
+DEFAULT_INSTALL_DIR = Path("/usr/local/libexec/ordivon")
+DEFAULT_ENV_FILE = Path("/etc/ordivon/ordivon-runtime.env")
+DEFAULT_SERVICE = "ordivon-runtime.service"
+DEFAULT_SYSTEMCTL = Path("/usr/bin/systemctl")
+MAX_WORKSPACE_SCAN = 256
+
+
+class StatusError(RuntimeError):
+    pass
+
+
+def absolute_path(value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("path must be absolute")
+    return path
+
+
+def exact_commit(value: str) -> str:
+    if not COMMIT_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError("commit must be exactly 40 lowercase hexadecimal characters")
+    return value
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(prog="ordivon-runtime-status", description=__doc__)
+    result.add_argument("--json", action="store_true", help="emit stable JSON instead of one compact line")
+    result.add_argument("--database", type=absolute_path, default=DEFAULT_DATABASE)
+    result.add_argument("--runtime-store-root", type=absolute_path, default=DEFAULT_STORE_ROOT)
+    result.add_argument("--deployment-root", type=absolute_path, default=DEFAULT_DEPLOYMENT_ROOT)
+    result.add_argument("--install-dir", type=absolute_path, default=DEFAULT_INSTALL_DIR)
+    result.add_argument("--env-file", type=absolute_path, default=DEFAULT_ENV_FILE)
+    result.add_argument("--service", default=DEFAULT_SERVICE)
+    result.add_argument("--systemctl", type=absolute_path, default=DEFAULT_SYSTEMCTL)
+    result.add_argument("--expected-commit", type=exact_commit)
+    result.add_argument("--max-workspaces", type=int, default=MAX_WORKSPACE_SCAN)
+    return result
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise StatusError(f"cannot read status receipt {path.name}: {error}") from error
+    if not isinstance(value, dict):
+        raise StatusError(f"status receipt {path.name} is not an object")
+    return value
+
+
+def latest_deployment(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any] | None]:
+    if not root.is_dir():
+        raise StatusError("deployment receipt root is missing")
+    candidates: list[tuple[int, Path, dict[str, Any]]] = []
+    for result_path in root.glob("*/result.json"):
+        try:
+            result = load_json(result_path)
+        except StatusError:
+            continue
+        if result.get("status") != "deployed":
+            continue
+        finished = result.get("finishedAtMs")
+        if not isinstance(finished, int) or finished < 0:
+            continue
+        candidates.append((finished, result_path, result))
+    if not candidates:
+        raise StatusError("no successful deployment receipt exists")
+    _, result_path, result = max(candidates, key=lambda item: (item[0], item[1].parent.name))
+    plan_path = result_path.with_name("plan.json")
+    plan = load_json(plan_path) if plan_path.is_file() else None
+    return result_path, result, plan
+
+
+def deployment_status(
+    deployment_root: Path,
+    install_dir: Path,
+    expected_commit: str | None,
+    reasons: list[str],
+) -> dict[str, Any]:
+    try:
+        result_path, result, plan = latest_deployment(deployment_root)
+    except StatusError as error:
+        reasons.append("DEPLOYMENT_RECEIPT_MISSING")
+        return {
+            "receiptId": None,
+            "commit": None,
+            "builtAtMs": None,
+            "deployedAtMs": None,
+            "binaries": [],
+            "available": False,
+        }
+
+    commit = result.get("commit")
+    if not isinstance(commit, str) or not COMMIT_PATTERN.fullmatch(commit):
+        reasons.append("DEPLOYMENT_COMMIT_INVALID")
+        commit = None
+    if expected_commit is not None and commit != expected_commit:
+        reasons.append("EXPECTED_COMMIT_MISMATCH")
+
+    built_at = None
+    if isinstance(plan, dict):
+        manifest = plan.get("candidateManifest")
+        if isinstance(manifest, dict) and isinstance(manifest.get("builtAtMs"), int):
+            built_at = manifest["builtAtMs"]
+
+    binaries: list[dict[str, Any]] = []
+    installed = result.get("installed")
+    if not isinstance(installed, list) or not installed:
+        reasons.append("DEPLOYMENT_BINARY_SET_INVALID")
+        installed = []
+    seen: set[str] = set()
+    for item in installed:
+        if not isinstance(item, dict):
+            reasons.append("DEPLOYMENT_BINARY_RECORD_INVALID")
+            continue
+        name = item.get("name")
+        expected_digest = item.get("digest")
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in {".", ".."}
+            or "/" in name
+            or name in seen
+        ):
+            reasons.append("DEPLOYMENT_BINARY_NAME_INVALID")
+            continue
+        seen.add(name)
+        path = install_dir / name
+        present = path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)
+        observed_digest = sha256(path) if present else None
+        matches = isinstance(expected_digest, str) and observed_digest == expected_digest
+        if not present:
+            reasons.append(f"BINARY_MISSING:{name}")
+        elif not matches:
+            reasons.append(f"BINARY_DIGEST_MISMATCH:{name}")
+        binaries.append(
+            {
+                "name": name,
+                "bytes": path.stat().st_size if present else None,
+                "expectedDigest": expected_digest if isinstance(expected_digest, str) else None,
+                "observedDigest": observed_digest,
+                "matches": matches,
+            }
+        )
+    probe = result.get("probe") if isinstance(result.get("probe"), dict) else {}
+    server_info = probe.get("serverInfo") if isinstance(probe.get("serverInfo"), dict) else {}
+    return {
+        "receiptId": result_path.parent.name,
+        "commit": commit,
+        "builtAtMs": built_at,
+        "deployedAtMs": result.get("finishedAtMs")
+        if isinstance(result.get("finishedAtMs"), int)
+        else None,
+        "commitMatchesExpectation": expected_commit is None or commit == expected_commit,
+        "protocolVersion": probe.get("protocolVersion") if isinstance(probe.get("protocolVersion"), str) else None,
+        "serverVersion": server_info.get("version") if isinstance(server_info.get("version"), str) else None,
+        "toolCount": probe.get("toolCount") if isinstance(probe.get("toolCount"), int) else None,
+        "binaries": binaries,
+    }
+
+
+def service_status(systemctl: Path, service: str, reasons: list[str]) -> dict[str, Any]:
+    command = [
+        str(systemctl),
+        "show",
+        service,
+        "--property=ActiveState",
+        "--property=SubState",
+        "--property=MainPID",
+        "--property=ExecMainStartTimestamp",
+        "--property=NRestarts",
+        "--no-pager",
+    ]
+    try:
+        completed = subprocess.run(
+            command, check=False, text=True, capture_output=True, timeout=5
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        reasons.append("SERVICE_QUERY_FAILED")
+        return {
+            "activeState": "unknown",
+            "subState": "unknown",
+            "mainPid": None,
+            "startedAt": None,
+            "restarts": None,
+            "queryAvailable": False,
+        }
+    if completed.returncode != 0:
+        reasons.append("SERVICE_QUERY_FAILED")
+    values = dict(line.split("=", 1) for line in completed.stdout.splitlines() if "=" in line)
+    active = values.get("ActiveState", "unknown")
+    sub = values.get("SubState", "unknown")
+    if active != "active" or sub != "running":
+        reasons.append("SERVICE_NOT_RUNNING")
+    try:
+        main_pid = int(values.get("MainPID", "0")) or None
+    except ValueError:
+        main_pid = None
+        reasons.append("SERVICE_PID_INVALID")
+    try:
+        restarts = int(values.get("NRestarts", ""))
+    except ValueError:
+        restarts = None
+    return {
+        "activeState": active,
+        "subState": sub,
+        "mainPid": main_pid,
+        "startedAt": values.get("ExecMainStartTimestamp") or None,
+        "restarts": restarts,
+    }
+
+
+def whitelisted_config(env_file: Path, reasons: list[str]) -> dict[str, int | None]:
+    allowed = {
+        "ORDIVON_GLOBAL_MAX_CONCURRENCY": "globalMaxConcurrency",
+        "ORDIVON_RECONCILE_INTERVAL_MS": "reconcileIntervalMs",
+    }
+    values: dict[str, int | None] = {output: None for output in allowed.values()}
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        reasons.append("CONFIG_UNREADABLE")
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key not in allowed:
+            continue
+        try:
+            parsed = int(value.strip().strip('"').strip("'"))
+        except ValueError:
+            reasons.append(f"CONFIG_VALUE_INVALID:{allowed[key]}")
+            continue
+        values[allowed[key]] = parsed
+    if values["globalMaxConcurrency"] is None:
+        reasons.append("CONFIG_CAPACITY_MISSING")
+    return values
+
+
+def registry_status(database: Path, reasons: list[str]) -> tuple[dict[str, Any], set[str]]:
+    held_workspaces: set[str] = set()
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error as error:
+        reasons.append("REGISTRY_UNREADABLE")
+        return {"available": False}, held_workspaces
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+        required = {
+            "schema_migrations": {"version"},
+            "jobs": {"job_id", "workspace_id", "resolution"},
+            "attempts": {"attempt_id", "job_id", "state"},
+            "concurrency_reservations": {"attempt_id", "state"},
+            "attempt_conditions": {"attempt_id", "condition_type", "status"},
+        }
+        for table, columns in required.items():
+            present = {
+                str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            missing = columns - present
+            if missing:
+                raise StatusError(
+                    "missing Registry capability: "
+                    + ",".join(f"{table}.{column}" for column in sorted(missing))
+                )
+        migration = connection.execute(
+            "SELECT COALESCE(MAX(version),0) FROM schema_migrations"
+        ).fetchone()[0]
+        jobs_total, jobs_active = connection.execute(
+            "SELECT COUNT(*),COALESCE(SUM(resolution IS NULL),0) FROM jobs"
+        ).fetchone()
+        active_reservations = connection.execute(
+            "SELECT COUNT(*) FROM concurrency_reservations WHERE state='active'"
+        ).fetchone()[0]
+        held_reservations = connection.execute(
+            "SELECT COUNT(*) FROM concurrency_reservations WHERE state='held_orphaned'"
+        ).fetchone()[0]
+        recovery_required = connection.execute(
+            "SELECT COUNT(*) FROM attempt_conditions "
+            "WHERE condition_type='recovery_required' AND status='true'"
+        ).fetchone()[0]
+        placeholders = ",".join("?" for _ in TERMINAL_ATTEMPT_STATES)
+        nonterminal_attempts = connection.execute(
+            f"SELECT COUNT(*) FROM attempts WHERE state NOT IN ({placeholders})",
+            TERMINAL_ATTEMPT_STATES,
+        ).fetchone()[0]
+        for row in connection.execute(
+            """
+            SELECT DISTINCT jobs.workspace_id
+            FROM jobs
+            JOIN attempts ON attempts.job_id=jobs.job_id
+            JOIN concurrency_reservations
+              ON concurrency_reservations.attempt_id=attempts.attempt_id
+            WHERE concurrency_reservations.state IN ('active','held_orphaned')
+            """
+        ):
+            held_workspaces.add(str(row[0]))
+    except (sqlite3.Error, StatusError) as error:
+        reasons.append("REGISTRY_CAPABILITY_MISMATCH")
+        return {"available": False}, held_workspaces
+    finally:
+        connection.close()
+    if recovery_required:
+        reasons.append("RECOVERY_REQUIRED")
+    if jobs_active != nonterminal_attempts:
+        reasons.append("ACTIVE_STATE_DIVERGENCE")
+    return {
+        "schemaVersion": int(migration),
+        "jobsTotal": int(jobs_total),
+        "jobsActive": int(jobs_active),
+        "nonterminalAttempts": int(nonterminal_attempts),
+        "activeReservations": int(active_reservations),
+        "heldReservations": int(held_reservations),
+        "recoveryRequired": int(recovery_required),
+    }, held_workspaces
+
+
+def workspace_status(
+    store_root: Path, held: set[str], maximum: int, reasons: list[str]
+) -> dict[str, Any]:
+    records_root = store_root / "workspace-records"
+    workspaces_root = store_root / "workspaces"
+    counts = {"open": 0, "closed": 0, "invalid": 0}
+    open_records: list[dict[str, Any]] = []
+    if records_root.is_dir():
+        for path in sorted(records_root.glob("*.json")):
+            try:
+                record = load_json(path)
+            except StatusError:
+                counts["invalid"] += 1
+                continue
+            state = record.get("state", "open")
+            if state == "closed":
+                counts["closed"] += 1
+            elif state == "open":
+                counts["open"] += 1
+                open_records.append(record)
+            else:
+                counts["invalid"] += 1
+    else:
+        reasons.append("WORKSPACE_RECORD_ROOT_MISSING")
+    physical = (
+        sum(1 for path in workspaces_root.iterdir() if path.is_dir())
+        if workspaces_root.is_dir()
+        else 0
+    )
+    if physical != counts["open"]:
+        reasons.append("WORKSPACE_RECORD_DIVERGENCE")
+
+    scanned = min(len(open_records), maximum)
+    truncated = len(open_records) > maximum
+    dirty = missing = unreadable = 0
+    for record in open_records[:maximum]:
+        raw_path = record.get("workspacePath")
+        if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+            unreadable += 1
+            continue
+        path = Path(raw_path)
+        if not path.is_dir():
+            missing += 1
+            continue
+        try:
+            completed = subprocess.run(
+                [
+                    "/usr/bin/git",
+                    "-C",
+                    str(path),
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=normal",
+                ],
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=3,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            unreadable += 1
+            continue
+        if completed.returncode != 0:
+            unreadable += 1
+        elif completed.stdout:
+            dirty += 1
+    if truncated:
+        reasons.append("WORKSPACE_SCAN_TRUNCATED")
+    if missing:
+        reasons.append("WORKSPACE_PATH_MISSING")
+    if unreadable:
+        reasons.append("WORKSPACE_STATE_UNREADABLE")
+    return {
+        "records": counts,
+        "physicalOpen": physical,
+        "held": len(held),
+        "scanned": scanned,
+        "dirty": dirty,
+        "missing": missing,
+        "unreadable": unreadable,
+        "scanTruncated": truncated,
+    }
+
+
+def lifecycle_status(store_root: Path) -> dict[str, Any]:
+    root = store_root / "lifecycle-receipts"
+    candidates: list[tuple[int, Path, dict[str, Any]]] = []
+    if root.is_dir():
+        for path in root.glob("*/result.json"):
+            try:
+                value = load_json(path)
+            except StatusError:
+                continue
+            observed = int(path.stat().st_mtime * 1000)
+            candidates.append((observed, path, value))
+    if not candidates:
+        return {
+            "receiptId": None,
+            "observedAtMs": None,
+            "status": None,
+            "actions": None,
+            "failures": None,
+        }
+    observed, path, value = max(
+        candidates, key=lambda item: (item[0], item[1].parent.name)
+    )
+    actions = value.get("actions")
+    failures = value.get("failures")
+    return {
+        "receiptId": path.parent.name,
+        "observedAtMs": observed,
+        "status": value.get("status") if isinstance(value.get("status"), str) else None,
+        "actions": len(actions) if isinstance(actions, list) else None,
+        "failures": len(failures) if isinstance(failures, list) else None,
+    }
+
+
+def build_status(args: argparse.Namespace) -> dict[str, Any]:
+    if args.max_workspaces < 1 or args.max_workspaces > 10_000:
+        raise StatusError("max-workspaces must be in 1..=10000")
+    started = time.perf_counter()
+    reasons: list[str] = []
+    deployment = deployment_status(
+        args.deployment_root, args.install_dir, args.expected_commit, reasons
+    )
+    service = service_status(args.systemctl, args.service, reasons)
+    config = whitelisted_config(args.env_file, reasons)
+    registry, held = registry_status(args.database, reasons)
+    workspaces = workspace_status(
+        args.runtime_store_root, held, args.max_workspaces, reasons
+    )
+    lifecycle = lifecycle_status(args.runtime_store_root)
+    unique_reasons = list(dict.fromkeys(reasons))
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "status": "healthy" if not unique_reasons else "attention",
+        "generatedAtMs": int(time.time() * 1000),
+        "elapsedMs": round((time.perf_counter() - started) * 1000, 1),
+        "deployment": deployment,
+        "service": service,
+        "config": config,
+        "registry": registry,
+        "workspaces": workspaces,
+        "lifecycle": lifecycle,
+        "operatorAction": {"count": len(unique_reasons), "reasons": unique_reasons},
+    }
+
+
+def human(report: dict[str, Any]) -> str:
+    deployment = report["deployment"]
+    service = report["service"]
+    registry = report["registry"]
+    config = report["config"]
+    workspaces = report["workspaces"]
+    commit = deployment.get("commit")
+    short_commit = commit[:12] if isinstance(commit, str) else "unknown"
+    return (
+        f"{str(report['status']).upper()} commit={short_commit} "
+        f"service={service.get('activeState')}/{service.get('subState')} "
+        f"jobs={registry.get('jobsActive', '?')}/{registry.get('jobsTotal', '?')} "
+        f"capacity={registry.get('activeReservations', '?')}+"
+        f"{registry.get('heldReservations', '?')}/{config.get('globalMaxConcurrency', '?')} "
+        f"workspaces={workspaces.get('physicalOpen', '?')} "
+        f"dirty={workspaces.get('dirty', '?')} held={workspaces.get('held', '?')} "
+        f"actions={report['operatorAction']['count']}"
+    )
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        report = build_status(args)
+    except StatusError as error:
+        print(f"runtime status failed: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps(report, indent=2, sort_keys=True) if args.json else human(report))
+    return 0 if report["status"] == "healthy" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

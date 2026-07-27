@@ -632,7 +632,7 @@ class DeployReclaimTests(unittest.TestCase):
             database = root / "registry.sqlite3"
             initialize_registry(database)
             systemctl = fake_systemctl(root)
-            with mcp_server(["workspace.patch", "workspace.execPlan"]) as port:
+            with mcp_server(["workspace.get", "workspace.execPlan"]) as port:
                 env_file = root / "runtime.env"
                 env_file.write_text(
                     f"ORDIVON_BIND=127.0.0.1:{port}\nORDIVON_BEARER_TOKEN=test\n",
@@ -671,7 +671,7 @@ class DeployReclaimTests(unittest.TestCase):
                     "--binary",
                     "runner",
                     "--required-tool",
-                    "workspace.patch",
+                    "workspace.get",
                     "--required-tool",
                     "workspace.execPlan",
                     "--expected-tool-count",
@@ -687,6 +687,8 @@ class DeployReclaimTests(unittest.TestCase):
                     capture_output=True,
                 )
                 deployment = json.loads(deployed.stdout)
+                self.assertEqual(deployment["probe"]["protocolVersion"], "2025-06-18")
+                self.assertEqual(deployment["probe"]["toolCount"], 2)
                 self.assertEqual((install / "runtime").read_text(), "new-runtime\n")
                 self.assertEqual((install / "runtime.previous").read_text(), "old-runtime\n")
                 receipt = Path(deployment["receipt"])
@@ -736,7 +738,7 @@ class DeployReclaimTests(unittest.TestCase):
             database = root / "registry.sqlite3"
             initialize_registry(database)
             systemctl = fake_systemctl(root)
-            with mcp_server(["workspace.patch"]) as port:
+            with mcp_server(["workspace.get"]) as port:
                 env_file = root / "runtime.env"
                 env_file.write_text(
                     f"ORDIVON_BIND=127.0.0.1:{port}\nORDIVON_BEARER_TOKEN=test\n",
@@ -774,7 +776,7 @@ class DeployReclaimTests(unittest.TestCase):
                         "--binary",
                         "runtime",
                         "--required-tool",
-                        "workspace.patch",
+                        "workspace.get",
                         "--expected-tool-count",
                         "1",
                         "--wait-seconds",
@@ -856,7 +858,7 @@ class DeployReclaimTests(unittest.TestCase):
                 "else:\n"
                 "    raise SystemExit(1)\n",
             )
-            with mcp_server(["workspace.patch"]) as port:
+            with mcp_server(["workspace.get"]) as port:
                 env_file = root / "runtime.env"
                 env_file.write_text(
                     f"ORDIVON_BIND=127.0.0.1:{port}\nORDIVON_BEARER_TOKEN=test\n",
@@ -894,7 +896,7 @@ class DeployReclaimTests(unittest.TestCase):
                         "--binary",
                         "runtime",
                         "--required-tool",
-                        "workspace.patch",
+                        "workspace.get",
                         "--expected-tool-count",
                         "1",
                         "--wait-seconds",
@@ -932,7 +934,7 @@ class DeployReclaimTests(unittest.TestCase):
             database = root / "registry.sqlite3"
             initialize_registry(database)
             systemctl = fake_systemctl(root)
-            with mcp_server(["workspace.patch"]) as port:
+            with mcp_server(["workspace.get"]) as port:
                 env_file = root / "runtime.env"
                 env_file.write_text(
                     f"ORDIVON_BIND=127.0.0.1:{port}\nORDIVON_BEARER_TOKEN=test\n",
@@ -972,7 +974,7 @@ class DeployReclaimTests(unittest.TestCase):
                         "--expected-tool-count",
                         "2",
                         "--required-tool",
-                        "workspace.patch",
+                        "workspace.get",
                         "--wait-seconds",
                         "0.5",
                     ],

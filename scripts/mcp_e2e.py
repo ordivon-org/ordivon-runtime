@@ -38,7 +38,6 @@ EXPECTED_TOOLS = {
     "workspace.list",
     "workspace.mutate",
     "workspace.open",
-    "workspace.patch",
     "workspace.read",
 }
 TERMINAL = {"succeeded", "failed", "timed_out", "cancelled", "lost", "orphaned"}
@@ -184,7 +183,7 @@ def wait_for_server(process: subprocess.Popen[str], endpoint: str, token: str, l
     raise RuntimeError(f"ordivon-runtime did not become ready: {last_error}")
 
 
-def start_server(repo: Path, root: Path, port: int, token: str) -> ServerProcess:
+def start_server(repo: Path, target_dir: Path, root: Path, port: int, token: str) -> ServerProcess:
     log_path = root / "server.log"
     log_handle = log_path.open("a", encoding="utf-8")
     env = os.environ.copy()
@@ -195,12 +194,12 @@ def start_server(repo: Path, root: Path, port: int, token: str) -> ServerProcess
             "ORDIVON_BEARER_TOKEN": token,
             "ORDIVON_STORE_ROOT": str(root / "store"),
             "ORDIVON_REGISTRY_ROOT": str(root / "registry"),
-            "ORDIVON_RUNNER_PATH": str(repo / "target/debug/ordivon-runtime-runner"),
+            "ORDIVON_RUNNER_PATH": str(target_dir / "debug/ordivon-runtime-runner"),
             "ORDIVON_TRACE_PATH": str(root / "registry/runtime-trace.jsonl"),
         }
     )
     process = subprocess.Popen(
-        [str(repo / "target/debug/ordivon-runtime")],
+        [str(target_dir / "debug/ordivon-runtime")],
         cwd=repo,
         env=env,
         text=True,
@@ -252,6 +251,11 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
     repo = repo.resolve()
     command("cargo", "build", "-p", "ordivon-runtime-core", "--bin", "ordivon-runtime-runner", cwd=repo)
     command("cargo", "build", "-p", "ordivon-runtime-mcp", cwd=repo)
+    metadata = json.loads(command("cargo", "metadata", "--no-deps", "--format-version", "1", cwd=repo))
+    target_dir = Path(metadata["target_directory"])
+    for binary in ("ordivon-runtime", "ordivon-runtime-runner"):
+        if not (target_dir / "debug" / binary).is_file():
+            raise RuntimeError(f"Cargo did not produce required binary: {binary}")
 
     root = Path("/root/.local/share/ordivon-acceptance") / f"mcp-e2e-{uuid.uuid4()}"
     root.mkdir(parents=True)
@@ -259,7 +263,7 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
     token = secrets.token_urlsafe(48)
     port = free_port()
     endpoint = f"http://127.0.0.1:{port}/mcp"
-    server = start_server(repo, root, port, token)
+    server = start_server(repo, target_dir, root, port, token)
     attempt_ids: list[str] = []
     result: dict[str, Any] = {
         "schemaVersion": 1,
@@ -360,48 +364,6 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             },
         )
         check("workspace-read-slice", sliced.get("content") == "ell", sliced)
-        patched = client.tool(
-            "workspace.patch",
-            {
-                "schemaVersion": SCHEMA_VERSION,
-                "workspaceId": workspace_id,
-                "files": [
-                    {
-                        "relativePath": "README.md",
-                        "expectedDigest": full["digest"],
-                        "edits": [
-                            {
-                                "range": {
-                                    "start": {"line": 1, "column": 0},
-                                    "end": {"line": 1, "column": 5},
-                                },
-                                "expectedText": "hello",
-                                "replacement": "hello patched",
-                            }
-                        ],
-                    }
-                ],
-                "maxDiffBytes": 65_536,
-            },
-        )
-        check(
-            "workspace-patch",
-            len(patched.get("files", [])) == 1 and "hello patched" in patched.get("diff", ""),
-            patched,
-        )
-        full = client.tool(
-            "workspace.read",
-            {
-                "schemaVersion": SCHEMA_VERSION,
-                "workspaceId": workspace_id,
-                "relativePath": "README.md",
-                "mode": "FULL",
-                "offset": 0,
-                "maxBytes": 4096,
-            },
-        )
-        check("workspace-patch-readback", full.get("content") == "hello patched\n", full)
-
         missing_digest = client.tool_result(
             "workspace.mutate",
             {
@@ -447,7 +409,7 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
                         "mode": "REPLACE_EXACT",
                         "content": "hello accepted\n",
                         "expectedDigest": full["digest"],
-                        "expectedText": "hello patched\n",
+                        "expectedText": "hello\n",
                     },
                 ],
             },
@@ -748,7 +710,7 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         check("task-cancel", cancelled.get("status") == "cancelled", cancelled)
 
         server.stop()
-        server = start_server(repo, root, port, token)
+        server = start_server(repo, target_dir, root, port, token)
         client = wait_for_server(server.process, endpoint, token, server.log_path)
         after_restart = client.tool(
             "task.observe",

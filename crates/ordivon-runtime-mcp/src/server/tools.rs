@@ -178,28 +178,6 @@ impl RuntimeServer {
     }
 
     #[tool(
-        name = "workspace.patch",
-        description = "Apply one atomic digest-guarded multi-file text patch. Every edit uses an exact one-based line, zero-based Unicode column range plus expectedText. All files are validated before any write, conflicts write nothing, and the result includes the final bounded diff.",
-        annotations(
-            title = "Patch workspace files",
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn workspace_patch(
-        &self,
-        Parameters(request): Parameters<WorkspacePatchRequest>,
-    ) -> ToolOutcome<WorkspacePatchResult> {
-        let runtime = self.state.runtime.clone();
-        self.run_core("workspace.patch", move || {
-            runtime.patch_workspace(&request).map_err(ToolError::from)
-        })
-        .await
-    }
-
-    #[tool(
         name = "workspace.diff",
         description = "Return a bounded compact Git diff and untracked paths for an isolated workspace.",
         annotations(

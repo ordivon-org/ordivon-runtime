@@ -146,6 +146,15 @@ class OperationalScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("column:jobs.resolution", result.stderr)
 
+    def test_local_acceptance_resolves_external_cargo_target_directory(self) -> None:
+        local_acceptance = (REPO / "scripts/local-acceptance").read_text(encoding="utf-8")
+        mcp_e2e = (REPO / "scripts/mcp_e2e.py").read_text(encoding="utf-8")
+        self.assertIn("cargo metadata --no-deps --format-version 1", local_acceptance)
+        self.assertIn('["target_directory"]', local_acceptance)
+        self.assertNotIn('$repo/target/debug/ordivon-runtime-runner', local_acceptance)
+        self.assertIn('metadata["target_directory"]', mcp_e2e)
+        self.assertNotIn('repo / "target/debug/ordivon-runtime"', mcp_e2e)
+
     def test_local_acceptance_contract_is_executable(self) -> None:
         result = subprocess.run(
             ["scripts/local-acceptance", "check"],
