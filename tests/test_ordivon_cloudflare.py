@@ -5,6 +5,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "ordivon_cloudflare.py"
@@ -27,6 +28,86 @@ class CloudflareControlTests(unittest.TestCase):
         self.assertEqual(cf.normalize_api_token("Bearer abc"), "abc")
         self.assertEqual(cf.normalize_api_token('"abc"'), "abc")
         self.assertEqual(cf.normalize_api_token("'abc'"), "abc")
+
+    def test_classify_api_token(self) -> None:
+        self.assertEqual(cf.classify_api_token("cfut_example"), "user")
+        self.assertEqual(cf.classify_api_token("cfat_example"), "account")
+        self.assertEqual(cf.classify_api_token("cfk_example"), "global_api_key")
+        self.assertEqual(cf.classify_api_token("legacy-token"), "legacy_or_unknown")
+
+    def test_client_sends_exact_bearer_header(self) -> None:
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return b'{"success":true,"result":{"status":"active"},"errors":[],"messages":[]}'
+
+        config = cf.Config(
+            api_token="cfat_test-secret",
+            account_id="account",
+            zone_id="zone",
+            zone_name="ordivon.com",
+            token_type="account",
+        )
+        client = cf.CloudflareClient(config, retries=0)
+        with mock.patch.object(cf.urllib.request, "urlopen", return_value=Response()) as urlopen:
+            client.request("GET", "/accounts/account/tokens/verify")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer cfat_test-secret")
+        self.assertEqual(request.full_url, "https://api.cloudflare.com/client/v4/accounts/account/tokens/verify")
+
+    def test_verify_uses_user_endpoint(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.paths = []
+
+            def request(self, method, path):
+                self.paths.append(path)
+                return {"result": {"status": "active"}}
+
+        client = Client()
+        _, verified_type = cf.verify_api_token(client, "user", "account-id")
+        self.assertEqual(verified_type, "user")
+        self.assertEqual(client.paths, ["/user/tokens/verify"])
+
+    def test_verify_uses_account_endpoint(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.paths = []
+
+            def request(self, method, path):
+                self.paths.append(path)
+                return {"result": {"status": "active"}}
+
+        client = Client()
+        _, verified_type = cf.verify_api_token(client, "account", "account-id")
+        self.assertEqual(verified_type, "account")
+        self.assertEqual(client.paths, ["/accounts/account-id/tokens/verify"])
+
+    def test_verify_legacy_falls_back_to_account_endpoint(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.paths = []
+
+            def request(self, method, path):
+                self.paths.append(path)
+                if path == "/user/tokens/verify":
+                    raise cf.CloudflareError("invalid", status=401)
+                return {"result": {"status": "active"}}
+
+        client = Client()
+        _, verified_type = cf.verify_api_token(client, "legacy_or_unknown", "account-id")
+        self.assertEqual(verified_type, "account")
+        self.assertEqual(
+            client.paths,
+            ["/user/tokens/verify", "/accounts/account-id/tokens/verify"],
+        )
 
     def test_normalize_dns_name(self) -> None:
         self.assertEqual(cf.normalize_dns_name("@", "ordivon.com"), "ordivon.com")

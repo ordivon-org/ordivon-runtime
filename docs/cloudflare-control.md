@@ -28,7 +28,12 @@ Then run:
 ./scripts/install-cloudflare-control
 ```
 
-Paste the token into the hidden prompt. The installer verifies it, discovers the account ID and `ordivon.com` zone ID, and writes:
+Paste the token into the hidden prompt. The installer supports both Cloudflare token families introduced in 2026:
+
+- User API Token: `cfut_...`, verified with `/user/tokens/verify`
+- Account API Token: `cfat_...`, verified with `/accounts/{account_id}/tokens/verify`
+
+Legacy unprefixed tokens are probed against both verification endpoints. The installer discovers the account ID and `ordivon.com` zone ID, then writes:
 
 ```text
 ~/.config/ordivon/secrets/cloudflare.json

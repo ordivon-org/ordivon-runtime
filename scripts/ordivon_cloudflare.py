@@ -27,7 +27,7 @@ from typing import Any
 API_BASE = "https://api.cloudflare.com/client/v4"
 DEFAULT_ZONE = "ordivon.com"
 DEFAULT_TIMEOUT_SECONDS = 30
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 
 
 class CloudflareError(RuntimeError):
@@ -53,6 +53,7 @@ class Config:
     account_id: str
     zone_id: str
     zone_name: str
+    token_type: str = "unknown"
     api_base: str = API_BASE
     version: int = CONFIG_VERSION
 
@@ -86,6 +87,60 @@ def normalize_api_token(raw: str) -> str:
     if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'}:
         token = token[1:-1].strip()
     return token
+
+
+def classify_api_token(token: str) -> str:
+    """Classify Cloudflare's prefixed 2026 credentials without exposing them."""
+    if token.startswith("cfut_"):
+        return "user"
+    if token.startswith("cfat_"):
+        return "account"
+    if token.startswith("cfk_"):
+        return "global_api_key"
+    return "legacy_or_unknown"
+
+
+def verify_api_token(
+    client: "CloudflareClient", token_type: str, account_id: str
+) -> tuple[dict[str, Any], str]:
+    """Verify user and account-owned tokens against their distinct endpoints."""
+    if token_type == "global_api_key":
+        raise CloudflareError(
+            "A Global API Key cannot be used as a Bearer API token. Create a User API Token (cfut_) "
+            "or Account API Token (cfat_)."
+        )
+
+    if token_type == "user":
+        attempts = [("user", "/user/tokens/verify")]
+    elif token_type == "account":
+        attempts = [("account", f"/accounts/{account_id}/tokens/verify")]
+    else:
+        attempts = [
+            ("user", "/user/tokens/verify"),
+            ("account", f"/accounts/{account_id}/tokens/verify"),
+        ]
+
+    failures: list[CloudflareError] = []
+    for inferred_type, endpoint in attempts:
+        try:
+            response = client.request("GET", endpoint)
+        except CloudflareError as exc:
+            failures.append(exc)
+            continue
+        status = (response.get("result") or {}).get("status")
+        if status != "active":
+            raise CloudflareError(f"Cloudflare {inferred_type} API token is not active: {status}")
+        return response, inferred_type
+
+    statuses = ", ".join(str(error.status or "unknown") for error in failures)
+    errors = failures[-1].errors if failures else []
+    raise CloudflareError(
+        "Cloudflare rejected the credential on every applicable verification endpoint "
+        f"for token type {token_type!r} (HTTP statuses: {statuses}).",
+        status=failures[-1].status if failures else None,
+        errors=errors,
+        payload=failures[-1].payload if failures else None,
+    )
 
 
 def normalize_dns_name(name: str, zone_name: str) -> str:
@@ -154,6 +209,7 @@ def load_config(path: pathlib.Path) -> Config:
         account_id=str(account_id),
         zone_id=str(zone_id),
         zone_name=str(zone_name),
+        token_type=str(raw.get("token_type") or classify_api_token(str(token))),
         api_base=str(raw.get("api_base") or API_BASE),
         version=int(raw.get("version") or CONFIG_VERSION),
     )
@@ -275,47 +331,75 @@ def command_setup(args: argparse.Namespace) -> int:
     if any(character.isspace() for character in token):
         raise CloudflareError("The pasted credential contains internal whitespace and is not a valid Cloudflare API token")
 
-    bootstrap = Config(api_token=token, account_id="", zone_id="", zone_name=args.zone)
-    client = CloudflareClient(bootstrap)
-    try:
-        verification = client.request("GET", "/user/tokens/verify")
-    except CloudflareError as exc:
-        if exc.status == 401:
-            raise CloudflareError(
-                "Cloudflare rejected this credential as an invalid API token. Create a token under "
-                "Cloudflare Dashboard > My Profile > API Tokens (or Manage Account > API Tokens). "
-                "Paste the one-time token secret, not a token name/ID, Global API Key, Tunnel token, "
-                "or Zero Trust Access Service Token client ID/secret.",
-                status=exc.status,
-                errors=exc.errors,
-                payload=exc.payload,
-            ) from exc
-        raise
-    status = (verification.get("result") or {}).get("status")
-    if status not in {None, "active"}:
-        raise CloudflareError(f"Cloudflare token is not active: {status}")
+    token_type = classify_api_token(token)
+    if token_type == "global_api_key":
+        raise CloudflareError(
+            "The credential starts with cfk_ and is a Global API Key, not a scoped API token. "
+            "Create a cfut_ User API Token or cfat_ Account API Token."
+        )
 
-    zones = client.request("GET", "/zones", query={"name": args.zone, "per_page": 50}).get("result") or []
+    bootstrap = Config(
+        api_token=token,
+        account_id="",
+        zone_id="",
+        zone_name=args.zone,
+        token_type=token_type,
+    )
+    client = CloudflareClient(bootstrap)
+
+    try:
+        zones = client.request("GET", "/zones", query={"name": args.zone, "per_page": 50}).get("result") or []
+    except CloudflareError as exc:
+        raise CloudflareError(
+            "The token could not read the requested zone. It must include Zone > Zone > Read for "
+            f"{args.zone}. Cloudflare returned: {exc}",
+            status=exc.status,
+            errors=exc.errors,
+            payload=exc.payload,
+        ) from exc
+
     exact = [zone for zone in zones if zone.get("name") == args.zone]
     if len(exact) != 1:
         names = [zone.get("name") for zone in zones]
-        raise CloudflareError(f"Expected exactly one accessible zone named {args.zone!r}; found {len(exact)}. Visible zones: {names}")
+        raise CloudflareError(
+            f"Expected exactly one accessible zone named {args.zone!r}; found {len(exact)}. Visible zones: {names}"
+        )
 
     zone = exact[0]
-    account_id = ((zone.get("account") or {}).get("id"))
+    account_id = (zone.get("account") or {}).get("id")
     zone_id = zone.get("id")
     if not account_id or not zone_id:
         raise CloudflareError("Cloudflare zone response did not contain account_id and zone_id")
 
-    config = Config(api_token=token, account_id=account_id, zone_id=zone_id, zone_name=args.zone)
+    verification, verified_type = verify_api_token(client, token_type, str(account_id))
+    config = Config(
+        api_token=token,
+        account_id=str(account_id),
+        zone_id=str(zone_id),
+        zone_name=args.zone,
+        token_type=verified_type,
+    )
     save_config(path, config)
-    emit({"configured": True, "config_path": str(path), **config.public()})
+    emit(
+        {
+            "configured": True,
+            "config_path": str(path),
+            **config.public(),
+            "token_status": (verification.get("result") or {}).get("status"),
+        }
+    )
     return 0
 
 
 def command_verify(args: argparse.Namespace, client: CloudflareClient) -> int:
-    result = client.request("GET", "/user/tokens/verify")
-    emit({"config": client.config.public(), "token": result.get("result")})
+    result, verified_type = verify_api_token(client, client.config.token_type, client.config.account_id)
+    emit(
+        {
+            "config": client.config.public(),
+            "verified_as": verified_type,
+            "token": result.get("result"),
+        }
+    )
     return 0
 
 
