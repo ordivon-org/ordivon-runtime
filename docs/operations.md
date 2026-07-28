@@ -19,13 +19,15 @@ A normal production deployment is:
 repo=$(git rev-parse --show-toplevel)
 commit=$(git -C "$repo" rev-parse HEAD)
 manifest="$repo/target/release/ordivon-deployment-manifest.json"
+cargo=$(command -v cargo)
+test -x "$cargo"
 
 scripts/ordivon-runtime-deploy prepare \
   --source-repo "$repo" \
   --commit "$commit" \
   --candidate-dir "$repo/target/release" \
   --candidate-manifest "$manifest" \
-  --cargo /root/.cargo/bin/cargo
+  --cargo "$cargo"
 
 scripts/ordivon-runtime-deploy plan \
   --source-repo "$repo" \
