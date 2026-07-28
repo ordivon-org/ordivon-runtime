@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use super::engine::append_terminal_evidence_for_commit;
 use super::registry::{load_attempt, load_job, load_reservation, MAX_MIGRATION_VERSION};
 use super::{
     inspect_runtime, ArtifactRegistration, AttemptState, Registry, RegistryConfig,
@@ -230,6 +231,8 @@ pub fn apply_runtime_repair(
                     case,
                     &audit,
                 )?);
+                let attempt = registry.get_attempt(&case.attempt.attempt_id)?;
+                append_terminal_evidence_for_commit(&registry, &attempt, &mut terminal)?;
                 operations.push(AdminRepairOperation::Terminal {
                     terminal: terminal.clone(),
                     audit,
@@ -253,8 +256,10 @@ pub fn apply_runtime_repair(
                 ));
             }
             RuntimeDoctorProposal::ManualReview { .. } => {
-                let terminal =
+                let mut terminal =
                     prepare_final_lost_terminal(&config.doctor.store_root, case, &audit)?;
+                let attempt = registry.get_attempt(&case.attempt.attempt_id)?;
+                append_terminal_evidence_for_commit(&registry, &attempt, &mut terminal)?;
                 operations.push(AdminRepairOperation::Terminal { terminal, audit });
                 actions.push(action(
                     case,

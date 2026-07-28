@@ -174,3 +174,17 @@ scripts/ordivon-runtime-status --json --expected-commit "$(git rev-parse HEAD)"
 ```
 
 The command returns `0` for `healthy`, `1` when bounded facts require operator attention, and `2` for an invalid invocation or unreadable mandatory input. Output contains receipt identifiers and binary names, but not source paths, Workspace paths, command arguments, arbitrary environment values, or secret material. The deployment receipt remains the build-identity source of truth; the status command does not introduce another database or marker.
+## Contained-local acceptance
+
+The contained profile has a root/systemd integration fixture that uses the real Runner and cgroup v2. It proves that an unmounted secret below host `/var` is invisible, network socket creation or connection is blocked, the Workspace remains writable, inherited credential variables are absent, the systemd/Runner cgroup identity remains consistent, and `terminal_evidence` reports a clean process tree with the supplied foreign reference.
+
+```sh
+cargo build -p ordivon-runtime-core --bin ordivon-runtime-runner
+ORDIVON_RUN_INTEGRATION=1 \
+ORDIVON_RUNNER_PATH="$CARGO_TARGET_DIR/debug/ordivon-runtime-runner" \
+  cargo test -p ordivon-runtime-core --test transactional_runtime \
+  contained_local_hides_unmounted_state_blocks_egress_and_preserves_evidence \
+  -- --ignored --nocapture
+```
+
+A failed namespace setup is terminal `RUNNER_START_FAILED`; contained execution does not retry as trusted-local. `ProtectControlGroups=yes` is intentional: it keeps the host cgroup path readable but immutable so Runner-start identity, cancellation, restart recovery, and recursive residual checks refer to the same supervisor object. The stronger `strict` cgroup namespace is not used because it rewrites the Runner-visible path to `/` and destroys that identity invariant.

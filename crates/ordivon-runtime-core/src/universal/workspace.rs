@@ -556,6 +556,15 @@ pub fn workspace_source_state_digest(
     workspace_source_state_digest_at(Path::new(&record.workspace_path))
 }
 
+pub(crate) fn workspace_git_common_dir_at(workspace: &Path) -> Result<PathBuf, UniversalExecError> {
+    let workspace = canonical_directory(workspace, "workspacePath")?;
+    let common_dir = git_output(
+        &workspace,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    canonical_directory(Path::new(common_dir.trim()), "workspaceGitCommonDir")
+}
+
 pub(crate) fn workspace_source_state_digest_at(
     workspace: &Path,
 ) -> Result<String, UniversalExecError> {

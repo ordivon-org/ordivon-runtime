@@ -29,8 +29,9 @@ use super::{
 use crate::universal::{
     canonical_directory, create_git_workspace_compact, list_workspace_records,
     load_workspace_record, mutate_workspace, patch_workspace, remove_git_workspace,
-    resolve_workspace_cwd, sha256_bytes, sha256_file, workspace_source_state_digest,
-    write_json_atomic, CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
+    resolve_workspace_cwd, sha256_bytes, sha256_file, workspace_git_common_dir_at,
+    workspace_source_state_digest, write_bytes_atomic, write_json_atomic,
+    CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
     RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskProgress, RunnerTaskRequest,
     RunnerTaskResult, UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
     WorkspaceDiffRequest, WorkspaceMutateRequest, WorkspaceMutateResult, WorkspacePatchRequest,
@@ -48,6 +49,7 @@ const PROGRESS_FILE: &str = "progress.json";
 const CANCEL_FILE: &str = "cancel-requested.json";
 const CONTROL_RESULT_FILE: &str = "control-result.json";
 const ORPHAN_REMEDIATION_FILE: &str = "orphan-remediation.json";
+const TERMINAL_EVIDENCE_FILE_PREFIX: &str = "terminal-evidence-";
 const INTERACTIVE_RECONCILIATION_LIMIT: u32 = 32;
 const ADAPTIVE_POLL_DELAYS_MS: [u64; 5] = [2, 5, 10, 20, 50];
 const DEFAULT_EXECUTION_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -126,6 +128,53 @@ struct ControlTerminalEvidence {
     reason_code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    observed_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TerminalSupervisorEvidence {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    boot_id: Option<String>,
+    unit_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invocation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control_group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    main_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process_start_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runner_start_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TerminalProcessEvidence {
+    schema_version: u32,
+    job_id: String,
+    attempt_id: String,
+    workspace_id: String,
+    source_revision: String,
+    execution_profile: super::ExecutionProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    foreign_references: Vec<super::ForeignReference>,
+    executable: String,
+    args: Vec<String>,
+    cwd: String,
+    supervisor: TerminalSupervisorEvidence,
+    start_disposition: String,
+    cancellation_disposition: String,
+    execution_disposition: String,
+    delivery_disposition: String,
+    process_tree_disposition: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process_tree_detail: Option<String>,
+    reason_code: String,
+    terminal_artifact_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supersedes_artifact_id: Option<String>,
     observed_at_ms: u64,
 }
 
@@ -402,7 +451,10 @@ impl Runtime {
         let cwd = resolve_workspace_cwd(&record, &request.execution.cwd_relative)
             .map_err(map_universal_error)?;
         let executable = validate_executable(&self.executor, &request.execution.executable)?;
-        let base_environment = self.execution_environment(&request.execution.workspace_id)?;
+        let base_environment = self.execution_environment(
+            &request.execution.workspace_id,
+            request.execution.execution_profile,
+        )?;
         let mut steps = Vec::with_capacity(request.execution.steps.len());
         for step in &request.execution.steps {
             let step_cwd =
@@ -428,6 +480,12 @@ impl Runtime {
                 workspace_source_state_digest(&self.executor, &request.execution.workspace_id)
                     .map_err(map_universal_error)?,
             ),
+            workspace_git_common_dir: Some(
+                workspace_git_common_dir_at(&workspace_path)
+                    .map_err(map_universal_error)?
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             executable: executable.to_string_lossy().into_owned(),
             executable_digest: sha256_file(&executable).map_err(map_universal_error)?,
             args: request.execution.args.clone(),
@@ -438,6 +496,8 @@ impl Runtime {
             stderr_limit_bytes: request.execution.stderr_limit_bytes,
             steps,
             budget: request.execution.budget.clone(),
+            execution_profile: request.execution.execution_profile,
+            foreign_references: request.execution.foreign_references.clone(),
             principal: request.principal.clone(),
         })
     }
@@ -465,7 +525,11 @@ impl Runtime {
         false
     }
 
-    fn execution_environment(&self, workspace_id: &str) -> RuntimeResult<BTreeMap<String, String>> {
+    fn execution_environment(
+        &self,
+        workspace_id: &str,
+        execution_profile: super::ExecutionProfile,
+    ) -> RuntimeResult<BTreeMap<String, String>> {
         let workspace_cache = self.executor.workspace_cache_path(workspace_id);
         let build_cache = self.executor.workspace_build_cache_path(workspace_id);
         let workspace_tmp = self.executor.workspace_tmp_path(workspace_id);
@@ -477,7 +541,23 @@ impl Runtime {
         }
         let mut environment = BTreeMap::new();
         environment.insert("PATH".to_string(), self.execution_path.clone());
-        environment.insert("HOME".to_string(), self.execution_home.clone());
+        let execution_home = match execution_profile {
+            crate::runtime::ExecutionProfile::TrustedLocal => self.execution_home.clone(),
+            super::ExecutionProfile::ContainedLocal => {
+                let contained_home = workspace_cache.join("home");
+                fs::create_dir_all(&contained_home).map_err(|error| {
+                    io_error(
+                        &format!(
+                            "create contained execution home {}",
+                            contained_home.display()
+                        ),
+                        error,
+                    )
+                })?;
+                contained_home.to_string_lossy().into_owned()
+            }
+        };
+        environment.insert("HOME".to_string(), execution_home);
         environment.insert("LANG".to_string(), "C.UTF-8".to_string());
         environment.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
         environment.insert(
@@ -504,6 +584,23 @@ impl Runtime {
             "npm_config_cache".to_string(),
             shared.join("npm").to_string_lossy().into_owned(),
         );
+        for name in [
+            "HOME",
+            "TMPDIR",
+            "XDG_CACHE_HOME",
+            "CARGO_TARGET_DIR",
+            "UV_CACHE_DIR",
+            "PIP_CACHE_DIR",
+            "npm_config_cache",
+        ] {
+            let path = Path::new(environment.get(name).expect("execution path is present"));
+            fs::create_dir_all(path).map_err(|error| {
+                io_error(
+                    &format!("create execution environment path {}", path.display()),
+                    error,
+                )
+            })?;
+        }
         Ok(environment)
     }
 
@@ -677,14 +774,17 @@ impl Runtime {
             .map_err(map_universal_error)?;
         let runner = validate_runner(&self.executor.runner_path)?;
         let runtime_ceiling = plan.timeout_ms.saturating_add(5_000);
-        let output = systemd_run(
-            &starting.unit_name,
-            &runner,
-            &bundle_path,
-            Path::new(&plan.workspace_path),
-            runtime_ceiling,
-            &plan.budget,
-        )?;
+        let output = systemd_run(&SystemdRunSpec {
+            unit_name: &starting.unit_name,
+            runner: &runner,
+            bundle_path: &bundle_path,
+            workspace_path: Path::new(&plan.workspace_path),
+            workspace_git_common_dir: plan.workspace_git_common_dir.as_deref().map(Path::new),
+            runtime_ceiling_ms: runtime_ceiling,
+            budget: &plan.budget,
+            execution_profile: plan.execution_profile,
+            environment: &plan.env,
+        })?;
         if !output.status.success() {
             let detail = format!(
                 "systemd-run failed: {}",
@@ -848,7 +948,8 @@ impl Runtime {
             if current.state.is_terminal() {
                 return self.observation_from_registry(&current.job_id, 0, 0);
             }
-            let terminal = self.prepare_runner_terminal(&current)?;
+            let mut terminal = self.prepare_runner_terminal(&current)?;
+            self.append_terminal_evidence(&current, &mut terminal)?;
             match self.registry.commit_terminal(&terminal) {
                 Ok(projection) => {
                     self.cleanup_payload_view(&current.attempt_id)?;
@@ -1344,7 +1445,7 @@ impl Runtime {
                 });
             }
         }
-        self.registry.recover_orphaned_terminal(&TerminalCommit {
+        let mut terminal = TerminalCommit {
             attempt_id: attempt.attempt_id.clone(),
             expected_row_version: attempt.row_version,
             state,
@@ -1354,7 +1455,9 @@ impl Runtime {
             finished_at_ms: observed_at_ms,
             artifacts,
             reason_code: reason_code.to_string(),
-        })?;
+        };
+        self.append_terminal_evidence(attempt, &mut terminal)?;
+        self.registry.recover_orphaned_terminal(&terminal)?;
         self.cleanup_payload_view(&attempt.attempt_id)
     }
 
@@ -1368,32 +1471,14 @@ impl Runtime {
         }
         let mut terminal = self.prepare_runner_terminal(&current)?;
         terminal.reason_code = "LATE_IDENTITY_BOUND_RUNNER_RESULT".to_string();
+        self.append_terminal_evidence(&current, &mut terminal)?;
         self.registry.recover_orphaned_terminal(&terminal)?;
         self.cleanup_payload_view(&current.attempt_id)?;
         Ok(true)
     }
 
     fn orphan_process_tree_alive(&self, attempt: &AttemptRecord) -> RuntimeResult<bool> {
-        let properties = systemctl_show(&attempt.unit_name)?;
-        let matching_unit_active = unit_is_active(&properties)
-            && attempt
-                .invocation_id
-                .as_deref()
-                .zip(nonempty_property(&properties, "InvocationID").as_deref())
-                .is_some_and(|(expected, observed)| expected == observed);
-        let recorded_pid_alive = attempt.main_pid.is_some_and(|pid| {
-            process_identity(pid)
-                .as_deref()
-                .zip(attempt.process_start_identity.as_deref())
-                .is_some_and(|(observed, expected)| observed == expected)
-        });
-        let cgroup_alive = attempt
-            .control_group
-            .as_deref()
-            .map(cgroup_has_processes)
-            .transpose()?
-            .unwrap_or(false);
-        Ok(matching_unit_active || recorded_pid_alive || cgroup_alive)
+        attempt_process_tree_alive(attempt)
     }
 
     pub fn reconcile_attempt(&self, attempt_id: &str) -> RuntimeResult<()> {
@@ -1600,7 +1685,7 @@ impl Runtime {
                 }
             }
         }
-        let projection = self.registry.commit_terminal(&TerminalCommit {
+        let mut terminal = TerminalCommit {
             attempt_id: current.attempt_id.clone(),
             expected_row_version: current.row_version,
             state,
@@ -1612,11 +1697,21 @@ impl Runtime {
             finished_at_ms: observed_at_ms,
             artifacts,
             reason_code: reason_code.to_string(),
-        })?;
+        };
+        self.append_terminal_evidence(&current, &mut terminal)?;
+        let projection = self.registry.commit_terminal(&terminal)?;
         if state != AttemptState::Orphaned {
             self.cleanup_payload_view(&current.attempt_id)?;
         }
         self.observation_from_parts(projection, Some(current), 4096, 4096, None, None)
+    }
+
+    pub(crate) fn append_terminal_evidence(
+        &self,
+        attempt: &AttemptRecord,
+        terminal: &mut TerminalCommit,
+    ) -> RuntimeResult<()> {
+        append_terminal_evidence_for_commit(&self.registry, attempt, terminal)
     }
 
     pub fn cancel_task(&self, request: &TaskCancelRequest) -> RuntimeResult<TaskObservation> {
@@ -1881,6 +1976,186 @@ fn artifact_descriptor(
     }
 }
 
+pub(crate) fn append_terminal_evidence_for_commit(
+    registry: &Registry,
+    attempt: &AttemptRecord,
+    terminal: &mut TerminalCommit,
+) -> RuntimeResult<()> {
+    let job = registry.get_job(&attempt.job_id)?;
+    let plan: RuntimeExecutionPlan =
+        serde_json::from_str(&job.execution_plan_json).map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                format!("stored execution plan is invalid: {error}"),
+                Some("executionPlan"),
+                false,
+            )
+        })?;
+    let previous_terminal_evidence = registry
+        .list_artifacts(&attempt.job_id)?
+        .into_iter()
+        .rfind(|artifact| artifact.kind == "terminal_evidence")
+        .map(|artifact| artifact.artifact_id);
+    let (process_tree_disposition, process_tree_detail) = observe_terminal_process_tree(attempt);
+    let cancellation_disposition = match attempt.termination_intent {
+        AttemptTerminationIntent::Natural if job.desired_state == JobDesiredState::Cancelled => {
+            "requested"
+        }
+        AttemptTerminationIntent::Natural => "not_requested",
+        AttemptTerminationIntent::StopRequested => "requested",
+        AttemptTerminationIntent::DeadlineExceeded => "deadline_exceeded",
+    };
+    let delivery_disposition = match terminal.state {
+        AttemptState::Orphaned => "reconciliation_required",
+        AttemptState::Lost => "unknown",
+        _ => "committed",
+    };
+    let evidence = TerminalProcessEvidence {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        job_id: attempt.job_id.clone(),
+        attempt_id: attempt.attempt_id.clone(),
+        workspace_id: plan.workspace_id,
+        source_revision: plan.source_revision,
+        execution_profile: plan.execution_profile,
+        foreign_references: plan.foreign_references,
+        executable: plan.executable,
+        args: plan.args,
+        cwd: plan.cwd,
+        supervisor: TerminalSupervisorEvidence {
+            boot_id: attempt.boot_id.clone(),
+            unit_name: attempt.unit_name.clone(),
+            invocation_id: attempt.invocation_id.clone(),
+            control_group: attempt.control_group.clone(),
+            main_pid: attempt.main_pid,
+            process_start_identity: attempt.process_start_identity.clone(),
+            runner_start_digest: attempt.runner_start_digest.clone(),
+        },
+        start_disposition: if attempt.runner_start_digest.is_some() {
+            "identity_bound".to_string()
+        } else {
+            "not_bound".to_string()
+        },
+        cancellation_disposition: cancellation_disposition.to_string(),
+        execution_disposition: terminal.state.as_db().to_string(),
+        delivery_disposition: delivery_disposition.to_string(),
+        process_tree_disposition,
+        process_tree_detail,
+        reason_code: terminal.reason_code.clone(),
+        terminal_artifact_ids: terminal
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.artifact_id.clone())
+            .collect(),
+        supersedes_artifact_id: previous_terminal_evidence,
+        observed_at_ms: terminal.finished_at_ms,
+    };
+    let bytes = serde_json::to_vec_pretty(&evidence).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
+            format!("cannot serialize terminal evidence: {error}"),
+            Some("terminalEvidence"),
+            false,
+        )
+    })?;
+    let digest = sha256_bytes(&bytes);
+    let digest_hex = digest.strip_prefix("sha256:").ok_or_else(|| {
+        RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
+            "terminal evidence digest has an invalid prefix",
+            Some("terminalEvidence"),
+            false,
+        )
+    })?;
+    let file_name = format!("{TERMINAL_EVIDENCE_FILE_PREFIX}{digest_hex}.json");
+    let path = Path::new(&attempt.bundle_path).join(&file_name);
+    if path.is_file() {
+        let observed = sha256_file(&path).map_err(map_universal_error)?;
+        if observed != digest {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ArtifactIdentityConflict,
+                "content-addressed terminal evidence has conflicting bytes",
+                Some("terminalEvidence"),
+                false,
+            ));
+        }
+    } else {
+        write_bytes_atomic(&path, &bytes).map_err(map_universal_error)?;
+    }
+    terminal.artifacts.push(ArtifactRegistration {
+        artifact_id: format!("{}.terminal-evidence.{digest_hex}", attempt.attempt_id),
+        kind: "terminal_evidence".to_string(),
+        relative_path: file_name,
+        digest,
+        media_type: "application/json".to_string(),
+        byte_length: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        truncated: false,
+    });
+    Ok(())
+}
+
+fn observe_terminal_process_tree(attempt: &AttemptRecord) -> (String, Option<String>) {
+    if attempt.control_group.is_none()
+        && attempt.main_pid.is_none()
+        && attempt.invocation_id.is_none()
+    {
+        return (
+            "unknown".to_string(),
+            Some("the Attempt never bound a supervisor process identity".to_string()),
+        );
+    }
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut poll_index = 0;
+    loop {
+        match attempt_process_tree_alive(attempt) {
+            Ok(false) => return ("terminal_clean".to_string(), None),
+            Ok(true) if Instant::now() < deadline => {
+                sleep_until_poll(deadline, &mut poll_index);
+            }
+            Ok(true) => {
+                return (
+                    "unexpected_residual".to_string(),
+                    Some(
+                        "the identity-bound unit, PID, or cgroup remained populated after the terminal result"
+                            .to_string(),
+                    ),
+                )
+            }
+            Err(error) => {
+                return (
+                    "unknown".to_string(),
+                    Some(format!(
+                        "post-terminal process-tree observation failed: {}",
+                        error.message
+                    )),
+                )
+            }
+        }
+    }
+}
+
+fn attempt_process_tree_alive(attempt: &AttemptRecord) -> RuntimeResult<bool> {
+    let properties = systemctl_show(&attempt.unit_name)?;
+    let matching_unit_active = unit_is_active(&properties)
+        && attempt
+            .invocation_id
+            .as_deref()
+            .zip(properties.get("InvocationID").map(String::as_str))
+            .is_some_and(|(expected, observed)| expected == observed);
+    let recorded_pid_alive = attempt.main_pid.is_some_and(|pid| {
+        process_identity(pid)
+            .as_deref()
+            .zip(attempt.process_start_identity.as_deref())
+            .is_some_and(|(observed, expected)| observed == expected)
+    });
+    let cgroup_alive = attempt
+        .control_group
+        .as_deref()
+        .map(cgroup_has_processes)
+        .transpose()?
+        .unwrap_or(false);
+    Ok(matching_unit_active || recorded_pid_alive || cgroup_alive)
+}
+
 fn validate_run_request(request: &TaskRunRequest, max_output_bytes: u64) -> RuntimeResult<()> {
     if request.schema_version != RUNTIME_SCHEMA_VERSION {
         return Err(RuntimeError::invalid(
@@ -1953,6 +2228,51 @@ fn validate_run_request(request: &TaskRunRequest, max_output_bytes: u64) -> Runt
         ));
     }
     validate_execution_budget(&request.execution.budget, "execution.budget")?;
+    if request.execution.foreign_references.len() > super::MAX_FOREIGN_REFERENCES {
+        return Err(RuntimeError::invalid(
+            format!(
+                "foreignReferences exceed the maximum of {}",
+                super::MAX_FOREIGN_REFERENCES
+            ),
+            "execution.foreignReferences",
+        ));
+    }
+    let mut foreign_reference_keys = std::collections::BTreeSet::new();
+    for (index, reference) in request.execution.foreign_references.iter().enumerate() {
+        for (value, suffix) in [
+            (&reference.namespace, "namespace"),
+            (&reference.reference_type, "type"),
+            (&reference.id, "id"),
+        ] {
+            validate_text_id(
+                value,
+                &format!("execution.foreignReferences[{index}].{suffix}"),
+            )?;
+        }
+        if let Some(generation) = &reference.generation {
+            validate_text_id(
+                generation,
+                &format!("execution.foreignReferences[{index}].generation"),
+            )?;
+        }
+        if let Some(digest) = &reference.digest {
+            validate_text_id(
+                digest,
+                &format!("execution.foreignReferences[{index}].digest"),
+            )?;
+        }
+        let key = (
+            reference.namespace.as_str(),
+            reference.reference_type.as_str(),
+            reference.id.as_str(),
+        );
+        if !foreign_reference_keys.insert(key) {
+            return Err(RuntimeError::invalid(
+                "foreignReferences must be unique by namespace, type, and id",
+                &format!("execution.foreignReferences[{index}]"),
+            ));
+        }
+    }
     if request.execution.args.len() > 128 || request.execution.env.len() > 64 {
         return Err(RuntimeError::invalid(
             "args or environment exceed runtime bounds",
@@ -2107,14 +2427,28 @@ fn validate_runner(path: &Path) -> RuntimeResult<PathBuf> {
     fs::canonicalize(path).map_err(|error| io_error("canonicalize Runner", error))
 }
 
-fn build_systemd_run_command(
-    unit_name: &str,
-    runner: &Path,
-    bundle_path: &Path,
-    _workspace_path: &Path,
+struct SystemdRunSpec<'a> {
+    unit_name: &'a str,
+    runner: &'a Path,
+    bundle_path: &'a Path,
+    workspace_path: &'a Path,
+    workspace_git_common_dir: Option<&'a Path>,
     runtime_ceiling_ms: u64,
-    budget: &super::ExecutionBudget,
-) -> RuntimeResult<Command> {
+    budget: &'a super::ExecutionBudget,
+    execution_profile: super::ExecutionProfile,
+    environment: &'a BTreeMap<String, String>,
+}
+
+fn build_systemd_run_command(spec: &SystemdRunSpec<'_>) -> RuntimeResult<Command> {
+    let unit_name = spec.unit_name;
+    let runner = spec.runner;
+    let bundle_path = spec.bundle_path;
+    let workspace_path = spec.workspace_path;
+    let workspace_git_common_dir = spec.workspace_git_common_dir;
+    let runtime_ceiling_ms = spec.runtime_ceiling_ms;
+    let budget = spec.budget;
+    let execution_profile = spec.execution_profile;
+    let environment = spec.environment;
     let mut command = Command::new("systemd-run");
     command
         .arg(format!("--unit={unit_name}"))
@@ -2138,10 +2472,113 @@ fn build_systemd_run_command(
         command.arg(format!("--property=CPUQuota={cpu_quota_percent}%"));
     }
 
-    append_trusted_environment(&mut command);
+    match execution_profile {
+        crate::runtime::ExecutionProfile::TrustedLocal => append_trusted_environment(&mut command),
+        super::ExecutionProfile::ContainedLocal => {
+            append_contained_properties(
+                &mut command,
+                runner,
+                workspace_path,
+                workspace_git_common_dir,
+                bundle_path,
+                environment,
+            )?;
+        }
+    }
 
     command.arg(runner).arg("--task-dir").arg(bundle_path);
     Ok(command)
+}
+
+fn append_contained_properties(
+    command: &mut Command,
+    runner: &Path,
+    workspace_path: &Path,
+    workspace_git_common_dir: Option<&Path>,
+    bundle_path: &Path,
+    environment: &BTreeMap<String, String>,
+) -> RuntimeResult<()> {
+    command.args([
+        "--property=ProtectSystem=strict",
+        "--property=ProtectHome=tmpfs",
+        "--property=PrivateTmp=yes",
+        "--property=PrivateDevices=yes",
+        "--property=PrivateNetwork=yes",
+        "--property=NoNewPrivileges=yes",
+        "--property=CapabilityBoundingSet=",
+        "--property=AmbientCapabilities=",
+        "--property=RestrictSUIDSGID=yes",
+        "--property=RestrictNamespaces=yes",
+        "--property=LockPersonality=yes",
+        "--property=ProtectHostname=yes",
+        "--property=ProtectClock=yes",
+        "--property=ProtectKernelTunables=yes",
+        "--property=ProtectKernelModules=yes",
+        "--property=ProtectKernelLogs=yes",
+        "--property=ProtectControlGroups=yes",
+        "--property=ProtectProc=invisible",
+        "--property=ProcSubset=pid",
+        "--property=KeyringMode=private",
+        "--property=RestrictAddressFamilies=AF_UNIX",
+        "--property=TemporaryFileSystem=/run:ro",
+        "--property=TemporaryFileSystem=/var:ro",
+        "--property=SystemCallFilter=~@mount @raw-io @reboot @swap @module @obsolete",
+        "--property=UMask=0077",
+    ]);
+
+    let runner_value = systemd_path_value(runner)?;
+    command.arg(format!(
+        "--property=BindReadOnlyPaths={runner_value}:{runner_value}"
+    ));
+    if let Some(common_dir) = workspace_git_common_dir {
+        let value = systemd_path_value(common_dir)?;
+        command.arg(format!("--property=BindReadOnlyPaths={value}:{value}"));
+    }
+    for name in ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "XDG_CACHE_HOME"] {
+        if let Some(value) = environment.get(name) {
+            command.arg(format!("--setenv={name}={value}"));
+        }
+    }
+    command.arg("--setenv=GIT_OPTIONAL_LOCKS=0");
+
+    let mut writable_paths = std::collections::BTreeSet::new();
+    writable_paths.insert(workspace_path.to_path_buf());
+    writable_paths.insert(bundle_path.to_path_buf());
+    for name in [
+        "HOME",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "CARGO_TARGET_DIR",
+        "UV_CACHE_DIR",
+        "PIP_CACHE_DIR",
+        "npm_config_cache",
+    ] {
+        if let Some(value) = environment.get(name) {
+            writable_paths.insert(PathBuf::from(value));
+        }
+    }
+    for path in writable_paths {
+        let value = systemd_path_value(&path)?;
+        command.arg(format!("--property=BindPaths={value}:{value}"));
+    }
+    Ok(())
+}
+
+fn systemd_path_value(path: &Path) -> RuntimeResult<String> {
+    if !path.is_absolute() {
+        return Err(RuntimeError::invalid(
+            "contained write paths must be absolute",
+            "executionProfile",
+        ));
+    }
+    let value = path.to_string_lossy();
+    if value.is_empty() || value.as_bytes().contains(&0) || value.chars().any(char::is_whitespace) {
+        return Err(RuntimeError::invalid(
+            "contained write paths must be non-empty and whitespace-free",
+            "executionProfile",
+        ));
+    }
+    Ok(value.into_owned())
 }
 
 fn append_trusted_environment(command: &mut Command) {
@@ -2178,24 +2615,10 @@ fn valid_environment_name(name: &str) -> bool {
         && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
-fn systemd_run(
-    unit_name: &str,
-    runner: &Path,
-    bundle_path: &Path,
-    workspace_path: &Path,
-    runtime_ceiling_ms: u64,
-    budget: &super::ExecutionBudget,
-) -> RuntimeResult<std::process::Output> {
-    build_systemd_run_command(
-        unit_name,
-        runner,
-        bundle_path,
-        workspace_path,
-        runtime_ceiling_ms,
-        budget,
-    )?
-    .output()
-    .map_err(|error| tool_error("cannot execute systemd-run", error))
+fn systemd_run(spec: &SystemdRunSpec<'_>) -> RuntimeResult<std::process::Output> {
+    build_systemd_run_command(spec)?
+        .output()
+        .map_err(|error| tool_error("cannot execute systemd-run", error))
 }
 
 fn systemctl_show(unit_name: &str) -> RuntimeResult<BTreeMap<String, String>> {
@@ -2330,17 +2753,47 @@ fn cgroup_has_processes(control_group: &str) -> RuntimeResult<bool> {
             false,
         ));
     }
-    let path = Path::new("/sys/fs/cgroup")
-        .join(control_group.trim_start_matches('/'))
-        .join("cgroup.procs");
-    if !path.is_file() {
+    let root = Path::new("/sys/fs/cgroup").join(control_group.trim_start_matches('/'));
+    let events_path = root.join("cgroup.events");
+    if events_path.is_file() {
+        let content = fs::read_to_string(events_path)
+            .map_err(|error| io_error("read cgroup population state", error))?;
+        return parse_cgroup_populated(&content);
+    }
+
+    let processes_path = root.join("cgroup.procs");
+    if !processes_path.is_file() {
         return Ok(false);
     }
-    let content = fs::read_to_string(path)
+    let content = fs::read_to_string(processes_path)
         .map_err(|error| io_error("read cgroup process membership", error))?;
     Ok(content
         .lines()
         .any(|line| line.trim().parse::<u32>().is_ok()))
+}
+
+fn parse_cgroup_populated(content: &str) -> RuntimeResult<bool> {
+    for line in content.lines() {
+        let mut fields = line.split_whitespace();
+        if fields.next() == Some("populated") {
+            return match fields.next() {
+                Some("0") if fields.next().is_none() => Ok(false),
+                Some("1") if fields.next().is_none() => Ok(true),
+                _ => Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "cgroup.events has an invalid populated value",
+                    Some("controlGroup"),
+                    false,
+                )),
+            };
+        }
+    }
+    Err(RuntimeError::new(
+        RuntimeErrorCode::RegistryCorrupt,
+        "cgroup.events omitted populated state",
+        Some("controlGroup"),
+        false,
+    ))
 }
 
 fn process_identity(pid: u32) -> Option<String> {
@@ -2887,6 +3340,8 @@ mod trusted_systemd_command_tests {
                 stderr_limit_bytes: 1_024,
                 steps: Vec::new(),
                 budget: crate::ExecutionBudget::default(),
+                execution_profile: crate::runtime::ExecutionProfile::TrustedLocal,
+                foreign_references: Vec::new(),
             },
             wait_ms: 0,
             stdout_tail_bytes: 0,
@@ -2967,7 +3422,12 @@ mod trusted_systemd_command_tests {
             startup_grace_ms: 2_000,
         })
         .unwrap();
-        let environment = runtime.execution_environment("workspace-env").unwrap();
+        let environment = runtime
+            .execution_environment(
+                "workspace-env",
+                crate::runtime::ExecutionProfile::TrustedLocal,
+            )
+            .unwrap();
         assert!(!runtime.inherit_host_environment());
         assert_eq!(
             environment.get("PATH").map(String::as_str),
@@ -2991,14 +3451,19 @@ mod trusted_systemd_command_tests {
 
     #[test]
     fn trusted_command_keeps_only_process_ownership_and_lifecycle_properties() {
-        let command = build_systemd_run_command(
-            "ordivon-test.service",
-            Path::new("/usr/bin/true"),
-            Path::new("/var/lib/ordivon/attempts/attempt-test"),
-            Path::new("/root/projects/ordivon-runtime"),
-            10_000,
-            &crate::ExecutionBudget::default(),
-        )
+        let budget = crate::ExecutionBudget::default();
+        let environment = BTreeMap::new();
+        let command = build_systemd_run_command(&SystemdRunSpec {
+            unit_name: "ordivon-test.service",
+            runner: Path::new("/usr/bin/true"),
+            bundle_path: Path::new("/var/lib/ordivon/attempts/attempt-test"),
+            workspace_path: Path::new("/root/projects/ordivon-runtime"),
+            workspace_git_common_dir: None,
+            runtime_ceiling_ms: 10_000,
+            budget: &budget,
+            execution_profile: crate::runtime::ExecutionProfile::TrustedLocal,
+            environment: &environment,
+        })
         .unwrap();
         let args = command
             .get_args()
@@ -3033,18 +3498,23 @@ mod trusted_systemd_command_tests {
 
     #[test]
     fn execution_budget_maps_to_systemd_resource_properties() {
-        let command = build_systemd_run_command(
-            "ordivon-budget.service",
-            Path::new("/usr/bin/true"),
-            Path::new("/var/lib/ordivon/attempts/attempt-budget"),
-            Path::new("/root/projects/ordivon-runtime"),
-            10_000,
-            &crate::ExecutionBudget {
-                memory_max_bytes: Some(512 * 1024 * 1024),
-                tasks_max: Some(64),
-                cpu_quota_percent: Some(250),
-            },
-        )
+        let budget = crate::ExecutionBudget {
+            memory_max_bytes: Some(512 * 1024 * 1024),
+            tasks_max: Some(64),
+            cpu_quota_percent: Some(250),
+        };
+        let environment = BTreeMap::new();
+        let command = build_systemd_run_command(&SystemdRunSpec {
+            unit_name: "ordivon-budget.service",
+            runner: Path::new("/usr/bin/true"),
+            bundle_path: Path::new("/var/lib/ordivon/attempts/attempt-budget"),
+            workspace_path: Path::new("/root/projects/ordivon-runtime"),
+            workspace_git_common_dir: None,
+            runtime_ceiling_ms: 10_000,
+            budget: &budget,
+            execution_profile: crate::runtime::ExecutionProfile::TrustedLocal,
+            environment: &environment,
+        })
         .unwrap();
         let args = command
             .get_args()
@@ -3054,5 +3524,82 @@ mod trusted_systemd_command_tests {
         assert!(args.contains("MemoryMax=536870912"));
         assert!(args.contains("TasksMax=64"));
         assert!(args.contains("CPUQuota=250%"));
+    }
+    #[test]
+    fn contained_command_is_explicitly_isolated_without_trusted_environment() {
+        let root =
+            std::env::temp_dir().join(format!("ordivon-contained-command-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        let bundle = root.join("bundle");
+        let cache = root.join("cache");
+        for path in [&workspace, &bundle, &cache] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let environment = BTreeMap::from([
+            (
+                "HOME".to_string(),
+                cache.join("home").to_string_lossy().into_owned(),
+            ),
+            (
+                "TMPDIR".to_string(),
+                cache.join("tmp").to_string_lossy().into_owned(),
+            ),
+        ]);
+        for value in environment.values() {
+            fs::create_dir_all(value).unwrap();
+        }
+        let budget = crate::ExecutionBudget::default();
+        let command = build_systemd_run_command(&SystemdRunSpec {
+            unit_name: "ordivon-contained-test.service",
+            runner: Path::new("/usr/bin/true"),
+            bundle_path: &bundle,
+            workspace_path: &workspace,
+            workspace_git_common_dir: None,
+            runtime_ceiling_ms: 10_000,
+            budget: &budget,
+            execution_profile: crate::runtime::ExecutionProfile::ContainedLocal,
+            environment: &environment,
+        })
+        .unwrap();
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let joined = args.join(" ");
+        for required in [
+            "ProtectSystem=strict",
+            "ProtectHome=tmpfs",
+            "PrivateNetwork=yes",
+            "NoNewPrivileges=yes",
+            "CapabilityBoundingSet=",
+            "ProtectControlGroups=yes",
+            "RestrictAddressFamilies=AF_UNIX",
+            "TemporaryFileSystem=/run:ro",
+            "TemporaryFileSystem=/var:ro",
+        ] {
+            assert!(joined.contains(required), "missing {required}");
+        }
+        assert!(joined.contains(&format!(
+            "BindPaths={}:{}",
+            workspace.display(),
+            workspace.display()
+        )));
+        assert!(joined.contains("BindReadOnlyPaths=/usr/bin/true:/usr/bin/true"));
+        assert!(!joined.contains("GITHUB_TOKEN"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.starts_with("--setenv=GITHUB_TOKEN=")));
+        assert!(joined.contains("--setenv=GIT_OPTIONAL_LOCKS=0"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cgroup_events_population_is_recursive_and_fail_closed() {
+        assert!(parse_cgroup_populated("populated 1\nfrozen 0\n").unwrap());
+        assert!(!parse_cgroup_populated("populated 0\nfrozen 0\n").unwrap());
+        for invalid in ["frozen 0\n", "populated 2\n", "populated 1 extra\n"] {
+            let error = parse_cgroup_populated(invalid).unwrap_err();
+            assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt);
+        }
     }
 }

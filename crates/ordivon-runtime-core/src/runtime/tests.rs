@@ -179,6 +179,7 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
             workspace_path: sandbox.workspace().to_string_lossy().into_owned(),
             source_revision: "test-revision".to_string(),
             workspace_source_digest: None,
+            workspace_git_common_dir: None,
             executable: executable.to_string_lossy().into_owned(),
             executable_digest: file_digest(&executable),
             args: Vec::new(),
@@ -189,6 +190,8 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
             stderr_limit_bytes: 65_536,
             steps: Vec::new(),
             budget: crate::ExecutionBudget::default(),
+            execution_profile: super::ExecutionProfile::TrustedLocal,
+            foreign_references: Vec::new(),
             principal: "principal:test".to_string(),
         },
         global_limit,
@@ -460,6 +463,8 @@ fn request_identity_excludes_observation_preferences_and_capacity_policy() {
             stderr_limit_bytes: 65_536,
             steps: Vec::new(),
             budget: ExecutionBudget::default(),
+            execution_profile: super::ExecutionProfile::TrustedLocal,
+            foreign_references: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -488,6 +493,249 @@ fn request_identity_excludes_observation_preferences_and_capacity_policy() {
     let mut changed = base;
     changed.execution.args.push("different".to_string());
     assert_ne!(operation_request_identity_digest(&changed).unwrap(), digest);
+}
+
+#[test]
+fn execution_profile_and_foreign_references_are_part_of_request_identity() {
+    let base = TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: "request:profile-reference-identity".to_string(),
+        principal: "principal:test".to_string(),
+        global_limit: 4,
+        execution: UniversalExecutionRequest {
+            workspace_id: "workspace-identity".to_string(),
+            executable: "/usr/bin/true".to_string(),
+            args: Vec::new(),
+            cwd_relative: ".".to_string(),
+            env: BTreeMap::new(),
+            timeout_ms: 1_000,
+            stdout_limit_bytes: 1_024,
+            stderr_limit_bytes: 1_024,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            execution_profile: ExecutionProfile::TrustedLocal,
+            foreign_references: Vec::new(),
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    let trusted = operation_request_identity_digest(&base).unwrap();
+    let mut contained = base.clone();
+    contained.execution.execution_profile = ExecutionProfile::ContainedLocal;
+    assert_ne!(
+        operation_request_identity_digest(&contained).unwrap(),
+        trusted
+    );
+
+    let mut referenced = base;
+    referenced
+        .execution
+        .foreign_references
+        .push(ForeignReference {
+            namespace: "ordivon.edge".to_string(),
+            reference_type: "supervisor_generation".to_string(),
+            id: "edge-supervisor-1".to_string(),
+            generation: Some("7".to_string()),
+            digest: Some(digest(b"edge-generation")),
+        });
+    assert_ne!(
+        operation_request_identity_digest(&referenced).unwrap(),
+        trusted
+    );
+}
+
+#[test]
+fn duplicate_foreign_references_are_rejected_before_admission() {
+    let sandbox = Sandbox::new("duplicate-foreign-reference", 5000);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let reference = ForeignReference {
+        namespace: "ordivon.security".to_string(),
+        reference_type: "operation".to_string(),
+        id: "security-operation-1".to_string(),
+        generation: None,
+        digest: None,
+    };
+    let request = TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: "request:duplicate-reference".to_string(),
+        principal: "principal:test".to_string(),
+        global_limit: 1,
+        execution: UniversalExecutionRequest {
+            workspace_id: "workspace-test".to_string(),
+            executable: "/usr/bin/true".to_string(),
+            args: Vec::new(),
+            cwd_relative: ".".to_string(),
+            env: BTreeMap::new(),
+            timeout_ms: 1_000,
+            stdout_limit_bytes: 1_024,
+            stderr_limit_bytes: 1_024,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            execution_profile: ExecutionProfile::TrustedLocal,
+            foreign_references: vec![reference.clone(), reference],
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    let error = runtime.run_task(&request).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert!(error
+        .field
+        .as_deref()
+        .unwrap()
+        .contains("foreignReferences"));
+}
+
+#[test]
+fn terminal_evidence_is_a_durable_artifact_with_native_binding() {
+    let sandbox = Sandbox::new("terminal-native-evidence", 5000);
+    let mut submit = request(&sandbox, "request:terminal-native-evidence", 4);
+    submit.plan.execution_profile = ExecutionProfile::ContainedLocal;
+    submit.plan.foreign_references.push(ForeignReference {
+        namespace: "ordivon.edge".to_string(),
+        reference_type: "supervisor_generation".to_string(),
+        id: "edge-supervisor-9".to_string(),
+        generation: Some("9".to_string()),
+        digest: None,
+    });
+    let created = created(sandbox.registry.submit(&submit).unwrap());
+    let bundle_ready = sandbox
+        .registry
+        .mark_bundle_ready(
+            &created.attempt.attempt_id,
+            created.attempt.row_version,
+            &digest(b"terminal-evidence-bundle"),
+            created.attempt.created_at_ms + 1,
+        )
+        .unwrap();
+    let starting = sandbox
+        .registry
+        .mark_dispatch_issued(
+            &bundle_ready.attempt_id,
+            bundle_ready.row_version,
+            bundle_ready.created_at_ms + 2,
+        )
+        .unwrap();
+    write_completed_runner_result(&starting, 42);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let mut terminal = super::evidence::prepare_runner_terminal_from_bundle(&starting).unwrap();
+    runtime
+        .append_terminal_evidence(&starting, &mut terminal)
+        .unwrap();
+    sandbox.registry.commit_terminal(&terminal).unwrap();
+
+    let artifact = sandbox
+        .registry
+        .list_artifacts(&created.job.job_id)
+        .unwrap()
+        .into_iter()
+        .find(|artifact| artifact.kind == "terminal_evidence")
+        .unwrap();
+    assert!(artifact
+        .artifact_id
+        .starts_with(&format!("{}.terminal-evidence.", starting.attempt_id)));
+    let evidence: serde_json::Value = serde_json::from_slice(
+        &fs::read(Path::new(&starting.bundle_path).join(&artifact.relative_path)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(evidence["executionProfile"], "contained_local");
+    assert_eq!(evidence["foreignReferences"][0]["id"], "edge-supervisor-9");
+    assert_eq!(evidence["executionDisposition"], "succeeded");
+    assert_eq!(evidence["deliveryDisposition"], "committed");
+    assert_eq!(evidence["processTreeDisposition"], "unknown");
+    assert_eq!(evidence["terminalArtifactIds"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn recovered_terminal_evidence_supersedes_without_overwriting_history() {
+    let sandbox = Sandbox::new("terminal-evidence-supersession", 5000);
+    let submit = request(&sandbox, "request:terminal-evidence-supersession", 4);
+    let created = created(sandbox.registry.submit(&submit).unwrap());
+    let ready = sandbox
+        .registry
+        .mark_bundle_ready(
+            &created.attempt.attempt_id,
+            created.attempt.row_version,
+            &digest(b"supersession-bundle"),
+            created.attempt.created_at_ms + 1,
+        )
+        .unwrap();
+    let starting = sandbox
+        .registry
+        .mark_dispatch_issued(
+            &ready.attempt_id,
+            ready.row_version,
+            ready.created_at_ms + 2,
+        )
+        .unwrap();
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+
+    let mut orphaned = TerminalCommit {
+        attempt_id: starting.attempt_id.clone(),
+        expected_row_version: starting.row_version,
+        state: AttemptState::Orphaned,
+        result_digest: digest(b"orphaned-control-result"),
+        exit_code: None,
+        infrastructure_error_digest: Some(digest(b"identity-conflict")),
+        finished_at_ms: starting.created_at_ms + 3,
+        artifacts: Vec::new(),
+        reason_code: "SUPERVISOR_IDENTITY_ORPHANED".to_string(),
+    };
+    runtime
+        .append_terminal_evidence(&starting, &mut orphaned)
+        .unwrap();
+    sandbox.registry.commit_terminal(&orphaned).unwrap();
+
+    let current = sandbox.registry.get_attempt(&starting.attempt_id).unwrap();
+    let mut recovered = TerminalCommit {
+        attempt_id: current.attempt_id.clone(),
+        expected_row_version: current.row_version,
+        state: AttemptState::Succeeded,
+        result_digest: digest(b"late-runner-result"),
+        exit_code: Some(0),
+        infrastructure_error_digest: None,
+        finished_at_ms: current.finished_at_ms.unwrap() + 1,
+        artifacts: Vec::new(),
+        reason_code: "LATE_IDENTITY_BOUND_RUNNER_RESULT".to_string(),
+    };
+    runtime
+        .append_terminal_evidence(&current, &mut recovered)
+        .unwrap();
+    sandbox
+        .registry
+        .recover_orphaned_terminal(&recovered)
+        .unwrap();
+
+    let evidence_artifacts = sandbox
+        .registry
+        .list_artifacts(&created.job.job_id)
+        .unwrap()
+        .into_iter()
+        .filter(|artifact| artifact.kind == "terminal_evidence")
+        .collect::<Vec<_>>();
+    assert_eq!(evidence_artifacts.len(), 2);
+    assert_ne!(
+        evidence_artifacts[0].relative_path,
+        evidence_artifacts[1].relative_path
+    );
+    let first: serde_json::Value = serde_json::from_slice(
+        &fs::read(Path::new(&starting.bundle_path).join(&evidence_artifacts[0].relative_path))
+            .unwrap(),
+    )
+    .unwrap();
+    let second: serde_json::Value = serde_json::from_slice(
+        &fs::read(Path::new(&starting.bundle_path).join(&evidence_artifacts[1].relative_path))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(first["executionDisposition"], "orphaned");
+    assert_eq!(second["executionDisposition"], "succeeded");
+    assert_eq!(
+        second["supersedesArtifactId"],
+        evidence_artifacts[0].artifact_id
+    );
 }
 
 #[test]
@@ -1463,8 +1711,16 @@ fn runtime_repair_recovers_runner_truth_and_explicitly_finalizes_lost() {
             |row| row.get(0),
         )
         .unwrap();
+    let terminal_evidence: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE kind='terminal_evidence'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(repair_events, 2);
     assert_eq!(receipts, 2);
+    assert_eq!(terminal_evidence, 2);
 }
 
 #[test]
