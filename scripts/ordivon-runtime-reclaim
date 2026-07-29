@@ -13,11 +13,12 @@ import sqlite3
 import subprocess
 import sys
 import time
-import urllib.request
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
+
+from mcp_probe import connect_compatible
 
 SCHEMA_VERSION = 1
 MAX_DIRTY_PATHS = 20
@@ -415,79 +416,32 @@ def load_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def parse_mcp_response(text: str, content_type: str) -> dict[str, object]:
-    if "text/event-stream" in content_type:
-        events = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
-        if not events:
-            raise RuntimeError("MCP returned an empty event stream")
-        text = events[-1]
-    value = json.loads(text)
-    if "error" in value:
-        raise RuntimeError(f"MCP error: {value['error']}")
-    result = value.get("result")
-    if not isinstance(result, dict):
-        raise RuntimeError("MCP response lacks an object result")
-    return result
-
-
-def mcp_call(endpoint: str, token: str, request_id: int, method: str, params: dict[str, object]) -> dict[str, object]:
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(
-            {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-        ).encode("utf-8"),
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "MCP-Protocol-Version": "2025-06-18",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return parse_mcp_response(
-            response.read().decode("utf-8"),
-            response.headers.get("Content-Type", ""),
-        )
-
-
 def close_workspace(env_file: Path, workspace_id: str) -> dict[str, object]:
     environment = load_env_file(env_file)
     bind = environment.get("ORDIVON_BIND")
     token = environment.get("ORDIVON_BEARER_TOKEN")
     if not bind or not token:
-        raise RuntimeError("environment file must define ORDIVON_BIND and ORDIVON_BEARER_TOKEN")
-    endpoint = f"http://{bind}/mcp"
-    mcp_call(
-        endpoint,
+        raise RuntimeError(
+            "environment file must define ORDIVON_BIND and ORDIVON_BEARER_TOKEN"
+        )
+    client = connect_compatible(
+        f"http://{bind}/mcp",
         token,
-        1,
-        "initialize",
+        client_name="ordivon-runtime-reclaim",
+        timeout=30.0,
+    )
+    structured = client.call_tool(
+        "workspace.close",
         {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "ordivon-runtime-reclaim", "version": "1"},
+            "schemaVersion": SCHEMA_VERSION,
+            "workspaceId": workspace_id,
+            "force": False,
         },
     )
-    result = mcp_call(
-        endpoint,
-        token,
-        2,
-        "tools/call",
-        {
-            "name": "workspace.close",
-            "arguments": {
-                "schemaVersion": SCHEMA_VERSION,
-                "workspaceId": workspace_id,
-                "force": False,
-            },
-        },
-    )
-    if result.get("isError"):
-        raise RuntimeError(f"workspace.close rejected {workspace_id}: {result}")
-    structured = result.get("structuredContent")
-    if not isinstance(structured, dict) or structured.get("removed") is not True:
-        raise RuntimeError(f"workspace.close did not remove {workspace_id}: {result}")
+    if structured.get("removed") is not True:
+        raise RuntimeError(
+            f"workspace.close did not remove {workspace_id}: {structured}"
+        )
     return structured
 
 

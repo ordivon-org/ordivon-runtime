@@ -18,46 +18,130 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 @contextmanager
-def mcp_server(tool_names: list[str], close_callback=None):
+def mcp_server(tool_names: list[str], close_callback=None, *, modern: bool = True):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, _format: str, *args) -> None:
             return
+
+        def send_json(
+            self,
+            request: dict[str, object],
+            *,
+            result: dict[str, object] | None = None,
+            error: dict[str, object] | None = None,
+            status: int = 200,
+            session_id: str | None = None,
+        ) -> None:
+            response: dict[str, object] = {
+                "jsonrpc": "2.0",
+                "id": request.get("id"),
+            }
+            if error is not None:
+                response["error"] = error
+            else:
+                response["result"] = result or {}
+            body = json.dumps(response).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            if session_id is not None:
+                self.send_header("Mcp-Session-Id", session_id)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             request = json.loads(self.rfile.read(length))
             method = request.get("method")
-            if method == "initialize":
-                result = {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "serverInfo": {"name": "test-runtime", "version": "1"},
-                }
-            elif method == "tools/list":
-                result = {"tools": [{"name": name} for name in tool_names]}
-            elif method == "tools/call" and request.get("params", {}).get("name") == "workspace.close":
-                arguments = request["params"]["arguments"]
-                if close_callback is not None:
-                    close_callback(str(arguments["workspaceId"]))
-                result = {
-                    "isError": False,
-                    "structuredContent": {
-                        "workspaceId": arguments["workspaceId"],
-                        "removed": True,
+            params = request.get("params")
+            params = params if isinstance(params, dict) else {}
+            if method == "server/discover":
+                if not modern:
+                    self.send_json(
+                        request,
+                        error={"code": -32601, "message": "Method not found"},
+                        status=404,
+                    )
+                    return
+                self.send_json(
+                    request,
+                    result={
+                        "supportedVersions": [
+                            "2026-07-28",
+                            "2025-11-25",
+                            "2025-06-18",
+                        ],
+                        "capabilities": {"tools": {}},
+                        "instructions": "test Runtime",
+                        "ttlMs": 0,
+                        "cacheScope": "private",
+                        "_meta": {
+                            "io.modelcontextprotocol/serverInfo": {
+                                "name": "test-runtime",
+                                "version": "1",
+                                "title": "Test Runtime",
+                            },
+                            "com.ordivon/runtime/toolCatalogDigest": ("sha256:" + "a" * 64),
+                        },
                     },
-                }
-            else:
-                self.send_response(400)
+                )
+                return
+            if method == "initialize":
+                requested_version = params.get("protocolVersion")
+                protocol_version = requested_version if isinstance(requested_version, str) else "2025-06-18"
+                self.send_json(
+                    request,
+                    result={
+                        "protocolVersion": protocol_version,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {
+                            "name": "test-runtime",
+                            "version": "1",
+                        },
+                    },
+                    session_id="test-session",
+                )
+                return
+            if method == "notifications/initialized":
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            response = json.dumps(
-                {"jsonrpc": "2.0", "id": request.get("id"), "result": result}
-            ).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(response)))
-            self.end_headers()
-            self.wfile.write(response)
+            if not modern and self.headers.get("Mcp-Session-Id") != "test-session":
+                self.send_json(
+                    request,
+                    error={"code": -32001, "message": "Missing session"},
+                    status=400,
+                )
+                return
+            if method == "tools/list":
+                self.send_json(
+                    request,
+                    result={"tools": [{"name": name} for name in tool_names]},
+                )
+                return
+            if method == "tools/call" and params.get("name") == "workspace.close":
+                arguments = params.get("arguments")
+                arguments = arguments if isinstance(arguments, dict) else {}
+                workspace_id = str(arguments.get("workspaceId"))
+                if close_callback is not None:
+                    close_callback(workspace_id)
+                self.send_json(
+                    request,
+                    result={
+                        "isError": False,
+                        "structuredContent": {
+                            "workspaceId": workspace_id,
+                            "removed": True,
+                        },
+                    },
+                )
+                return
+            self.send_json(
+                request,
+                error={"code": -32601, "message": "Method not found"},
+                status=404,
+            )
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -91,12 +175,8 @@ def initialize_registry(database: Path, *, active_workspace: str | None = None) 
                 "INSERT INTO jobs VALUES ('job-active', ?, NULL, 1)",
                 (active_workspace,),
             )
-            connection.execute(
-                "INSERT INTO attempts VALUES ('attempt-active','job-active','running')"
-            )
-            connection.execute(
-                "INSERT INTO concurrency_reservations VALUES ('attempt-active','active')"
-            )
+            connection.execute("INSERT INTO attempts VALUES ('attempt-active','job-active','running')")
+            connection.execute("INSERT INTO concurrency_reservations VALUES ('attempt-active','active')")
         connection.commit()
 
 
@@ -175,8 +255,8 @@ def fake_systemctl(root: Path) -> Path:
         systemctl,
         "#!/bin/sh\n"
         f"state='{state}'\n"
-        "case \"$1\" in\n"
-        "  is-active) cat \"$state\" ;;\n"
+        'case "$1" in\n'
+        '  is-active) cat "$state" ;;\n'
         "  stop) printf 'inactive\\n' > \"$state\" ;;\n"
         "  start) printf 'active\\n' > \"$state\" ;;\n"
         "  *) exit 1 ;;\n"
@@ -199,11 +279,11 @@ class DeployReclaimTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 "target=''\n"
                 "while [ $# -gt 0 ]; do\n"
-                "  if [ \"$1\" = --target-dir ]; then target=$2; shift 2; else shift; fi\n"
+                '  if [ "$1" = --target-dir ]; then target=$2; shift 2; else shift; fi\n'
                 "done\n"
-                "mkdir -p \"$target/release\"\n"
+                'mkdir -p "$target/release"\n'
                 "printf 'built-from-commit\\n' > \"$target/release/runtime\"\n"
-                "chmod 755 \"$target/release/runtime\"\n",
+                'chmod 755 "$target/release/runtime"\n',
             )
             result = subprocess.run(
                 [
@@ -246,11 +326,11 @@ class DeployReclaimTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 "target=''\n"
                 "while [ $# -gt 0 ]; do\n"
-                "  if [ \"$1\" = --target-dir ]; then target=$2; shift 2; else shift; fi\n"
+                '  if [ "$1" = --target-dir ]; then target=$2; shift 2; else shift; fi\n'
                 "done\n"
-                "mkdir -p \"$target/release\"\n"
+                'mkdir -p "$target/release"\n'
                 "printf 'built\n' > \"$target/release/runtime\"\n"
-                "chmod 755 \"$target/release/runtime\"\n"
+                'chmod 755 "$target/release/runtime"\n'
                 "printf 'changed\n' > README.md\n",
             )
             result = subprocess.run(
@@ -456,7 +536,7 @@ class DeployReclaimTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-            with mcp_server(["workspace.close"], close_callback) as port:
+            with mcp_server(["workspace.close"], close_callback, modern=False) as port:
                 env_file = root / "runtime.env"
                 env_file.write_text(
                     f"ORDIVON_BIND=127.0.0.1:{port}\nORDIVON_BEARER_TOKEN=test\n",
@@ -687,7 +767,13 @@ class DeployReclaimTests(unittest.TestCase):
                     capture_output=True,
                 )
                 deployment = json.loads(deployed.stdout)
-                self.assertEqual(deployment["probe"]["protocolVersion"], "2025-06-18")
+                self.assertEqual(deployment["probe"]["lifecycle"], "modern")
+                self.assertEqual(deployment["probe"]["protocolVersion"], "2026-07-28")
+                self.assertIn("2026-07-28", deployment["probe"]["supportedVersions"])
+                self.assertEqual(
+                    deployment["probe"]["toolCatalogDigest"],
+                    "sha256:" + "a" * 64,
+                )
                 self.assertEqual(deployment["probe"]["toolCount"], 2)
                 self.assertEqual((install / "runtime").read_text(), "new-runtime\n")
                 self.assertEqual((install / "runtime.previous").read_text(), "old-runtime\n")
@@ -918,7 +1004,7 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual(receipt_result["status"], "not_committed")
             self.assertTrue(receipt_result["rollback"]["serviceActive"])
 
-    def test_deploy_probe_failure_automatically_restores_previous_binary(self) -> None:
+    def test_deploy_requires_modern_and_restores_legacy_previous_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repo = root / "repo"
@@ -934,7 +1020,7 @@ class DeployReclaimTests(unittest.TestCase):
             database = root / "registry.sqlite3"
             initialize_registry(database)
             systemctl = fake_systemctl(root)
-            with mcp_server(["workspace.get"]) as port:
+            with mcp_server(["workspace.get"], modern=False) as port:
                 env_file = root / "runtime.env"
                 env_file.write_text(
                     f"ORDIVON_BIND=127.0.0.1:{port}\nORDIVON_BEARER_TOKEN=test\n",
@@ -972,7 +1058,7 @@ class DeployReclaimTests(unittest.TestCase):
                         "--binary",
                         "runtime",
                         "--expected-tool-count",
-                        "2",
+                        "1",
                         "--required-tool",
                         "workspace.get",
                         "--wait-seconds",

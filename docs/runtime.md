@@ -140,6 +140,12 @@ The Job report projects Attempts, reservations, conditions, Artifact volume, rec
 
 These metrics are diagnostic references for Runtime changes. They do not score model reasoning, user satisfaction, context quality, or user rework, and they do not create a new MCP tool.
 
+## MCP protocol boundary
+
+The Adapter supports the stable MCP `2026-07-28` stateless lifecycle and compatibility lifecycles `2025-11-25` and `2025-06-18` on the same HTTP endpoint. Modern requests use `server/discover`, standard routing headers, and per-request metadata without a protocol Session. `LocalSessionManager` exists only for legacy `initialize` clients; Runtime continuity remains the durable Workspace/Job/Attempt model in Core.
+
+`server/discover` returns a deterministic SHA-256 `toolCatalogDigest` over the complete name-sorted Tool definitions with `ttlMs=0` and private cache scope. Deployment receipts bind this digest. The Adapter no longer advertises or implements the experimental Core Tasks methods (`tasks/list`, enqueue, get, result, cancel). `workspace.exec` and `workspace.execPlan` return Ordivon Job observations, while `task.observe`, `task.list`, and `task.cancel` remain ordinary Tools. MCP adapts transport and discovery; it does not become Runtime's persistence model.
+
 ## Extension boundary
 
 Use existing host executables through `workspace.exec` unless repeated real use proves that a stable operation needs a dedicated structured Tool contract. Arbitrary execution is effect-opaque: a caller may not promote it to read-only, idempotent, or reconcilable by declaration. A structured effect adapter is justified only when it owns canonical identity, enforceable preconditions, receipt or state proof, reconciliation, and ambiguity behavior. `contained_local` reduces ambient local authority for ordinary engineering workloads; genuinely hostile, multi-tenant, controlled-egress, or disposable workloads still require an external isolation boundary owned outside Runtime.

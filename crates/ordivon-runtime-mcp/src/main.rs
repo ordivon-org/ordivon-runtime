@@ -249,7 +249,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 fn transport_config(cancellation: CancellationToken) -> StreamableHttpServerConfig {
     StreamableHttpServerConfig::default()
-        .with_stateful_mode(false)
+        .with_legacy_session_mode(true)
         .with_json_response(true)
         .with_sse_keep_alive(None)
         .disable_allowed_hosts()
