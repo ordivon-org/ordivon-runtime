@@ -263,6 +263,37 @@ pub const MIN_MEMORY_MAX_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_MEMORY_MAX_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_TASKS_MAX: u32 = 1_000_000;
 pub const MAX_CPU_QUOTA_PERCENT: u32 = 10_000;
+pub const MAX_FOREIGN_REFERENCES: usize = 16;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionProfile {
+    #[default]
+    TrustedLocal,
+    ContainedLocal,
+}
+
+impl ExecutionProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TrustedLocal => "trusted_local",
+            Self::ContainedLocal => "contained_local",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForeignReference {
+    pub namespace: String,
+    #[serde(rename = "type")]
+    pub reference_type: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -330,6 +361,8 @@ pub struct RuntimeExecutionPlan {
     pub source_revision: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_source_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_git_common_dir: Option<String>,
     pub executable: String,
     pub executable_digest: String,
     #[serde(default)]
@@ -348,6 +381,10 @@ pub struct RuntimeExecutionPlan {
     pub steps: Vec<RuntimeExecutionStep>,
     #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
     pub budget: ExecutionBudget,
+    #[serde(default)]
+    pub execution_profile: ExecutionProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreign_references: Vec<ForeignReference>,
     pub principal: String,
 }
 
@@ -380,6 +417,9 @@ struct OperationRequestIdentity {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     steps: Vec<UniversalExecutionStep>,
     budget: ExecutionBudget,
+    execution_profile: ExecutionProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    foreign_references: Vec<ForeignReference>,
 }
 
 pub(crate) fn operation_request_identity_digest(request: &TaskRunRequest) -> RuntimeResult<String> {
@@ -396,6 +436,8 @@ pub(crate) fn operation_request_identity_digest(request: &TaskRunRequest) -> Run
         stderr_limit_bytes: request.execution.stderr_limit_bytes,
         steps: request.execution.steps.clone(),
         budget: request.execution.budget.clone(),
+        execution_profile: request.execution.execution_profile,
+        foreign_references: request.execution.foreign_references.clone(),
     })
 }
 
@@ -440,6 +482,8 @@ pub(crate) fn operation_request_identity_digest_from_plan(
             })
             .collect(),
         budget: plan.budget.clone(),
+        execution_profile: plan.execution_profile,
+        foreign_references: plan.foreign_references.clone(),
     })
 }
 
@@ -821,6 +865,11 @@ pub struct UniversalExecutionRequest {
     pub steps: Vec<UniversalExecutionStep>,
     #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
     pub budget: ExecutionBudget,
+    #[serde(default)]
+    pub execution_profile: ExecutionProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = MAX_FOREIGN_REFERENCES))]
+    pub foreign_references: Vec<ForeignReference>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

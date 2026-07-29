@@ -87,6 +87,7 @@ fn submit(
                 workspace_path: workspace.clone(),
                 source_revision: "revision:test".to_string(),
                 workspace_source_digest: None,
+                workspace_git_common_dir: None,
                 executable: "/usr/bin/true".to_string(),
                 executable_digest: format!("sha256:{}", "a".repeat(64)),
                 args: Vec::new(),
@@ -97,6 +98,8 @@ fn submit(
                 stderr_limit_bytes: 1024,
                 steps: Vec::new(),
                 budget: ordivon_runtime_core::ExecutionBudget::default(),
+                execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
+                foreign_references: Vec::new(),
                 principal: "principal:mcp-test".to_string(),
             },
             global_limit: 4,
@@ -212,6 +215,35 @@ fn tool_catalog_uses_transactional_job_contract() {
         .pointer("/$defs/UniversalExecutionRequest/properties/cwdRelative/description")
         .and_then(Value::as_str)
         .is_some_and(|description| description.contains("relative to the Workspace root")));
+    assert_eq!(
+        exec_schema.pointer("/$defs/UniversalExecutionRequest/properties/executionProfile/default"),
+        Some(&serde_json::json!("trusted_local"))
+    );
+    assert_eq!(
+        exec_schema.pointer("/$defs/ExecutionProfile/enum"),
+        Some(&serde_json::json!(["trusted_local", "contained_local"]))
+    );
+    assert_eq!(
+        exec_schema
+            .pointer("/$defs/UniversalExecutionRequest/properties/foreignReferences/maxItems"),
+        Some(&serde_json::json!(
+            ordivon_runtime_core::MAX_FOREIGN_REFERENCES
+        ))
+    );
+    assert_eq!(
+        exec_schema
+            .pointer("/$defs/UniversalExecutionRequest/properties/foreignReferences/items/$ref"),
+        Some(&serde_json::json!("#/$defs/ForeignReference"))
+    );
+    assert_eq!(
+        exec_schema.pointer("/$defs/ForeignReference/required"),
+        Some(&serde_json::json!(["namespace", "type", "id"]))
+    );
+    assert_eq!(
+        exec_schema.pointer("/$defs/ForeignReference/additionalProperties"),
+        Some(&serde_json::json!(false))
+    );
+
     assert_eq!(
         exec_schema.pointer("/$defs/ExecutionBudget/properties/memoryMaxBytes/maximum"),
         Some(&serde_json::json!(

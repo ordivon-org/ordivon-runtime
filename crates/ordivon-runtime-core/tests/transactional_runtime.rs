@@ -123,6 +123,8 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
             stderr_limit_bytes: 65_536,
             steps: Vec::new(),
             budget: ordivon_runtime_core::ExecutionBudget::default(),
+            execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
+            foreign_references: Vec::new(),
         },
         wait_ms: 30_000,
         stdout_tail_bytes: 4096,
@@ -159,9 +161,21 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
     assert_eq!(listed.jobs[0].client_request_id, request.client_request_id);
     assert_eq!(listed.jobs[0].workspace_id, workspace_id);
     assert_eq!(listed.jobs[0].executable_name, "python3.14");
-    assert_eq!(listed.jobs[0].artifact_count, 3);
+    assert_eq!(listed.jobs[0].artifact_count, 4);
     let artifacts = runtime.registry().list_artifacts(&first.job_id).unwrap();
-    assert_eq!(artifacts.len(), 3);
+    let artifact_kinds = artifacts
+        .iter()
+        .map(|artifact| artifact.kind.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        artifact_kinds,
+        std::collections::BTreeSet::from([
+            "execution_result",
+            "stderr",
+            "stdout",
+            "terminal_evidence",
+        ])
+    );
     let stdout = artifacts
         .iter()
         .find(|artifact| artifact.kind == "stdout")
@@ -290,6 +304,8 @@ impl IntegrationContext {
                 stderr_limit_bytes: 1_048_576,
                 steps: Vec::new(),
                 budget: ordivon_runtime_core::ExecutionBudget::default(),
+                execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
+                foreign_references: Vec::new(),
             },
             wait_ms,
             stdout_tail_bytes: 8192,
@@ -327,6 +343,162 @@ impl Drop for IntegrationContext {
         }
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn contained_local_hides_unmounted_state_blocks_egress_and_preserves_evidence() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let runner_path =
+        PathBuf::from(std::env::var("ORDIVON_RUNNER_PATH").expect("ORDIVON_RUNNER_PATH"));
+    let repo = fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
+    let revision = command_output("git", &["rev-parse", "HEAD"], &repo);
+    let root =
+        PathBuf::from("/var/lib/ordivon-contained-integration").join(Uuid::now_v7().to_string());
+    fs::create_dir_all(&root).unwrap();
+    let secret_path = root.join("unmounted-secret.txt");
+    fs::write(&secret_path, "MUST_NOT_BE_VISIBLE").unwrap();
+    let executor = UniversalExecutorConfig {
+        store_root: root.join("store"),
+        workspace_root: None,
+        workspace_uid: None,
+        workspace_gid: None,
+        runner_path,
+        allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
+        max_runtime_ms: MAX_UNIVERSAL_RUNTIME_MS,
+        max_output_bytes: MAX_UNIVERSAL_OUTPUT_BYTES,
+    };
+    executor.ensure_store().unwrap();
+    let workspace_id = format!("runtime-contained-{}", Uuid::now_v7());
+    create_git_workspace(
+        &executor,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.clone(),
+            source_repo: repo.to_string_lossy().into_owned(),
+            source_revision: revision,
+        },
+    )
+    .unwrap();
+    write_workspace_text(
+        &executor,
+        &WorkspaceWriteRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.clone(),
+            relative_path: "contained_probe.py".to_string(),
+            content: format!(
+                r#"import os
+import pathlib
+import socket
+secret = pathlib.Path({secret:?})
+print("SECRET_VISIBLE=" + str(secret.exists()), flush=True)
+network = "connected"
+sock = None
+try:
+    sock = socket.socket()
+    sock.settimeout(0.5)
+    sock.connect(("1.1.1.1", 53))
+except OSError:
+    network = "blocked"
+finally:
+    if sock is not None:
+        sock.close()
+print("NETWORK=" + network, flush=True)
+print("GITHUB_TOKEN=" + str(os.environ.get("GITHUB_TOKEN")), flush=True)
+pathlib.Path("contained-output.txt").write_text("ok")
+print("WRITE_OK=" + pathlib.Path("contained-output.txt").read_text(), flush=True)
+"#,
+                secret = secret_path.to_string_lossy()
+            ),
+            expected_digest: None,
+        },
+    )
+    .unwrap();
+    let runtime = Runtime::new(RuntimeConfig {
+        registry: RegistryConfig {
+            db_path: root.join("registry/registry.sqlite3"),
+            store_root: root.join("registry"),
+            busy_timeout_ms: 5000,
+        },
+        executor: executor.clone(),
+        startup_grace_ms: 5000,
+    })
+    .unwrap();
+    let request = TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: format!("request:contained:{}", Uuid::now_v7()),
+        principal: "principal:integration".to_string(),
+        global_limit: 2,
+        execution: UniversalExecutionRequest {
+            workspace_id: workspace_id.clone(),
+            executable: "/usr/bin/python3.14".to_string(),
+            args: vec!["contained_probe.py".to_string()],
+            cwd_relative: ".".to_string(),
+            env: Default::default(),
+            timeout_ms: 10_000,
+            stdout_limit_bytes: 65_536,
+            stderr_limit_bytes: 65_536,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            execution_profile: ordivon_runtime_core::ExecutionProfile::ContainedLocal,
+            foreign_references: vec![ordivon_runtime_core::ForeignReference {
+                namespace: "ordivon.edge".to_string(),
+                reference_type: "supervisor_generation".to_string(),
+                id: "contained-integration-supervisor".to_string(),
+                generation: Some("1".to_string()),
+                digest: None,
+            }],
+        },
+        wait_ms: 30_000,
+        stdout_tail_bytes: 8192,
+        stderr_tail_bytes: 8192,
+    };
+    let result = runtime.run_task(&request).unwrap();
+    assert_eq!(result.status, "succeeded", "{}", result.stderr_tail);
+    assert!(result.stdout_tail.contains("SECRET_VISIBLE=False"));
+    assert!(result.stdout_tail.contains("NETWORK=blocked"));
+    assert!(result.stdout_tail.contains("GITHUB_TOKEN=None"));
+    assert!(result.stdout_tail.contains("WRITE_OK=ok"));
+    let evidence = result
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "terminal_evidence")
+        .unwrap();
+    let evidence = runtime
+        .read_artifact(&ArtifactReadRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: result.job_id.clone(),
+            artifact_id: evidence.artifact_id.clone(),
+            offset: 0,
+            max_bytes: 65_536,
+        })
+        .unwrap();
+    let evidence: serde_json::Value = serde_json::from_str(&evidence.content).unwrap();
+    assert_eq!(evidence["executionProfile"], "contained_local");
+    assert_eq!(evidence["processTreeDisposition"], "terminal_clean");
+    assert_eq!(
+        evidence["foreignReferences"][0]["id"],
+        "contained-integration-supervisor"
+    );
+
+    let attempt_id = result.attempt_id.unwrap();
+    let unit = format!("ordivon-{attempt_id}.service");
+    let _ = Command::new("systemctl").args(["stop", &unit]).output();
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &unit])
+        .output();
+    remove_git_workspace(
+        &executor,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id,
+            force: true,
+        },
+    )
+    .unwrap();
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -1136,6 +1308,7 @@ impl IntegrationContext {
                 workspace_path: workspace.to_string_lossy().into_owned(),
                 source_revision: self.revision.clone(),
                 workspace_source_digest: None,
+                workspace_git_common_dir: None,
                 executable: executable.to_string_lossy().into_owned(),
                 executable_digest: file_digest(&executable),
                 args: Vec::new(),
@@ -1146,6 +1319,8 @@ impl IntegrationContext {
                 stderr_limit_bytes: 65_536,
                 steps: Vec::new(),
                 budget: ordivon_runtime_core::ExecutionBudget::default(),
+                execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
+                foreign_references: Vec::new(),
                 principal: "principal:integration".to_string(),
             },
             global_limit,

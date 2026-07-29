@@ -9,15 +9,16 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use ordivon_runtime_core::{
     read_workspace_slice_compact, read_workspace_text_compact, workspace_diff_compact,
     ArtifactReadRequest, ArtifactReadResult, CompactWorkspaceDiffResult,
-    CompactWorkspaceOpenResult, ExecutionBudget, GitWorkspaceCreateRequest, Runtime,
-    RuntimeCapacity, RuntimeConfig, RuntimeError, RuntimeJobListRequest, RuntimeJobListResult,
-    RuntimeWorkspaceGetRequest, RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult,
-    RuntimeWorkspaceSummary, TaskCancelRequest, TaskObservation, TaskObserveRequest,
-    TaskRunRequest, UniversalExecError, UniversalExecutionRequest, UniversalExecutionStep,
-    UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
-    WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceMutateRequest,
-    WorkspaceMutateResult, WorkspaceReadRequest as ExecWorkspaceReadRequest,
-    WorkspaceReadSliceRequest, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
+    CompactWorkspaceOpenResult, ExecutionBudget, ExecutionProfile, ForeignReference,
+    GitWorkspaceCreateRequest, Runtime, RuntimeCapacity, RuntimeConfig, RuntimeError,
+    RuntimeJobListRequest, RuntimeJobListResult, RuntimeWorkspaceGetRequest,
+    RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
+    TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunRequest, UniversalExecError,
+    UniversalExecutionRequest, UniversalExecutionStep, UniversalExecutorConfig,
+    WorkspaceCloseRequest, WorkspaceCloseResult, WorkspaceDiffRequest as ExecWorkspaceDiffRequest,
+    WorkspaceMutateRequest, WorkspaceMutateResult,
+    WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
+    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::IntoCallToolResult;
@@ -127,6 +128,10 @@ pub struct WorkspaceExecPlanInput {
     pub stderr_limit_bytes: u64,
     #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
     pub budget: ExecutionBudget,
+    #[serde(default)]
+    pub execution_profile: ExecutionProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreign_references: Vec<ForeignReference>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -193,6 +198,8 @@ impl ExecutionContext {
                 stderr_limit_bytes: request.execution.stderr_limit_bytes,
                 steps: request.execution.steps,
                 budget: request.execution.budget,
+                execution_profile: request.execution.execution_profile,
+                foreign_references: request.execution.foreign_references,
             },
             wait_ms: request.wait_ms,
             stdout_tail_bytes: request.stdout_tail_bytes,

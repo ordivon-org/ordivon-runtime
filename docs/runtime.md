@@ -64,6 +64,16 @@ The complete Agent Effect Commit Kernel contract, current proof boundary, costs,
 
 Reconciliation compares Registry state with runner evidence and systemd/cgroup reality. It may run at startup, observation, listing, admission, or Workspace boundaries. One Job's recoverable inconsistency must not expand into a service-wide failure.
 
+## Terminal supervision evidence
+
+Every terminal Attempt registers `terminal-evidence-<digest>.json` as a `terminal_evidence` Artifact. The evidence binds the durable Job and Attempt to the committed Workspace, source revision, execution profile, optional foreign references, exact command, systemd unit, invocation, cgroup, PID identity, Runner-start digest, terminal reason, and the other terminal Artifact identities. It projects three orthogonal facts instead of expanding the Job state machine:
+
+- `executionDisposition`: the committed Attempt terminal state;
+- `deliveryDisposition`: whether the terminal result was committed, is unknown, or still requires reconciliation;
+- `processTreeDisposition`: `terminal_clean`, `unexpected_residual`, or `unknown`.
+
+Runtime prefers the recursive cgroup-v2 `cgroup.events: populated` fact and falls back to direct `cgroup.procs` membership only when the events file is unavailable. The evidence remains an Artifact consumed through `task.observe` and `artifact.read`; Runtime does not add a parallel evidence Tool or foreign-reference database. Foreign references are bounded immutable inputs in the Execution Plan and therefore participate in request identity, replay conflict detection, and the plan digest.
+
 A verified terminal result can defeat a later cancellation race because observed completion is stronger evidence than delayed intent. An identity-uncertain Attempt remains `orphaned` and retains its reservation while its recorded unit, process identity, or cgroup may still own a live process tree. When all three are proven absent, reconciliation converges it to `lost`, `timed_out`, or `cancelled` according to persisted intent and releases the reservation atomically. A late identity-bound runner Result still takes precedence when available.
 
 ## Workspace source commitment
@@ -73,6 +83,15 @@ A `clientRequestId` binds the stable operation request separately from the obser
 The Runtime also rejects `workspace.mutate` while an active or held Job owns that Workspace. This prevents Ordivon-mediated mutations from changing the committed source world during execution. The cost is deliberate: editing and execution that must overlap use separate Workspaces rather than weakening one Job's source precondition.
 
 This is a trusted-local pre-spawn commitment, not an immutable filesystem snapshot. A host process with the same authority can still write directly outside the Runtime, including in the interval after Runner validation, and a running command may intentionally modify its own Workspace. Ignored files, wall-clock time, network state, and other ambient dependencies are not included. Target processes do not inherit the Runtime service environment: the Runtime binds configured `ORDIVON_EXEC_PATH` and `ORDIVON_EXEC_HOME` values plus a fixed locale, temporary directory, and external cache paths into the committed execution plan, then overlays only the request's explicit environment. Stronger immutability would require a separate snapshot or isolation design and its merge-back cost; it is not claimed here.
+
+## Execution authority profiles
+
+`workspace.exec` and `workspace.execPlan` accept `executionProfile` with two values:
+
+- `trusted_local` is the compatibility default and preserves the existing installed-service-user authority model.
+- `contained_local` is explicit and never silently falls back. Runtime uses the same systemd transient-unit supervisor, but sets a private network, removes effective and ambient capabilities, enables no-new-privileges, restricts namespaces and address families, makes the base filesystem read-only, hides `/root`, `/home`, `/run`, and `/var`, and bind-mounts back only the exact Runner, Git common directory, Workspace, Attempt bundle, and Runtime-created cache paths required by the committed plan. The Runner receives a fixed environment allowlist plus `GIT_OPTIONAL_LOCKS=0`; request environment is passed only to the target process through the durable Runner request.
+
+This profile protects accidental credential and host-state access by local engineering workloads. It deliberately does not claim kernel-grade isolation against hostile same-host code, filesystem confidentiality outside the hidden state hierarchies, controlled egress, or disposable-machine semantics. Those belong to Edge or another external isolation owner. Dynamic users, bubblewrap, generic proxying, and policy-specific approval state are not part of contained v1 because they would duplicate supervision or introduce ownership and mount-composition costs without a demonstrated workload requirement.
 
 ## Execution budgets
 
@@ -123,4 +142,4 @@ These metrics are diagnostic references for Runtime changes. They do not score m
 
 ## Extension boundary
 
-Use existing host executables through `workspace.exec` unless repeated real use proves that a stable operation needs a dedicated structured Tool contract. Arbitrary execution is effect-opaque: a caller may not promote it to read-only, idempotent, or reconcilable by declaration. A structured effect adapter is justified only when it owns canonical identity, enforceable preconditions, receipt or state proof, reconciliation, and ambiguity behavior. Untrusted workloads require an external isolation boundary, not an alternate execution mode inside Ordivon Runtime.
+Use existing host executables through `workspace.exec` unless repeated real use proves that a stable operation needs a dedicated structured Tool contract. Arbitrary execution is effect-opaque: a caller may not promote it to read-only, idempotent, or reconcilable by declaration. A structured effect adapter is justified only when it owns canonical identity, enforceable preconditions, receipt or state proof, reconciliation, and ambiguity behavior. `contained_local` reduces ambient local authority for ordinary engineering workloads; genuinely hostile, multi-tenant, controlled-egress, or disposable workloads still require an external isolation boundary owned outside Runtime.
