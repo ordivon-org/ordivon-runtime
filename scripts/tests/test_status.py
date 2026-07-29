@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -78,8 +79,27 @@ def fixture(root: Path) -> dict[str, Path]:
     install = root / "install"
     install.mkdir()
     executable(install / "runtime", "runtime\n")
-    deployments = root / "deployments" / "deploy-1"
+    deployment_root = root / "deployments"
+    previous_deployment = deployment_root / "deploy-0"
+    previous_deployment.mkdir(parents=True)
+    (previous_deployment / "result.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "status": "deployed",
+                "commit": "0" * 40,
+                "finishedAtMs": 1,
+                "installed": [],
+                "probe": {"protocolVersion": "2025-06-18"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    deployments = deployment_root / "deploy-1"
     deployments.mkdir(parents=True)
+    previous_binary = deployments / "previous" / "ordivon-runtime"
+    previous_binary.parent.mkdir()
+    executable(previous_binary, "previous-runtime\n")
     (deployments / "result.json").write_text(
         json.dumps(
             {
@@ -116,6 +136,34 @@ def fixture(root: Path) -> dict[str, Path]:
     )
     (deployments / "plan.json").write_text(
         json.dumps({"candidateManifest": {"builtAtMs": 1, "path": "/private/candidate"}}),
+        encoding="utf-8",
+    )
+    trace_path = root / "runtime-trace.jsonl"
+    trace_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "kind": "mcp_protocol_observation",
+                        "observedUnixMs": 3,
+                        "protocolVersion": "2025-11-25",
+                        "method": "initialize",
+                        "client": {"name": "openai-mcp", "version": "1.0.0"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "kind": "mcp_protocol_observation",
+                        "observedUnixMs": 4,
+                        "protocolVersion": "2025-11-25",
+                        "method": "tools/call",
+                        "tool": "workspace.exec",
+                        "client": {"name": "openai-mcp", "version": "1.0.0"},
+                    }
+                ),
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
     env_file = root / "runtime.env"
@@ -178,6 +226,7 @@ class RuntimeStatusTests(unittest.TestCase):
                 capture_output=True,
             )
             report = json.loads(result.stdout)
+            self.assertEqual(report["schemaVersion"], 2)
             self.assertEqual(report["status"], "healthy")
             self.assertEqual(report["deployment"]["commit"], COMMIT)
             self.assertEqual(report["deployment"]["protocolLifecycle"], "modern")
@@ -191,6 +240,22 @@ class RuntimeStatusTests(unittest.TestCase):
                 "sha256:" + "b" * 64,
             )
             self.assertEqual(report["deployment"]["toolCount"], 13)
+            compatibility = report["compatibility"]
+            self.assertEqual(compatibility["canonicalProtocolVersion"], "2026-07-28")
+            self.assertEqual(compatibility["deletionCandidates"], [])
+            decisions = {item["protocolVersion"]: item for item in compatibility["decisions"]}
+            self.assertIn(
+                "production-deploy-and-acceptance",
+                decisions["2026-07-28"]["consumers"],
+            )
+            self.assertIn(
+                "live-client:openai-mcp@1.0.0",
+                decisions["2025-11-25"]["consumers"],
+            )
+            self.assertIn(
+                "receipt-bound-rollback:deploy-0",
+                decisions["2025-06-18"]["consumers"],
+            )
             self.assertEqual(report["config"]["globalMaxConcurrency"], 4)
             self.assertEqual(report["workspaces"]["dirty"], 0)
             self.assertEqual(report["operatorAction"]["count"], 0)
@@ -217,6 +282,55 @@ class RuntimeStatusTests(unittest.TestCase):
                 "BINARY_DIGEST_MISMATCH:runtime",
                 report["operatorAction"]["reasons"],
             )
+
+    def test_missing_protocol_trace_blocks_compatibility_deletion_without_health_incident(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            (paths["database"].parent / "runtime-trace.jsonl").unlink()
+            result = subprocess.run(
+                command(paths, "--json"),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(result.stdout)
+            self.assertEqual(report["status"], "healthy")
+            self.assertEqual(report["operatorAction"]["count"], 0)
+            self.assertEqual(report["compatibility"]["deletionCandidates"], [])
+            decisions = {item["protocolVersion"]: item for item in report["compatibility"]["decisions"]}
+            self.assertIn(
+                "PROTOCOL_TRACE_UNAVAILABLE",
+                decisions["2025-11-25"]["blockers"],
+            )
+            self.assertFalse(decisions["2025-11-25"]["deletionEligible"])
+
+    def test_recent_deployment_blocks_protocol_deletion_until_retention_window_completes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            current = paths["deployments"] / "deploy-1" / "result.json"
+            value = json.loads(current.read_text(encoding="utf-8"))
+            value["finishedAtMs"] = int(time.time() * 1000)
+            value["probe"]["supportedVersions"].append("2024-11-05")
+            current.write_text(json.dumps(value), encoding="utf-8")
+            result = subprocess.run(
+                command(paths, "--json"),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(result.stdout)
+            compatibility = report["compatibility"]
+            self.assertEqual(compatibility["retentionHours"], 168)
+            self.assertFalse(compatibility["retentionSatisfied"])
+            decisions = {item["protocolVersion"]: item for item in compatibility["decisions"]}
+            self.assertIn(
+                "RETENTION_WINDOW_INCOMPLETE",
+                decisions["2024-11-05"]["blockers"],
+            )
+            self.assertFalse(decisions["2024-11-05"]["deletionEligible"])
+            self.assertNotIn("2024-11-05", compatibility["deletionCandidates"])
 
     def test_human_output_is_one_compact_line(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

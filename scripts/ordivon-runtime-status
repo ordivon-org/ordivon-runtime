@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 TERMINAL_ATTEMPT_STATES = ("succeeded", "failed", "timed_out", "cancelled", "lost", "orphaned")
 DEFAULT_DATABASE = Path("/var/lib/ordivon/registry/registry.sqlite3")
@@ -26,6 +26,8 @@ DEFAULT_ENV_FILE = Path("/etc/ordivon/ordivon-runtime.env")
 DEFAULT_SERVICE = "ordivon-runtime.service"
 DEFAULT_SYSTEMCTL = Path("/usr/bin/systemctl")
 MAX_WORKSPACE_SCAN = 256
+MAX_PROTOCOL_TRACE_BYTES = 8 * 1024 * 1024
+DEFAULT_PROTOCOL_RETENTION_HOURS = 168
 
 
 class StatusError(RuntimeError):
@@ -53,6 +55,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--deployment-root", type=absolute_path, default=DEFAULT_DEPLOYMENT_ROOT)
     result.add_argument("--install-dir", type=absolute_path, default=DEFAULT_INSTALL_DIR)
     result.add_argument("--env-file", type=absolute_path, default=DEFAULT_ENV_FILE)
+    result.add_argument("--trace-path", type=absolute_path)
+    result.add_argument("--protocol-retention-hours", type=int, default=DEFAULT_PROTOCOL_RETENTION_HOURS)
     result.add_argument("--service", default=DEFAULT_SERVICE)
     result.add_argument("--systemctl", type=absolute_path, default=DEFAULT_SYSTEMCTL)
     result.add_argument("--expected-commit", type=exact_commit)
@@ -99,6 +103,214 @@ def latest_deployment(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any] 
     plan_path = result_path.with_name("plan.json")
     plan = load_json(plan_path) if plan_path.is_file() else None
     return result_path, result, plan
+
+
+def previous_deployment_protocol(root: Path, current_finished_at_ms: int | None) -> dict[str, Any] | None:
+    if not root.is_dir() or current_finished_at_ms is None:
+        return None
+    candidates: list[tuple[int, Path, str]] = []
+    for result_path in root.glob("*/result.json"):
+        try:
+            result = load_json(result_path)
+        except StatusError:
+            continue
+        finished = result.get("finishedAtMs")
+        probe = result.get("probe") if isinstance(result.get("probe"), dict) else {}
+        version = probe.get("protocolVersion")
+        if (
+            result.get("status") == "deployed"
+            and isinstance(finished, int)
+            and 0 <= finished < current_finished_at_ms
+            and isinstance(version, str)
+        ):
+            candidates.append((finished, result_path, version))
+    if not candidates:
+        return None
+    finished, path, version = max(candidates, key=lambda item: (item[0], item[1].parent.name))
+    return {
+        "receiptId": path.parent.name,
+        "finishedAtMs": finished,
+        "protocolVersion": version,
+    }
+
+
+def configured_trace_path(env_file: Path, database: Path) -> Path:
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return database.parent / "runtime-trace.jsonl"
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key == "ORDIVON_TRACE_PATH":
+            candidate = Path(value.strip().strip('"').strip("'"))
+            if candidate.is_absolute():
+                return candidate
+    return database.parent / "runtime-trace.jsonl"
+
+
+def protocol_observations(trace_path: Path, since_ms: int) -> dict[str, Any]:
+    if not trace_path.is_file() or trace_path.is_symlink():
+        return {
+            "available": False,
+            "sinceMs": since_ms,
+            "scanBytes": 0,
+            "scanTruncated": False,
+            "invalidLines": 0,
+            "events": 0,
+            "versions": [],
+        }
+    try:
+        size = trace_path.stat().st_size
+        start = max(0, size - MAX_PROTOCOL_TRACE_BYTES)
+        counts: dict[tuple[str, str], dict[str, int]] = {}
+        invalid = 0
+        events = 0
+        with trace_path.open("rb") as handle:
+            handle.seek(start)
+            if start:
+                handle.readline()
+            scan_start = handle.tell()
+            for raw in handle:
+                try:
+                    item = json.loads(raw)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    invalid += 1
+                    continue
+                if not isinstance(item, dict) or item.get("kind") != "mcp_protocol_observation":
+                    continue
+                observed = item.get("observedUnixMs")
+                version = item.get("protocolVersion")
+                if not isinstance(observed, int) or observed < since_ms or not isinstance(version, str) or not version:
+                    continue
+                client = item.get("client") if isinstance(item.get("client"), dict) else {}
+                name = client.get("name") if isinstance(client.get("name"), str) else "unknown"
+                client_version = client.get("version") if isinstance(client.get("version"), str) else "unknown"
+                identity = f"{name}@{client_version}"
+                key = (version, identity)
+                summary = counts.setdefault(key, {"events": 0, "initializations": 0, "toolCalls": 0})
+                summary["events"] += 1
+                if item.get("method") == "initialize":
+                    summary["initializations"] += 1
+                if item.get("method") == "tools/call":
+                    summary["toolCalls"] += 1
+                events += 1
+        versions: dict[str, dict[str, Any]] = {}
+        for (version, client), values in sorted(counts.items()):
+            entry = versions.setdefault(version, {"protocolVersion": version, "events": 0, "clients": []})
+            entry["events"] += values["events"]
+            entry["clients"].append({"client": client, **values})
+        return {
+            "available": True,
+            "sinceMs": since_ms,
+            "scanBytes": size - scan_start,
+            "scanTruncated": start > 0,
+            "invalidLines": invalid,
+            "events": events,
+            "versions": list(versions.values()),
+        }
+    except OSError:
+        return {
+            "available": False,
+            "sinceMs": since_ms,
+            "scanBytes": 0,
+            "scanTruncated": False,
+            "invalidLines": 0,
+            "events": 0,
+            "versions": [],
+        }
+
+
+def compatibility_status(
+    deployment_root: Path,
+    deployment: dict[str, Any],
+    trace_path: Path,
+    generated_at_ms: int,
+    retention_hours: int,
+) -> dict[str, Any]:
+    deployed_at_ms = deployment.get("deployedAtMs")
+    since_ms = deployed_at_ms if isinstance(deployed_at_ms, int) else 0
+    observations = protocol_observations(trace_path, since_ms)
+    previous = previous_deployment_protocol(deployment_root, deployed_at_ms)
+    retention_ms = retention_hours * 60 * 60 * 1000
+    retention_satisfied = (
+        isinstance(deployed_at_ms, int)
+        and generated_at_ms >= deployed_at_ms
+        and generated_at_ms - deployed_at_ms >= retention_ms
+    )
+    previous_binary_available = False
+    try:
+        result_path, _, _ = latest_deployment(deployment_root)
+        previous_binary_available = (result_path.parent / "previous" / "ordivon-runtime").is_file()
+    except StatusError:
+        pass
+
+    observed_by_version = {
+        item["protocolVersion"]: item
+        for item in observations["versions"]
+        if isinstance(item, dict) and isinstance(item.get("protocolVersion"), str)
+    }
+    current = deployment.get("protocolVersion")
+    supported = deployment.get("supportedProtocolVersions")
+    if not isinstance(supported, list):
+        supported = []
+    decisions: list[dict[str, Any]] = []
+    deletion_candidates: list[str] = []
+    for version in [item for item in supported if isinstance(item, str)]:
+        consumers: list[str] = []
+        blockers: list[str] = []
+        if version == current:
+            consumers.append("production-deploy-and-acceptance")
+        observed = observed_by_version.get(version, {})
+        for client in observed.get("clients", []) if isinstance(observed, dict) else []:
+            identity = client.get("client") if isinstance(client, dict) else None
+            if isinstance(identity, str):
+                consumers.append(f"live-client:{identity}")
+        if previous_binary_available and isinstance(previous, dict) and previous.get("protocolVersion") == version:
+            consumers.append(f"receipt-bound-rollback:{previous.get('receiptId')}")
+        if previous_binary_available and previous is None and version != current:
+            blockers.append("ROLLBACK_PROTOCOL_UNKNOWN")
+        if version != current and not retention_satisfied:
+            blockers.append(
+                "RETENTION_WINDOW_INCOMPLETE" if isinstance(deployed_at_ms, int) else "DEPLOYMENT_TIME_UNKNOWN"
+            )
+        if not observations["available"]:
+            blockers.append("PROTOCOL_TRACE_UNAVAILABLE")
+        elif observations["scanTruncated"] and not observed:
+            blockers.append("PROTOCOL_TRACE_TRUNCATED")
+        deletion_eligible = version != current and not consumers and not blockers
+        if deletion_eligible:
+            deletion_candidates.append(version)
+        if version == current:
+            trigger = "replace the canonical protocol through a receipted deployment and leave its rollback window"
+        elif any(item.startswith("live-client:") for item in consumers):
+            trigger = "observe no live client during an explicit retention window and retain no rollback dependency"
+        elif any(item.startswith("receipt-bound-rollback:") for item in consumers):
+            trigger = "expire the receipt-bound previous binary and observe no live client"
+        else:
+            trigger = "complete modern production and rollback acceptance with complete trace evidence"
+        decisions.append(
+            {
+                "protocolVersion": version,
+                "observedEvents": observed.get("events", 0) if isinstance(observed, dict) else 0,
+                "consumers": sorted(set(consumers)),
+                "blockers": blockers,
+                "deletionEligible": deletion_eligible,
+                "deletionTrigger": trigger,
+            }
+        )
+    return {
+        "canonicalProtocolVersion": current,
+        "retentionHours": retention_hours,
+        "retentionSatisfied": retention_satisfied,
+        "observations": observations,
+        "previousDeployment": previous,
+        "previousBinaryAvailable": previous_binary_available,
+        "decisions": decisions,
+        "deletionCandidates": deletion_candidates,
+    }
 
 
 def deployment_status(
@@ -151,13 +363,7 @@ def deployment_status(
             continue
         name = item.get("name")
         expected_digest = item.get("digest")
-        if (
-            not isinstance(name, str)
-            or not name
-            or name in {".", ".."}
-            or "/" in name
-            or name in seen
-        ):
+        if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name or name in seen:
             reasons.append("DEPLOYMENT_BINARY_NAME_INVALID")
             continue
         seen.add(name)
@@ -184,32 +390,20 @@ def deployment_status(
         "receiptId": result_path.parent.name,
         "commit": commit,
         "builtAtMs": built_at,
-        "deployedAtMs": result.get("finishedAtMs")
-        if isinstance(result.get("finishedAtMs"), int)
-        else None,
+        "deployedAtMs": result.get("finishedAtMs") if isinstance(result.get("finishedAtMs"), int) else None,
         "commitMatchesExpectation": expected_commit is None or commit == expected_commit,
-        "protocolLifecycle": probe.get("lifecycle")
-        if isinstance(probe.get("lifecycle"), str)
-        else None,
-        "protocolVersion": probe.get("protocolVersion")
-        if isinstance(probe.get("protocolVersion"), str)
-        else None,
+        "protocolLifecycle": probe.get("lifecycle") if isinstance(probe.get("lifecycle"), str) else None,
+        "protocolVersion": probe.get("protocolVersion") if isinstance(probe.get("protocolVersion"), str) else None,
         "supportedProtocolVersions": [
-            version
-            for version in probe.get("supportedVersions", [])
-            if isinstance(version, str)
+            version for version in probe.get("supportedVersions", []) if isinstance(version, str)
         ]
         if isinstance(probe.get("supportedVersions"), list)
         else [],
         "toolCatalogDigest": probe.get("toolCatalogDigest")
         if isinstance(probe.get("toolCatalogDigest"), str)
         else None,
-        "serverVersion": server_info.get("version")
-        if isinstance(server_info.get("version"), str)
-        else None,
-        "toolCount": probe.get("toolCount")
-        if isinstance(probe.get("toolCount"), int)
-        else None,
+        "serverVersion": server_info.get("version") if isinstance(server_info.get("version"), str) else None,
+        "toolCount": probe.get("toolCount") if isinstance(probe.get("toolCount"), int) else None,
         "binaries": binaries,
     }
 
@@ -227,9 +421,7 @@ def service_status(systemctl: Path, service: str, reasons: list[str]) -> dict[st
         "--no-pager",
     ]
     try:
-        completed = subprocess.run(
-            command, check=False, text=True, capture_output=True, timeout=5
-        )
+        completed = subprocess.run(command, check=False, text=True, capture_output=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         reasons.append("SERVICE_QUERY_FAILED")
         return {
@@ -312,18 +504,13 @@ def registry_status(database: Path, reasons: list[str]) -> tuple[dict[str, Any],
             "attempt_conditions": {"attempt_id", "condition_type", "status"},
         }
         for table, columns in required.items():
-            present = {
-                str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")
-            }
+            present = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
             missing = columns - present
             if missing:
                 raise StatusError(
-                    "missing Registry capability: "
-                    + ",".join(f"{table}.{column}" for column in sorted(missing))
+                    "missing Registry capability: " + ",".join(f"{table}.{column}" for column in sorted(missing))
                 )
-        migration = connection.execute(
-            "SELECT COALESCE(MAX(version),0) FROM schema_migrations"
-        ).fetchone()[0]
+        migration = connection.execute("SELECT COALESCE(MAX(version),0) FROM schema_migrations").fetchone()[0]
         jobs_total, jobs_active = connection.execute(
             "SELECT COUNT(*),COALESCE(SUM(resolution IS NULL),0) FROM jobs"
         ).fetchone()
@@ -334,8 +521,7 @@ def registry_status(database: Path, reasons: list[str]) -> tuple[dict[str, Any],
             "SELECT COUNT(*) FROM concurrency_reservations WHERE state='held_orphaned'"
         ).fetchone()[0]
         recovery_required = connection.execute(
-            "SELECT COUNT(*) FROM attempt_conditions "
-            "WHERE condition_type='recovery_required' AND status='true'"
+            "SELECT COUNT(*) FROM attempt_conditions WHERE condition_type='recovery_required' AND status='true'"
         ).fetchone()[0]
         placeholders = ",".join("?" for _ in TERMINAL_ATTEMPT_STATES)
         nonterminal_attempts = connection.execute(
@@ -373,9 +559,7 @@ def registry_status(database: Path, reasons: list[str]) -> tuple[dict[str, Any],
     }, held_workspaces
 
 
-def workspace_status(
-    store_root: Path, held: set[str], maximum: int, reasons: list[str]
-) -> dict[str, Any]:
+def workspace_status(store_root: Path, held: set[str], maximum: int, reasons: list[str]) -> dict[str, Any]:
     records_root = store_root / "workspace-records"
     workspaces_root = store_root / "workspaces"
     counts = {"open": 0, "closed": 0, "invalid": 0}
@@ -397,11 +581,7 @@ def workspace_status(
                 counts["invalid"] += 1
     else:
         reasons.append("WORKSPACE_RECORD_ROOT_MISSING")
-    physical = (
-        sum(1 for path in workspaces_root.iterdir() if path.is_dir())
-        if workspaces_root.is_dir()
-        else 0
-    )
+    physical = sum(1 for path in workspaces_root.iterdir() if path.is_dir()) if workspaces_root.is_dir() else 0
     if physical != counts["open"]:
         reasons.append("WORKSPACE_RECORD_DIVERGENCE")
 
@@ -476,9 +656,7 @@ def lifecycle_status(store_root: Path) -> dict[str, Any]:
             "actions": None,
             "failures": None,
         }
-    observed, path, value = max(
-        candidates, key=lambda item: (item[0], item[1].parent.name)
-    )
+    observed, path, value = max(candidates, key=lambda item: (item[0], item[1].parent.name))
     actions = value.get("actions")
     failures = value.get("failures")
     return {
@@ -493,25 +671,33 @@ def lifecycle_status(store_root: Path) -> dict[str, Any]:
 def build_status(args: argparse.Namespace) -> dict[str, Any]:
     if args.max_workspaces < 1 or args.max_workspaces > 10_000:
         raise StatusError("max-workspaces must be in 1..=10000")
+    if args.protocol_retention_hours < 1 or args.protocol_retention_hours > 87_600:
+        raise StatusError("protocol-retention-hours must be in 1..=87600")
     started = time.perf_counter()
+    generated_at_ms = int(time.time() * 1000)
     reasons: list[str] = []
-    deployment = deployment_status(
-        args.deployment_root, args.install_dir, args.expected_commit, reasons
+    deployment = deployment_status(args.deployment_root, args.install_dir, args.expected_commit, reasons)
+    trace_path = args.trace_path or configured_trace_path(args.env_file, args.database)
+    compatibility = compatibility_status(
+        args.deployment_root,
+        deployment,
+        trace_path,
+        generated_at_ms,
+        args.protocol_retention_hours,
     )
     service = service_status(args.systemctl, args.service, reasons)
     config = whitelisted_config(args.env_file, reasons)
     registry, held = registry_status(args.database, reasons)
-    workspaces = workspace_status(
-        args.runtime_store_root, held, args.max_workspaces, reasons
-    )
+    workspaces = workspace_status(args.runtime_store_root, held, args.max_workspaces, reasons)
     lifecycle = lifecycle_status(args.runtime_store_root)
     unique_reasons = list(dict.fromkeys(reasons))
     return {
         "schemaVersion": SCHEMA_VERSION,
         "status": "healthy" if not unique_reasons else "attention",
-        "generatedAtMs": int(time.time() * 1000),
+        "generatedAtMs": generated_at_ms,
         "elapsedMs": round((time.perf_counter() - started) * 1000, 1),
         "deployment": deployment,
+        "compatibility": compatibility,
         "service": service,
         "config": config,
         "registry": registry,
@@ -538,6 +724,7 @@ def human(report: dict[str, Any]) -> str:
         f"capacity={registry.get('activeReservations', '?')}+"
         f"{registry.get('heldReservations', '?')}/{config.get('globalMaxConcurrency', '?')} "
         f"workspaces={workspaces.get('physicalOpen', '?')} "
+        f"compat-delete={len(report['compatibility'].get('deletionCandidates', []))} "
         f"dirty={workspaces.get('dirty', '?')} held={workspaces.get('held', '?')} "
         f"actions={report['operatorAction']['count']}"
     )

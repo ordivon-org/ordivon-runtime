@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The Agent reasons and chooses actions. Ordivon Runtime executes, owns the resulting process tree, records non-reconstructable execution truth, and reconciles that truth after interruption.
+A participant, Agent, or Host forms and admits work. Ordivon Runtime executes it, owns the resulting process tree, records non-reconstructable execution truth, and reconciles that truth after interruption.
 
 ## Execution path
 
@@ -88,7 +88,7 @@ This is a trusted-local pre-spawn commitment, not an immutable filesystem snapsh
 
 `workspace.exec` and `workspace.execPlan` accept `executionProfile` with two values:
 
-- `trusted_local` is the compatibility default and preserves the existing installed-service-user authority model.
+- `trusted_local` is the canonical owner-trusted profile. It grants the installed service user's local authority without adding a central approval layer.
 - `contained_local` is explicit and never silently falls back. Runtime uses the same systemd transient-unit supervisor, but sets a private network, removes effective and ambient capabilities, enables no-new-privileges, restricts namespaces and address families, makes the base filesystem read-only, hides `/root`, `/home`, `/run`, and `/var`, and bind-mounts back only the exact Runner, Git common directory, Workspace, Attempt bundle, and Runtime-created cache paths required by the committed plan. The Runner receives a fixed environment allowlist plus `GIT_OPTIONAL_LOCKS=0`; request environment is passed only to the target process through the durable Runner request.
 
 This profile protects accidental credential and host-state access by local engineering workloads. It deliberately does not claim kernel-grade isolation against hostile same-host code, filesystem confidentiality outside the hidden state hierarchies, controlled egress, or disposable-machine semantics. Those belong to Edge or another external isolation owner. Dynamic users, bubblewrap, generic proxying, and policy-specific approval state are not part of contained v1 because they would duplicate supervision or introduce ownership and mount-composition costs without a demonstrated workload requirement.
@@ -123,6 +123,10 @@ The Runtime uses five separate terms rather than one overloaded notion of comple
 
 A successful process exit is execution evidence, not proof of semantic completion. An Artifact is retained evidence, not proof that a claim is correct. A closed Workspace does not change Job resolution, and client reconnection does not change Attempt state.
 
+## Mechanical acceleration measurements
+
+`ordivon-runtime-inspect summary` derives mechanical latency distributions from the existing append-only Job event history. It reports admission-to-dispatch, dispatch-to-Runner binding, Runner-binding-to-terminal, cancellation-to-terminal, and reconciliation-failure-to-convergence intervals alongside total Job duration, recovery, duplicate-dispatch, cancellation, and Artifact facts. No timing table, telemetry service, or semantic score is added. Missing event pairs produce zero samples rather than invented timings. These measurements expose Runtime's physical contribution to a wider `verified improvement / unit time` evaluation; they do not decide whether the executed work was useful or correct.
+
 ## Correlated Job lookup
 
 `task.list` retains newest-first cursor pagination and may additionally filter by an exact `clientRequestId`. The filter is a read-only projection over the durable Job Registry and its indexed request identity; it does not create a second idempotency store or change Job ownership. Recovery callers still consume every filtered page and reject conflicting Job identities rather than treating the newest match as sufficient proof. The lookup index is maintained idempotently as a non-semantic query capability rather than advancing the Registry schema version, so the previous Runtime binary can still open the same Registry during receipt-bound rollback.
@@ -142,9 +146,11 @@ These metrics are diagnostic references for Runtime changes. They do not score m
 
 ## MCP protocol boundary
 
-The Adapter supports the stable MCP `2026-07-28` stateless lifecycle and compatibility lifecycles `2025-11-25` and `2025-06-18` on the same HTTP endpoint. Modern requests use `server/discover`, standard routing headers, and per-request metadata without a protocol Session. `LocalSessionManager` exists only for legacy `initialize` clients; Runtime continuity remains the durable Workspace/Job/Attempt model in Core.
+The Adapter uses the stable MCP `2026-07-28` stateless lifecycle as its canonical path and currently retains compatibility lifecycles `2025-11-25` and `2025-06-18` on the same HTTP endpoint. Modern requests use `server/discover`, standard routing headers, and per-request metadata without a protocol Session. `LocalSessionManager` exists only for legacy `initialize` clients; Runtime continuity remains the durable Workspace/Job/Attempt model in Core.
 
 `server/discover` returns a deterministic SHA-256 `toolCatalogDigest` over the complete name-sorted Tool definitions with `ttlMs=0` and private cache scope. Deployment receipts bind this digest. The Adapter no longer advertises or implements the experimental Core Tasks methods (`tasks/list`, enqueue, get, result, cancel). `workspace.exec` and `workspace.execPlan` return Ordivon Job observations, while `task.observe`, `task.list`, and `task.cancel` remain ordinary Tools. MCP adapts transport and discovery; it does not become Runtime's persistence model.
+
+`scripts/ordivon-runtime-status` projects a bounded compatibility inventory from the current deployment receipt, recent protocol observations, and the immediately previous receipted deployment. Every retained protocol version therefore names a current production, live-client, or rollback consumer plus a deletion trigger. Missing, truncated, or not-yet-long-enough trace evidence blocks deletion conclusions but does not make Runtime unhealthy. The complete inventory, including persisted-state compatibility, is defined in [`compatibility.md`](compatibility.md).
 
 ## Extension boundary
 
