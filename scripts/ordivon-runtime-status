@@ -109,13 +109,19 @@ def deployment_status(
 ) -> dict[str, Any]:
     try:
         result_path, result, plan = latest_deployment(deployment_root)
-    except StatusError as error:
+    except StatusError:
         reasons.append("DEPLOYMENT_RECEIPT_MISSING")
         return {
             "receiptId": None,
             "commit": None,
             "builtAtMs": None,
             "deployedAtMs": None,
+            "protocolLifecycle": None,
+            "protocolVersion": None,
+            "supportedProtocolVersions": [],
+            "toolCatalogDigest": None,
+            "serverVersion": None,
+            "toolCount": None,
             "binaries": [],
             "available": False,
         }
@@ -182,9 +188,28 @@ def deployment_status(
         if isinstance(result.get("finishedAtMs"), int)
         else None,
         "commitMatchesExpectation": expected_commit is None or commit == expected_commit,
-        "protocolVersion": probe.get("protocolVersion") if isinstance(probe.get("protocolVersion"), str) else None,
-        "serverVersion": server_info.get("version") if isinstance(server_info.get("version"), str) else None,
-        "toolCount": probe.get("toolCount") if isinstance(probe.get("toolCount"), int) else None,
+        "protocolLifecycle": probe.get("lifecycle")
+        if isinstance(probe.get("lifecycle"), str)
+        else None,
+        "protocolVersion": probe.get("protocolVersion")
+        if isinstance(probe.get("protocolVersion"), str)
+        else None,
+        "supportedProtocolVersions": [
+            version
+            for version in probe.get("supportedVersions", [])
+            if isinstance(version, str)
+        ]
+        if isinstance(probe.get("supportedVersions"), list)
+        else [],
+        "toolCatalogDigest": probe.get("toolCatalogDigest")
+        if isinstance(probe.get("toolCatalogDigest"), str)
+        else None,
+        "serverVersion": server_info.get("version")
+        if isinstance(server_info.get("version"), str)
+        else None,
+        "toolCount": probe.get("toolCount")
+        if isinstance(probe.get("toolCount"), int)
+        else None,
         "binaries": binaries,
     }
 
@@ -205,7 +230,7 @@ def service_status(systemctl: Path, service: str, reasons: list[str]) -> dict[st
         completed = subprocess.run(
             command, check=False, text=True, capture_output=True, timeout=5
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except (OSError, subprocess.TimeoutExpired):
         reasons.append("SERVICE_QUERY_FAILED")
         return {
             "activeState": "unknown",
@@ -273,7 +298,7 @@ def registry_status(database: Path, reasons: list[str]) -> tuple[dict[str, Any],
     held_workspaces: set[str] = set()
     try:
         connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
-    except sqlite3.Error as error:
+    except sqlite3.Error:
         reasons.append("REGISTRY_UNREADABLE")
         return {"available": False}, held_workspaces
     try:
@@ -328,7 +353,7 @@ def registry_status(database: Path, reasons: list[str]) -> tuple[dict[str, Any],
             """
         ):
             held_workspaces.add(str(row[0]))
-    except (sqlite3.Error, StatusError) as error:
+    except (sqlite3.Error, StatusError):
         reasons.append("REGISTRY_CAPABILITY_MISMATCH")
         return {"available": False}, held_workspaces
     finally:
@@ -506,6 +531,8 @@ def human(report: dict[str, Any]) -> str:
     short_commit = commit[:12] if isinstance(commit, str) else "unknown"
     return (
         f"{str(report['status']).upper()} commit={short_commit} "
+        f"mcp={deployment.get('protocolLifecycle') or 'unknown'}/"
+        f"{deployment.get('protocolVersion') or 'unknown'} "
         f"service={service.get('activeState')}/{service.get('subState')} "
         f"jobs={registry.get('jobsActive', '?')}/{registry.get('jobsTotal', '?')} "
         f"capacity={registry.get('activeReservations', '?')}+"

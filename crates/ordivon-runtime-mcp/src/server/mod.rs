@@ -21,14 +21,15 @@ use ordivon_runtime_core::{
     MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::handler::server::tool::IntoCallToolResult;
+use rmcp::handler::server::tool::{IntoCallToolResult, ToolCallContext};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::service::{RequestContext, RoleServer};
-use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use rmcp::{tool, tool_router, ErrorData as McpError, ServerHandler};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 static GLOBAL_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -257,6 +258,26 @@ impl RuntimeServer {
     pub fn runtime_handle(&self) -> Runtime {
         self.state.runtime.clone()
     }
+
+    pub fn tool_catalog_digest(&self) -> String {
+        let mut tools = self.tool_router.list_all();
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        let bytes = serde_json::to_vec(&tools)
+            .expect("Tool catalog serialization is infallible for generated schemas");
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
+    pub(crate) fn discovery_result(&self) -> DiscoverResult {
+        let mut result = DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        );
+        result.meta.get_or_insert_default().0.insert(
+            "com.ordivon/runtime/toolCatalogDigest".to_string(),
+            serde_json::Value::String(self.tool_catalog_digest()),
+        );
+        result
+    }
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -450,7 +471,7 @@ impl<T> IntoCallToolResult for ToolOutcome<T>
 where
     T: Serialize + JsonSchema + Send + 'static,
 {
-    fn into_call_tool_result(self) -> Result<CallToolResult, McpError> {
+    fn into_call_tool_result(self) -> Result<CallToolResponse, McpError> {
         let (ok, value, compatibility_text) = match self {
             Self::Success(result) => {
                 let value = serde_json::to_value(result).map_err(|error| {
@@ -469,7 +490,7 @@ where
             CallToolResult::error(vec![ContentBlock::text(compatibility_text)])
         };
         result.structured_content = Some(value);
-        Ok(result)
+        Ok(result.into())
     }
 }
 
@@ -558,72 +579,7 @@ fn unix_ms() -> u128 {
         .as_millis()
 }
 
-fn parse_workspace_exec(arguments: Option<JsonObject>) -> Result<WorkspaceExecRequest, McpError> {
-    serde_json::from_value(Value::Object(arguments.unwrap_or_default())).map_err(|error| {
-        McpError::invalid_params(
-            format!("invalid workspace.exec task arguments: {error}"),
-            None,
-        )
-    })
-}
-
-fn parse_workspace_exec_plan(
-    arguments: Option<JsonObject>,
-) -> Result<WorkspaceExecPlanRequest, McpError> {
-    serde_json::from_value(Value::Object(arguments.unwrap_or_default())).map_err(|error| {
-        McpError::invalid_params(
-            format!("invalid workspace.execPlan task arguments: {error}"),
-            None,
-        )
-    })
-}
-
-fn mcp_error(error: ToolError) -> McpError {
-    let data = serde_json::to_value(&error).ok();
-    if matches!(
-        error.code.as_str(),
-        "INVALID_REQUEST" | "JOB_NOT_FOUND" | "ATTEMPT_NOT_FOUND" | "IDEMPOTENCY_CONFLICT"
-    ) {
-        McpError::invalid_params(error.message, data)
-    } else {
-        McpError::internal_error(error.message, data)
-    }
-}
-
-fn format_unix_ms(value: u64) -> Result<String, McpError> {
-    let nanos = i128::from(value) * 1_000_000;
-    let timestamp = time::OffsetDateTime::from_unix_timestamp_nanos(nanos)
-        .map_err(|error| McpError::internal_error(format!("invalid task time: {error}"), None))?;
-    timestamp
-        .format(&time::format_description::well_known::Rfc3339)
-        .map_err(|error| {
-            McpError::internal_error(format!("cannot format task time: {error}"), None)
-        })
-}
-
-fn encode_cursor(cursor: &ordivon_runtime_core::RuntimeJobListCursor) -> String {
-    format!("{}:{}", cursor.created_at_ms, cursor.job_id)
-}
-
-fn decode_cursor(
-    value: Option<String>,
-) -> Result<Option<ordivon_runtime_core::RuntimeJobListCursor>, McpError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let (created, job_id) = value
-        .split_once(':')
-        .ok_or_else(|| McpError::invalid_params("invalid task cursor", None))?;
-    let created_at_ms = created
-        .parse()
-        .map_err(|_| McpError::invalid_params("invalid task cursor timestamp", None))?;
-    Ok(Some(ordivon_runtime_core::RuntimeJobListCursor {
-        created_at_ms,
-        job_id: job_id.to_string(),
-    }))
-}
-
-mod tasks;
+mod handler;
 mod tools;
 
 #[cfg(test)]

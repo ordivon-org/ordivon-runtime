@@ -1,13 +1,10 @@
-use super::tasks::task_from_job;
 use super::*;
-use ordivon_runtime_core::{
-    AdmissionOutcome, ArtifactDescriptor, RegistryConfig, RuntimeExecutionPlan, SubmitRequest,
-    TaskObservation, RUNTIME_SCHEMA_VERSION,
-};
+use ordivon_runtime_core::{ArtifactDescriptor, RegistryConfig, TaskObservation};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde_json::Value;
 struct Sandbox {
     root: PathBuf,
 }
@@ -62,52 +59,6 @@ impl Sandbox {
 impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
-fn submit(
-    server: &RuntimeServer,
-    client_request_id: &str,
-) -> ordivon_runtime_core::CreatedAdmission {
-    let workspace = std::env::current_dir()
-        .unwrap()
-        .join("target/ordivon-tests/ordivon-runtime-mcp-workspace");
-    let workspace = workspace.to_string_lossy().into_owned();
-    let outcome = server
-        .state
-        .runtime
-        .registry()
-        .submit(&SubmitRequest {
-            schema_version: RUNTIME_SCHEMA_VERSION,
-            client_request_id: client_request_id.to_string(),
-            request_identity_digest: None,
-            plan: RuntimeExecutionPlan {
-                schema_version: RUNTIME_SCHEMA_VERSION,
-                workspace_id: "workspace:mcp-test".to_string(),
-                workspace_path: workspace.clone(),
-                source_revision: "revision:test".to_string(),
-                workspace_source_digest: None,
-                workspace_git_common_dir: None,
-                executable: "/usr/bin/true".to_string(),
-                executable_digest: format!("sha256:{}", "a".repeat(64)),
-                args: Vec::new(),
-                cwd: workspace,
-                env: Default::default(),
-                timeout_ms: 1000,
-                stdout_limit_bytes: 1024,
-                stderr_limit_bytes: 1024,
-                steps: Vec::new(),
-                budget: ordivon_runtime_core::ExecutionBudget::default(),
-                execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
-                foreign_references: Vec::new(),
-                principal: "principal:mcp-test".to_string(),
-            },
-            global_limit: 4,
-        })
-        .unwrap();
-    match outcome {
-        AdmissionOutcome::Created(created) => *created,
-        AdmissionOutcome::Existing { .. } => panic!("expected a new Job"),
     }
 }
 
@@ -187,22 +138,13 @@ fn tool_catalog_uses_transactional_job_contract() {
         .iter()
         .find(|tool| tool.name.as_ref() == "workspace.exec")
         .unwrap();
-    assert_eq!(exec.task_support(), TaskSupport::Optional);
+
     assert_eq!(
         exec.annotations
             .as_ref()
             .and_then(|annotations| annotations.idempotent_hint),
         Some(false)
     );
-    let exec_plan = tools
-        .iter()
-        .find(|tool| tool.name.as_ref() == "workspace.execPlan")
-        .unwrap();
-    assert_eq!(exec_plan.task_support(), TaskSupport::Optional);
-    assert!(tools
-        .iter()
-        .filter(|tool| !matches!(tool.name.as_ref(), "workspace.exec" | "workspace.execPlan"))
-        .all(|tool| tool.task_support() == TaskSupport::Forbidden));
     let schema = serde_json::to_string(&exec.input_schema).unwrap();
     assert!(schema.contains("clientRequestId"));
     assert!(!schema.contains("taskId"));
@@ -397,7 +339,10 @@ fn structured_failure_is_a_tool_error_not_protocol_failure() {
         "idempotency mismatch",
         "clientRequestId",
     ));
-    let result = outcome.into_call_tool_result().unwrap();
+    let response = outcome.into_call_tool_result().unwrap();
+    let CallToolResponse::Complete(result) = response else {
+        panic!("structured Tool outcome must be complete");
+    };
     assert_eq!(result.is_error, Some(true));
     assert_eq!(result.content.len(), 1);
     assert_eq!(
@@ -409,65 +354,6 @@ fn structured_failure_is_a_tool_error_not_protocol_failure() {
             .and_then(Value::as_str),
         Some("clientRequestId")
     );
-}
-
-#[test]
-fn job_projection_becomes_native_mcp_task_without_projection_file() {
-    let sandbox = Sandbox::new("task-projection");
-    let server = sandbox.server();
-    let created = submit(&server, "request:projection");
-    let projection = server
-        .state
-        .runtime
-        .registry()
-        .project_job(&created.job.job_id)
-        .unwrap();
-    let task = task_from_job(created.job.clone(), Some(&created.attempt), projection).unwrap();
-    assert_eq!(task.task_id, created.job.job_id);
-    assert_eq!(task.status, TaskStatus::Working);
-    assert_eq!(task.poll_interval, Some(250));
-    assert!(task.created_at.starts_with("20"));
-    assert!(!server
-        .state
-        .executor
-        .store_root
-        .join("m4-native-task-projections")
-        .exists());
-}
-
-#[test]
-fn cancelled_job_projects_to_cancelled_native_task() {
-    let sandbox = Sandbox::new("cancelled-projection");
-    let server = sandbox.server();
-    let created = submit(&server, "request:cancelled-projection");
-    server
-        .state
-        .runtime
-        .registry()
-        .request_cancel(&created.job.job_id, created.job.created_at_ms + 1)
-        .unwrap();
-    let job = server
-        .state
-        .runtime
-        .registry()
-        .get_job(&created.job.job_id)
-        .unwrap();
-    let attempt = server
-        .state
-        .runtime
-        .registry()
-        .get_latest_attempt(&created.job.job_id)
-        .unwrap()
-        .unwrap();
-    let projection = server
-        .state
-        .runtime
-        .registry()
-        .project_job(&created.job.job_id)
-        .unwrap();
-    let task = task_from_job(job, Some(&attempt), projection).unwrap();
-    assert_eq!(task.status, TaskStatus::Cancelled);
-    assert_eq!(task.poll_interval, None);
 }
 
 #[test]
@@ -611,4 +497,37 @@ fn incomplete_workspace_rollback_requires_reconciliation() {
         value.pointer("/commitState").and_then(Value::as_str),
         Some("unknown")
     );
+}
+
+#[test]
+fn tool_catalog_digest_is_deterministic_and_discovery_visible() {
+    let sandbox = Sandbox::new("catalog-digest");
+    let server = sandbox.server();
+    let first = server.tool_catalog_digest();
+    let second = server.tool_catalog_digest();
+    assert_eq!(first, second);
+    assert!(first.starts_with("sha256:"));
+    assert_eq!(first.len(), 71);
+
+    let result = server.discovery_result();
+    assert_eq!(result.ttl_ms, 0);
+    assert_eq!(result.cache_scope, CacheScope::Private);
+    assert_eq!(
+        result
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.0.get("com.ordivon/runtime/toolCatalogDigest"))
+            .and_then(serde_json::Value::as_str),
+        Some(first.as_str())
+    );
+    assert_eq!(
+        result.supported_versions,
+        vec![
+            ProtocolVersion::V_2026_07_28,
+            ProtocolVersion::V_2025_11_25,
+            ProtocolVersion::V_2025_06_18,
+        ]
+    );
+    assert!(result.capabilities.tools.is_some());
+    assert!(result.capabilities.extensions.is_none());
 }

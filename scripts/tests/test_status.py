@@ -95,14 +95,27 @@ def fixture(root: Path) -> dict[str, Path]:
                         "path": "/private/install/runtime",
                     }
                 ],
+                "probe": {
+                    "lifecycle": "modern",
+                    "protocolVersion": "2026-07-28",
+                    "supportedVersions": [
+                        "2026-07-28",
+                        "2025-11-25",
+                        "2025-06-18",
+                    ],
+                    "serverInfo": {
+                        "name": "ordivon-runtime-mcp",
+                        "version": "0.1.0",
+                    },
+                    "toolCatalogDigest": "sha256:" + "b" * 64,
+                    "toolCount": 13,
+                },
             }
         ),
         encoding="utf-8",
     )
     (deployments / "plan.json").write_text(
-        json.dumps(
-            {"candidateManifest": {"builtAtMs": 1, "path": "/private/candidate"}}
-        ),
+        json.dumps({"candidateManifest": {"builtAtMs": 1, "path": "/private/candidate"}}),
         encoding="utf-8",
     )
     env_file = root / "runtime.env"
@@ -167,6 +180,17 @@ class RuntimeStatusTests(unittest.TestCase):
             report = json.loads(result.stdout)
             self.assertEqual(report["status"], "healthy")
             self.assertEqual(report["deployment"]["commit"], COMMIT)
+            self.assertEqual(report["deployment"]["protocolLifecycle"], "modern")
+            self.assertEqual(report["deployment"]["protocolVersion"], "2026-07-28")
+            self.assertEqual(
+                report["deployment"]["supportedProtocolVersions"],
+                ["2026-07-28", "2025-11-25", "2025-06-18"],
+            )
+            self.assertEqual(
+                report["deployment"]["toolCatalogDigest"],
+                "sha256:" + "b" * 64,
+            )
+            self.assertEqual(report["deployment"]["toolCount"], 13)
             self.assertEqual(report["config"]["globalMaxConcurrency"], 4)
             self.assertEqual(report["workspaces"]["dirty"], 0)
             self.assertEqual(report["operatorAction"]["count"], 0)
@@ -188,9 +212,7 @@ class RuntimeStatusTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             report = json.loads(result.stdout)
             self.assertEqual(report["status"], "attention")
-            self.assertIn(
-                "EXPECTED_COMMIT_MISMATCH", report["operatorAction"]["reasons"]
-            )
+            self.assertIn("EXPECTED_COMMIT_MISMATCH", report["operatorAction"]["reasons"])
             self.assertIn(
                 "BINARY_DIGEST_MISMATCH:runtime",
                 report["operatorAction"]["reasons"],
@@ -199,9 +221,7 @@ class RuntimeStatusTests(unittest.TestCase):
     def test_human_output_is_one_compact_line(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             paths = fixture(Path(temporary))
-            result = subprocess.run(
-                command(paths), cwd=REPO, check=True, text=True, capture_output=True
-            )
+            result = subprocess.run(command(paths), cwd=REPO, check=True, text=True, capture_output=True)
             self.assertEqual(len(result.stdout.splitlines()), 1)
             self.assertIn("HEALTHY commit=aaaaaaaaaaaa", result.stdout)
             self.assertIn("capacity=0+0/4", result.stdout)

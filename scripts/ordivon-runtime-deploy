@@ -14,11 +14,11 @@ import sqlite3
 import subprocess
 import sys
 import time
-import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 from urllib.parse import quote
+
+from mcp_probe import probe_catalog
 
 SCHEMA_VERSION = 1
 DEFAULT_BINARIES = (
@@ -368,93 +368,32 @@ def load_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def parse_mcp_response(text: str, content_type: str) -> dict[str, Any]:
-    if "text/event-stream" in content_type:
-        events = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
-        if not events:
-            raise RuntimeError("MCP probe returned an empty event stream")
-        text = events[-1]
-    value = json.loads(text)
-    if "error" in value:
-        raise RuntimeError(f"MCP probe error: {value['error']}")
-    result = value.get("result")
-    if not isinstance(result, dict):
-        raise RuntimeError("MCP probe response lacks an object result")
-    return result
-
-
-def mcp_call(endpoint: str, token: str, request_id: int, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
-    if params is not None:
-        payload["params"] = params
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "MCP-Protocol-Version": "2025-06-18",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=5) as response:
-        return parse_mcp_response(
-            response.read().decode("utf-8"),
-            response.headers.get("Content-Type", ""),
-        )
-
-
 def probe_mcp(
     env_file: Path,
     *,
     expected_tool_count: int | None,
     required: tuple[str, ...],
     wait_seconds: float,
+    require_modern: bool,
+    allow_legacy_fallback: bool,
 ) -> dict[str, object]:
     environment = load_env_file(env_file)
     bind = environment.get("ORDIVON_BIND")
     token = environment.get("ORDIVON_BEARER_TOKEN")
     if not bind or not token:
-        raise RuntimeError("environment file must define ORDIVON_BIND and ORDIVON_BEARER_TOKEN")
-    endpoint = f"http://{bind}/mcp"
-    deadline = time.monotonic() + wait_seconds
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        try:
-            initialized = mcp_call(
-                endpoint,
-                token,
-                1,
-                "initialize",
-                {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": "ordivon-runtime-deploy", "version": "1"},
-                },
-            )
-            tools = mcp_call(endpoint, token, 2, "tools/list").get("tools")
-            if not isinstance(tools, list):
-                raise RuntimeError("MCP tools/list lacks a tools array")
-            names = {str(tool.get("name")) for tool in tools if isinstance(tool, dict)}
-            if expected_tool_count is not None and len(names) != expected_tool_count:
-                raise RuntimeError(
-                    f"MCP tool count {len(names)} does not equal expected {expected_tool_count}"
-                )
-            missing = sorted(set(required) - names)
-            if missing:
-                raise RuntimeError("MCP probe is missing required tools: " + ", ".join(missing))
-            return {
-                "protocolVersion": "2025-06-18",
-                "serverInfo": initialized.get("serverInfo"),
-                "toolCount": len(names),
-                "requiredTools": sorted(required),
-            }
-        except Exception as error:
-            last_error = error
-            time.sleep(0.2)
-    raise RuntimeError(f"MCP readiness probe failed: {last_error}")
-
+        raise RuntimeError(
+            "environment file must define ORDIVON_BIND and ORDIVON_BEARER_TOKEN"
+        )
+    return probe_catalog(
+        f"http://{bind}/mcp",
+        token,
+        client_name="ordivon-runtime-deploy",
+        expected_tool_count=expected_tool_count,
+        required_tools=required,
+        wait_seconds=wait_seconds,
+        require_modern=require_modern,
+        allow_legacy_fallback=allow_legacy_fallback,
+    )
 
 def service_active(systemctl: Path, service: str) -> bool:
     return run([str(systemctl), "is-active", service], check=False).stdout.strip() == "active"
@@ -532,7 +471,14 @@ def restore_previous(
         atomic_copy(source, install_dir / name)
     run([str(systemctl), "start", service])
     wait_service_active(systemctl, service, wait_seconds)
-    probe = probe_mcp(env_file, expected_tool_count=None, required=(), wait_seconds=wait_seconds)
+    probe = probe_mcp(
+        env_file,
+        expected_tool_count=None,
+        required=(),
+        wait_seconds=wait_seconds,
+        require_modern=False,
+        allow_legacy_fallback=True,
+    )
     return {"serviceActive": True, "probe": probe}
 
 
@@ -586,6 +532,8 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                 expected_tool_count=args.expected_tool_count,
                 required=required_tools(args),
                 wait_seconds=args.wait_seconds,
+                require_modern=True,
+                allow_legacy_fallback=False,
             )
             result = {
                 "schemaVersion": SCHEMA_VERSION,
@@ -632,6 +580,8 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                                 expected_tool_count=args.expected_tool_count,
                                 required=required_tools(args),
                                 wait_seconds=args.wait_seconds,
+                                require_modern=False,
+                                allow_legacy_fallback=True,
                             ),
                         }
                     except Exception as error:

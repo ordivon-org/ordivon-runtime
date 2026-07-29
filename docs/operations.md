@@ -64,7 +64,7 @@ Eligibility requires:
 - no active or held Job exists, except the deployment Job itself when the tool can prove its own Attempt identity from cgroup and Registry state;
 - the confirmation commit exactly matches the requested commit.
 
-The tool stages `.next` files, retains both receipt-local previous binaries and installed `.previous` binaries, stops admission, rechecks that no other active or held Job appeared, installs the candidate, waits for `active`, initializes MCP, verifies the tool catalog, and records candidate and installed digests. If the post-stop race check fails before replacement, the original service is restarted and the receipt is `not_committed`; a failure after replacement automatically restores the receipt-local previous binaries. There is no general active-Job override in the normal deployment contract.
+The tool stages `.next` files, retains both receipt-local previous binaries and installed `.previous` binaries, stops admission, rechecks that no other active or held Job appeared, installs the candidate, waits for `active`, requires a 2026 `server/discover` lifecycle, verifies the exact tool catalog, and records the protocol lifecycle, supported versions, `toolCatalogDigest`, candidate digests, and installed digests. A newly installed candidate may not pass through the legacy fallback. Recovery of an uncommitted replacement and explicit rollback probe modern discovery first but may use the previous service's 2025 `initialize` Session lifecycle, preserving old-binary rollback. If the post-stop race check fails before replacement, the original service is restarted and the receipt is `not_committed`; a failure after replacement automatically restores the receipt-local previous binaries. There is no general active-Job override in the normal deployment contract.
 
 Rollback is explicit and receipt-bound:
 
@@ -78,7 +78,11 @@ scripts/ordivon-runtime-deploy rollback \
   --env-file /etc/ordivon/ordivon-runtime.env
 ```
 
-Rollback validates the receipt-bound install directory, service, environment file, binary set, and previous digests. It preserves the displaced current binaries inside the same receipt before restoring the previous set. If restoring the previous set fails, it attempts to restore the displaced current set and receipts both outcomes. Additive query indexes that do not change Registry semantics are maintained outside `schema_migrations`; this preserves previous-binary rollback compatibility while allowing the newer Runtime to recreate missing performance indexes idempotently.
+Rollback validates the receipt-bound install directory, service, environment file, binary set, and previous digests. It preserves the displaced current binaries inside the same receipt before restoring the previous set. If restoring the previous set fails, it attempts to restore the displaced current set and receipts both outcomes. Its MCP probe accepts either the modern lifecycle or the prior legacy Session lifecycle, because rollback must be able to prove a genuinely old binary rather than require it to implement the new protocol. Additive query indexes that do not change Registry semantics are maintained outside `schema_migrations`; this preserves previous-binary rollback compatibility while allowing the newer Runtime to recreate missing performance indexes idempotently.
+
+### MCP probe module placement
+
+`scripts/ordivon-runtime-deploy` and `scripts/ordivon-runtime-reclaim` share `scripts/mcp_probe.py`; they no longer embed separate protocol clients. Run them from the repository as shown above, or install/copy all three files into the same directory. Installing either executable script without its sibling module is unsupported and fails before any mutation. Candidate deployment requires modern discovery; reclaim uses modern discovery first and falls back to legacy initialization only so that an installed previous Runtime can still release a Workspace through its own `workspace.close` contract.
 
 ## Workspace lifecycle and reclaim
 
@@ -165,7 +169,7 @@ The one-time pre-release installation hygiene pass is complete and remains avail
 
 ## Secret-free status
 
-`scripts/ordivon-runtime-status` combines the latest successful deployment receipt, installed binary digests, systemd state, allowlisted numeric Runtime configuration, Registry summaries, Workspace consistency, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.
+`scripts/ordivon-runtime-status` combines the latest successful deployment receipt, installed binary digests, the receipted MCP lifecycle, selected protocol version, supported protocol versions, `toolCatalogDigest`, systemd state, allowlisted numeric Runtime configuration, Registry summaries, Workspace consistency, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.
 
 ```bash
 scripts/ordivon-runtime-status

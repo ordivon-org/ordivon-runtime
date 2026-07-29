@@ -210,7 +210,6 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.exec",
         description = "Run one effect-opaque command inside a workspace with the installed service user's trusted-local authority. execution.executable must be an absolute host path and execution.cwdRelative must be relative to the Workspace root. The server makes duplicate clientRequestId admission idempotent and binds current Git source state, but it does not claim the command's external effects are idempotent.",
-        execution(task_support = "optional"),
         annotations(
             title = "Execute transactional workspace job",
             read_only_hint = false,
@@ -234,7 +233,6 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.execPlan",
         description = "Run an ordered structured execution plan inside one Workspace. Steps use absolute executables and explicit args, run sequentially, stop on the first failure by default, and continue only when that step explicitly sets continueOnError. The Job exposes current and failed step progress without parsing shell text.",
-        execution(task_support = "optional"),
         annotations(
             title = "Execute fail-fast workspace plan",
             read_only_hint = false,
