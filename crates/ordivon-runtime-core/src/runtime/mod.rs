@@ -19,9 +19,10 @@ pub use inspection::{
     inspect_job, summarize_experience, RuntimeExperienceArtifactSummary,
     RuntimeExperienceCancellationSummary, RuntimeExperienceDispatchSummary,
     RuntimeExperienceDurationSummary, RuntimeExperienceJobSummary,
-    RuntimeExperienceRecoverySummary, RuntimeExperienceSummary, RuntimeInspectionArtifactSummary,
-    RuntimeInspectionAttempt, RuntimeInspectionCondition, RuntimeInspectionConfig,
-    RuntimeInspectionEpisodes, RuntimeInspectionEvent, RuntimeInspectionJob, RuntimeJobInspection,
+    RuntimeExperienceMechanicalLatencySummary, RuntimeExperienceRecoverySummary,
+    RuntimeExperienceSummary, RuntimeInspectionArtifactSummary, RuntimeInspectionAttempt,
+    RuntimeInspectionCondition, RuntimeInspectionConfig, RuntimeInspectionEpisodes,
+    RuntimeInspectionEvent, RuntimeInspectionJob, RuntimeJobInspection,
     DEFAULT_INSPECTION_EVENT_LIMIT, MAX_INSPECTION_EVENT_LIMIT, RUNTIME_INSPECTION_SCHEMA_VERSION,
 };
 pub use registry::{

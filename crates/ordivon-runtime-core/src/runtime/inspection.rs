@@ -10,7 +10,7 @@ use super::{
     RuntimeError, RuntimeErrorCode, RuntimeResult,
 };
 
-pub const RUNTIME_INSPECTION_SCHEMA_VERSION: u32 = 1;
+pub const RUNTIME_INSPECTION_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_INSPECTION_EVENT_LIMIT: u32 = 200;
 pub const MAX_INSPECTION_EVENT_LIMIT: u32 = 1_000;
 const MAX_INSPECTION_ATTEMPTS: u32 = 32;
@@ -142,6 +142,7 @@ pub struct RuntimeExperienceSummary {
     pub recovery: RuntimeExperienceRecoverySummary,
     pub dispatch: RuntimeExperienceDispatchSummary,
     pub cancellation: RuntimeExperienceCancellationSummary,
+    pub mechanical_latency_ms: RuntimeExperienceMechanicalLatencySummary,
     pub duration_ms: RuntimeExperienceDurationSummary,
     pub artifacts: RuntimeExperienceArtifactSummary,
     pub event_types: BTreeMap<String, u64>,
@@ -196,6 +197,35 @@ pub struct RuntimeExperienceDurationSummary {
     pub p95: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeExperienceMechanicalLatencySummary {
+    pub admission_to_dispatch: RuntimeExperienceDurationSummary,
+    pub dispatch_to_runner_bound: RuntimeExperienceDurationSummary,
+    pub runner_bound_to_terminal: RuntimeExperienceDurationSummary,
+    pub cancellation_to_terminal: RuntimeExperienceDurationSummary,
+    pub reconciliation_to_convergence: RuntimeExperienceDurationSummary,
+}
+
+#[derive(Default)]
+struct RuntimeMechanicalLatencySamples {
+    admission_to_dispatch: Vec<u64>,
+    dispatch_to_runner_bound: Vec<u64>,
+    runner_bound_to_terminal: Vec<u64>,
+    cancellation_to_terminal: Vec<u64>,
+    reconciliation_to_convergence: Vec<u64>,
+}
+
+#[derive(Default)]
+struct RuntimeJobLatencyState {
+    created_at_ms: u64,
+    dispatch_at_ms: Option<u64>,
+    runner_bound_at_ms: Option<u64>,
+    cancellation_at_ms: Option<u64>,
+    reconciliation_failed_at_ms: Option<u64>,
+    terminal_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -440,6 +470,8 @@ pub fn summarize_experience(
         .saturating_sub(cancellation_cancelled)
         .saturating_sub(cancellation_other);
 
+    let mechanical_latency = collect_mechanical_latency_samples(&connection, since_ms)?;
+
     let mut durations: Vec<u64> = Vec::new();
     let mut statement = connection
         .prepare(
@@ -510,12 +542,22 @@ pub fn summarize_experience(
             resolved_other: cancellation_other,
             unresolved: cancellation_unresolved,
         },
-        duration_ms: RuntimeExperienceDurationSummary {
-            samples: durations.len() as u64,
-            p50: percentile(&durations, 50),
-            p95: percentile(&durations, 95),
-            max: durations.last().copied(),
+        mechanical_latency_ms: RuntimeExperienceMechanicalLatencySummary {
+            admission_to_dispatch: duration_summary(&mechanical_latency.admission_to_dispatch),
+            dispatch_to_runner_bound: duration_summary(
+                &mechanical_latency.dispatch_to_runner_bound,
+            ),
+            runner_bound_to_terminal: duration_summary(
+                &mechanical_latency.runner_bound_to_terminal,
+            ),
+            cancellation_to_terminal: duration_summary(
+                &mechanical_latency.cancellation_to_terminal,
+            ),
+            reconciliation_to_convergence: duration_summary(
+                &mechanical_latency.reconciliation_to_convergence,
+            ),
         },
+        duration_ms: duration_summary(&durations),
         artifacts: RuntimeExperienceArtifactSummary {
             count: artifact_count,
             bytes: artifact_bytes,
@@ -525,6 +567,134 @@ pub fn summarize_experience(
         terminal_reasons,
         semantic_completion_evaluated: false,
     })
+}
+
+fn collect_mechanical_latency_samples(
+    connection: &Connection,
+    since_ms: u64,
+) -> RuntimeResult<RuntimeMechanicalLatencySamples> {
+    let mut statement = connection
+        .prepare(
+            "SELECT e.job_id,j.created_at_ms,e.event_type,e.observed_at_ms FROM job_events e JOIN jobs j ON j.job_id=e.job_id WHERE j.created_at_ms>=?1 ORDER BY e.job_id,e.event_sequence",
+        )
+        .map_err(|error| RuntimeError::from_sql(error, "prepare mechanical latency events"))?;
+    let rows = statement
+        .query_map([since_ms], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u64>(3)?,
+            ))
+        })
+        .map_err(|error| RuntimeError::from_sql(error, "query mechanical latency events"))?;
+
+    let mut samples = RuntimeMechanicalLatencySamples::default();
+    let mut current_job: Option<String> = None;
+    let mut state = RuntimeJobLatencyState::default();
+    for row in rows {
+        let (job_id, created_at_ms, event_type, observed_at_ms) =
+            row.map_err(|error| RuntimeError::from_sql(error, "decode mechanical latency event"))?;
+        if current_job.as_deref() != Some(job_id.as_str()) {
+            if current_job.is_some() {
+                append_job_latency_samples(&state, &mut samples);
+            }
+            current_job = Some(job_id);
+            state = RuntimeJobLatencyState {
+                created_at_ms,
+                ..RuntimeJobLatencyState::default()
+            };
+        }
+        match event_type.as_str() {
+            "DISPATCH_ISSUED" => {
+                state.dispatch_at_ms.get_or_insert(observed_at_ms);
+            }
+            "RUNNER_BOUND" => {
+                state.runner_bound_at_ms.get_or_insert(observed_at_ms);
+            }
+            "STOP_REQUESTED" => {
+                state.cancellation_at_ms.get_or_insert(observed_at_ms);
+            }
+            "RECONCILIATION_FAILED" => {
+                state
+                    .reconciliation_failed_at_ms
+                    .get_or_insert(observed_at_ms);
+            }
+            "JOB_TERMINAL" => {
+                state.terminal_at_ms.get_or_insert(observed_at_ms);
+            }
+            "RECONCILIATION_CONVERGED" | "RUNNER_RESULT_RECOVERED" | "JOB_RESOLUTION_CORRECTED" => {
+                if let Some(failed_at_ms) = state.reconciliation_failed_at_ms.take() {
+                    append_interval(
+                        failed_at_ms,
+                        Some(observed_at_ms),
+                        &mut samples.reconciliation_to_convergence,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    if current_job.is_some() {
+        append_job_latency_samples(&state, &mut samples);
+    }
+    for values in [
+        &mut samples.admission_to_dispatch,
+        &mut samples.dispatch_to_runner_bound,
+        &mut samples.runner_bound_to_terminal,
+        &mut samples.cancellation_to_terminal,
+        &mut samples.reconciliation_to_convergence,
+    ] {
+        values.sort_unstable();
+    }
+    Ok(samples)
+}
+
+fn append_job_latency_samples(
+    state: &RuntimeJobLatencyState,
+    samples: &mut RuntimeMechanicalLatencySamples,
+) {
+    append_interval(
+        state.created_at_ms,
+        state.dispatch_at_ms,
+        &mut samples.admission_to_dispatch,
+    );
+    if let Some(dispatch_at_ms) = state.dispatch_at_ms {
+        append_interval(
+            dispatch_at_ms,
+            state.runner_bound_at_ms,
+            &mut samples.dispatch_to_runner_bound,
+        );
+    }
+    if let Some(runner_bound_at_ms) = state.runner_bound_at_ms {
+        append_interval(
+            runner_bound_at_ms,
+            state.terminal_at_ms,
+            &mut samples.runner_bound_to_terminal,
+        );
+    }
+    if let Some(cancellation_at_ms) = state.cancellation_at_ms {
+        append_interval(
+            cancellation_at_ms,
+            state.terminal_at_ms,
+            &mut samples.cancellation_to_terminal,
+        );
+    }
+}
+
+fn append_interval(start_ms: u64, end_ms: Option<u64>, values: &mut Vec<u64>) {
+    if let Some(end_ms) = end_ms.filter(|end_ms| *end_ms >= start_ms) {
+        values.push(end_ms - start_ms);
+    }
+}
+
+fn duration_summary(values: &[u64]) -> RuntimeExperienceDurationSummary {
+    RuntimeExperienceDurationSummary {
+        samples: values.len() as u64,
+        p50: percentile(values, 50),
+        p95: percentile(values, 95),
+        max: values.last().copied(),
+    }
 }
 
 fn open_read_only(config: &RuntimeInspectionConfig) -> RuntimeResult<(Connection, i64)> {

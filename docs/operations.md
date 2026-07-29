@@ -169,7 +169,7 @@ The one-time pre-release installation hygiene pass is complete and remains avail
 
 ## Secret-free status
 
-`scripts/ordivon-runtime-status` combines the latest successful deployment receipt, installed binary digests, the receipted MCP lifecycle, selected protocol version, supported protocol versions, `toolCatalogDigest`, systemd state, allowlisted numeric Runtime configuration, Registry summaries, Workspace consistency, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.
+`scripts/ordivon-runtime-status` combines the latest successful deployment receipt, installed binary digests, the receipted MCP lifecycle, selected protocol version, supported protocol versions, `toolCatalogDigest`, bounded protocol-consumer observations, the immediately previous rollback protocol, systemd state, allowlisted numeric Runtime configuration, Registry summaries, Workspace consistency, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.
 
 ```bash
 scripts/ordivon-runtime-status
@@ -177,7 +177,7 @@ scripts/ordivon-runtime-status --json
 scripts/ordivon-runtime-status --json --expected-commit "$(git rev-parse HEAD)"
 ```
 
-The command returns `0` for `healthy`, `1` when bounded facts require operator attention, and `2` for an invalid invocation or unreadable mandatory input. Output contains receipt identifiers and binary names, but not source paths, Workspace paths, command arguments, arbitrary environment values, or secret material. The deployment receipt remains the build-identity source of truth; the status command does not introduce another database or marker.
+Compatibility observations are advisory deletion evidence: an unreadable or truncated trace, unknown rollback protocol, or incomplete default seven-day observation window blocks a deletion conclusion but does not create an operator incident. The command returns `0` for `healthy`, `1` when bounded operational facts require operator attention, and `2` for an invalid invocation or unreadable mandatory input. Output contains receipt identifiers and binary names, but not source paths, Workspace paths, command arguments, arbitrary environment values, or secret material. The deployment receipt remains the build-identity source of truth; the status command does not introduce another database or marker.
 ## Contained-local acceptance
 
 The contained profile has a root/systemd integration fixture that uses the real Runner and cgroup v2. It proves that an unmounted secret below host `/var` is invisible, network socket creation or connection is blocked, the Workspace remains writable, inherited credential variables are absent, the systemd/Runner cgroup identity remains consistent, and `terminal_evidence` reports a clean process tree with the supplied foreign reference.
