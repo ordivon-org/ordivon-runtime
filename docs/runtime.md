@@ -74,6 +74,14 @@ Every terminal Attempt registers `terminal-evidence-<digest>.json` as a `termina
 
 Runtime prefers the recursive cgroup-v2 `cgroup.events: populated` fact and falls back to direct `cgroup.procs` membership only when the events file is unavailable. The evidence remains an Artifact consumed through `task.observe` and `artifact.read`; Runtime does not add a parallel evidence Tool or foreign-reference database. Foreign references are bounded immutable inputs in the Execution Plan and therefore participate in request identity, replay conflict detection, and the plan digest.
 
+### Host correlation convention
+
+Harness-originated execution uses opaque `ordivon.host` foreign references for the Host Task, Host Task Attempt, Assignment, and Harness Run. The Host places Task revision in the `task` generation, Assignment generation in the `assignment` generation, and binds each reference to its Host-owned digest. Runtime preserves these values exactly; it does not interpret Assignment validity, Harness capability, or Host Task state.
+
+Exact `clientRequestId` replay with the same execution request and references returns the original Runtime Job. Changing Assignment generation or digest under that request identity is an idempotency conflict, so stale work cannot masquerade as replay. A recovery caller locates the original Job with the exact `clientRequestId` and reads its immutable Execution Plan or terminal-evidence Artifact. Runtime success remains physical execution evidence; semantic CompletionProposal adjudication and TaskOutcome commitment remain Host-owned.
+
+The public `task.observe`, `task.list`, and `task.cancel` names remain compatibility Tool names for Runtime Job control. Public prose distinguishes Host Task Attempt, Harness Run, Runtime Job, and Runtime Attempt; Runtime adds no Host-specific enum, state table, query service, or semantic-completion field.
+
 A verified terminal result can defeat a later cancellation race because observed completion is stronger evidence than delayed intent. An identity-uncertain Attempt remains `orphaned` and retains its reservation while its recorded unit, process identity, or cgroup may still own a live process tree. When all three are proven absent, reconciliation converges it to `lost`, `timed_out`, or `cancelled` according to persisted intent and releases the reservation atomically. A late identity-bound runner Result still takes precedence when available.
 
 ## Workspace source commitment

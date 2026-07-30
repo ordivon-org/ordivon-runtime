@@ -1,7 +1,13 @@
 # Host Boundary Stage 2
 
-Status: implementation design for `ordivon-runtime#64`  
+Status: R1 contract and conformance vector implemented; R2 live Host integration remains
 Canonical experiment: `ordivon-computing/research/experiments/harness-boundary-v0/`
+
+## R1 result
+
+The frozen vector passes without Runtime production changes. Four opaque `ordivon.host` references bind one Host Task, Host Task Attempt, Assignment generation, and Harness Run to one Runtime Job and Runtime Attempt. Exact replay returns the original Job and creates no second Attempt; changing the Assignment generation or digest under the same `clientRequestId` produces `IdempotencyConflict`; terminal evidence preserves the exact references plus Job, Runtime Attempt, Workspace, source revision, and executable; and a fresh Registry instance locates the same Job and evidence through the exact request identity.
+
+The vector also confirms the negative boundary: terminal evidence records `executionDisposition=succeeded` but contains no semantic-completion or TaskOutcome claim. No Registry migration, Job or Attempt field, Host-specific schema enum, observation projection, Tool rename, foreign-reference index, service, or production Runtime branch was required. R2 is therefore limited to consuming one real Host H2 request and comparing it with this fixture.
 
 ## Objective
 
