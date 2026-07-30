@@ -1,13 +1,21 @@
 # Host Boundary Stage 2
 
-Status: R1 contract and conformance vector implemented; R2 live Host integration remains
+Status: R1 and R2 complete; Stage 2 retained the existing Runtime contract without production expansion
 Canonical experiment: `ordivon-computing/research/experiments/harness-boundary-v0/`
 
 ## R1 result
 
 The frozen vector passes without Runtime production changes. Four opaque `ordivon.host` references bind one Host Task, Host Task Attempt, Assignment generation, and Harness Run to one Runtime Job and Runtime Attempt. Exact replay returns the original Job and creates no second Attempt; changing the Assignment generation or digest under the same `clientRequestId` produces `IdempotencyConflict`; terminal evidence preserves the exact references plus Job, Runtime Attempt, Workspace, source revision, and executable; and a fresh Registry instance locates the same Job and evidence through the exact request identity.
 
-The vector also confirms the negative boundary: terminal evidence records `executionDisposition=succeeded` but contains no semantic-completion or TaskOutcome claim. No Registry migration, Job or Attempt field, Host-specific schema enum, observation projection, Tool rename, foreign-reference index, service, or production Runtime branch was required. R2 is therefore limited to consuming one real Host H2 request and comparing it with this fixture.
+The vector also confirms the negative boundary: terminal evidence records `executionDisposition=succeeded` but contains no semantic-completion or TaskOutcome claim. No Registry migration, Job or Attempt field, Host-specific schema enum, observation projection, Tool rename, foreign-reference index, service, or production Runtime branch was required.
+
+## R2 live result
+
+Runtime independently consumes the committed Host receipt [`../evidence/harness-h2-runtime-r2-live-d50f609-20260731.json`](../evidence/harness-h2-runtime-r2-live-d50f609-20260731.json). The request was emitted by Host implementation revision `d50f609ef2d269b5adc36e7e2088400c1971d0eb` against the active Runtime and bound one real Job and Runtime Attempt.
+
+The live trajectory matched the R1 fixture: exact replay returned the original Job; changing Assignment generation or digest under the old `clientRequestId` produced an idempotency conflict; terminal evidence retained the exact four Host references and bound Job, Attempt, Workspace, executable, and source revision; a fresh client recovered the same Job; Runtime made no semantic-completion or TaskOutcome claim; and the Workspace closed. The Runtime-side checker verifies receipt integrity, all thirteen live assertions, exact identity equality, reference order, terminal evidence, and the Host handoff projection.
+
+No R1 falsifier occurred. Runtime therefore retains the existing opaque `foreignReferences`, request identity, Job lookup, and terminal-evidence mechanisms. Canonical construction remains Host-local. Stage 2 adds no Runtime production code, state owner, projection, query index, service, or Tool alias.
 
 ## Objective
 
@@ -52,10 +60,10 @@ Reference types:
 
 | type | identity owner | generation | digest |
 |---|---|---|---|
-| `task` | Host | current Task revision | current Task event/projection digest |
+| `task` | Host | Assignment-bound Task revision | Host Task runtime-binding digest |
 | `task_attempt` | Host | omitted | immutable Task-Attempt descriptor digest |
 | `assignment` | Host | Assignment generation | immutable Assignment digest |
-| `harness_run` | Harness adapter, admitted by Host | omitted | run-intent or Run receipt digest |
+| `harness_run` | Harness adapter, admitted by Host | omitted | pre-completion Run binding digest |
 | `effect` | Host Effect owner | omitted | Effect digest |
 | `dispatch` | Host execution owner | omitted | Dispatch or exact request digest |
 
@@ -170,36 +178,25 @@ task.cancel
 
 They are compatibility names for Job control. Their descriptions and documentation already identify Job semantics. A rename or alias is admitted only after a live Host consumer demonstrates measurable ambiguity that qualified descriptions and foreign references fail to solve.
 
-## Required Runtime changes
+## Implemented Runtime validation
 
-### R1 — documentation
+### R1 — deterministic conformance
 
-Add this contract to the public Runtime model and link it from the README and Agent UX documentation.
+The Core vector verifies exact replay, Assignment generation and digest conflicts, terminal-evidence retention, fresh Registry recovery, and the absence of Runtime semantic-completion claims.
 
-Clarify in touched text:
+### R2 — live Host receipt
 
-- `foreignReferences` are correlation inputs, not foreign state ownership;
-- Job success is physical execution evidence;
-- Host Assignment generation performs semantic stale-worker fencing;
-- Runtime request identity prevents changed generations from masquerading as replay;
-- Runtime never validates semantic completion.
-
-### R2 — conformance test
-
-Add the vector above to `transactional_runtime.rs` or the closest existing foreign-reference integration test.
-
-The test must inspect the retained terminal-evidence Artifact rather than only the submitted request.
+The committed receipt and `scripts/check_host_h2_r2_receipt.py` independently verify the real Host request, all thirteen live assertions, exact cross-layer identities, and receipt integrity. Tamper tests reject changed references and failed live assertions even after integrity is recomputed.
 
 ### R3 — schema and catalog regression
 
-Retain existing MCP schema assertions that `foreignReferences`:
+Existing MCP tests retain the generic contract:
 
-- are present on execution requests;
-- use `ForeignReference` schema;
-- reject unknown fields;
-- remain bounded.
-
-Add no Host-specific enum to Runtime JSON Schema. Reference type values remain opaque strings.
+- execution requests expose bounded `foreignReferences`;
+- references use the generic `ForeignReference` schema;
+- unknown fields remain rejected;
+- reference type values remain opaque strings;
+- Runtime introduces no Host-specific enum.
 
 ## Host-owned changes
 
@@ -237,28 +234,28 @@ A projection becomes justified only when the live experiment shows that reading 
 - authoritative cross-layer binding is read from immutable Execution Plan or terminal evidence;
 - Runtime avoids duplicating reference state into every observation.
 
-## Acceptance
+## Acceptance result
 
-Stage 2 is complete when:
+Stage 2 passed every admission condition:
 
-- the conformance vector passes;
-- terminal evidence contains exact Host references;
-- changed Assignment generation conflicts under one request identity;
-- fresh Host recovery locates the original Job without duplicate dispatch;
-- public text consistently distinguishes Host Task Attempt from Runtime Attempt;
-- no Runtime schema migration or Tool rename is required.
+- deterministic and live conformance vectors passed;
+- terminal evidence contained the exact Host references;
+- changed Assignment generation and digest conflicted under the old request identity;
+- a fresh Host client recovered the original Job without duplicate dispatch;
+- public text distinguishes Host Task Attempt, Harness Run, Runtime Job, and Runtime Attempt;
+- no Runtime schema migration, Tool rename, or production change was required.
 
-## Falsifiers
+## Reopen conditions
 
-Expand Runtime only if the live vector proves one of these:
+Reopen the Runtime boundary only if later live work proves one of these:
 
-- foreign references are not recoverable from retained Runtime evidence;
+- foreign references cannot be recovered from retained Runtime evidence;
 - the original Job cannot be located after Host restart;
-- changed Assignment generation can be silently treated as replay;
+- changed Assignment generation can be treated as replay;
 - terminal evidence cannot bind the cross-layer identities;
-- reading the evidence introduces repeated material recovery cost that a bounded projection would remove.
+- repeated recovery cost justifies one bounded projection.
 
-Absent such evidence, close `ordivon-runtime#64` with the existing field retained and no broader Runtime abstraction.
+Current evidence supports closing `ordivon-runtime#64` with the existing generic field retained and no broader Runtime abstraction.
 
 ## Implementation batches
 
@@ -268,13 +265,13 @@ Documentation, terminology audit, terminal-evidence conformance vector.
 
 ### R2 — Host integration verification
 
-Consume one real request emitted by the Host Harness experiment and compare it with the Runtime fixture.
+Completed with the committed live receipt and Runtime-side checker. The real Host request matched the R1 fixture without a Runtime production change.
 
 ### R3 — closeout
 
-Record costs and decide:
+Completed with this disposition:
 
-- retain the convention;
-- localize additional helpers to Host;
-- add one bounded projection if proven necessary;
-- otherwise close without production Runtime changes.
+- retain opaque Runtime foreign references, exact request identity, Job lookup, and terminal evidence;
+- localize reference construction, semantic digests, generation fencing, and completion decisions to Host;
+- reject a duplicated observation projection, Host-specific schema enum, correlation service, and Tool rename;
+- close Stage 2 without production Runtime expansion.
