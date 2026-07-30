@@ -649,6 +649,141 @@ fn terminal_evidence_is_a_durable_artifact_with_native_binding() {
 }
 
 #[test]
+fn host_boundary_references_replay_conflict_and_survive_terminal_evidence() {
+    let sandbox = Sandbox::new("host-boundary-references", 5000);
+    let mut submit = request(&sandbox, "request:harness-fixture:g1:step1", 4);
+    submit.plan.source_revision = "fixture-revision".to_string();
+    submit.plan.foreign_references = vec![
+        ForeignReference {
+            namespace: "ordivon.host".to_string(),
+            reference_type: "assignment".to_string(),
+            id: "assignment:fixture:1:g1".to_string(),
+            generation: Some("1".to_string()),
+            digest: Some(digest(b"assignment-generation-1")),
+        },
+        ForeignReference {
+            namespace: "ordivon.host".to_string(),
+            reference_type: "harness_run".to_string(),
+            id: "harness-run:codex:1".to_string(),
+            generation: None,
+            digest: Some(digest(b"harness-run-codex-1")),
+        },
+        ForeignReference {
+            namespace: "ordivon.host".to_string(),
+            reference_type: "task".to_string(),
+            id: "task:fixture".to_string(),
+            generation: Some("7".to_string()),
+            digest: Some(digest(b"task-fixture-revision-7")),
+        },
+        ForeignReference {
+            namespace: "ordivon.host".to_string(),
+            reference_type: "task_attempt".to_string(),
+            id: "task-attempt:fixture:1".to_string(),
+            generation: None,
+            digest: Some(digest(b"task-attempt-fixture-1")),
+        },
+    ];
+
+    let first = created(sandbox.registry.submit(&submit).unwrap());
+    let replay = sandbox.registry.submit(&submit).unwrap();
+    let replayed_job = match replay {
+        AdmissionOutcome::Existing { job } => job,
+        AdmissionOutcome::Created(_) => panic!("exact Host replay created a second Job"),
+    };
+    assert_eq!(replayed_job.job_id, first.job.job_id);
+    assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 1);
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    let attempt_count: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM attempts WHERE job_id=?1",
+            [&first.job.job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(attempt_count, 1);
+    drop(connection);
+
+    let mut changed_generation = submit.clone();
+    changed_generation.plan.foreign_references[0].generation = Some("2".to_string());
+    let error = sandbox.registry.submit(&changed_generation).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::IdempotencyConflict);
+
+    let mut changed_digest = submit.clone();
+    changed_digest.plan.foreign_references[0].digest =
+        Some(digest(b"assignment-generation-1-drift"));
+    let error = sandbox.registry.submit(&changed_digest).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::IdempotencyConflict);
+
+    let bundle_ready = sandbox
+        .registry
+        .mark_bundle_ready(
+            &first.attempt.attempt_id,
+            first.attempt.row_version,
+            &digest(b"host-boundary-bundle"),
+            first.attempt.created_at_ms + 1,
+        )
+        .unwrap();
+    let starting = sandbox
+        .registry
+        .mark_dispatch_issued(
+            &bundle_ready.attempt_id,
+            bundle_ready.row_version,
+            bundle_ready.created_at_ms + 2,
+        )
+        .unwrap();
+    write_completed_runner_result(&starting, 42);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let mut terminal = super::evidence::prepare_runner_terminal_from_bundle(&starting).unwrap();
+    runtime
+        .append_terminal_evidence(&starting, &mut terminal)
+        .unwrap();
+    sandbox.registry.commit_terminal(&terminal).unwrap();
+
+    let terminal_artifact = sandbox
+        .registry
+        .list_artifacts(&first.job.job_id)
+        .unwrap()
+        .into_iter()
+        .find(|artifact| artifact.kind == "terminal_evidence")
+        .unwrap();
+    let evidence: serde_json::Value = serde_json::from_slice(
+        &fs::read(Path::new(&starting.bundle_path).join(&terminal_artifact.relative_path)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(evidence["jobId"], first.job.job_id);
+    assert_eq!(evidence["attemptId"], starting.attempt_id);
+    assert_eq!(evidence["workspaceId"], submit.plan.workspace_id);
+    assert_eq!(evidence["sourceRevision"], "fixture-revision");
+    assert_eq!(evidence["executable"], submit.plan.executable);
+    assert_eq!(
+        serde_json::from_value::<Vec<ForeignReference>>(evidence["foreignReferences"].clone(),)
+            .unwrap(),
+        submit.plan.foreign_references,
+    );
+    assert_eq!(evidence["executionDisposition"], "succeeded");
+    assert!(evidence.get("semanticCompletion").is_none());
+    assert!(evidence.get("taskOutcome").is_none());
+
+    let fresh_registry = Registry::initialize(sandbox.registry.config().clone()).unwrap();
+    let located = fresh_registry
+        .list_jobs(&RuntimeJobListRequest {
+            limit: 10,
+            cursor: None,
+            client_request_id: Some(submit.client_request_id.clone()),
+        })
+        .unwrap();
+    assert_eq!(located.jobs.len(), 1);
+    assert_eq!(located.jobs[0].job_id, first.job.job_id);
+    let recovered_artifact = fresh_registry
+        .list_artifacts(&first.job.job_id)
+        .unwrap()
+        .into_iter()
+        .find(|artifact| artifact.kind == "terminal_evidence")
+        .unwrap();
+    assert_eq!(recovered_artifact.digest, terminal_artifact.digest);
+}
+
+#[test]
 fn recovered_terminal_evidence_supersedes_without_overwriting_history() {
     let sandbox = Sandbox::new("terminal-evidence-supersession", 5000);
     let submit = request(&sandbox, "request:terminal-evidence-supersession", 4);
