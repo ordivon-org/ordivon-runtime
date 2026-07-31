@@ -21,7 +21,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: cargo fmt --check
       - run: cargo test --workspace
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test -p ordivon-runtime-core --no-default-features --features transactional-runtime
       - run: uvx ruff check scripts/
       - run: python -m unittest discover -s scripts/tests -v

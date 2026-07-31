@@ -385,6 +385,11 @@ fn execute_step(
     } else {
         command.current_dir(&cwd);
     }
+    // Give every step its own process group. A timed-out shell may leave
+    // descendants holding stdout/stderr pipes after the direct child exits;
+    // killing only the child would then prevent the Runner from committing
+    // its durable result before the outer systemd RuntimeMaxSec ceiling.
+    command.process_group(0);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -431,14 +436,7 @@ fn execute_step(
         }
         if Instant::now() >= deadline {
             timed_out = true;
-            child.kill().map_err(|error| {
-                UniversalExecError::new(
-                    UniversalExecErrorCode::ToolFailed,
-                    format!("cannot terminate timed-out step {}: {error}", step.id),
-                    None,
-                    false,
-                )
-            })?;
+            terminate_process_group(child.id(), &step.id)?;
             break child.wait().map_err(|error| {
                 UniversalExecError::new(
                     UniversalExecErrorCode::ToolFailed,
@@ -464,6 +462,31 @@ fn execute_step(
         stdout_dropped,
         stderr_dropped,
     })
+}
+
+fn terminate_process_group(pid: u32, step_id: &str) -> Result<(), UniversalExecError> {
+    let pgid = i32::try_from(pid).map_err(|_| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::ToolFailed,
+            format!("timed-out step {step_id} has an invalid process identity"),
+            None,
+            false,
+        )
+    })?;
+    let result = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(UniversalExecError::new(
+        UniversalExecErrorCode::ToolFailed,
+        format!("cannot terminate process group for timed-out step {step_id}: {error}"),
+        None,
+        false,
+    ))
 }
 
 fn initialize_output_file(path: &Path) -> Result<(), UniversalExecError> {

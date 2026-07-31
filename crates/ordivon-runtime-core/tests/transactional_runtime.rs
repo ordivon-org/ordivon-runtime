@@ -347,6 +347,29 @@ impl Drop for IntegrationContext {
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_timeout_preserves_result_when_descendants_hold_output_pipes() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("timeout-descendant-pipes");
+    let runtime = context.runtime(2_000);
+    let mut request = context.request("timeout-descendant-pipes", 10_000);
+    request.execution.executable = "/usr/bin/bash".to_string();
+    request.execution.args = vec!["-lc".to_string(), "sleep 5 & wait".to_string()];
+    request.execution.timeout_ms = 100;
+    let started = Instant::now();
+    let result = runtime.run_task(&request).unwrap();
+    assert_eq!(result.status, "timed_out");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(result
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.kind == "execution_result"));
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
 fn contained_local_hides_unmounted_state_blocks_egress_and_preserves_evidence() {
     if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
@@ -1525,6 +1548,53 @@ fn runtime_corrupt_runner_result_is_orphaned_and_quarantined() {
             .state,
         ordivon_runtime_core::ReservationState::HeldOrphaned
     );
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_failed_unit_is_released_only_after_durable_terminal_commit() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("failed-unit-release");
+    context.write(
+        "runtime_failed_unit.py",
+        "import sys
+print('FAILED_UNIT_EVIDENCE', flush=True)
+sys.exit(7)
+",
+    );
+    let runtime = context.runtime(2_000);
+    let result = runtime
+        .run_task(&context.request("runtime_failed_unit.py", 30_000))
+        .unwrap();
+    assert_eq!(result.status, "failed");
+    assert!(result
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.kind == "terminal_evidence"));
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&result.job_id)
+        .unwrap()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let output = Command::new("systemctl")
+            .args([
+                "show",
+                &attempt.unit_name,
+                "--property=LoadState",
+                "--value",
+            ])
+            .output()
+            .unwrap();
+        if String::from_utf8_lossy(&output.stdout).trim() == "not-found" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "failed unit was not released");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]

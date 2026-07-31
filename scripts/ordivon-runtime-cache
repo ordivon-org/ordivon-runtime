@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""Inspect and migrate Ordivon Runtime execution caches without deleting fallbacks."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import sqlite3
+import sys
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from urllib.parse import quote
+
+SCHEMA_VERSION = 1
+MIGRATION_CONFIRMATION = "MIGRATE_SHARED_EXECUTION_CACHES"
+PACKAGE_CACHE_DIRS = (
+    "uv",
+    "pip",
+    "npm",
+    "pnpm/store",
+    "corepack",
+    "bun/install-cache",
+    "go/mod",
+    "go/build",
+)
+
+
+def absolute_path(value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("path must be absolute")
+    return path
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="ordivon-runtime-cache")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("inspect", "migrate"):
+        command = commands.add_parser(name)
+        command.add_argument("--database", type=absolute_path, required=True)
+        command.add_argument("--runtime-store-root", type=absolute_path, required=True)
+        command.add_argument("--pretty", action="store_true")
+        if name == "migrate":
+            command.add_argument("--receipt-root", type=absolute_path, required=True)
+            command.add_argument("--lock-file", type=absolute_path, required=True)
+            command.add_argument("--confirm-policy", required=True)
+    return parser.parse_args()
+
+
+def source_key(source_repo: str) -> str:
+    return hashlib.sha256(source_repo.encode()).hexdigest()
+
+
+def directory_bytes(path: Path) -> int:
+    total = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            total += entry.stat(follow_symlinks=False).st_size
+                        elif entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
+
+
+def active_workspace_ids(database: Path) -> set[str]:
+    uri = f"file:{quote(str(database))}?mode=ro"
+    with sqlite3.connect(uri, uri=True, timeout=5) as connection:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+        required = {
+            "jobs": {"job_id", "workspace_id", "resolution"},
+            "attempts": {"attempt_id", "job_id"},
+            "concurrency_reservations": {"attempt_id", "state"},
+        }
+        for table, columns in required.items():
+            present = {
+                str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            missing = columns - present
+            if missing:
+                raise RuntimeError(
+                    "Runtime Registry lacks cache migration capabilities: "
+                    + ", ".join(f"{table}.{column}" for column in sorted(missing))
+                )
+        rows = connection.execute(
+            """
+            SELECT DISTINCT jobs.workspace_id
+            FROM jobs
+            LEFT JOIN attempts ON attempts.job_id=jobs.job_id
+            LEFT JOIN concurrency_reservations
+              ON concurrency_reservations.attempt_id=attempts.attempt_id
+            WHERE jobs.resolution IS NULL
+               OR concurrency_reservations.state IN ('active','held_orphaned')
+            """
+        ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def load_open_records(store_root: Path) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    records: list[dict[str, str]] = []
+    issues: list[dict[str, str]] = []
+    records_root = store_root / "workspace-records"
+    if not records_root.is_dir():
+        return records, [{"code": "RECORD_ROOT_MISSING", "path": str(records_root)}]
+    for path in sorted(records_root.glob("*.json")):
+        workspace_id = path.stem
+        if path.is_symlink() or not path.is_file():
+            issues.append({"workspaceId": workspace_id, "code": "RECORD_NOT_REGULAR"})
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            issues.append({"workspaceId": workspace_id, "code": "RECORD_UNREADABLE"})
+            continue
+        if value.get("state", "open") == "closed":
+            continue
+        source_repo = value.get("sourceRepo")
+        if value.get("workspaceId") != workspace_id or not isinstance(source_repo, str):
+            issues.append({"workspaceId": workspace_id, "code": "RECORD_IDENTITY_INVALID"})
+            continue
+        if not Path(source_repo).is_absolute() or "\x00" in source_repo:
+            issues.append({"workspaceId": workspace_id, "code": "SOURCE_REPO_INVALID"})
+            continue
+        records.append({"workspaceId": workspace_id, "sourceRepo": source_repo})
+    return records, issues
+
+
+def inspect(database: Path, store_root: Path) -> dict[str, object]:
+    cache_root = store_root / "cache"
+    legacy_root = cache_root / "build"
+    source_root = legacy_root / "sources"
+    active = active_workspace_ids(database)
+    records, issues = load_open_records(store_root)
+    groups: dict[str, dict[str, object]] = {}
+    legacy_bytes = 0
+    for record in records:
+        workspace_id = record["workspaceId"]
+        legacy = legacy_root / workspace_id
+        if not legacy.is_dir() or legacy.is_symlink():
+            continue
+        byte_length = directory_bytes(legacy)
+        legacy_bytes += byte_length
+        key = source_key(record["sourceRepo"])
+        group = groups.setdefault(
+            key,
+            {
+                "sourceKey": key,
+                "sourceRepo": record["sourceRepo"],
+                "target": str(source_root / key),
+                "targetExists": (source_root / key).is_dir(),
+                "sourceRepoAvailable": Path(record["sourceRepo"]).is_dir(),
+                "candidates": [],
+            },
+        )
+        group["candidates"].append(
+            {
+                "workspaceId": workspace_id,
+                "path": str(legacy),
+                "bytes": byte_length,
+                "active": workspace_id in active,
+                "modifiedUnixMs": int(legacy.stat().st_mtime * 1000),
+            }
+        )
+    plans: list[dict[str, object]] = []
+    for group in groups.values():
+        candidates = list(group["candidates"])
+        candidates.sort(
+            key=lambda item: (
+                bool(item["active"]),
+                -int(item["bytes"]),
+                -int(item["modifiedUnixMs"]),
+                str(item["workspaceId"]),
+            )
+        )
+        group["candidates"] = candidates
+        donor = next((item for item in candidates if not item["active"]), None)
+        group["selectedDonor"] = donor
+        group["migrationEligible"] = (
+            donor is not None
+            and not group["targetExists"]
+            and bool(group["sourceRepoAvailable"])
+        )
+        plans.append(group)
+    plans.sort(key=lambda item: str(item["sourceKey"]))
+    package_root = cache_root / "shared"
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "generatedAtMs": int(time.time() * 1000),
+        "cacheRoot": str(cache_root),
+        "packageCaches": [str(package_root / relative) for relative in PACKAGE_CACHE_DIRS],
+        "summary": {
+            "sourceGroups": len(plans),
+            "migrationEligibleGroups": sum(bool(item["migrationEligible"]) for item in plans),
+            "legacyBytes": legacy_bytes,
+            "activeWorkspaces": len(active),
+            "issues": len(issues),
+        },
+        "groups": plans,
+        "issues": issues,
+    }
+
+
+@contextmanager
+def exclusive_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def write_json_atomic(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def migrate(args: argparse.Namespace) -> dict[str, object]:
+    if args.confirm_policy != MIGRATION_CONFIRMATION:
+        raise RuntimeError(f"--confirm-policy must equal {MIGRATION_CONFIRMATION}")
+    with exclusive_lock(args.lock_file):
+        plan = inspect(args.database, args.runtime_store_root)
+        package_root = args.runtime_store_root / "cache" / "shared"
+        for relative in PACKAGE_CACHE_DIRS:
+            (package_root / relative).mkdir(parents=True, exist_ok=True)
+        actions: list[dict[str, object]] = []
+        failures: list[dict[str, object]] = []
+        for group in plan["groups"]:
+            if not group["migrationEligible"]:
+                continue
+            donor = group["selectedDonor"]
+            assert isinstance(donor, dict)
+            source = Path(str(donor["path"]))
+            target = Path(str(group["target"]))
+            try:
+                if not source.is_dir() or source.is_symlink():
+                    raise RuntimeError("selected donor is no longer a regular directory")
+                if target.exists():
+                    raise RuntimeError("source-scoped target appeared after inspection")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(source, target)
+                actions.append(
+                    {
+                        "sourceKey": group["sourceKey"],
+                        "sourceRepo": group["sourceRepo"],
+                        "workspaceId": donor["workspaceId"],
+                        "from": str(source),
+                        "to": str(target),
+                        "bytes": donor["bytes"],
+                        "action": "legacy_cache_promoted",
+                    }
+                )
+            except (OSError, RuntimeError) as error:
+                failures.append(
+                    {
+                        "sourceKey": group["sourceKey"],
+                        "workspaceId": donor["workspaceId"],
+                        "error": str(error),
+                    }
+                )
+        receipt_id = time.strftime("cache-migration-%Y%m%dT%H%M%SZ", time.gmtime())
+        receipt = args.receipt_root / f"{receipt_id}-{os.getpid()}"
+        result = {
+            "schemaVersion": SCHEMA_VERSION,
+            "status": "completed" if not failures else "partial",
+            "completedAtMs": int(time.time() * 1000),
+            "confirmation": args.confirm_policy,
+            "planSummary": plan["summary"],
+            "actions": actions,
+            "failures": failures,
+            "receipt": str(receipt),
+        }
+        write_json_atomic(receipt / "plan.json", plan)
+        write_json_atomic(receipt / "result.json", result)
+        return result
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        result = (
+            inspect(args.database, args.runtime_store_root)
+            if args.command == "inspect"
+            else migrate(args)
+        )
+    except (OSError, RuntimeError, sqlite3.Error) as error:
+        print(f"runtime cache operation failed: {error}", file=sys.stderr)
+        return 2
+    print(
+        json.dumps(result, indent=2, sort_keys=True)
+        if args.pretty
+        else json.dumps(result, sort_keys=True)
+    )
+    return 0 if result.get("status") != "partial" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1101,6 +1101,46 @@ fn runner_timeout_is_a_durable_failed_result() {
 }
 
 #[test]
+fn runner_timeout_terminates_descendant_pipe_holders_before_result() {
+    let sandbox = Sandbox::new("timeout-descendants");
+    let workspace = sandbox.root.join("workspace");
+    let task_dir = sandbox.root.join("task");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&task_dir).unwrap();
+    let executable = real_executable("/usr/bin/bash");
+    let request = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        payload: None,
+        inherit_host_environment: true,
+        task_id: "task-timeout-descendants".to_string(),
+        workspace_id: "workspace-timeout-descendants".to_string(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
+        executable: executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&executable).unwrap(),
+        args: vec!["-lc".to_string(), "sleep 5 & wait".to_string()],
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        steps: Vec::new(),
+        timeout_ms: 50,
+        stdout_limit_bytes: 1024,
+        stderr_limit_bytes: 1024,
+    };
+    write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
+    let started = std::time::Instant::now();
+    run_task_runner(&task_dir).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result.status, TaskTerminalStatus::Failed);
+    assert!(result.timed_out);
+}
+
+#[test]
 fn workspace_batch_mutation_preflights_before_writing() {
     let sandbox = Sandbox::new("batch");
     let source = sandbox.root.join("source");

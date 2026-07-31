@@ -167,6 +167,39 @@ scripts/ordivon-runtime-lifecycle repair \
 
 The one-time pre-release installation hygiene pass is complete and remains available through Git history and its receipts rather than as a permanent Runtime subsystem. Target commands do not inherit the Runtime service environment. `ORDIVON_EXEC_PATH` and `ORDIVON_EXEC_HOME` explicitly retain trusted root toolchains, while request `env` values remain the only per-operation overrides. The trusted-local root authority model remains unchanged.
 
+## Shared execution caches
+
+Runtime separates source isolation from reusable toolchain state:
+
+```text
+cache/shared/                    global package-download caches
+cache/build/sources/<sha256>/    trusted-local build cache per canonical source repository
+cache/build/<workspaceId>/       contained-local or legacy Workspace build cache
+cache/workspaces/<workspaceId>/  Workspace generic cache and contained-local home/tooling
+cache/tmp/<workspaceId>/         Workspace temporary files
+```
+
+The committed execution environment sets explicit paths for Cargo, uv, pip, npm, pnpm/Corepack, Bun, and Go. Trusted-local Jobs from different detached Workspaces of one source repository receive the same `CARGO_TARGET_DIR`; different repositories receive different directories. Package-download caches are global in trusted-local. Contained-local remains Workspace-scoped.
+
+Inspect legacy build caches without mutation:
+
+```bash
+scripts/ordivon-runtime-cache inspect \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --runtime-store-root /var/lib/ordivon/runtime --pretty
+```
+
+Migration is explicit, locked, and receipted. For each source repository it promotes the largest inactive legacy Workspace build cache with an atomic rename. Active or held Workspaces are excluded, an existing source-scoped target is never overwritten, and nonselected legacy caches are retained as fallbacks for later Workspace lifecycle cleanup.
+
+```bash
+scripts/ordivon-runtime-cache migrate \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --runtime-store-root /var/lib/ordivon/runtime \
+  --receipt-root /var/lib/ordivon/runtime/cache-receipts \
+  --lock-file /run/ordivon-runtime-cache.lock \
+  --confirm-policy MIGRATE_SHARED_EXECUTION_CACHES --pretty
+```
+
 ## Secret-free status
 
 `scripts/ordivon-runtime-status` combines the latest successful deployment receipt, installed binary digests, the receipted MCP lifecycle, selected protocol version, supported protocol versions, `toolCatalogDigest`, bounded protocol-consumer observations, the immediately previous rollback protocol, systemd state, allowlisted numeric Runtime configuration, Registry summaries, Workspace consistency, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.

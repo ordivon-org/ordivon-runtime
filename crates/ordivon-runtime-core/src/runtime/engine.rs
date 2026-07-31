@@ -54,6 +54,23 @@ const INTERACTIVE_RECONCILIATION_LIMIT: u32 = 32;
 const ADAPTIVE_POLL_DELAYS_MS: [u64; 5] = [2, 5, 10, 20, 50];
 const DEFAULT_EXECUTION_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const DEFAULT_EXECUTION_HOME: &str = "/root";
+const CONTAINED_RUNTIME_ENVIRONMENT: [&str; 15] = [
+    "HOME",
+    "TMPDIR",
+    "XDG_CACHE_HOME",
+    "CARGO_TARGET_DIR",
+    "UV_CACHE_DIR",
+    "PIP_CACHE_DIR",
+    "npm_config_cache",
+    "npm_config_store_dir",
+    "COREPACK_HOME",
+    "BUN_INSTALL_CACHE_DIR",
+    "GOMODCACHE",
+    "GOCACHE",
+    "GIT_OPTIONAL_LOCKS",
+    "ORDIVON_PAYLOAD_UID",
+    "ORDIVON_PAYLOAD_GID",
+];
 
 fn adaptive_poll_delay(poll_index: usize) -> Duration {
     Duration::from_millis(
@@ -451,10 +468,8 @@ impl Runtime {
         let cwd = resolve_workspace_cwd(&record, &request.execution.cwd_relative)
             .map_err(map_universal_error)?;
         let executable = validate_executable(&self.executor, &request.execution.executable)?;
-        let base_environment = self.execution_environment(
-            &request.execution.workspace_id,
-            request.execution.execution_profile,
-        )?;
+        let base_environment =
+            self.execution_environment(&record, request.execution.execution_profile)?;
         let mut steps = Vec::with_capacity(request.execution.steps.len());
         for step in &request.execution.steps {
             let step_cwd =
@@ -527,14 +542,28 @@ impl Runtime {
 
     fn execution_environment(
         &self,
-        workspace_id: &str,
+        record: &crate::universal::WorkspaceRecord,
         execution_profile: super::ExecutionProfile,
     ) -> RuntimeResult<BTreeMap<String, String>> {
-        let workspace_cache = self.executor.workspace_cache_path(workspace_id);
-        let build_cache = self.executor.workspace_build_cache_path(workspace_id);
-        let workspace_tmp = self.executor.workspace_tmp_path(workspace_id);
-        let shared = self.executor.shared_caches_root();
-        for path in [&workspace_cache, &build_cache, &workspace_tmp, &shared] {
+        let workspace_cache = self.executor.workspace_cache_path(&record.workspace_id);
+        let workspace_tmp = self.executor.workspace_tmp_path(&record.workspace_id);
+        let (build_cache, package_cache) = match execution_profile {
+            super::ExecutionProfile::TrustedLocal => (
+                self.executor.source_build_cache_path(&record.source_repo),
+                self.executor.shared_caches_root(),
+            ),
+            super::ExecutionProfile::ContainedLocal => (
+                self.executor
+                    .workspace_build_cache_path(&record.workspace_id),
+                workspace_cache.join("tooling"),
+            ),
+        };
+        for path in [
+            &workspace_cache,
+            &build_cache,
+            &workspace_tmp,
+            &package_cache,
+        ] {
             fs::create_dir_all(path).map_err(|error| {
                 io_error(&format!("create execution cache {}", path.display()), error)
             })?;
@@ -568,22 +597,22 @@ impl Runtime {
             "XDG_CACHE_HOME".to_string(),
             workspace_cache.to_string_lossy().into_owned(),
         );
-        environment.insert(
-            "CARGO_TARGET_DIR".to_string(),
-            build_cache.join("cargo").to_string_lossy().into_owned(),
-        );
-        environment.insert(
-            "UV_CACHE_DIR".to_string(),
-            shared.join("uv").to_string_lossy().into_owned(),
-        );
-        environment.insert(
-            "PIP_CACHE_DIR".to_string(),
-            shared.join("pip").to_string_lossy().into_owned(),
-        );
-        environment.insert(
-            "npm_config_cache".to_string(),
-            shared.join("npm").to_string_lossy().into_owned(),
-        );
+        for (name, path) in [
+            ("CARGO_TARGET_DIR", build_cache.join("cargo")),
+            ("UV_CACHE_DIR", package_cache.join("uv")),
+            ("PIP_CACHE_DIR", package_cache.join("pip")),
+            ("npm_config_cache", package_cache.join("npm")),
+            ("npm_config_store_dir", package_cache.join("pnpm/store")),
+            ("COREPACK_HOME", package_cache.join("corepack")),
+            (
+                "BUN_INSTALL_CACHE_DIR",
+                package_cache.join("bun/install-cache"),
+            ),
+            ("GOMODCACHE", package_cache.join("go/mod")),
+            ("GOCACHE", package_cache.join("go/build")),
+        ] {
+            environment.insert(name.to_string(), path.to_string_lossy().into_owned());
+        }
         for name in [
             "HOME",
             "TMPDIR",
@@ -592,6 +621,11 @@ impl Runtime {
             "UV_CACHE_DIR",
             "PIP_CACHE_DIR",
             "npm_config_cache",
+            "npm_config_store_dir",
+            "COREPACK_HOME",
+            "BUN_INSTALL_CACHE_DIR",
+            "GOMODCACHE",
+            "GOCACHE",
         ] {
             let path = Path::new(environment.get(name).expect("execution path is present"));
             fs::create_dir_all(path).map_err(|error| {
@@ -816,7 +850,7 @@ impl Runtime {
                     Ok(_) => return Ok(()),
                     Err(error) if error.code == RuntimeErrorCode::LaunchIdentityMismatch => {
                         // A very short-lived unit can write valid start evidence, finish, and be
-                        // collected between the filesystem check and systemctl_show. A complete
+                        // unloaded between the filesystem check and systemctl_show. A complete
                         // identity-bound Runner result is stronger terminal evidence than the
                         // already-disappeared transient unit.
                         if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
@@ -946,12 +980,16 @@ impl Runtime {
                 return self.observation_from_registry(&current.job_id, 0, 0);
             }
             if current.state.is_terminal() {
+                if current.state != AttemptState::Orphaned {
+                    release_terminal_unit(&current.unit_name);
+                }
                 return self.observation_from_registry(&current.job_id, 0, 0);
             }
             let mut terminal = self.prepare_runner_terminal(&current)?;
             self.append_terminal_evidence(&current, &mut terminal)?;
             match self.registry.commit_terminal(&terminal) {
                 Ok(projection) => {
+                    release_terminal_unit(&current.unit_name);
                     self.cleanup_payload_view(&current.attempt_id)?;
                     return self.observation_from_parts(
                         projection,
@@ -1473,6 +1511,7 @@ impl Runtime {
         terminal.reason_code = "LATE_IDENTITY_BOUND_RUNNER_RESULT".to_string();
         self.append_terminal_evidence(&current, &mut terminal)?;
         self.registry.recover_orphaned_terminal(&terminal)?;
+        release_terminal_unit(&current.unit_name);
         self.cleanup_payload_view(&current.attempt_id)?;
         Ok(true)
     }
@@ -1701,6 +1740,7 @@ impl Runtime {
         self.append_terminal_evidence(&current, &mut terminal)?;
         let projection = self.registry.commit_terminal(&terminal)?;
         if state != AttemptState::Orphaned {
+            release_terminal_unit(&current.unit_name);
             self.cleanup_payload_view(&current.attempt_id)?;
         }
         self.observation_from_parts(projection, Some(current), 4096, 4096, None, None)
@@ -2279,6 +2319,9 @@ fn validate_run_request(request: &TaskRunRequest, max_output_bytes: u64) -> Runt
             "execution",
         ));
     }
+    if request.execution.execution_profile == super::ExecutionProfile::ContainedLocal {
+        validate_contained_environment(&request.execution.env, "execution.env")?;
+    }
     if request.execution.steps.len() > 32 {
         return Err(RuntimeError::invalid(
             "steps exceed the maximum of 32",
@@ -2311,6 +2354,9 @@ fn validate_run_request(request: &TaskRunRequest, max_output_bytes: u64) -> Runt
                 "step runtime, args, or environment exceed bounds",
                 &format!("execution.steps[{index}]"),
             ));
+        }
+        if request.execution.execution_profile == super::ExecutionProfile::ContainedLocal {
+            validate_contained_environment(&step.env, &format!("execution.steps[{index}].env"))?;
         }
         total_timeout = total_timeout.checked_add(step.timeout_ms).ok_or_else(|| {
             RuntimeError::invalid("step timeout sum overflowed", "execution.steps")
@@ -2360,6 +2406,23 @@ fn validate_execution_budget(
                 super::MAX_CPU_QUOTA_PERCENT
             ),
             &format!("{field_prefix}.cpuQuotaPercent"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_contained_environment(
+    environment: &BTreeMap<String, String>,
+    field: &str,
+) -> RuntimeResult<()> {
+    if let Some(name) = CONTAINED_RUNTIME_ENVIRONMENT
+        .iter()
+        .find(|name| environment.contains_key(**name))
+    {
+        let environment_field = format!("{field}.{name}");
+        return Err(RuntimeError::invalid(
+            format!("{name} is owned by the contained-local Runtime profile"),
+            &environment_field,
         ));
     }
     Ok(())
@@ -2452,9 +2515,9 @@ fn build_systemd_run_command(spec: &SystemdRunSpec<'_>) -> RuntimeResult<Command
     let mut command = Command::new("systemd-run");
     command
         .arg(format!("--unit={unit_name}"))
-        .arg("--collect")
         .args([
             "--property=Type=exec",
+            "--property=CollectMode=inactive",
             "--property=KillMode=control-group",
             "--property=TimeoutStopSec=2s",
             "--property=SendSIGKILL=yes",
@@ -2552,6 +2615,11 @@ fn append_contained_properties(
         "UV_CACHE_DIR",
         "PIP_CACHE_DIR",
         "npm_config_cache",
+        "npm_config_store_dir",
+        "COREPACK_HOME",
+        "BUN_INSTALL_CACHE_DIR",
+        "GOMODCACHE",
+        "GOCACHE",
     ] {
         if let Some(value) = environment.get(name) {
             writable_paths.insert(PathBuf::from(value));
@@ -2619,6 +2687,34 @@ fn systemd_run(spec: &SystemdRunSpec<'_>) -> RuntimeResult<std::process::Output>
     build_systemd_run_command(spec)?
         .output()
         .map_err(|error| tool_error("cannot execute systemd-run", error))
+}
+
+fn release_terminal_unit(unit_name: &str) {
+    // Failed transient units retain the supervisor evidence needed by recovery.
+    // Only after Registry terminal commit is durable do we reset the failed state,
+    // allowing systemd to unload the unit without an unbounded failed-unit leak.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let Ok(properties) = systemctl_show(unit_name) else {
+            return;
+        };
+        if properties
+            .get("LoadState")
+            .is_some_and(|state| state == "not-found")
+        {
+            return;
+        }
+        if !unit_is_active(&properties) {
+            let _ = Command::new("systemctl")
+                .args(["reset-failed", unit_name])
+                .output();
+            return;
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn systemctl_show(unit_name: &str) -> RuntimeResult<BTreeMap<String, String>> {
@@ -3353,6 +3449,51 @@ mod trusted_systemd_command_tests {
     }
 
     #[test]
+    fn contained_runtime_paths_cannot_be_overridden_by_request_or_step_environment() {
+        let mut request = TaskRunRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            client_request_id: "request:contained-env".to_string(),
+            principal: "principal:test".to_string(),
+            global_limit: 1,
+            execution: UniversalExecutionRequest {
+                workspace_id: "workspace-contained-env".to_string(),
+                executable: "/usr/bin/true".to_string(),
+                args: Vec::new(),
+                cwd_relative: ".".to_string(),
+                env: BTreeMap::from([("CARGO_TARGET_DIR".to_string(), "/etc".to_string())]),
+                timeout_ms: 1_000,
+                stdout_limit_bytes: 1_024,
+                stderr_limit_bytes: 1_024,
+                steps: Vec::new(),
+                budget: crate::ExecutionBudget::default(),
+                execution_profile: crate::runtime::ExecutionProfile::ContainedLocal,
+                foreign_references: Vec::new(),
+            },
+            wait_ms: 0,
+            stdout_tail_bytes: 0,
+            stderr_tail_bytes: 0,
+        };
+        let error = validate_run_request(&request, 1_024).unwrap_err();
+        assert_eq!(
+            error.field.as_deref(),
+            Some("execution.env.CARGO_TARGET_DIR")
+        );
+
+        request.execution.env.clear();
+        request.execution.steps.push(crate::UniversalExecutionStep {
+            id: "step".to_string(),
+            executable: "/usr/bin/true".to_string(),
+            args: Vec::new(),
+            cwd_relative: ".".to_string(),
+            env: BTreeMap::from([("HOME".to_string(), "/etc".to_string())]),
+            timeout_ms: 1_000,
+            continue_on_error: false,
+        });
+        let error = validate_run_request(&request, 1_024).unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("execution.steps[0].env.HOME"));
+    }
+
+    #[test]
     fn adaptive_polling_starts_fast_and_caps_at_fifty_milliseconds() {
         let observed = (0..8)
             .map(|index| adaptive_poll_delay(index).as_millis())
@@ -3422,11 +3563,42 @@ mod trusted_systemd_command_tests {
             startup_grace_ms: 2_000,
         })
         .unwrap();
+        let record = crate::universal::WorkspaceRecord {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-env".to_string(),
+            source_repo: root.join("source-a").to_string_lossy().into_owned(),
+            source_revision: "a".repeat(40),
+            workspace_path: root
+                .join("runtime/workspaces/workspace-env")
+                .to_string_lossy()
+                .into_owned(),
+            created_unix_ms: 1,
+        };
+        let peer = crate::universal::WorkspaceRecord {
+            workspace_id: "workspace-peer".to_string(),
+            workspace_path: root
+                .join("runtime/workspaces/workspace-peer")
+                .to_string_lossy()
+                .into_owned(),
+            ..record.clone()
+        };
+        let other = crate::universal::WorkspaceRecord {
+            workspace_id: "workspace-other".to_string(),
+            source_repo: root.join("source-b").to_string_lossy().into_owned(),
+            workspace_path: root
+                .join("runtime/workspaces/workspace-other")
+                .to_string_lossy()
+                .into_owned(),
+            ..record.clone()
+        };
         let environment = runtime
-            .execution_environment(
-                "workspace-env",
-                crate::runtime::ExecutionProfile::TrustedLocal,
-            )
+            .execution_environment(&record, crate::runtime::ExecutionProfile::TrustedLocal)
+            .unwrap();
+        let peer_environment = runtime
+            .execution_environment(&peer, crate::runtime::ExecutionProfile::TrustedLocal)
+            .unwrap();
+        let other_environment = runtime
+            .execution_environment(&other, crate::runtime::ExecutionProfile::TrustedLocal)
             .unwrap();
         assert!(!runtime.inherit_host_environment());
         assert_eq!(
@@ -3437,14 +3609,46 @@ mod trusted_systemd_command_tests {
             environment.get("HOME").map(String::as_str),
             Some(runtime.execution_home.as_str())
         );
+        assert_eq!(
+            environment.get("CARGO_TARGET_DIR"),
+            peer_environment.get("CARGO_TARGET_DIR")
+        );
+        assert_ne!(
+            environment.get("CARGO_TARGET_DIR"),
+            other_environment.get("CARGO_TARGET_DIR")
+        );
+        for name in [
+            "UV_CACHE_DIR",
+            "PIP_CACHE_DIR",
+            "npm_config_cache",
+            "npm_config_store_dir",
+            "COREPACK_HOME",
+            "BUN_INSTALL_CACHE_DIR",
+            "GOMODCACHE",
+            "GOCACHE",
+        ] {
+            assert_eq!(environment.get(name), peer_environment.get(name));
+            assert!(Path::new(environment.get(name).unwrap())
+                .starts_with(root.join("runtime/cache/shared")));
+        }
         let workspace_root = root.join("runtime/workspaces/workspace-env");
         for name in ["XDG_CACHE_HOME", "CARGO_TARGET_DIR", "TMPDIR"] {
             let value = Path::new(environment.get(name).unwrap());
             assert!(value.starts_with(root.join("runtime/cache")));
             assert!(!value.starts_with(&workspace_root));
         }
+        assert!(Path::new(environment.get("CARGO_TARGET_DIR").unwrap())
+            .starts_with(root.join("runtime/cache/build/sources")));
         assert!(Path::new(environment.get("XDG_CACHE_HOME").unwrap()).is_dir());
         assert!(Path::new(environment.get("TMPDIR").unwrap()).is_dir());
+
+        let contained = runtime
+            .execution_environment(&record, crate::runtime::ExecutionProfile::ContainedLocal)
+            .unwrap();
+        assert!(Path::new(contained.get("CARGO_TARGET_DIR").unwrap())
+            .starts_with(root.join("runtime/cache/build/workspace-env")));
+        assert!(Path::new(contained.get("UV_CACHE_DIR").unwrap())
+            .starts_with(root.join("runtime/cache/workspaces/workspace-env/tooling")));
         drop(runtime);
         fs::remove_dir_all(root).unwrap();
     }
@@ -3488,6 +3692,8 @@ mod trusted_systemd_command_tests {
             );
         }
         assert!(args.contains("KillMode=control-group"));
+        assert!(args.contains("CollectMode=inactive"));
+        assert!(!args.split_whitespace().any(|value| value == "--collect"));
         assert!(args.contains("RuntimeMaxSec=10000ms"));
         assert!(valid_environment_name("GITHUB_TOKEN"));
         assert!(valid_environment_name("CARGO_BIN_EXE_ordivon_job_fixture"));

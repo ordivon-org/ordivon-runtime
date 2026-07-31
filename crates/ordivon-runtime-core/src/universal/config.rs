@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{invalid, io_error, UniversalExecError, UniversalExecErrorCode};
+use super::{invalid, io_error, sha256_bytes, UniversalExecError, UniversalExecErrorCode};
 
 pub const UNIVERSAL_EXEC_SCHEMA_VERSION: u32 = 1;
 pub const MAX_UNIVERSAL_ARGS: usize = 128;
@@ -89,6 +89,7 @@ impl UniversalExecutorConfig {
             self.tasks_root(),
             self.workspace_caches_root(),
             self.build_caches_root(),
+            self.source_build_caches_root(),
             self.workspace_tmp_root(),
             self.shared_caches_root(),
         ] {
@@ -123,6 +124,10 @@ impl UniversalExecutorConfig {
         self.cache_root().join("build")
     }
 
+    pub fn source_build_caches_root(&self) -> PathBuf {
+        self.build_caches_root().join("sources")
+    }
+
     pub fn workspace_tmp_root(&self) -> PathBuf {
         self.cache_root().join("tmp")
     }
@@ -137,6 +142,12 @@ impl UniversalExecutorConfig {
 
     pub(crate) fn workspace_build_cache_path(&self, workspace_id: &str) -> PathBuf {
         self.build_caches_root().join(workspace_id)
+    }
+
+    pub(crate) fn source_build_cache_path(&self, source_repo: &str) -> PathBuf {
+        let digest = sha256_bytes(source_repo.as_bytes());
+        let key = digest.strip_prefix("sha256:").unwrap_or(&digest);
+        self.source_build_caches_root().join(key)
     }
 
     pub(crate) fn workspace_tmp_path(&self, workspace_id: &str) -> PathBuf {
