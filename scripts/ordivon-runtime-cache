@@ -208,6 +208,7 @@ def inspect(database: Path, store_root: Path) -> dict[str, object]:
         group["targetHasFiles"] = target_has_files
         group["migrationEligible"] = (
             donor is not None
+            and int(donor["bytes"]) > 0
             and bool(group["sourceRepoAvailable"])
             and not group["activeWorkspaceIds"]
             and (not group["targetExists"] or not target_has_files)

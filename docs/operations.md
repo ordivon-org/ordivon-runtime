@@ -189,7 +189,7 @@ scripts/ordivon-runtime-cache inspect \
   --runtime-store-root /var/lib/ordivon/runtime --pretty
 ```
 
-Migration is explicit, locked, and receipted. For each source repository it promotes the largest inactive legacy Workspace build cache with an atomic rename. Any source repository with an active or held Workspace is excluded. An absent or directory-only empty source target may be atomically replaced; a target containing cache files is never overwritten. Nonselected legacy caches are retained as fallbacks for later Workspace lifecycle cleanup.
+Migration is explicit, locked, and receipted. For each source repository it promotes the largest nonempty inactive legacy Workspace build cache with an atomic rename. Any source repository with an active or held Workspace is excluded. An absent or directory-only empty source target may be atomically replaced; a target containing cache files is never overwritten. Nonselected legacy caches are retained as fallbacks for later Workspace lifecycle cleanup.
 
 ```bash
 scripts/ordivon-runtime-cache migrate \

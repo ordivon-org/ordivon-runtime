@@ -170,6 +170,35 @@ class CacheMigrationTests(unittest.TestCase):
             self.assertEqual(active_report["groups"][0]["activeWorkspaceIds"], ["workspace-active"])
             self.assertFalse(active_report["groups"][0]["migrationEligible"])
 
+    def test_zero_byte_legacy_cache_is_not_promoted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            source = root / "source"
+            source.mkdir()
+            record(runtime, "workspace-empty", source)
+            (runtime / "cache" / "build" / "workspace-empty").mkdir(parents=True)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-cache",
+                    "inspect",
+                    "--database",
+                    str(database),
+                    "--runtime-store-root",
+                    str(runtime),
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(result.stdout)
+            self.assertEqual(report["groups"][0]["selectedDonor"]["bytes"], 0)
+            self.assertFalse(report["groups"][0]["migrationEligible"])
+
     def test_missing_source_repository_is_not_promoted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
