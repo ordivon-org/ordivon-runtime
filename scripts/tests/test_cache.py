@@ -56,12 +56,14 @@ class CacheMigrationTests(unittest.TestCase):
             database = root / "registry.sqlite3"
             initialize_registry(database, "workspace-active")
             source = root / "source"
+            active_source = root / "active-source"
             source.mkdir()
-            sizes = {
-                "workspace-small": 10,
-                "workspace-large": 100,
-                "workspace-active": 1000,
-            }
+            active_source.mkdir()
+            record(runtime, "workspace-active", active_source)
+            active_cache = runtime / "cache" / "build" / "workspace-active" / "cargo"
+            active_cache.mkdir(parents=True)
+            (active_cache / "artifact").write_bytes(b"x" * 1000)
+            sizes = {"workspace-small": 10, "workspace-large": 100}
             for workspace_id, size in sizes.items():
                 record(runtime, workspace_id, source)
                 cache = runtime / "cache" / "build" / workspace_id / "cargo"
@@ -98,6 +100,75 @@ class CacheMigrationTests(unittest.TestCase):
             self.assertTrue((runtime / "cache" / "build" / "workspace-active").is_dir())
             self.assertTrue((runtime / "cache" / "shared" / "pnpm" / "store").is_dir())
             self.assertTrue(Path(report["receipt"], "plan.json").is_file())
+
+    def test_empty_target_is_replaced_but_active_source_is_not(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            source = root / "source"
+            source.mkdir()
+            record(runtime, "workspace-donor", source)
+            legacy = runtime / "cache" / "build" / "workspace-donor" / "cargo"
+            legacy.mkdir(parents=True)
+            (legacy / "artifact").write_text("cache", encoding="utf-8")
+            key = hashlib.sha256(str(source).encode()).hexdigest()
+            empty_target = runtime / "cache" / "build" / "sources" / key / "cargo"
+            empty_target.mkdir(parents=True)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-cache",
+                    "migrate",
+                    "--database",
+                    str(database),
+                    "--runtime-store-root",
+                    str(runtime),
+                    "--receipt-root",
+                    str(root / "receipts"),
+                    "--lock-file",
+                    str(root / "cache.lock"),
+                    "--confirm-policy",
+                    "MIGRATE_SHARED_EXECUTION_CACHES",
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(result.stdout)
+            self.assertEqual(len(report["actions"]), 1)
+            self.assertTrue((empty_target / "artifact").is_file())
+
+            active_database = root / "active.sqlite3"
+            initialize_registry(active_database, "workspace-active")
+            active_runtime = root / "active-runtime"
+            active_source = root / "active-source"
+            active_source.mkdir()
+            record(active_runtime, "workspace-active", active_source)
+            record(active_runtime, "workspace-donor", active_source)
+            active_legacy = active_runtime / "cache" / "build" / "workspace-donor"
+            active_legacy.mkdir(parents=True)
+            (active_legacy / "artifact").write_text("cache", encoding="utf-8")
+            inspected = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-cache",
+                    "inspect",
+                    "--database",
+                    str(active_database),
+                    "--runtime-store-root",
+                    str(active_runtime),
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            active_report = json.loads(inspected.stdout)
+            self.assertEqual(active_report["groups"][0]["activeWorkspaceIds"], ["workspace-active"])
+            self.assertFalse(active_report["groups"][0]["migrationEligible"])
 
     def test_missing_source_repository_is_not_promoted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
