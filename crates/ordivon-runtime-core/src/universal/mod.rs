@@ -33,12 +33,12 @@ pub use types::{
     WorkspaceTextRange, WorkspaceWriteRequest, WorkspaceWriteResult,
     MAX_WORKSPACE_PATCH_EDITS_PER_FILE, MAX_WORKSPACE_PATCH_FILES,
 };
-#[cfg(any(feature = "transactional-runtime", test))]
-pub use workspace::workspace_source_state_digest;
 pub use workspace::{
     create_git_workspace, list_workspace_records, load_workspace_record, read_workspace_text,
     remove_git_workspace, workspace_diff, write_workspace_text,
 };
+#[cfg(any(feature = "transactional-runtime", test))]
+pub use workspace::{workspace_is_dirty, workspace_source_state_digest};
 
 pub(crate) use config::canonical_directory;
 pub(crate) use fsutil::{

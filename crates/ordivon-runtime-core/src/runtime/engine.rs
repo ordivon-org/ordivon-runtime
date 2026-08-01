@@ -30,7 +30,7 @@ use crate::universal::{
     canonical_directory, create_git_workspace_compact, list_workspace_records,
     load_workspace_record, mutate_workspace, patch_workspace, remove_git_workspace,
     resolve_workspace_cwd, sha256_bytes, sha256_file, workspace_git_common_dir_at,
-    workspace_source_state_digest, write_bytes_atomic, write_json_atomic,
+    workspace_is_dirty, workspace_source_state_digest, write_bytes_atomic, write_json_atomic,
     CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
     RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskProgress, RunnerTaskRequest,
     RunnerTaskResult, UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
@@ -331,21 +331,22 @@ impl Runtime {
             let active_job_ids = self
                 .registry
                 .active_job_ids_for_workspace(&record.workspace_id, 20)?;
-            match crate::universal::workspace_diff(
-                &self.executor,
-                &WorkspaceDiffRequest {
-                    schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
-                    workspace_id: record.workspace_id.clone(),
-                    max_bytes: 1,
-                },
-            ) {
-                Ok(diff) => workspaces.push(Self::workspace_summary_from_parts(
-                    &record,
-                    diff.byte_length > 0 || !diff.untracked_paths.is_empty(),
-                    workspace_source_state_digest(&self.executor, &record.workspace_id)
-                        .map_err(map_universal_error)?,
-                    active_job_ids,
-                )),
+            match workspace_is_dirty(&self.executor, &record.workspace_id) {
+                Ok(dirty) => {
+                    let source_state_digest = request
+                        .include_source_state_digest
+                        .then(|| {
+                            workspace_source_state_digest(&self.executor, &record.workspace_id)
+                        })
+                        .transpose()
+                        .map_err(map_universal_error)?;
+                    workspaces.push(Self::workspace_summary_from_parts(
+                        &record,
+                        dirty,
+                        source_state_digest,
+                        active_job_ids,
+                    ));
+                }
                 Err(error) => issues.push(RuntimeWorkspaceIssue {
                     workspace_id: record.workspace_id,
                     code: error.code.as_str().to_string(),
@@ -376,8 +377,10 @@ impl Runtime {
         Ok(Self::workspace_summary_from_parts(
             record,
             diff.byte_length > 0 || !diff.untracked_paths.is_empty(),
-            workspace_source_state_digest(&self.executor, &record.workspace_id)
-                .map_err(map_universal_error)?,
+            Some(
+                workspace_source_state_digest(&self.executor, &record.workspace_id)
+                    .map_err(map_universal_error)?,
+            ),
             active_job_ids,
         ))
     }
@@ -385,7 +388,7 @@ impl Runtime {
     fn workspace_summary_from_parts(
         record: &crate::universal::WorkspaceRecord,
         dirty: bool,
-        source_state_digest: String,
+        source_state_digest: Option<String>,
         active_job_ids: Vec<String>,
     ) -> RuntimeWorkspaceSummary {
         RuntimeWorkspaceSummary {

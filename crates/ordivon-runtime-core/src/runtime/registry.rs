@@ -96,6 +96,34 @@ impl RegistryConfig {
     }
 }
 
+fn capacity_holders(
+    transaction: &Transaction<'_>,
+    workspace_id: Option<&str>,
+    limit: u32,
+) -> RuntimeResult<(Vec<String>, Vec<String>)> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT DISTINCT j.job_id,j.workspace_id FROM concurrency_reservations r JOIN attempts a ON a.attempt_id=r.attempt_id JOIN jobs j ON j.job_id=a.job_id WHERE r.state IN ('active','held_orphaned') AND (?1 IS NULL OR j.workspace_id=?1) ORDER BY r.acquired_at_ms ASC,j.job_id ASC LIMIT ?2",
+        )
+        .map_err(|error| RuntimeError::from_sql(error, "cannot prepare capacity-holder query"))?;
+    let rows = statement
+        .query_map(params![workspace_id, limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| RuntimeError::from_sql(error, "cannot query capacity holders"))?;
+    let mut job_ids = Vec::new();
+    let mut workspace_ids = Vec::new();
+    for row in rows {
+        let (job_id, holder_workspace_id) =
+            row.map_err(|error| RuntimeError::from_sql(error, "cannot decode capacity holder"))?;
+        job_ids.push(job_id);
+        if !workspace_ids.contains(&holder_workspace_id) {
+            workspace_ids.push(holder_workspace_id);
+        }
+    }
+    Ok((job_ids, workspace_ids))
+}
+
 impl Registry {
     pub fn initialize(config: RegistryConfig) -> RuntimeResult<Self> {
         config.validate()?;
@@ -523,6 +551,11 @@ impl Registry {
             )
             .map_err(|error| RuntimeError::from_sql(error, "cannot count workspace reservations"))?;
         if workspace_active >= WORKSPACE_EXECUTION_LIMIT {
+            let (holder_job_ids, holder_workspace_ids) = capacity_holders(
+                &transaction,
+                Some(&request.plan.workspace_id),
+                WORKSPACE_EXECUTION_LIMIT,
+            )?;
             return Err(RuntimeError::concurrency(
                 format!(
                     "workspace execution concurrency limit reached (active={workspace_active}, limit={WORKSPACE_EXECUTION_LIMIT})"
@@ -533,6 +566,8 @@ impl Registry {
                     active: workspace_active,
                     limit: WORKSPACE_EXECUTION_LIMIT,
                     workspace_id: Some(request.plan.workspace_id.clone()),
+                    holder_job_ids,
+                    holder_workspace_ids,
                 },
             ));
         }
@@ -545,6 +580,9 @@ impl Registry {
             )
             .map_err(|error| RuntimeError::from_sql(error, "cannot count global reservations"))?;
         if global_active >= request.global_limit {
+            let holder_limit = request.global_limit.min(16);
+            let (holder_job_ids, holder_workspace_ids) =
+                capacity_holders(&transaction, None, holder_limit)?;
             return Err(RuntimeError::concurrency(
                 format!(
                     "global execution concurrency limit reached (active={global_active}, limit={})",
@@ -556,6 +594,8 @@ impl Registry {
                     active: global_active,
                     limit: request.global_limit,
                     workspace_id: None,
+                    holder_job_ids,
+                    holder_workspace_ids,
                 },
             ));
         }

@@ -289,6 +289,37 @@ fn workspace_diff_reports_structured_modified_added_deleted_and_renamed_paths() 
 }
 
 #[test]
+fn workspace_dirty_probe_is_lightweight_and_respects_git_ignores() {
+    let sandbox = Sandbox::new("workspace-dirty-probe");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    fs::write(source.join(".gitignore"), "*.cache\n").unwrap();
+    run_git(&source, ["add", ".gitignore"]);
+    run_git(&source, ["commit", "-qm", "ignore cache"]);
+    let config = sandbox.config();
+    let workspace_id = "workspace-dirty-probe";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    assert!(!workspace_is_dirty(&config, workspace_id).unwrap());
+    fs::write(workspace.join("compiler.cache"), "ignored").unwrap();
+    assert!(!workspace_is_dirty(&config, workspace_id).unwrap());
+    fs::write(workspace.join("untracked.txt"), "visible").unwrap();
+    assert!(workspace_is_dirty(&config, workspace_id).unwrap());
+    fs::remove_file(workspace.join("untracked.txt")).unwrap();
+    fs::write(workspace.join("README.md"), "tracked change\n").unwrap();
+    assert!(workspace_is_dirty(&config, workspace_id).unwrap());
+}
+
+#[test]
 fn workspace_source_state_digest_tracks_source_but_ignores_ignored_cache() {
     let sandbox = Sandbox::new("source-state");
     let source = sandbox.root.join("source");

@@ -1,5 +1,3 @@
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use ordivon_runtime_core::{RegistryConfig, RuntimeConfig, UniversalExecutorConfig};
 use ordivon_runtime_mcp::server::{ExecutionContext, RuntimeServer, ServerConfig};
+use ordivon_runtime_mcp::{append_rotating_jsonl, DEFAULT_TRACE_ROTATION_BYTES};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -338,9 +337,21 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         .ok()
         .map(|value| value.parse())
         .transpose()?
-        .unwrap_or(4);
+        .unwrap_or(8);
     if global_limit == 0 {
         return Err("ORDIVON_GLOBAL_MAX_CONCURRENCY must be positive".into());
+    }
+    let max_runtime_ms: u64 = std::env::var("ORDIVON_MAX_RUNTIME_MS")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(900_000);
+    if !(1_000..=ordivon_runtime_core::MAX_UNIVERSAL_RUNTIME_MS).contains(&max_runtime_ms) {
+        return Err(format!(
+            "ORDIVON_MAX_RUNTIME_MS must be in 1000..={}",
+            ordivon_runtime_core::MAX_UNIVERSAL_RUNTIME_MS
+        )
+        .into());
     }
     let principal =
         std::env::var("ORDIVON_PRINCIPAL").unwrap_or_else(|_| "principal:local-owner".to_string());
@@ -367,7 +378,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                     workspace_gid,
                     runner_path,
                     allowed_executable_roots,
-                    max_runtime_ms: 900_000,
+                    max_runtime_ms,
                     max_output_bytes: 16 * 1024 * 1024,
                 },
                 startup_grace_ms,
@@ -426,14 +437,7 @@ fn append_http_trace(
             return;
         }
     };
-    let result = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| {
-            serde_json::to_writer(&mut file, &record)?;
-            file.write_all(b"\n")
-        });
+    let result = append_rotating_jsonl(path, &record, DEFAULT_TRACE_ROTATION_BYTES);
     drop(guard);
     if let Err(error) = result {
         tracing::warn!("cannot append HTTP trace {}: {error}", path.display());

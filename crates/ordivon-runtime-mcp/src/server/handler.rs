@@ -103,14 +103,8 @@ impl RuntimeServer {
                 .and_then(|capabilities| serde_json::to_value(capabilities).ok()),
             "observedUnixMs": unix_ms(),
         });
-        let write_result = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut file| {
-                serde_json::to_writer(&mut file, &record)?;
-                file.write_all(b"\n")
-            });
+        let write_result =
+            crate::append_rotating_jsonl(path, &record, crate::DEFAULT_TRACE_ROTATION_BYTES);
         if let Err(error) = write_result {
             tracing::warn!("cannot append protocol trace {}: {error}", path.display());
         }

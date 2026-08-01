@@ -712,6 +712,36 @@ pub(crate) fn workspace_diff_paths(
 }
 
 #[cfg(any(feature = "transactional-runtime", test))]
+pub fn workspace_is_dirty(
+    config: &UniversalExecutorConfig,
+    workspace_id: &str,
+) -> Result<bool, UniversalExecError> {
+    let record = load_workspace_record(config, workspace_id)?;
+    workspace_is_dirty_at(Path::new(&record.workspace_path))
+}
+
+fn workspace_is_dirty_at(workspace: &Path) -> Result<bool, UniversalExecError> {
+    let workspace = canonical_directory(workspace, "workspacePath")?;
+    let output = Command::new("git")
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(workspace)
+        .args([
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=normal",
+            "--ignore-submodules=none",
+        ])
+        .output()
+        .map_err(|error| tool_unavailable("git status", error))?;
+    if !output.status.success() {
+        return Err(tool_failed("git status", &output.stderr));
+    }
+    Ok(!output.stdout.is_empty())
+}
+
+#[cfg(any(feature = "transactional-runtime", test))]
 pub fn workspace_source_state_digest(
     config: &UniversalExecutorConfig,
     workspace_id: &str,

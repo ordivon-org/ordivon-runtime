@@ -64,7 +64,7 @@ Eligibility requires:
 - no active or held Job exists, except the deployment Job itself when the tool can prove its own Attempt identity from cgroup and Registry state;
 - the confirmation commit exactly matches the requested commit.
 
-The tool stages `.next` files, retains both receipt-local previous binaries and installed `.previous` binaries, stops admission, rechecks that no other active or held Job appeared, installs the candidate, waits for `active`, requires a 2026 `server/discover` lifecycle, verifies the exact tool catalog, and records the protocol lifecycle, supported versions, `toolCatalogDigest`, candidate digests, and installed digests. A newly installed candidate may not pass through the legacy fallback. Recovery of an uncommitted replacement and explicit rollback probe modern discovery first but may use the previous service's 2025 `initialize` Session lifecycle, preserving old-binary rollback. If the post-stop race check fails before replacement, the original service is restarted and the receipt is `not_committed`; a failure after replacement automatically restores the receipt-local previous binaries. There is no general active-Job override in the normal deployment contract.
+The tool stages `.next` files, retains both receipt-local previous binaries and installed `.previous` binaries, stops admission, rechecks that no other active or held Job appeared, installs the candidate, waits for `active`, requires a 2026 `server/discover` lifecycle, verifies the exact tool catalog, and records the protocol lifecycle, supported versions, `toolCatalogDigest`, candidate digests, and installed digests. After a successful standard-layout deployment it keeps the current and immediately previous candidate build trees and removes older exact-commit candidate directories; rollback remains receipt-owned and does not depend on those build trees. A newly installed candidate may not pass through the legacy fallback. Recovery of an uncommitted replacement and explicit rollback probe modern discovery first but may use the previous service's 2025 `initialize` Session lifecycle, preserving old-binary rollback. If the post-stop race check fails before replacement, the original service is restarted and the receipt is `not_committed`; a failure after replacement automatically restores the receipt-local previous binaries. There is no general active-Job override in the normal deployment contract.
 
 Rollback is explicit and receipt-bound:
 
@@ -130,7 +130,7 @@ The apply command is a policy executor, not a timer. Scheduling is intentionally
 
 ### Policy-driven lifecycle
 
-The low-level reclaim command remains the only release executor. `ordivon-runtime-lifecycle` adds the installed retention policy without creating another Workspace database. It derives the retention basis from Workspace creation and the latest durable Job/Attempt activity, treats active or held Jobs as leases, and classifies server-generated `ws-*` handles as `ephemeral`, explicit handles as `review`, or configured identities as `pinned`.
+The low-level reclaim command remains the only release executor. `ordivon-runtime-lifecycle` adds the installed retention policy without creating another Workspace database. It derives the retention basis from Workspace creation and the latest durable Job/Attempt activity and treats active or held Jobs as leases. The packaged policy defaults every Workspace identity—generated or readable—to `ephemeral` for 24 hours; only explicit exact/prefix rules promote selected identities to `review` or `pinned`. Naming is therefore no longer mistaken for retention intent.
 
 ```bash
 scripts/ordivon-runtime-lifecycle inspect \
@@ -200,9 +200,22 @@ scripts/ordivon-runtime-cache migrate \
   --confirm-policy MIGRATE_SHARED_EXECUTION_CACHES --pretty
 ```
 
+Cache reclamation is capacity-driven rather than a blind age sweep. The packaged daily lifecycle service uses a 64 GiB high watermark and removes least-recently-modified reclaimable cache directories until 48 GiB. Open or active Workspace caches and source-build caches referenced by any open Workspace are protected. Global package-manager caches are measured but not interpreted or deleted by Runtime; mature package-manager-native pruning remains their owner.
+
+```bash
+scripts/ordivon-runtime-cache prune \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --runtime-store-root /var/lib/ordivon/runtime \
+  --receipt-root /var/lib/ordivon/runtime/cache-receipts \
+  --lock-file /run/ordivon-runtime-cache.lock \
+  --high-watermark-bytes 68719476736 \
+  --low-watermark-bytes 51539607552 \
+  --confirm-policy PRUNE_EXECUTION_CACHES --pretty
+```
+
 ## Secret-free status
 
-`scripts/ordivon-runtime-status` combines the latest successful deployment receipt, installed binary digests, the receipted MCP lifecycle, selected protocol version, supported protocol versions, `toolCatalogDigest`, bounded protocol-consumer observations, the immediately previous rollback protocol, systemd state, allowlisted numeric Runtime configuration, Registry summaries, Workspace consistency, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.
+`scripts/ordivon-runtime-status` combines the latest successful deployment receipt, installed binary digests, the receipted MCP lifecycle, selected protocol version, supported protocol versions, `toolCatalogDigest`, bounded current-plus-rotated protocol observations, the immediately previous rollback protocol, systemd state, allowlisted numeric Runtime configuration, Registry summaries, Workspace consistency, cache/Registry/deployment/candidate byte measurements, stale dirty Workspace counts, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.
 
 ```bash
 scripts/ordivon-runtime-status

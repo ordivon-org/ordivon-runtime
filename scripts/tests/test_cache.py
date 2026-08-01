@@ -261,5 +261,55 @@ class CacheMigrationTests(unittest.TestCase):
             self.assertIsNone(report["groups"][0]["selectedDonor"])
 
 
+    def test_prune_uses_watermarks_and_preserves_open_workspace_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            source = root / "source"
+            source.mkdir()
+            record(runtime, "workspace-protected", source)
+            protected = runtime / "cache" / "build" / "workspace-protected"
+            protected.mkdir(parents=True)
+            (protected / "artifact").write_bytes(b"p" * 5)
+            stale = runtime / "cache" / "build" / "workspace-stale"
+            stale.mkdir(parents=True)
+            (stale / "artifact").write_bytes(b"s" * 120)
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-cache",
+                    "prune",
+                    "--database",
+                    str(database),
+                    "--runtime-store-root",
+                    str(runtime),
+                    "--receipt-root",
+                    str(root / "receipts"),
+                    "--lock-file",
+                    str(root / "cache.lock"),
+                    "--high-watermark-bytes",
+                    "50",
+                    "--low-watermark-bytes",
+                    "10",
+                    "--confirm-policy",
+                    "PRUNE_EXECUTION_CACHES",
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["status"], "completed")
+            self.assertTrue(protected.is_dir())
+            self.assertFalse(stale.exists())
+            self.assertLessEqual(report["afterBytes"], 50)
+            self.assertEqual(report["actions"][0]["action"], "cache_removed")
+            self.assertTrue(Path(report["receipt"], "plan.json").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()

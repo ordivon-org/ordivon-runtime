@@ -76,6 +76,8 @@ def fixture(root: Path) -> dict[str, Path]:
         json.dumps({"status": "completed", "actions": [], "failures": []}),
         encoding="utf-8",
     )
+    candidates = root / "candidates"
+    candidates.mkdir()
     install = root / "install"
     install.mkdir()
     executable(install / "runtime", "runtime\n")
@@ -168,7 +170,11 @@ def fixture(root: Path) -> dict[str, Path]:
     )
     env_file = root / "runtime.env"
     env_file.write_text(
-        "ORDIVON_GLOBAL_MAX_CONCURRENCY=4\n"
+        "ORDIVON_GLOBAL_MAX_CONCURRENCY=8\n"
+        "ORDIVON_MAX_RUNTIME_MS=3600000\n"
+        "ORDIVON_BODY_LIMIT_BYTES=1048576\n"
+        "ORDIVON_CACHE_HIGH_WATERMARK_BYTES=68719476736\n"
+        "ORDIVON_CACHE_LOW_WATERMARK_BYTES=51539607552\n"
         "ORDIVON_RECONCILE_INTERVAL_MS=15000\n"
         "ORDIVON_BEARER_TOKEN=super-secret-token\n"
         "PRIVATE_PATH=/private/value\n",
@@ -188,6 +194,7 @@ def fixture(root: Path) -> dict[str, Path]:
         "database": database,
         "store": store,
         "deployments": deployments.parent,
+        "candidates": candidates,
         "install": install,
         "env": env_file,
         "systemctl": systemctl,
@@ -204,6 +211,8 @@ def command(paths: dict[str, Path], *extra: str) -> list[str]:
         str(paths["store"]),
         "--deployment-root",
         str(paths["deployments"]),
+        "--candidate-root",
+        str(paths["candidates"]),
         "--install-dir",
         str(paths["install"]),
         "--env-file",
@@ -256,8 +265,13 @@ class RuntimeStatusTests(unittest.TestCase):
                 "receipt-bound-rollback:deploy-0",
                 decisions["2025-06-18"]["consumers"],
             )
-            self.assertEqual(report["config"]["globalMaxConcurrency"], 4)
+            self.assertEqual(report["config"]["globalMaxConcurrency"], 8)
+            self.assertEqual(report["config"]["maxRuntimeMs"], 3_600_000)
+            self.assertEqual(report["config"]["bodyLimitBytes"], 1_048_576)
             self.assertEqual(report["workspaces"]["dirty"], 0)
+            self.assertEqual(report["workspaces"]["staleDirty"], 0)
+            self.assertIsNotNone(report["storage"]["cacheBytes"])
+            self.assertIsNotNone(report["storage"]["registryBytes"])
             self.assertEqual(report["operatorAction"]["count"], 0)
             self.assertNotIn("super-secret-token", result.stdout)
             self.assertNotIn("/private/", result.stdout)
@@ -332,13 +346,66 @@ class RuntimeStatusTests(unittest.TestCase):
             self.assertFalse(decisions["2024-11-05"]["deletionEligible"])
             self.assertNotIn("2024-11-05", compatibility["deletionCandidates"])
 
+    def test_rotated_protocol_trace_is_part_of_bounded_compatibility_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            trace = paths["database"].parent / "runtime-trace.jsonl"
+            rotated = Path(str(trace) + ".1")
+            trace.replace(rotated)
+            trace.write_text(
+                json.dumps(
+                    {
+                        "kind": "mcp_protocol_observation",
+                        "observedUnixMs": 5,
+                        "protocolVersion": "2025-11-25",
+                        "method": "tools/call",
+                        "tool": "workspace.list",
+                        "client": {"name": "openai-mcp", "version": "1.0.0"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                command(paths, "--json"),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(completed.stdout)
+            observations = report["compatibility"]["observations"]
+            self.assertEqual(observations["segments"], 2)
+            self.assertGreaterEqual(observations["events"], 3)
+
+    def test_stale_dirty_workspace_requires_operator_attention_without_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            workspace = paths["store"] / "workspaces" / "workspace-1"
+            (workspace / "README.md").write_text("dirty\n", encoding="utf-8")
+            completed = subprocess.run(
+                command(paths, "--json", "--stale-dirty-hours", "1"),
+                cwd=REPO,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(completed.returncode, 1)
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["workspaces"]["staleDirty"], 1)
+            self.assertIn(
+                "STALE_DIRTY_WORKSPACES",
+                report["operatorAction"]["reasons"],
+            )
+            self.assertTrue(workspace.is_dir())
+
     def test_human_output_is_one_compact_line(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             paths = fixture(Path(temporary))
             result = subprocess.run(command(paths), cwd=REPO, check=True, text=True, capture_output=True)
             self.assertEqual(len(result.stdout.splitlines()), 1)
             self.assertIn("HEALTHY commit=aaaaaaaaaaaa", result.stdout)
-            self.assertIn("capacity=0+0/4", result.stdout)
+            self.assertIn("capacity=0+0/8", result.stdout)
 
 
 if __name__ == "__main__":

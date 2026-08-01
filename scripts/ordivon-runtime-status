@@ -21,6 +21,7 @@ TERMINAL_ATTEMPT_STATES = ("succeeded", "failed", "timed_out", "cancelled", "los
 DEFAULT_DATABASE = Path("/var/lib/ordivon/registry/registry.sqlite3")
 DEFAULT_STORE_ROOT = Path("/var/lib/ordivon/runtime")
 DEFAULT_DEPLOYMENT_ROOT = Path("/var/lib/ordivon/deployments")
+DEFAULT_CANDIDATE_ROOT = Path("/var/lib/ordivon/candidates")
 DEFAULT_INSTALL_DIR = Path("/usr/local/libexec/ordivon")
 DEFAULT_ENV_FILE = Path("/etc/ordivon/ordivon-runtime.env")
 DEFAULT_SERVICE = "ordivon-runtime.service"
@@ -28,6 +29,9 @@ DEFAULT_SYSTEMCTL = Path("/usr/bin/systemctl")
 MAX_WORKSPACE_SCAN = 256
 MAX_PROTOCOL_TRACE_BYTES = 8 * 1024 * 1024
 DEFAULT_PROTOCOL_RETENTION_HOURS = 168
+DEFAULT_STALE_DIRTY_HOURS = 168
+DEFAULT_CACHE_HIGH_WATERMARK_BYTES = 64 * 1024 * 1024 * 1024
+DEFAULT_CACHE_LOW_WATERMARK_BYTES = 48 * 1024 * 1024 * 1024
 
 
 class StatusError(RuntimeError):
@@ -53,10 +57,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--database", type=absolute_path, default=DEFAULT_DATABASE)
     result.add_argument("--runtime-store-root", type=absolute_path, default=DEFAULT_STORE_ROOT)
     result.add_argument("--deployment-root", type=absolute_path, default=DEFAULT_DEPLOYMENT_ROOT)
+    result.add_argument("--candidate-root", type=absolute_path, default=DEFAULT_CANDIDATE_ROOT)
     result.add_argument("--install-dir", type=absolute_path, default=DEFAULT_INSTALL_DIR)
     result.add_argument("--env-file", type=absolute_path, default=DEFAULT_ENV_FILE)
     result.add_argument("--trace-path", type=absolute_path)
     result.add_argument("--protocol-retention-hours", type=int, default=DEFAULT_PROTOCOL_RETENTION_HOURS)
+    result.add_argument("--stale-dirty-hours", type=int, default=DEFAULT_STALE_DIRTY_HOURS)
     result.add_argument("--service", default=DEFAULT_SERVICE)
     result.add_argument("--systemctl", type=absolute_path, default=DEFAULT_SYSTEMCTL)
     result.add_argument("--expected-commit", type=exact_commit)
@@ -152,7 +158,9 @@ def configured_trace_path(env_file: Path, database: Path) -> Path:
 
 
 def protocol_observations(trace_path: Path, since_ms: int) -> dict[str, Any]:
-    if not trace_path.is_file() or trace_path.is_symlink():
+    rotated = Path(str(trace_path) + ".1")
+    segments = [path for path in (rotated, trace_path) if path.is_file() and not path.is_symlink()]
+    if not segments:
         return {
             "available": False,
             "sinceMs": since_ms,
@@ -163,40 +171,49 @@ def protocol_observations(trace_path: Path, since_ms: int) -> dict[str, Any]:
             "versions": [],
         }
     try:
-        size = trace_path.stat().st_size
-        start = max(0, size - MAX_PROTOCOL_TRACE_BYTES)
+        total_size = sum(path.stat().st_size for path in segments)
+        remaining = MAX_PROTOCOL_TRACE_BYTES
+        chunks: list[bytes] = []
+        for path in reversed(segments):
+            if remaining <= 0:
+                break
+            size = path.stat().st_size
+            retain = min(size, remaining)
+            with path.open("rb") as handle:
+                handle.seek(size - retain)
+                if retain < size:
+                    handle.readline()
+                chunk = handle.read()
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(reversed(chunks))
         counts: dict[tuple[str, str], dict[str, int]] = {}
         invalid = 0
         events = 0
-        with trace_path.open("rb") as handle:
-            handle.seek(start)
-            if start:
-                handle.readline()
-            scan_start = handle.tell()
-            for raw in handle:
-                try:
-                    item = json.loads(raw)
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    invalid += 1
-                    continue
-                if not isinstance(item, dict) or item.get("kind") != "mcp_protocol_observation":
-                    continue
-                observed = item.get("observedUnixMs")
-                version = item.get("protocolVersion")
-                if not isinstance(observed, int) or observed < since_ms or not isinstance(version, str) or not version:
-                    continue
-                client = item.get("client") if isinstance(item.get("client"), dict) else {}
-                name = client.get("name") if isinstance(client.get("name"), str) else "unknown"
-                client_version = client.get("version") if isinstance(client.get("version"), str) else "unknown"
-                identity = f"{name}@{client_version}"
-                key = (version, identity)
-                summary = counts.setdefault(key, {"events": 0, "initializations": 0, "toolCalls": 0})
-                summary["events"] += 1
-                if item.get("method") == "initialize":
-                    summary["initializations"] += 1
-                if item.get("method") == "tools/call":
-                    summary["toolCalls"] += 1
-                events += 1
+        for raw in payload.splitlines():
+            try:
+                item = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                invalid += 1
+                continue
+            if not isinstance(item, dict) or item.get("kind") != "mcp_protocol_observation":
+                continue
+            observed = item.get("observedUnixMs")
+            version = item.get("protocolVersion")
+            if not isinstance(observed, int) or observed < since_ms or not isinstance(version, str) or not version:
+                continue
+            client = item.get("client") if isinstance(item.get("client"), dict) else {}
+            name = client.get("name") if isinstance(client.get("name"), str) else "unknown"
+            client_version = client.get("version") if isinstance(client.get("version"), str) else "unknown"
+            identity = f"{name}@{client_version}"
+            key = (version, identity)
+            summary = counts.setdefault(key, {"events": 0, "initializations": 0, "toolCalls": 0})
+            summary["events"] += 1
+            if item.get("method") == "initialize":
+                summary["initializations"] += 1
+            if item.get("method") == "tools/call":
+                summary["toolCalls"] += 1
+            events += 1
         versions: dict[str, dict[str, Any]] = {}
         for (version, client), values in sorted(counts.items()):
             entry = versions.setdefault(version, {"protocolVersion": version, "events": 0, "clients": []})
@@ -205,8 +222,9 @@ def protocol_observations(trace_path: Path, since_ms: int) -> dict[str, Any]:
         return {
             "available": True,
             "sinceMs": since_ms,
-            "scanBytes": size - scan_start,
-            "scanTruncated": start > 0,
+            "scanBytes": len(payload),
+            "scanTruncated": total_size > len(payload),
+            "segments": len(segments),
             "invalidLines": invalid,
             "events": events,
             "versions": list(versions.values()),
@@ -460,6 +478,10 @@ def service_status(systemctl: Path, service: str, reasons: list[str]) -> dict[st
 def whitelisted_config(env_file: Path, reasons: list[str]) -> dict[str, int | None]:
     allowed = {
         "ORDIVON_GLOBAL_MAX_CONCURRENCY": "globalMaxConcurrency",
+        "ORDIVON_MAX_RUNTIME_MS": "maxRuntimeMs",
+        "ORDIVON_BODY_LIMIT_BYTES": "bodyLimitBytes",
+        "ORDIVON_CACHE_HIGH_WATERMARK_BYTES": "cacheHighWatermarkBytes",
+        "ORDIVON_CACHE_LOW_WATERMARK_BYTES": "cacheLowWatermarkBytes",
         "ORDIVON_RECONCILE_INTERVAL_MS": "reconcileIntervalMs",
     }
     values: dict[str, int | None] = {output: None for output in allowed.values()}
@@ -559,7 +581,13 @@ def registry_status(database: Path, reasons: list[str]) -> tuple[dict[str, Any],
     }, held_workspaces
 
 
-def workspace_status(store_root: Path, held: set[str], maximum: int, reasons: list[str]) -> dict[str, Any]:
+def workspace_status(
+    store_root: Path,
+    held: set[str],
+    maximum: int,
+    stale_dirty_hours: int,
+    reasons: list[str],
+) -> dict[str, Any]:
     records_root = store_root / "workspace-records"
     workspaces_root = store_root / "workspaces"
     counts = {"open": 0, "closed": 0, "invalid": 0}
@@ -587,7 +615,8 @@ def workspace_status(store_root: Path, held: set[str], maximum: int, reasons: li
 
     scanned = min(len(open_records), maximum)
     truncated = len(open_records) > maximum
-    dirty = missing = unreadable = 0
+    dirty = stale_dirty = missing = unreadable = 0
+    stale_before_ms = int(time.time() * 1000) - stale_dirty_hours * 3_600_000
     for record in open_records[:maximum]:
         raw_path = record.get("workspacePath")
         if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
@@ -619,21 +648,87 @@ def workspace_status(store_root: Path, held: set[str], maximum: int, reasons: li
             unreadable += 1
         elif completed.stdout:
             dirty += 1
+            created = record.get("createdUnixMs")
+            if isinstance(created, int) and created <= stale_before_ms:
+                stale_dirty += 1
     if truncated:
         reasons.append("WORKSPACE_SCAN_TRUNCATED")
     if missing:
         reasons.append("WORKSPACE_PATH_MISSING")
     if unreadable:
         reasons.append("WORKSPACE_STATE_UNREADABLE")
+    if stale_dirty:
+        reasons.append("STALE_DIRTY_WORKSPACES")
     return {
         "records": counts,
         "physicalOpen": physical,
         "held": len(held),
         "scanned": scanned,
         "dirty": dirty,
+        "staleDirty": stale_dirty,
+        "staleDirtyHours": stale_dirty_hours,
         "missing": missing,
         "unreadable": unreadable,
         "scanTruncated": truncated,
+    }
+
+
+def directory_bytes(path: Path) -> int | None:
+    if not path.exists():
+        return 0
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/du", "-sb", str(path)],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        return int(completed.stdout.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def storage_status(
+    database: Path,
+    store_root: Path,
+    deployment_root: Path,
+    candidate_root: Path,
+    config: dict[str, int | None],
+    reasons: list[str],
+) -> dict[str, Any]:
+    cache_bytes = directory_bytes(store_root / "cache")
+    workspace_bytes = directory_bytes(store_root / "workspaces")
+    registry_bytes = directory_bytes(database.parent)
+    deployment_bytes = directory_bytes(deployment_root)
+    candidate_bytes = directory_bytes(candidate_root)
+    high = config.get("cacheHighWatermarkBytes") or DEFAULT_CACHE_HIGH_WATERMARK_BYTES
+    low = config.get("cacheLowWatermarkBytes") or DEFAULT_CACHE_LOW_WATERMARK_BYTES
+    if cache_bytes is None or registry_bytes is None:
+        reasons.append("STORAGE_MEASUREMENT_UNAVAILABLE")
+    elif cache_bytes > high:
+        reasons.append("CACHE_HIGH_WATERMARK")
+    try:
+        stat = os.statvfs(store_root)
+        disk_total = stat.f_frsize * stat.f_blocks
+        disk_available = stat.f_frsize * stat.f_bavail
+    except OSError:
+        disk_total = disk_available = None
+    return {
+        "cacheBytes": cache_bytes,
+        "cacheHighWatermarkBytes": high,
+        "cacheLowWatermarkBytes": low,
+        "workspaceBytes": workspace_bytes,
+        "registryBytes": registry_bytes,
+        "deploymentBytes": deployment_bytes,
+        "candidateBytes": candidate_bytes,
+        "diskTotalBytes": disk_total,
+        "diskAvailableBytes": disk_available,
     }
 
 
@@ -673,6 +768,8 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
         raise StatusError("max-workspaces must be in 1..=10000")
     if args.protocol_retention_hours < 1 or args.protocol_retention_hours > 87_600:
         raise StatusError("protocol-retention-hours must be in 1..=87600")
+    if args.stale_dirty_hours < 1 or args.stale_dirty_hours > 87_600:
+        raise StatusError("stale-dirty-hours must be in 1..=87600")
     started = time.perf_counter()
     generated_at_ms = int(time.time() * 1000)
     reasons: list[str] = []
@@ -688,7 +785,21 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
     service = service_status(args.systemctl, args.service, reasons)
     config = whitelisted_config(args.env_file, reasons)
     registry, held = registry_status(args.database, reasons)
-    workspaces = workspace_status(args.runtime_store_root, held, args.max_workspaces, reasons)
+    workspaces = workspace_status(
+        args.runtime_store_root,
+        held,
+        args.max_workspaces,
+        args.stale_dirty_hours,
+        reasons,
+    )
+    storage = storage_status(
+        args.database,
+        args.runtime_store_root,
+        args.deployment_root,
+        args.candidate_root,
+        config,
+        reasons,
+    )
     lifecycle = lifecycle_status(args.runtime_store_root)
     unique_reasons = list(dict.fromkeys(reasons))
     return {
@@ -702,6 +813,7 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
         "config": config,
         "registry": registry,
         "workspaces": workspaces,
+        "storage": storage,
         "lifecycle": lifecycle,
         "operatorAction": {"count": len(unique_reasons), "reasons": unique_reasons},
     }
@@ -725,7 +837,8 @@ def human(report: dict[str, Any]) -> str:
         f"{registry.get('heldReservations', '?')}/{config.get('globalMaxConcurrency', '?')} "
         f"workspaces={workspaces.get('physicalOpen', '?')} "
         f"compat-delete={len(report['compatibility'].get('deletionCandidates', []))} "
-        f"dirty={workspaces.get('dirty', '?')} held={workspaces.get('held', '?')} "
+        f"dirty={workspaces.get('dirty', '?')}/{workspaces.get('staleDirty', '?')} "
+        f"held={workspaces.get('held', '?')} "
         f"actions={report['operatorAction']['count']}"
     )
 

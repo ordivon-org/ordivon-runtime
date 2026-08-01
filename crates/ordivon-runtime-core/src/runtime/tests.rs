@@ -3033,6 +3033,8 @@ fn workspace_execution_is_serialized_with_retry_guidance() {
     assert_eq!(capacity.active, 1);
     assert_eq!(capacity.limit, 1);
     assert_eq!(capacity.workspace_id.as_deref(), Some("workspace:test"));
+    assert_eq!(capacity.holder_job_ids.len(), 1);
+    assert_eq!(capacity.holder_workspace_ids, vec!["workspace:test"]);
 
     let mut other = request(&sandbox, "request:workspace:other", 4);
     other.plan.workspace_id = "workspace:other".to_string();
@@ -3059,6 +3061,8 @@ fn global_execution_capacity_reports_cross_workspace_usage() {
     assert_eq!(capacity.active, 1);
     assert_eq!(capacity.limit, 1);
     assert_eq!(capacity.workspace_id, None);
+    assert_eq!(capacity.holder_job_ids.len(), 1);
+    assert_eq!(capacity.holder_workspace_ids, vec!["workspace:test"]);
 }
 
 #[test]

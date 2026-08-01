@@ -366,6 +366,8 @@ fn capacity_failure_preserves_retry_and_scope_metadata() {
             active: 4,
             limit: 4,
             workspace_id: None,
+            holder_job_ids: vec!["job-holder".to_string()],
+            holder_workspace_ids: vec!["workspace-holder".to_string()],
         },
     );
     let tool_error = ToolError::from(error);
@@ -385,6 +387,18 @@ fn capacity_failure_preserves_retry_and_scope_metadata() {
     assert_eq!(
         value.pointer("/capacity/limit").and_then(Value::as_u64),
         Some(4)
+    );
+    assert_eq!(
+        value
+            .pointer("/capacity/holderJobIds/0")
+            .and_then(Value::as_str),
+        Some("job-holder")
+    );
+    assert_eq!(
+        value
+            .pointer("/capacity/holderWorkspaceIds/0")
+            .and_then(Value::as_str),
+        Some("workspace-holder")
     );
     assert_eq!(
         value.pointer("/origin").and_then(Value::as_str),
@@ -451,6 +465,33 @@ fn workspace_open_schema_prefers_server_generated_handles() {
     .bind();
     assert!(bound.workspace_id.starts_with("ws-"));
     assert_eq!(bound.workspace_id.len(), 39);
+}
+
+#[test]
+fn workspace_list_schema_makes_exact_source_digest_opt_in() {
+    let sandbox = Sandbox::new("workspace-list-schema");
+    let server = sandbox.server();
+    let tool = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .find(|tool| tool.name.as_ref() == "workspace.list")
+        .unwrap();
+    let schema = serde_json::to_value(&tool.input_schema).unwrap();
+    let required = schema
+        .pointer("/required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(!required
+        .iter()
+        .any(|value| value.as_str() == Some("includeSourceStateDigest")));
+    assert_eq!(
+        schema
+            .pointer("/properties/includeSourceStateDigest/default")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
 }
 
 #[test]

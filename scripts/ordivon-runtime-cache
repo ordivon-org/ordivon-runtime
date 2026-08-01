@@ -18,6 +18,9 @@ from urllib.parse import quote
 
 SCHEMA_VERSION = 1
 MIGRATION_CONFIRMATION = "MIGRATE_SHARED_EXECUTION_CACHES"
+PRUNE_CONFIRMATION = "PRUNE_EXECUTION_CACHES"
+DEFAULT_HIGH_WATERMARK_BYTES = 64 * 1024 * 1024 * 1024
+DEFAULT_LOW_WATERMARK_BYTES = 48 * 1024 * 1024 * 1024
 PACKAGE_CACHE_DIRS = (
     "uv",
     "pip",
@@ -37,18 +40,42 @@ def absolute_path(value: str) -> Path:
     return path
 
 
+def positive_bytes(value: str) -> int:
+    parsed = int(value)
+    if not 1 <= parsed <= 16 * 1024 * 1024 * 1024 * 1024:
+        raise argparse.ArgumentTypeError("bytes must be in 1..=16TiB")
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="ordivon-runtime-cache")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("inspect", "migrate"):
-        command = commands.add_parser(name)
-        command.add_argument("--database", type=absolute_path, required=True)
-        command.add_argument("--runtime-store-root", type=absolute_path, required=True)
-        command.add_argument("--pretty", action="store_true")
-        if name == "migrate":
-            command.add_argument("--receipt-root", type=absolute_path, required=True)
-            command.add_argument("--lock-file", type=absolute_path, required=True)
-            command.add_argument("--confirm-policy", required=True)
+    inspect_command = commands.add_parser("inspect")
+    inspect_command.add_argument("--database", type=absolute_path, required=True)
+    inspect_command.add_argument("--runtime-store-root", type=absolute_path, required=True)
+    inspect_command.add_argument("--pretty", action="store_true")
+
+    migrate = commands.add_parser("migrate")
+    migrate.add_argument("--database", type=absolute_path, required=True)
+    migrate.add_argument("--runtime-store-root", type=absolute_path, required=True)
+    migrate.add_argument("--receipt-root", type=absolute_path, required=True)
+    migrate.add_argument("--lock-file", type=absolute_path, required=True)
+    migrate.add_argument("--confirm-policy", required=True)
+    migrate.add_argument("--pretty", action="store_true")
+
+    prune = commands.add_parser("prune")
+    prune.add_argument("--database", type=absolute_path, required=True)
+    prune.add_argument("--runtime-store-root", type=absolute_path, required=True)
+    prune.add_argument("--receipt-root", type=absolute_path, required=True)
+    prune.add_argument("--lock-file", type=absolute_path, required=True)
+    prune.add_argument("--confirm-policy", required=True)
+    prune.add_argument(
+        "--high-watermark-bytes", type=positive_bytes, default=DEFAULT_HIGH_WATERMARK_BYTES
+    )
+    prune.add_argument(
+        "--low-watermark-bytes", type=positive_bytes, default=DEFAULT_LOW_WATERMARK_BYTES
+    )
+    prune.add_argument("--pretty", action="store_true")
     return parser.parse_args()
 
 
@@ -233,6 +260,110 @@ def inspect(database: Path, store_root: Path) -> dict[str, object]:
     }
 
 
+def cache_mtime_ms(path: Path) -> int:
+    latest = path.stat().st_mtime
+    for child in path.rglob("*"):
+        try:
+            latest = max(latest, child.lstat().st_mtime)
+        except OSError:
+            continue
+    return int(latest * 1000)
+
+
+def cache_prune_candidates(database: Path, store_root: Path) -> tuple[int, list[dict[str, object]]]:
+    cache_root = store_root / "cache"
+    total_bytes = directory_bytes(cache_root)
+    active = active_workspace_ids(database)
+    records, _ = load_open_records(store_root)
+    open_ids = {record["workspaceId"] for record in records}
+    protected_sources = {source_key(record["sourceRepo"]) for record in records}
+    candidates: list[dict[str, object]] = []
+
+    def add_children(root: Path, kind: str, protected: set[str]) -> None:
+        if not root.is_dir():
+            return
+        for child in root.iterdir():
+            if child.name in protected or child.is_symlink() or not child.is_dir():
+                continue
+            candidates.append(
+                {
+                    "kind": kind,
+                    "path": str(child),
+                    "bytes": directory_bytes(child),
+                    "modifiedUnixMs": cache_mtime_ms(child),
+                }
+            )
+
+    add_children(cache_root / "build", "legacy_build", open_ids | active | {"sources"})
+    add_children(cache_root / "workspaces", "workspace_cache", open_ids | active)
+    add_children(cache_root / "tmp", "workspace_tmp", open_ids | active)
+    add_children(cache_root / "build" / "sources", "source_build", protected_sources)
+    candidates.sort(key=lambda item: (int(item["modifiedUnixMs"]), -int(item["bytes"]), str(item["path"])))
+    return total_bytes, candidates
+
+
+def prune(args: argparse.Namespace) -> dict[str, object]:
+    if args.confirm_policy != PRUNE_CONFIRMATION:
+        raise RuntimeError(f"--confirm-policy must equal {PRUNE_CONFIRMATION}")
+    if args.low_watermark_bytes >= args.high_watermark_bytes:
+        raise RuntimeError("low-watermark-bytes must be smaller than high-watermark-bytes")
+    with exclusive_lock(args.lock_file):
+        before_bytes, candidates = cache_prune_candidates(args.database, args.runtime_store_root)
+        selected: list[dict[str, object]] = []
+        retained = before_bytes
+        if before_bytes > args.high_watermark_bytes:
+            for candidate in candidates:
+                if retained <= args.low_watermark_bytes:
+                    break
+                selected.append(candidate)
+                retained = max(0, retained - int(candidate["bytes"]))
+        receipt_id = time.strftime("cache-prune-%Y%m%dT%H%M%SZ", time.gmtime())
+        receipt = args.receipt_root / f"{receipt_id}-{os.getpid()}"
+        plan = {
+            "schemaVersion": SCHEMA_VERSION,
+            "generatedAtMs": int(time.time() * 1000),
+            "cacheRoot": str(args.runtime_store_root / "cache"),
+            "beforeBytes": before_bytes,
+            "highWatermarkBytes": args.high_watermark_bytes,
+            "lowWatermarkBytes": args.low_watermark_bytes,
+            "candidateCount": len(candidates),
+            "selected": selected,
+        }
+        actions: list[dict[str, object]] = []
+        failures: list[dict[str, object]] = []
+        cache_root = (args.runtime_store_root / "cache").resolve()
+        for candidate in selected:
+            path = Path(str(candidate["path"]))
+            try:
+                resolved = path.resolve()
+                if resolved == cache_root or cache_root not in resolved.parents:
+                    raise RuntimeError("cache candidate escapes cache root")
+                if path.is_symlink() or not path.is_dir():
+                    raise RuntimeError("cache candidate is not a regular directory")
+                shutil.rmtree(path)
+                actions.append({**candidate, "action": "cache_removed"})
+            except (OSError, RuntimeError) as error:
+                failures.append({**candidate, "error": str(error)})
+        after_bytes = directory_bytes(args.runtime_store_root / "cache")
+        status = "completed" if not failures and after_bytes <= args.high_watermark_bytes else "partial"
+        result = {
+            "schemaVersion": SCHEMA_VERSION,
+            "status": status,
+            "completedAtMs": int(time.time() * 1000),
+            "confirmation": args.confirm_policy,
+            "beforeBytes": before_bytes,
+            "afterBytes": after_bytes,
+            "highWatermarkBytes": args.high_watermark_bytes,
+            "lowWatermarkBytes": args.low_watermark_bytes,
+            "actions": actions,
+            "failures": failures,
+            "receipt": str(receipt),
+        }
+        write_json_atomic(receipt / "plan.json", plan)
+        write_json_atomic(receipt / "result.json", result)
+        return result
+
+
 @contextmanager
 def exclusive_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -324,11 +455,12 @@ def migrate(args: argparse.Namespace) -> dict[str, object]:
 def main() -> int:
     args = parse_args()
     try:
-        result = (
-            inspect(args.database, args.runtime_store_root)
-            if args.command == "inspect"
-            else migrate(args)
-        )
+        if args.command == "inspect":
+            result = inspect(args.database, args.runtime_store_root)
+        elif args.command == "migrate":
+            result = migrate(args)
+        else:
+            result = prune(args)
     except (OSError, RuntimeError, sqlite3.Error) as error:
         print(f"runtime cache operation failed: {error}", file=sys.stderr)
         return 2

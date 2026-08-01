@@ -721,6 +721,8 @@ pub struct RuntimeWorkspaceListRequest {
     #[serde(default = "default_runtime_list_limit")]
     #[schemars(range(min = 1, max = 100))]
     pub limit: u32,
+    #[serde(default)]
+    pub include_source_state_digest: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
@@ -731,7 +733,8 @@ pub struct RuntimeWorkspaceSummary {
     pub created_at_ms: u64,
     pub head_mode: String,
     pub dirty: bool,
-    pub source_state_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_state_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_job_ids: Vec<String>,
 }

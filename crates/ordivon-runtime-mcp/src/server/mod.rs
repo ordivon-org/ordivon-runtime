@@ -1,6 +1,4 @@
 use std::borrow::Cow;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -31,6 +29,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use crate::{append_rotating_jsonl, DEFAULT_TRACE_ROTATION_BYTES};
 
 static GLOBAL_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static GLOBAL_TRACE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -545,14 +545,7 @@ impl RuntimeServer {
             "totalMs": trace.total_ms,
             "observedUnixMs": unix_ms(),
         });
-        let write_result = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut file| {
-                serde_json::to_writer(&mut file, &record)?;
-                file.write_all(b"\n")
-            });
+        let write_result = append_rotating_jsonl(path, &record, DEFAULT_TRACE_ROTATION_BYTES);
         if let Err(error) = write_result {
             tracing::warn!("cannot append trace {}: {error}", path.display());
         }

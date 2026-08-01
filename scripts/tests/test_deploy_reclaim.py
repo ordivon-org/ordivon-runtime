@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import runpy
 import shutil
 import sqlite3
 import subprocess
@@ -775,6 +776,7 @@ class DeployReclaimTests(unittest.TestCase):
                     "sha256:" + "a" * 64,
                 )
                 self.assertEqual(deployment["probe"]["toolCount"], 2)
+                self.assertEqual(deployment["candidatePrune"]["status"], "skipped")
                 self.assertEqual((install / "runtime").read_text(), "new-runtime\n")
                 self.assertEqual((install / "runtime.previous").read_text(), "old-runtime\n")
                 receipt = Path(deployment["receipt"])
@@ -807,6 +809,53 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual(rollback["status"], "restored_previous")
             self.assertEqual((install / "runtime").read_text(), "old-runtime\n")
             self.assertTrue(Path(rollback["currentBackup"]).is_dir())
+
+    def test_candidate_prune_keeps_current_and_previous_deployments(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate_root = root / "candidates"
+            current = "c" * 40
+            previous = "b" * 40
+            obsolete = "a" * 40
+            current_release = candidate_root / current / "release"
+            current_release.mkdir(parents=True)
+            (current_release / "runtime").write_text("current", encoding="utf-8")
+            for commit in (previous, obsolete):
+                release = candidate_root / commit / "release"
+                release.mkdir(parents=True)
+                (release / "runtime").write_text(commit, encoding="utf-8")
+            (candidate_root / "notes").mkdir()
+            deployments = root / "deployments"
+            prior_receipt = deployments / "prior"
+            prior_receipt.mkdir(parents=True)
+            (prior_receipt / "result.json").write_text(
+                json.dumps(
+                    {
+                        "status": "deployed",
+                        "commit": previous,
+                        "finishedAtMs": 10,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            scripts_path = str(REPO / "scripts")
+            sys.path.insert(0, scripts_path)
+            try:
+                namespace = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
+            finally:
+                sys.path.remove(scripts_path)
+            result = namespace["prune_candidate_artifacts"](
+                current_release,
+                deployments,
+                current,
+                keep=2,
+            )
+            self.assertEqual(result["status"], "completed")
+            self.assertTrue((candidate_root / current).is_dir())
+            self.assertTrue((candidate_root / previous).is_dir())
+            self.assertFalse((candidate_root / obsolete).exists())
+            self.assertTrue((candidate_root / "notes").is_dir())
+            self.assertEqual(result["actions"][0]["commit"], obsolete)
 
     def test_explicit_rollback_rejects_tampered_previous_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
