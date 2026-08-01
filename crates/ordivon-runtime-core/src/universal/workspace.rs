@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -10,8 +10,8 @@ use super::{
     validate_relative_path, write_bytes_atomic, write_json_atomic, GitWorkspaceCreateRequest,
     UniversalExecError, UniversalExecErrorCode, UniversalExecutorConfig, WorkspaceCloseRequest,
     WorkspaceCloseResult, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceReadRequest,
-    WorkspaceReadResult, WorkspaceRecord, WorkspaceWriteRequest, WorkspaceWriteResult,
-    UNIVERSAL_EXEC_SCHEMA_VERSION,
+    WorkspaceReadResult, WorkspaceRecord, WorkspaceRenamedPath, WorkspaceWriteRequest,
+    WorkspaceWriteResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +29,15 @@ struct ClosedWorkspaceRecord {
     source_state_digest: Option<String>,
     closed_unix_ms: u128,
     removal_result: String,
+}
+
+#[derive(Debug, Default)]
+struct WorkspaceChangedPaths {
+    changed: Vec<String>,
+    modified: Vec<String>,
+    added: Vec<String>,
+    deleted: Vec<String>,
+    renamed: Vec<WorkspaceRenamedPath>,
 }
 
 #[derive(Serialize)]
@@ -437,6 +446,7 @@ pub fn workspace_diff(
             false,
         )
     })?;
+    let changed = workspace_changed_paths(workspace)?;
     let untracked_output = Command::new("git")
         .arg("-C")
         .arg(workspace)
@@ -475,7 +485,159 @@ pub fn workspace_diff(
         digest: sha256_bytes(bytes),
         byte_length: retained as u64,
         truncated: retained < total,
+        changed_paths: changed.changed,
+        modified_paths: changed.modified,
+        added_paths: changed.added,
+        deleted_paths: changed.deleted,
+        renamed_paths: changed.renamed,
         untracked_paths,
+    })
+}
+
+fn workspace_changed_paths(workspace: &Path) -> Result<WorkspaceChangedPaths, UniversalExecError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args([
+            "diff",
+            "HEAD",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            "--find-copies",
+        ])
+        .output()
+        .map_err(|error| tool_unavailable("git diff --name-status", error))?;
+    if !output.status.success() {
+        return Err(tool_failed("git diff --name-status", &output.stderr));
+    }
+    let fields: Vec<&[u8]> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .collect();
+    let mut changed = BTreeSet::new();
+    let mut modified = BTreeSet::new();
+    let mut added = BTreeSet::new();
+    let mut deleted = BTreeSet::new();
+    let mut renamed = Vec::new();
+    let mut index = 0usize;
+    while index < fields.len() {
+        if changed.len() >= 512 {
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::OutputLimitExceeded,
+                "workspace has more than 512 changed paths",
+                None,
+                false,
+            ));
+        }
+        let status = std::str::from_utf8(fields[index]).map_err(|error| {
+            UniversalExecError::new(
+                UniversalExecErrorCode::ArtifactNotUtf8,
+                format!("git diff status is not UTF-8: {error}"),
+                None,
+                false,
+            )
+        })?;
+        index += 1;
+        let code = status.as_bytes().first().copied().ok_or_else(|| {
+            UniversalExecError::new(
+                UniversalExecErrorCode::ToolFailed,
+                "git diff emitted an empty path status",
+                None,
+                false,
+            )
+        })?;
+        let path = |raw: &[u8]| -> Result<String, UniversalExecError> {
+            String::from_utf8(raw.to_vec()).map_err(|error| {
+                UniversalExecError::new(
+                    UniversalExecErrorCode::ArtifactNotUtf8,
+                    format!("changed Git path is not UTF-8: {error}"),
+                    None,
+                    false,
+                )
+            })
+        };
+        match code {
+            b'R' | b'C' => {
+                if index + 1 >= fields.len() {
+                    return Err(UniversalExecError::new(
+                        UniversalExecErrorCode::ToolFailed,
+                        "git diff rename/copy record is incomplete",
+                        None,
+                        false,
+                    ));
+                }
+                let from_path = path(fields[index])?;
+                let to_path = path(fields[index + 1])?;
+                index += 2;
+                if code == b'R' {
+                    changed.insert(from_path.clone());
+                    changed.insert(to_path.clone());
+                    renamed.push(WorkspaceRenamedPath { from_path, to_path });
+                } else {
+                    changed.insert(to_path.clone());
+                    added.insert(to_path);
+                }
+            }
+            b'M' | b'T' | b'U' => {
+                if index >= fields.len() {
+                    return Err(UniversalExecError::new(
+                        UniversalExecErrorCode::ToolFailed,
+                        "git diff path record is incomplete",
+                        None,
+                        false,
+                    ));
+                }
+                let value = path(fields[index])?;
+                index += 1;
+                changed.insert(value.clone());
+                modified.insert(value);
+            }
+            b'A' => {
+                if index >= fields.len() {
+                    return Err(UniversalExecError::new(
+                        UniversalExecErrorCode::ToolFailed,
+                        "git diff added-path record is incomplete",
+                        None,
+                        false,
+                    ));
+                }
+                let value = path(fields[index])?;
+                index += 1;
+                changed.insert(value.clone());
+                added.insert(value);
+            }
+            b'D' => {
+                if index >= fields.len() {
+                    return Err(UniversalExecError::new(
+                        UniversalExecErrorCode::ToolFailed,
+                        "git diff deleted-path record is incomplete",
+                        None,
+                        false,
+                    ));
+                }
+                let value = path(fields[index])?;
+                index += 1;
+                changed.insert(value.clone());
+                deleted.insert(value);
+            }
+            _ => {
+                return Err(UniversalExecError::new(
+                    UniversalExecErrorCode::ToolFailed,
+                    format!("unsupported git diff path status: {status}"),
+                    None,
+                    false,
+                ));
+            }
+        }
+    }
+    Ok(WorkspaceChangedPaths {
+        changed: changed.into_iter().collect(),
+        modified: modified.into_iter().collect(),
+        added: added.into_iter().collect(),
+        deleted: deleted.into_iter().collect(),
+        renamed,
     })
 }
 

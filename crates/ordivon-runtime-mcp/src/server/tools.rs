@@ -179,7 +179,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.diff",
-        description = "Return a bounded compact Git diff and untracked paths for an isolated workspace.",
+        description = "Return a bounded Git diff plus structured changed, modified, added, deleted, renamed, and untracked paths for an isolated Workspace.",
         annotations(
             title = "Inspect workspace diff",
             read_only_hint = true,

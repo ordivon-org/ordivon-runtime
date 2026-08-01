@@ -129,6 +129,11 @@ fn workspace_round_trip_is_isolated_and_digest_guarded() {
     .unwrap();
     assert!(diff.diff.contains("-baseline"));
     assert!(diff.diff.contains("+changed"));
+    assert_eq!(diff.changed_paths, vec!["README.md"]);
+    assert_eq!(diff.modified_paths, vec!["README.md"]);
+    assert!(diff.added_paths.is_empty());
+    assert!(diff.deleted_paths.is_empty());
+    assert!(diff.renamed_paths.is_empty());
     assert!(diff.untracked_paths.is_empty());
     assert_eq!(
         fs::read_to_string(source.join("README.md")).unwrap(),
@@ -193,6 +198,8 @@ fn workspace_diff_includes_staged_changes_and_workspace_listing_recovers_open_ha
     )
     .unwrap();
     assert!(diff.diff.contains("+staged"));
+    assert_eq!(diff.changed_paths, vec!["README.md"]);
+    assert_eq!(diff.modified_paths, vec!["README.md"]);
 
     let stale_id = "workspace-list-stale";
     create_git_workspace(
@@ -218,6 +225,67 @@ fn workspace_diff_includes_staged_changes_and_workspace_listing_recovers_open_ha
     let listed = list_workspace_records(&config, 10).unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].workspace_id, workspace_id);
+}
+
+#[test]
+fn workspace_diff_reports_structured_modified_added_deleted_and_renamed_paths() {
+    let sandbox = Sandbox::new("workspace-structured-diff");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    fs::write(source.join("old-name.txt"), "rename me\n").unwrap();
+    fs::write(source.join("delete-me.txt"), "delete me\n").unwrap();
+    run_git(&source, ["add", "old-name.txt", "delete-me.txt"]);
+    run_git(&source, ["commit", "-qm", "add diff fixtures"]);
+    let config = sandbox.config();
+    let workspace_id = "workspace-structured-diff";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    fs::write(workspace.join("README.md"), "modified\n").unwrap();
+    fs::write(workspace.join("added.txt"), "new unique bytes\n").unwrap();
+    run_git(&workspace, ["add", "added.txt"]);
+    fs::remove_file(workspace.join("delete-me.txt")).unwrap();
+    run_git(&workspace, ["mv", "old-name.txt", "renamed.txt"]);
+    fs::write(workspace.join("untracked.txt"), "untracked\n").unwrap();
+
+    let diff = workspace_diff(
+        &config,
+        &WorkspaceDiffRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            max_bytes: 64 * 1024,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        diff.changed_paths,
+        vec![
+            "README.md",
+            "added.txt",
+            "delete-me.txt",
+            "old-name.txt",
+            "renamed.txt",
+        ]
+    );
+    assert_eq!(diff.modified_paths, vec!["README.md"]);
+    assert_eq!(diff.added_paths, vec!["added.txt"]);
+    assert_eq!(diff.deleted_paths, vec!["delete-me.txt"]);
+    assert_eq!(
+        diff.renamed_paths,
+        vec![WorkspaceRenamedPath {
+            from_path: "old-name.txt".to_string(),
+            to_path: "renamed.txt".to_string(),
+        }]
+    );
+    assert_eq!(diff.untracked_paths, vec!["untracked.txt"]);
 }
 
 #[test]

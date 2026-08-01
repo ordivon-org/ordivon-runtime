@@ -29,9 +29,9 @@ pub use types::{
     WorkspaceMutateRequest, WorkspaceMutateResult, WorkspaceMutation, WorkspaceMutationMode,
     WorkspaceMutationResult, WorkspacePatchRequest, WorkspacePatchResult, WorkspacePatchedFile,
     WorkspaceReadRequest, WorkspaceReadResult, WorkspaceReadSliceRequest, WorkspaceReadSliceResult,
-    WorkspaceRecord, WorkspaceTextEdit, WorkspaceTextPosition, WorkspaceTextRange,
-    WorkspaceWriteRequest, WorkspaceWriteResult, MAX_WORKSPACE_PATCH_EDITS_PER_FILE,
-    MAX_WORKSPACE_PATCH_FILES,
+    WorkspaceRecord, WorkspaceRenamedPath, WorkspaceTextEdit, WorkspaceTextPosition,
+    WorkspaceTextRange, WorkspaceWriteRequest, WorkspaceWriteResult,
+    MAX_WORKSPACE_PATCH_EDITS_PER_FILE, MAX_WORKSPACE_PATCH_FILES,
 };
 #[cfg(any(feature = "transactional-runtime", test))]
 pub use workspace::workspace_source_state_digest;
