@@ -17,6 +17,8 @@ Use the executable local acceptance contract after changes that affect systemd, 
 ```text
 scripts/local-acceptance check
 scripts/local-acceptance run
+scripts/ordivon-runtime-status --health --json
+scripts/ordivon-runtime-status --diagnose --json
 ```
 
 `check` is portable and verifies that the repository still contains the local-only acceptance entry points. `run` requires the trusted local root/systemd/cgroup-v2 environment and executes the real systemd suites plus MCP end-to-end acceptance.

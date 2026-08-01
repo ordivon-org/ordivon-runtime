@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""Prove exact Runtime global admission capacity through the public MCP surface."""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+import uuid
+from typing import Any
+import sys
+
+SCRIPT_ROOT = Path(__file__).resolve().parent
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
+from mcp_probe import McpClient, McpProbeError, connect_compatible
+
+SCHEMA_VERSION = 1
+TERMINAL_STATUSES = {"succeeded", "failed", "timed_out", "cancelled", "lost", "orphaned"}
+
+
+class AcceptanceError(RuntimeError):
+    pass
+
+
+def absolute_path(value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("path must be absolute")
+    return path
+
+
+def positive_limit(value: str) -> int:
+    parsed = int(value)
+    if not 1 <= parsed <= 16:
+        raise argparse.ArgumentTypeError("limit must be in 1..=16")
+    return parsed
+
+
+def positive_seconds(value: str) -> float:
+    parsed = float(value)
+    if not 1.0 <= parsed <= 60.0:
+        raise argparse.ArgumentTypeError("seconds must be in 1..=60")
+    return parsed
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(prog="ordivon-runtime-capacity-acceptance", description=__doc__)
+    result.add_argument("--endpoint", default="http://127.0.0.1:8897/mcp")
+    result.add_argument("--token-env", default="ORDIVON_BEARER_TOKEN")
+    result.add_argument("--source-repo", type=absolute_path, required=True)
+    result.add_argument("--source-revision", required=True)
+    result.add_argument("--limit", type=positive_limit, default=8)
+    result.add_argument("--hold-seconds", type=positive_seconds, default=8.0)
+    result.add_argument("--receipt", type=absolute_path)
+    result.add_argument("--pretty", action="store_true")
+    return result
+
+
+def canonical_digest(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def write_json_atomic(path: Path, value: object, *, pretty: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2 if pretty else None, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def tool_outcome(client: McpClient, name: str, arguments: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    result = client.request("tools/call", {"name": name, "arguments": arguments})
+    structured = result.get("structuredContent")
+    if not isinstance(structured, dict):
+        raise AcceptanceError(f"tool {name} omitted structuredContent")
+    if result.get("isError") is True:
+        error = structured.get("error")
+        if not isinstance(error, dict):
+            raise AcceptanceError(f"tool {name} returned an unstructured error")
+        return False, error
+    return True, structured
+
+
+def observe_terminal(client: McpClient, job_id: str, deadline: float) -> dict[str, Any]:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AcceptanceError(f"Job did not reach terminal state: {job_id}")
+        ok, observation = tool_outcome(
+            client,
+            "task.observe",
+            {
+                "schemaVersion": 1,
+                "jobId": job_id,
+                "waitMs": min(30_000, max(0, int(remaining * 1_000))),
+                "stdoutTailBytes": 1_024,
+                "stderrTailBytes": 1_024,
+            },
+        )
+        if not ok:
+            raise AcceptanceError(f"cannot observe Job {job_id}: {observation}")
+        if observation.get("status") in TERMINAL_STATUSES:
+            return observation
+
+
+def capacity_checks(
+    *,
+    limit: int,
+    job_ids: list[str],
+    workspace_ids: list[str],
+    rejection: dict[str, Any] | None,
+    terminal: list[dict[str, Any]],
+    close_results: list[dict[str, Any]],
+) -> dict[str, bool]:
+    capacity = rejection.get("capacity") if isinstance(rejection, dict) else None
+    capacity = capacity if isinstance(capacity, dict) else {}
+    holder_jobs = capacity.get("holderJobIds")
+    holder_jobs = holder_jobs if isinstance(holder_jobs, list) else []
+    holder_workspaces = capacity.get("holderWorkspaceIds")
+    holder_workspaces = holder_workspaces if isinstance(holder_workspaces, list) else []
+    return {
+        "exactJobsAdmitted": len(job_ids) == limit and len(set(job_ids)) == limit,
+        "nextJobRejected": isinstance(rejection, dict) and rejection.get("code") == "CONCURRENCY_LIMIT",
+        "globalScopeReported": capacity.get("scope") == "global",
+        "activeLimitReported": capacity.get("active") == limit and capacity.get("limit") == limit,
+        "allHolderJobsReported": set(holder_jobs) == set(job_ids) and len(holder_jobs) == limit,
+        "allHolderWorkspacesReported": set(holder_workspaces) == set(workspace_ids[:limit])
+        and len(holder_workspaces) == limit,
+        "allJobsSucceeded": len(terminal) == limit
+        and all(item.get("status") == "succeeded" for item in terminal),
+        "allWorkspacesClosed": len(close_results) == limit + 1
+        and all(
+            item.get("closed") is True and item.get("removed") is True
+            for item in close_results
+        ),
+    }
+
+
+def run(args: argparse.Namespace) -> dict[str, Any]:
+    token = os.environ.get(args.token_env)
+    if not token:
+        raise AcceptanceError(f"environment variable {args.token_env} is missing")
+    if not args.source_repo.is_dir():
+        raise AcceptanceError("source-repo must be an existing directory")
+    client = connect_compatible(
+        args.endpoint,
+        token,
+        client_name="ordivon-runtime-capacity-acceptance",
+        timeout=30.0,
+    )
+    prefix = f"capacity-{int(time.time())}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    workspace_ids = [f"{prefix}-{index}" for index in range(args.limit + 1)]
+    opened: list[str] = []
+    job_ids: list[str] = []
+    rejection: dict[str, Any] | None = None
+    terminal: list[dict[str, Any]] = []
+    close_results: list[dict[str, Any]] = []
+    failure: Exception | None = None
+    try:
+        for workspace_id in workspace_ids:
+            ok, opened_workspace = tool_outcome(
+                client,
+                "workspace.open",
+                {
+                    "schemaVersion": 1,
+                    "sourceRepo": str(args.source_repo),
+                    "sourceRevision": args.source_revision,
+                    "workspaceId": workspace_id,
+                },
+            )
+            if not ok:
+                raise AcceptanceError(f"cannot open Workspace {workspace_id}: {opened_workspace}")
+            opened.append(workspace_id)
+
+        for index, workspace_id in enumerate(workspace_ids[: args.limit]):
+            ok, observation = tool_outcome(
+                client,
+                "workspace.exec",
+                {
+                    "schemaVersion": 1,
+                    "clientRequestId": f"{prefix}-job-{index}",
+                    "execution": {
+                        "workspaceId": workspace_id,
+                        "executable": "/usr/bin/sleep",
+                        "args": [f"{args.hold_seconds:g}"],
+                        "cwdRelative": ".",
+                        "timeoutMs": int((args.hold_seconds + 30.0) * 1_000),
+                        "stdoutLimitBytes": 1_024,
+                        "stderrLimitBytes": 1_024,
+                    },
+                    "waitMs": 0,
+                    "stdoutTailBytes": 0,
+                    "stderrTailBytes": 0,
+                },
+            )
+            if not ok or not isinstance(observation.get("jobId"), str):
+                raise AcceptanceError(f"Job {index} was not admitted: {observation}")
+            job_ids.append(str(observation["jobId"]))
+
+        ok, ninth = tool_outcome(
+            client,
+            "workspace.exec",
+            {
+                "schemaVersion": 1,
+                "clientRequestId": f"{prefix}-job-rejected",
+                "execution": {
+                    "workspaceId": workspace_ids[-1],
+                    "executable": "/usr/bin/true",
+                    "args": [],
+                    "cwdRelative": ".",
+                    "timeoutMs": 5_000,
+                    "stdoutLimitBytes": 1_024,
+                    "stderrLimitBytes": 1_024,
+                },
+                "waitMs": 0,
+                "stdoutTailBytes": 0,
+                "stderrTailBytes": 0,
+            },
+        )
+        if ok:
+            raise AcceptanceError("Job above the expected global capacity was admitted")
+        rejection = ninth
+
+        deadline = time.monotonic() + args.hold_seconds + 90.0
+        terminal = [observe_terminal(client, job_id, deadline) for job_id in job_ids]
+    except Exception as error:  # cleanup below is mandatory before re-raising
+        failure = error
+    finally:
+        deadline = time.monotonic() + args.hold_seconds + 90.0
+        for job_id in job_ids:
+            if not any(item.get("jobId") == job_id for item in terminal):
+                try:
+                    terminal.append(observe_terminal(client, job_id, deadline))
+                except Exception:
+                    pass
+        for workspace_id in reversed(opened):
+            try:
+                ok, closed = tool_outcome(
+                    client,
+                    "workspace.close",
+                    {"schemaVersion": 1, "workspaceId": workspace_id, "force": True},
+                )
+                close_results.append(
+                    {
+                        "workspaceId": workspace_id,
+                        "closed": ok and closed.get("workspaceId") == workspace_id,
+                        "removed": closed.get("removed") if ok else None,
+                        "error": None if ok else closed.get("code"),
+                    }
+                )
+            except Exception as error:
+                close_results.append(
+                    {"workspaceId": workspace_id, "closed": False, "removed": None, "error": str(error)}
+                )
+    if failure is not None:
+        raise AcceptanceError(str(failure)) from failure
+
+    checks = capacity_checks(
+        limit=args.limit,
+        job_ids=job_ids,
+        workspace_ids=workspace_ids,
+        rejection=rejection,
+        terminal=terminal,
+        close_results=close_results,
+    )
+    if not all(checks.values()):
+        raise AcceptanceError("capacity acceptance checks failed: " + json.dumps(checks, sort_keys=True))
+    report: dict[str, Any] = {
+        "schemaVersion": SCHEMA_VERSION,
+        "kind": "ordivon.runtime-global-capacity-acceptance",
+        "capturedAt": datetime.now(timezone.utc).isoformat(),
+        "sourceRevision": args.source_revision,
+        "expectedLimit": args.limit,
+        "workspaceIds": workspace_ids,
+        "jobIds": job_ids,
+        "rejection": rejection,
+        "terminal": [
+            {"jobId": item.get("jobId"), "status": item.get("status"), "exitCode": item.get("exitCode")}
+            for item in terminal
+        ],
+        "closeResults": close_results,
+        "checks": checks,
+    }
+    report["integrity"] = {
+        "algorithm": "sha256",
+        "canonicalization": "json-sort-keys-v1",
+        "payloadDigest": canonical_digest(report),
+    }
+    return report
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        report = run(args)
+    except (AcceptanceError, McpProbeError, OSError, ValueError) as error:
+        print(f"capacity acceptance failed: {error}", file=sys.stderr)
+        return 1
+    if args.receipt is not None:
+        write_json_atomic(args.receipt, report, pretty=args.pretty)
+    print(json.dumps(report, indent=2 if args.pretty else None, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
