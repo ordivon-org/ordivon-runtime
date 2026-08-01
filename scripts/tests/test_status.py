@@ -26,7 +26,8 @@ def executable(path: Path, text: str) -> None:
 
 def fixture(root: Path) -> dict[str, Path]:
     database = root / "registry.sqlite3"
-    with sqlite3.connect(database) as connection:
+    connection = sqlite3.connect(database)
+    try:
         connection.executescript(
             """
             CREATE TABLE schema_migrations(version INTEGER);
@@ -41,6 +42,8 @@ def fixture(root: Path) -> dict[str, Path]:
             INSERT INTO attempt_conditions VALUES ('attempt-1','recovery_required','false');
             """
         )
+    finally:
+        connection.close()
     store = root / "runtime"
     records = store / "workspace-records"
     workspaces = store / "workspaces"
@@ -201,7 +204,7 @@ def fixture(root: Path) -> dict[str, Path]:
     }
 
 
-def command(paths: dict[str, Path], *extra: str) -> list[str]:
+def raw_command(paths: dict[str, Path], *extra: str) -> list[str]:
     return [
         sys.executable,
         str(SCRIPT),
@@ -223,6 +226,11 @@ def command(paths: dict[str, Path], *extra: str) -> list[str]:
     ]
 
 
+def command(paths: dict[str, Path], *extra: str) -> list[str]:
+    mode = [] if any(value in {"--health", "--diagnose"} for value in extra) else ["--diagnose"]
+    return raw_command(paths, *mode, *extra)
+
+
 class RuntimeStatusTests(unittest.TestCase):
     def test_healthy_json_is_secret_free_and_path_free(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -235,8 +243,11 @@ class RuntimeStatusTests(unittest.TestCase):
                 capture_output=True,
             )
             report = json.loads(result.stdout)
-            self.assertEqual(report["schemaVersion"], 2)
+            self.assertEqual(report["schemaVersion"], 3)
             self.assertEqual(report["status"], "healthy")
+            self.assertEqual(report["mode"], "diagnose")
+            self.assertEqual(report["health"]["status"], "healthy")
+            self.assertEqual(report["maintenance"]["status"], "healthy")
             self.assertEqual(report["deployment"]["commit"], COMMIT)
             self.assertEqual(report["deployment"]["protocolLifecycle"], "modern")
             self.assertEqual(report["deployment"]["protocolVersion"], "2026-07-28")
@@ -273,6 +284,7 @@ class RuntimeStatusTests(unittest.TestCase):
             self.assertIsNotNone(report["storage"]["cacheBytes"])
             self.assertIsNotNone(report["storage"]["registryBytes"])
             self.assertEqual(report["operatorAction"]["count"], 0)
+            self.assertEqual(report["maintenanceAction"]["count"], 0)
             self.assertNotIn("super-secret-token", result.stdout)
             self.assertNotIn("/private/", result.stdout)
             self.assertNotIn(str(Path(temporary)), result.stdout)
@@ -290,7 +302,7 @@ class RuntimeStatusTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1)
             report = json.loads(result.stdout)
-            self.assertEqual(report["status"], "attention")
+            self.assertEqual(report["status"], "unhealthy")
             self.assertIn("EXPECTED_COMMIT_MISMATCH", report["operatorAction"]["reasons"])
             self.assertIn(
                 "BINARY_DIGEST_MISMATCH:runtime",
@@ -390,21 +402,61 @@ class RuntimeStatusTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
             )
-            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(completed.returncode, 0)
             report = json.loads(completed.stdout)
+            self.assertEqual(report["status"], "attention")
+            self.assertEqual(report["health"]["status"], "healthy")
+            self.assertEqual(report["maintenance"]["status"], "attention")
             self.assertEqual(report["workspaces"]["staleDirty"], 1)
             self.assertIn(
                 "STALE_DIRTY_WORKSPACES",
-                report["operatorAction"]["reasons"],
+                report["maintenanceAction"]["reasons"],
             )
             self.assertTrue(workspace.is_dir())
+
+    def test_default_mode_is_fast_health(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            completed = subprocess.run(
+                raw_command(paths, "--json", "--expected-commit", COMMIT),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["mode"], "health")
+            self.assertNotIn("workspaces", report)
+            self.assertNotIn("storage", report)
+
+    def test_health_mode_skips_expensive_maintenance_probes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            workspace = paths["store"] / "workspaces" / "workspace-1"
+            (workspace / "README.md").write_text("dirty\n", encoding="utf-8")
+            completed = subprocess.run(
+                command(paths, "--health", "--json", "--expected-commit", COMMIT),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["mode"], "health")
+            self.assertEqual(report["status"], "healthy")
+            self.assertEqual(report["health"]["status"], "healthy")
+            self.assertEqual(report["maintenance"]["status"], "not_checked")
+            self.assertNotIn("workspaces", report)
+            self.assertNotIn("storage", report)
+            self.assertNotIn("compatibility", report)
+            self.assertNotIn("lifecycle", report)
 
     def test_human_output_is_one_compact_line(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             paths = fixture(Path(temporary))
             result = subprocess.run(command(paths), cwd=REPO, check=True, text=True, capture_output=True)
             self.assertEqual(len(result.stdout.splitlines()), 1)
-            self.assertIn("HEALTHY commit=aaaaaaaaaaaa", result.stdout)
+            self.assertIn("HEALTHY mode=diagnose commit=aaaaaaaaaaaa", result.stdout)
             self.assertIn("capacity=0+0/8", result.stdout)
 
 

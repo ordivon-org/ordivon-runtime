@@ -21,6 +21,7 @@ case "$mode" in
     test -f "$repo/crates/ordivon-runtime-core/src/bin/ordivon-runtime-inspect.rs"
     test -x "$repo/scripts/ordivon-runtime-lifecycle"
     test -x "$repo/scripts/ordivon-runtime-status"
+    test -x "$repo/scripts/ordivon-runtime-capacity-acceptance"
     test -f "$repo/packaging/systemd/ordivon-runtime-lifecycle.service"
     test -f "$repo/packaging/systemd/ordivon-runtime-lifecycle.timer"
     test -f "$repo/packaging/systemd/ordivon-workspace-retention.json"

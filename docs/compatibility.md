@@ -5,7 +5,7 @@ Runtime retains compatibility only when a named live consumer, persisted state, 
 The current machine-readable inventory is projected by:
 
 ```text
-scripts/ordivon-runtime-status --json
+scripts/ordivon-runtime-status --diagnose --json
 ```
 
 Its `compatibility` section combines the current deployment receipt, a bounded tail of protocol observations, the immediately previous receipted deployment, and a default seven-day observation window. Missing, truncated, or temporally insufficient observations block deletion conclusions but do not create an operational incident. The window can be changed explicitly with `--protocol-retention-hours`; status never shortens it implicitly.

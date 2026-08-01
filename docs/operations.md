@@ -82,7 +82,7 @@ Rollback validates the receipt-bound install directory, service, environment fil
 
 ### MCP probe module placement
 
-`scripts/ordivon-runtime-deploy` and `scripts/ordivon-runtime-reclaim` share `scripts/mcp_probe.py`; they no longer embed separate protocol clients. Run them from the repository as shown above, or install/copy all three files into the same directory. Installing either executable script without its sibling module is unsupported and fails before any mutation. Candidate deployment requires modern discovery; reclaim uses modern discovery first and falls back to legacy initialization only so that an installed previous Runtime can still release a Workspace through its own `workspace.close` contract.
+`scripts/ordivon-runtime-deploy`, `scripts/ordivon-runtime-reclaim`, and `scripts/ordivon-runtime-capacity-acceptance` share `scripts/mcp_probe.py`; they no longer embed separate protocol clients. Run them from the repository as shown above, or install/copy all three files into the same directory. Installing either executable script without its sibling module is unsupported and fails before any mutation. Candidate deployment requires modern discovery; reclaim uses modern discovery first and falls back to legacy initialization only so that an installed previous Runtime can still release a Workspace through its own `workspace.close` contract.
 
 ## Workspace lifecycle and reclaim
 
@@ -213,17 +213,43 @@ scripts/ordivon-runtime-cache prune \
   --confirm-policy PRUNE_EXECUTION_CACHES --pretty
 ```
 
-## Secret-free status
+## Capacity acceptance
 
-`scripts/ordivon-runtime-status` combines the latest successful deployment receipt, installed binary digests, the receipted MCP lifecycle, selected protocol version, supported protocol versions, `toolCatalogDigest`, bounded current-plus-rotated protocol observations, the immediately previous rollback protocol, systemd state, allowlisted numeric Runtime configuration, Registry summaries, Workspace consistency, cache/Registry/deployment/candidate byte measurements, stale dirty Workspace counts, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.
+`scripts/ordivon-runtime-capacity-acceptance` is the repeatable public-surface proof for global admission. It opens `N+1` isolated Workspaces, admits exactly `N` bounded sleep Jobs, requires the next Job to fail with `CONCURRENCY_LIMIT`, verifies the complete holder Job and Workspace sets, waits for every admitted Job to succeed, and closes every acceptance Workspace. It emits a digest-bound JSON receipt and never reads the Registry directly.
+
+Run it from a host shell or independent systemd unit, not from a Runtime Job: a Runtime Job would itself consume one of the slots being measured.
 
 ```bash
-scripts/ordivon-runtime-status
-scripts/ordivon-runtime-status --json
-scripts/ordivon-runtime-status --json --expected-commit "$(git rev-parse HEAD)"
+set -a
+source /etc/ordivon/ordivon-mcp.env
+set +a
+
+scripts/ordivon-runtime-capacity-acceptance \
+  --source-repo /root/projects/ordivon-runtime \
+  --source-revision "$(git -C /root/projects/ordivon-runtime rev-parse HEAD)" \
+  --limit 8 \
+  --receipt /var/lib/ordivon/runtime/evidence/runtime-capacity-live.json \
+  --pretty
 ```
 
-Compatibility observations are advisory deletion evidence: an unreadable or truncated trace, unknown rollback protocol, or incomplete default seven-day observation window blocks a deletion conclusion but does not create an operator incident. The command returns `0` for `healthy`, `1` when bounded operational facts require operator attention, and `2` for an invalid invocation or unreadable mandatory input. Output contains receipt identifiers and binary names, but not source paths, Workspace paths, command arguments, arbitrary environment values, or secret material. The deployment receipt remains the build-identity source of truth; the status command does not introduce another database or marker.
+The command is parameterized rather than hard-coded to eight. Exact holder-set validation is bounded to `1..=16`, matching the bounded capacity error envelope.
+
+## Secret-free status
+
+`scripts/ordivon-runtime-status` separates operational health from bounded maintenance diagnosis. The default and `--health` path verifies the latest successful deployment receipt, installed binary digests, systemd state, allowlisted numeric Runtime configuration, and Registry/recovery consistency. It deliberately skips Git Workspace scans, recursive storage measurement, lifecycle receipts, and protocol-history analysis. `--diagnose` adds the receipted MCP lifecycle, selected and supported protocol versions, `toolCatalogDigest`, bounded current-plus-rotated protocol observations, the immediately previous rollback protocol, Workspace consistency, cache/Registry/deployment/candidate byte measurements, stale dirty Workspace counts, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.
+
+```bash
+# Fast health path; this is the default and is suitable for frequent automation.
+scripts/ordivon-runtime-status
+scripts/ordivon-runtime-status --health --json
+
+# Explicit maintenance and compatibility diagnosis; this may scan large cache trees.
+scripts/ordivon-runtime-status --diagnose --json
+scripts/ordivon-runtime-status --diagnose --json \
+  --expected-commit "$(git rev-parse HEAD)"
+```
+
+The JSON schema reports separate `health` and `maintenance` states. Exit code `1` is reserved for operational health failures such as service, deployment, Registry, recovery, or exact-binary inconsistency. Maintenance findings such as a stale dirty Workspace produce top-level `status=attention` but retain exit code `0`; automation must inspect `maintenanceAction` when maintenance policy should gate a workflow. Compatibility observations remain advisory deletion evidence: an unreadable or truncated trace, unknown rollback protocol, or incomplete observation window blocks deletion but does not create a health incident. Exit code `2` remains reserved for an invalid invocation or unreadable mandatory input.
 ## Contained-local acceptance
 
 The contained profile has a root/systemd integration fixture that uses the real Runner and cgroup v2. It proves that an unmounted secret below host `/var` is invisible, network socket creation or connection is blocked, the Workspace remains writable, inherited credential variables are absent, the systemd/Runner cgroup identity remains consistent, and `terminal_evidence` reports a clean process tree with the supplied foreign reference.
