@@ -27,7 +27,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.close",
-        description = "Close one Workspace. By default, reject tracked or untracked changes; force=true may remove dirty files. Active or held Jobs always block closure.",
+        description = "Close one Workspace. By default, reject tracked or untracked changes; force=true may remove dirty files. expectedSourceStateDigest compare-and-closes only the exact committed source state and remains replayable through the closed tombstone. Active or held Jobs always block closure.",
         annotations(
             title = "Close workspace",
             read_only_hint = false,
@@ -49,7 +49,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.get",
-        description = "Return one Workspace's exact source commit, detached-head mode, dirty state, creation time, and active Job identities. Use this after reconnecting instead of reconstructing Workspace state from memory.",
+        description = "Return one Workspace's exact source commit, detached-head mode, dirty state, complete sourceStateDigest, creation time, and active Job identities. Use this after reconnecting instead of reconstructing Workspace state from memory.",
         annotations(
             title = "Get workspace state",
             read_only_hint = true,

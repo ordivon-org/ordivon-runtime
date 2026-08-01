@@ -72,12 +72,25 @@ pub struct WorkspaceCloseRequest {
     pub workspace_id: String,
     #[serde(default)]
     pub force: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_source_state_digest: Option<String>,
 }
 
 impl WorkspaceCloseRequest {
     pub fn validate_shape(&self) -> Result<(), UniversalExecError> {
         require_schema(self.schema_version)?;
-        validate_id(&self.workspace_id, "workspaceId")
+        validate_id(&self.workspace_id, "workspaceId")?;
+        if self
+            .expected_source_state_digest
+            .as_ref()
+            .is_some_and(|digest| !valid_digest(digest))
+        {
+            return Err(invalid(
+                "expectedSourceStateDigest must be SHA-256",
+                "expectedSourceStateDigest",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -86,6 +99,8 @@ impl WorkspaceCloseRequest {
 pub struct WorkspaceCloseResult {
     pub workspace_id: String,
     pub removed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_state_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

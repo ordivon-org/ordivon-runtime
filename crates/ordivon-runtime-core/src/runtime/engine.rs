@@ -342,6 +342,8 @@ impl Runtime {
                 Ok(diff) => workspaces.push(Self::workspace_summary_from_parts(
                     &record,
                     diff.byte_length > 0 || !diff.untracked_paths.is_empty(),
+                    workspace_source_state_digest(&self.executor, &record.workspace_id)
+                        .map_err(map_universal_error)?,
                     active_job_ids,
                 )),
                 Err(error) => issues.push(RuntimeWorkspaceIssue {
@@ -374,6 +376,8 @@ impl Runtime {
         Ok(Self::workspace_summary_from_parts(
             record,
             diff.byte_length > 0 || !diff.untracked_paths.is_empty(),
+            workspace_source_state_digest(&self.executor, &record.workspace_id)
+                .map_err(map_universal_error)?,
             active_job_ids,
         ))
     }
@@ -381,6 +385,7 @@ impl Runtime {
     fn workspace_summary_from_parts(
         record: &crate::universal::WorkspaceRecord,
         dirty: bool,
+        source_state_digest: String,
         active_job_ids: Vec<String>,
     ) -> RuntimeWorkspaceSummary {
         RuntimeWorkspaceSummary {
@@ -389,6 +394,7 @@ impl Runtime {
             created_at_ms: u64::try_from(record.created_unix_ms).unwrap_or(u64::MAX),
             head_mode: "detached".to_string(),
             dirty,
+            source_state_digest,
             active_job_ids,
         }
     }
