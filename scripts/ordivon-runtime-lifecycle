@@ -23,13 +23,13 @@ REPAIR_CONFIRMATION = "REPAIR_WORKSPACE_IDENTITIES"
 QUARANTINE_CONFIRMATION = "QUARANTINE_BROKEN_WORKSPACES"
 DEFAULT_POLICY = {
     "schemaVersion": 1,
-    "defaultClass": "review",
+    "defaultClass": "ephemeral",
     "classes": {
         "ephemeral": {"retentionHours": 24.0},
         "review": {"retentionHours": 168.0},
         "pinned": {"retentionHours": None},
     },
-    "rules": [{"prefix": "ws-", "class": "ephemeral"}],
+    "rules": [],
     "sourceRepoAliases": {},
 }
 

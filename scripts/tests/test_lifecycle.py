@@ -76,14 +76,14 @@ class LifecycleTests(unittest.TestCase):
             records.mkdir(parents=True)
             workspaces.mkdir()
             database = root / "registry.sqlite3"
-            initialize_registry(database, "ws-example", 2_000)
-            workspace = workspaces / "ws-example"
+            initialize_registry(database, "named-audit-workspace", 2_000)
+            workspace = workspaces / "named-audit-workspace"
             revision = init_repository(workspace)
-            (records / "ws-example.json").write_text(
+            (records / "named-audit-workspace.json").write_text(
                 json.dumps(
                     {
                         "schemaVersion": 1,
-                        "workspaceId": "ws-example",
+                        "workspaceId": "named-audit-workspace",
                         "sourceRepo": str(workspace),
                         "sourceRevision": revision,
                         "workspacePath": str(workspace),

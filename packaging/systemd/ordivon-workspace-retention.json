@@ -1,14 +1,12 @@
 {
   "schemaVersion": 1,
-  "defaultClass": "review",
+  "defaultClass": "ephemeral",
   "classes": {
     "ephemeral": {"retentionHours": 24},
     "review": {"retentionHours": 168},
     "pinned": {"retentionHours": null}
   },
-  "rules": [
-    {"prefix": "ws-", "class": "ephemeral"}
-  ],
+  "rules": [],
   "sourceRepoAliases": {
     "/root/projects/agent-native-computing": "/root/projects/ordivon-computing"
   }
