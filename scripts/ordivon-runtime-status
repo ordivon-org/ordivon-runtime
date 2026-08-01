@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 TERMINAL_ATTEMPT_STATES = ("succeeded", "failed", "timed_out", "cancelled", "lost", "orphaned")
 DEFAULT_DATABASE = Path("/var/lib/ordivon/registry/registry.sqlite3")
@@ -53,6 +53,22 @@ def exact_commit(value: str) -> str:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="ordivon-runtime-status", description=__doc__)
+    mode = result.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--health",
+        dest="mode",
+        action="store_const",
+        const="health",
+        help="run the fast operational health path only",
+    )
+    mode.add_argument(
+        "--diagnose",
+        dest="mode",
+        action="store_const",
+        const="diagnose",
+        help="run health plus bounded maintenance diagnostics",
+    )
+    result.set_defaults(mode="health")
     result.add_argument("--json", action="store_true", help="emit stable JSON instead of one compact line")
     result.add_argument("--database", type=absolute_path, default=DEFAULT_DATABASE)
     result.add_argument("--runtime-store-root", type=absolute_path, default=DEFAULT_STORE_ROOT)
@@ -772,51 +788,87 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
         raise StatusError("stale-dirty-hours must be in 1..=87600")
     started = time.perf_counter()
     generated_at_ms = int(time.time() * 1000)
-    reasons: list[str] = []
-    deployment = deployment_status(args.deployment_root, args.install_dir, args.expected_commit, reasons)
-    trace_path = args.trace_path or configured_trace_path(args.env_file, args.database)
-    compatibility = compatibility_status(
+    health_reasons: list[str] = []
+    maintenance_reasons: list[str] = []
+
+    deployment = deployment_status(
         args.deployment_root,
-        deployment,
-        trace_path,
-        generated_at_ms,
-        args.protocol_retention_hours,
+        args.install_dir,
+        args.expected_commit,
+        health_reasons,
     )
-    service = service_status(args.systemctl, args.service, reasons)
-    config = whitelisted_config(args.env_file, reasons)
-    registry, held = registry_status(args.database, reasons)
-    workspaces = workspace_status(
-        args.runtime_store_root,
-        held,
-        args.max_workspaces,
-        args.stale_dirty_hours,
-        reasons,
-    )
-    storage = storage_status(
-        args.database,
-        args.runtime_store_root,
-        args.deployment_root,
-        args.candidate_root,
-        config,
-        reasons,
-    )
-    lifecycle = lifecycle_status(args.runtime_store_root)
-    unique_reasons = list(dict.fromkeys(reasons))
-    return {
+    service = service_status(args.systemctl, args.service, health_reasons)
+    config = whitelisted_config(args.env_file, health_reasons)
+    registry, held = registry_status(args.database, health_reasons)
+
+    report: dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
-        "status": "healthy" if not unique_reasons else "attention",
+        "mode": args.mode,
         "generatedAtMs": generated_at_ms,
-        "elapsedMs": round((time.perf_counter() - started) * 1000, 1),
         "deployment": deployment,
-        "compatibility": compatibility,
         "service": service,
         "config": config,
         "registry": registry,
-        "workspaces": workspaces,
-        "storage": storage,
-        "lifecycle": lifecycle,
-        "operatorAction": {"count": len(unique_reasons), "reasons": unique_reasons},
     }
+    if args.mode == "diagnose":
+        trace_path = args.trace_path or configured_trace_path(args.env_file, args.database)
+        report["compatibility"] = compatibility_status(
+            args.deployment_root,
+            deployment,
+            trace_path,
+            generated_at_ms,
+            args.protocol_retention_hours,
+        )
+        report["workspaces"] = workspace_status(
+            args.runtime_store_root,
+            held,
+            args.max_workspaces,
+            args.stale_dirty_hours,
+            maintenance_reasons,
+        )
+        report["storage"] = storage_status(
+            args.database,
+            args.runtime_store_root,
+            args.deployment_root,
+            args.candidate_root,
+            config,
+            maintenance_reasons,
+        )
+        report["lifecycle"] = lifecycle_status(args.runtime_store_root)
+
+    health_reasons = list(dict.fromkeys(health_reasons))
+    maintenance_reasons = list(dict.fromkeys(maintenance_reasons))
+    health_status = "healthy" if not health_reasons else "unhealthy"
+    maintenance_status = (
+        "not_checked"
+        if args.mode == "health"
+        else ("healthy" if not maintenance_reasons else "attention")
+    )
+    overall_status = (
+        "unhealthy"
+        if health_reasons
+        else ("attention" if maintenance_reasons else "healthy")
+    )
+    report.update(
+        {
+            "status": overall_status,
+            "elapsedMs": round((time.perf_counter() - started) * 1000, 1),
+            "health": {"status": health_status, "reasons": health_reasons},
+            "maintenance": {
+                "status": maintenance_status,
+                "reasons": maintenance_reasons,
+            },
+            "operatorAction": {
+                "count": len(health_reasons),
+                "reasons": health_reasons,
+            },
+            "maintenanceAction": {
+                "count": len(maintenance_reasons),
+                "reasons": maintenance_reasons,
+            },
+        }
+    )
+    return report
 
 
 def human(report: dict[str, Any]) -> str:
@@ -824,22 +876,29 @@ def human(report: dict[str, Any]) -> str:
     service = report["service"]
     registry = report["registry"]
     config = report["config"]
-    workspaces = report["workspaces"]
     commit = deployment.get("commit")
     short_commit = commit[:12] if isinstance(commit, str) else "unknown"
-    return (
-        f"{str(report['status']).upper()} commit={short_commit} "
-        f"mcp={deployment.get('protocolLifecycle') or 'unknown'}/"
-        f"{deployment.get('protocolVersion') or 'unknown'} "
+    common = (
+        f"{str(report['status']).upper()} mode={report['mode']} commit={short_commit} "
         f"service={service.get('activeState')}/{service.get('subState')} "
         f"jobs={registry.get('jobsActive', '?')}/{registry.get('jobsTotal', '?')} "
         f"capacity={registry.get('activeReservations', '?')}+"
         f"{registry.get('heldReservations', '?')}/{config.get('globalMaxConcurrency', '?')} "
+        f"health-actions={report['operatorAction']['count']}"
+    )
+    if report["mode"] == "health":
+        return common
+    workspaces = report["workspaces"]
+    compatibility = report["compatibility"]
+    return (
+        common
+        + f" mcp={deployment.get('protocolLifecycle') or 'unknown'}/"
+        f"{deployment.get('protocolVersion') or 'unknown'} "
         f"workspaces={workspaces.get('physicalOpen', '?')} "
-        f"compat-delete={len(report['compatibility'].get('deletionCandidates', []))} "
+        f"compat-delete={len(compatibility.get('deletionCandidates', []))} "
         f"dirty={workspaces.get('dirty', '?')}/{workspaces.get('staleDirty', '?')} "
         f"held={workspaces.get('held', '?')} "
-        f"actions={report['operatorAction']['count']}"
+        f"maintenance-actions={report['maintenanceAction']['count']}"
     )
 
 
@@ -851,7 +910,7 @@ def main() -> int:
         print(f"runtime status failed: {error}", file=sys.stderr)
         return 2
     print(json.dumps(report, indent=2, sort_keys=True) if args.json else human(report))
-    return 0 if report["status"] == "healthy" else 1
+    return 0 if report["health"]["status"] == "healthy" else 1
 
 
 if __name__ == "__main__":
