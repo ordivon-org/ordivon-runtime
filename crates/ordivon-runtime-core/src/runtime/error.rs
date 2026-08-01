@@ -73,6 +73,10 @@ pub struct RuntimeCapacity {
     pub limit: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holder_job_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holder_workspace_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

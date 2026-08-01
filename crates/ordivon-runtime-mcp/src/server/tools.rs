@@ -71,7 +71,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.list",
-        description = "List newest healthy open Workspaces with exact source commits, dirty state, detached-head mode, and active Jobs. Missing historical records are omitted; existing but unusable Workspaces are isolated in issues instead of failing the whole recovery list.",
+        description = "List newest healthy open Workspaces using a lightweight Git status probe. Exact sourceStateDigest is omitted by default and may be requested explicitly; workspace.get remains the precise proof boundary. Missing historical records are omitted and unusable Workspaces are isolated in issues.",
         annotations(
             title = "List open workspaces",
             read_only_hint = true,
