@@ -731,6 +731,7 @@ pub struct RuntimeWorkspaceSummary {
     pub created_at_ms: u64,
     pub head_mode: String,
     pub dirty: bool,
+    pub source_state_digest: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_job_ids: Vec<String>,
 }

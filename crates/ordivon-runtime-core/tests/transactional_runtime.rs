@@ -204,6 +204,7 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: workspace_id.clone(),
             force: true,
+            expected_source_state_digest: None,
         },
     )
     .unwrap();
@@ -518,6 +519,7 @@ print("WRITE_OK=" + pathlib.Path("contained-output.txt").read_text(), flush=True
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id,
             force: true,
+            expected_source_state_digest: None,
         },
     )
     .unwrap();
@@ -609,6 +611,7 @@ fn runtime_replays_same_request_after_effect_changes_or_workspace_closure() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: context.workspace_id.clone(),
             force: true,
+            expected_source_state_digest: None,
         })
         .unwrap();
     let replay_after_close = runtime.run_task(&request).unwrap();
@@ -889,6 +892,7 @@ fn runtime_incremental_observe_and_safe_close_preserve_active_work() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: context.workspace_id.clone(),
             force: true,
+            expected_source_state_digest: None,
         })
         .unwrap_err();
     assert_eq!(
@@ -933,6 +937,7 @@ fn runtime_incremental_observe_and_safe_close_preserve_active_work() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: context.workspace_id.clone(),
             force: true,
+            expected_source_state_digest: None,
         })
         .unwrap();
     assert!(closed.removed);
@@ -1120,6 +1125,7 @@ fn runtime_interactive_close_reconciles_completed_unobserved_job() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: context.workspace_id.clone(),
             force: true,
+            expected_source_state_digest: None,
         })
         .unwrap();
 

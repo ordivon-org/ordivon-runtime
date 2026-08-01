@@ -25,6 +25,8 @@ struct ClosedWorkspaceRecord {
     source_revision: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     final_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_state_digest: Option<String>,
     closed_unix_ms: u128,
     removal_result: String,
 }
@@ -793,19 +795,39 @@ pub fn remove_git_workspace(
             ));
         }
         cleanup_workspace_caches(config, &request.workspace_id)?;
+        if request.expected_source_state_digest.is_some() {
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::RevisionMismatch,
+                "cannot prove the requested Workspace source state after identity loss",
+                Some("expectedSourceStateDigest"),
+                false,
+            ));
+        }
         return Ok(WorkspaceCloseResult {
             workspace_id: request.workspace_id.clone(),
             removed: false,
+            source_state_digest: None,
         });
     }
 
     let bytes = read_workspace_record_bytes(&record_path)?;
     if let Some(closed) = decode_closed_workspace_record(&bytes)? {
         validate_closed_identity(&closed, &request.workspace_id)?;
+        if let Some(expected) = &request.expected_source_state_digest {
+            if closed.source_state_digest.as_deref() != Some(expected.as_str()) {
+                return Err(UniversalExecError::new(
+                    UniversalExecErrorCode::RevisionMismatch,
+                    "closed Workspace source state differs from expectedSourceStateDigest",
+                    Some("expectedSourceStateDigest"),
+                    false,
+                ));
+            }
+        }
         cleanup_workspace_caches(config, &request.workspace_id)?;
         return Ok(WorkspaceCloseResult {
             workspace_id: request.workspace_id.clone(),
             removed: false,
+            source_state_digest: closed.source_state_digest,
         });
     }
     let record = decode_open_workspace_record(&bytes, &request.workspace_id)?;
@@ -829,11 +851,20 @@ pub fn remove_git_workspace(
                 ensure_rescue_ref(source_repo, &request.workspace_id, head)?;
             }
         }
+        if request.expected_source_state_digest.is_some() {
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::RevisionMismatch,
+                "cannot prove expectedSourceStateDigest after Workspace directory loss",
+                Some("expectedSourceStateDigest"),
+                false,
+            ));
+        }
         cleanup_workspace_caches(config, &request.workspace_id)?;
-        write_closed_workspace_record(&record_path, &record, final_head, "already_missing")?;
+        write_closed_workspace_record(&record_path, &record, final_head, None, "already_missing")?;
         return Ok(WorkspaceCloseResult {
             workspace_id: request.workspace_id.clone(),
             removed: false,
+            source_state_digest: None,
         });
     }
 
@@ -846,6 +877,17 @@ pub fn remove_git_workspace(
             Some("workspacePath"),
             false,
         ));
+    }
+    let source_state_digest = workspace_source_state_digest_at(&recorded)?;
+    if let Some(expected) = &request.expected_source_state_digest {
+        if expected != &source_state_digest {
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::RevisionMismatch,
+                "Workspace source state differs from expectedSourceStateDigest",
+                Some("expectedSourceStateDigest"),
+                false,
+            ));
+        }
     }
     if !request.force {
         let dirty = workspace_dirty_paths(&recorded)?;
@@ -870,10 +912,17 @@ pub fn remove_git_workspace(
     }
     cleanup_workspace_caches(config, &request.workspace_id)?;
     remove_git_worktree_from_workspace(&recorded, request.force)?;
-    write_closed_workspace_record(&record_path, &record, Some(final_head), "removed")?;
+    write_closed_workspace_record(
+        &record_path,
+        &record,
+        Some(final_head),
+        Some(source_state_digest.clone()),
+        "removed",
+    )?;
     Ok(WorkspaceCloseResult {
         workspace_id: request.workspace_id.clone(),
         removed: true,
+        source_state_digest: Some(source_state_digest),
     })
 }
 
@@ -899,6 +948,7 @@ fn write_closed_workspace_record(
     record_path: &Path,
     open: &WorkspaceRecord,
     final_head: Option<String>,
+    source_state_digest: Option<String>,
     removal_result: &str,
 ) -> Result<(), UniversalExecError> {
     let closed = ClosedWorkspaceRecord {
@@ -908,6 +958,7 @@ fn write_closed_workspace_record(
         source_repo: open.source_repo.clone(),
         source_revision: open.source_revision.clone(),
         final_head,
+        source_state_digest,
         closed_unix_ms: now_unix_ms()?,
         removal_result: removal_result.to_string(),
     };

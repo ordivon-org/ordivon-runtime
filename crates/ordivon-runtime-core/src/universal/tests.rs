@@ -157,6 +157,7 @@ fn workspace_round_trip_is_isolated_and_digest_guarded() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: "workspace-1".to_string(),
             force: true,
+            expected_source_state_digest: None,
         },
     )
     .unwrap();
@@ -418,6 +419,7 @@ fn workspace_close_rejects_dirty_state_unless_force_is_explicit() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: "workspace-safe-close".to_string(),
             force: false,
+            expected_source_state_digest: None,
         },
     )
     .unwrap_err();
@@ -432,11 +434,90 @@ fn workspace_close_rejects_dirty_state_unless_force_is_explicit() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: "workspace-safe-close".to_string(),
             force: true,
+            expected_source_state_digest: None,
         },
     )
     .unwrap();
     assert!(closed.removed);
     assert!(!workspace.exists());
+}
+
+#[test]
+fn workspace_close_fences_exact_source_state_and_replays_tombstone() {
+    let sandbox = Sandbox::new("close-source-state-fence");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-source-state-fence";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    fs::write(workspace.join("README.md"), "verified state\n").unwrap();
+    let verified = workspace_source_state_digest(&config, workspace_id).unwrap();
+    fs::write(workspace.join("README.md"), "raced state\n").unwrap();
+
+    let error = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: true,
+            expected_source_state_digest: Some(verified),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, UniversalExecErrorCode::RevisionMismatch);
+    assert!(workspace.exists());
+
+    let current = workspace_source_state_digest(&config, workspace_id).unwrap();
+    let first = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: true,
+            expected_source_state_digest: Some(current.clone()),
+        },
+    )
+    .unwrap();
+    assert!(first.removed);
+    assert_eq!(first.source_state_digest.as_deref(), Some(current.as_str()));
+
+    let replay = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: true,
+            expected_source_state_digest: Some(current.clone()),
+        },
+    )
+    .unwrap();
+    assert!(!replay.removed);
+    assert_eq!(
+        replay.source_state_digest.as_deref(),
+        Some(current.as_str())
+    );
+
+    let mismatch = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: true,
+            expected_source_state_digest: Some(sha256_bytes(b"another-state")),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(mismatch.code, UniversalExecErrorCode::RevisionMismatch);
 }
 
 #[test]
@@ -470,6 +551,7 @@ fn clean_workspace_close_succeeds_without_force() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: workspace_id.to_string(),
             force: false,
+            expected_source_state_digest: None,
         },
     )
     .unwrap();
@@ -504,6 +586,7 @@ fn workspace_close_cache_failure_does_not_commit_closure() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: workspace_id.to_string(),
             force: false,
+            expected_source_state_digest: None,
         },
     )
     .unwrap_err();
@@ -549,6 +632,7 @@ fn workspace_close_preserves_changed_head_and_is_idempotent() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: workspace_id.to_string(),
             force: false,
+            expected_source_state_digest: None,
         },
     )
     .unwrap();
@@ -574,6 +658,7 @@ fn workspace_close_preserves_changed_head_and_is_idempotent() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: workspace_id.to_string(),
             force: false,
+            expected_source_state_digest: None,
         },
     )
     .unwrap();
@@ -635,6 +720,7 @@ fn workspace_close_recovers_final_head_after_physical_removal() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: workspace_id.to_string(),
             force: false,
+            expected_source_state_digest: None,
         },
     )
     .unwrap();
@@ -675,6 +761,7 @@ fn workspace_close_repairs_missing_directory_but_rejects_orphan_directory() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: workspace_id.to_string(),
             force: false,
+            expected_source_state_digest: None,
         },
     )
     .unwrap();
@@ -695,6 +782,7 @@ fn workspace_close_repairs_missing_directory_but_rejects_orphan_directory() {
                 schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
                 workspace_id: orphan_id.to_string(),
                 force: false,
+                expected_source_state_digest: None,
             },
         )
         .unwrap_err()
@@ -731,6 +819,7 @@ fn workspace_close_uses_live_git_identity_when_source_record_drifts() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: workspace_id.to_string(),
             force: false,
+            expected_source_state_digest: None,
         },
     )
     .unwrap();
