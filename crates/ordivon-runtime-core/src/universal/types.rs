@@ -217,12 +217,24 @@ impl WorkspaceDiffRequest {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceRenamedPath {
+    pub from_path: String,
+    pub to_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceDiffResult {
     pub workspace_id: String,
     pub diff: String,
     pub digest: String,
     pub byte_length: u64,
     pub truncated: bool,
+    pub changed_paths: Vec<String>,
+    pub modified_paths: Vec<String>,
+    pub added_paths: Vec<String>,
+    pub deleted_paths: Vec<String>,
+    pub renamed_paths: Vec<WorkspaceRenamedPath>,
     pub untracked_paths: Vec<String>,
 }
 
@@ -232,6 +244,11 @@ pub struct CompactWorkspaceDiffResult {
     pub diff: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
+    pub changed_paths: Vec<String>,
+    pub modified_paths: Vec<String>,
+    pub added_paths: Vec<String>,
+    pub deleted_paths: Vec<String>,
+    pub renamed_paths: Vec<WorkspaceRenamedPath>,
     pub untracked_paths: Vec<String>,
 }
 

@@ -22,11 +22,12 @@ pub use universal::{
     WorkspaceMutateRequest, WorkspaceMutateResult, WorkspaceMutation, WorkspaceMutationMode,
     WorkspaceMutationResult, WorkspacePatchRequest, WorkspacePatchResult, WorkspacePatchedFile,
     WorkspaceReadRequest, WorkspaceReadResult, WorkspaceReadSliceRequest, WorkspaceReadSliceResult,
-    WorkspaceRecord, WorkspaceTextEdit, WorkspaceTextPosition, WorkspaceTextRange,
-    WorkspaceWriteRequest, WorkspaceWriteResult, MAX_UNIVERSAL_ARGS, MAX_UNIVERSAL_ARG_BYTES,
-    MAX_UNIVERSAL_ENV_VALUE_BYTES, MAX_UNIVERSAL_ENV_VARS, MAX_UNIVERSAL_OUTPUT_BYTES,
-    MAX_UNIVERSAL_RUNTIME_MS, MAX_WORKSPACE_IO_BYTES, MAX_WORKSPACE_MUTATIONS,
-    MAX_WORKSPACE_PATCH_EDITS_PER_FILE, MAX_WORKSPACE_PATCH_FILES, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    WorkspaceRecord, WorkspaceRenamedPath, WorkspaceTextEdit, WorkspaceTextPosition,
+    WorkspaceTextRange, WorkspaceWriteRequest, WorkspaceWriteResult, MAX_UNIVERSAL_ARGS,
+    MAX_UNIVERSAL_ARG_BYTES, MAX_UNIVERSAL_ENV_VALUE_BYTES, MAX_UNIVERSAL_ENV_VARS,
+    MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS, MAX_WORKSPACE_IO_BYTES,
+    MAX_WORKSPACE_MUTATIONS, MAX_WORKSPACE_PATCH_EDITS_PER_FILE, MAX_WORKSPACE_PATCH_FILES,
+    UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
 #[cfg(feature = "transactional-runtime")]

@@ -34,6 +34,11 @@ pub fn workspace_diff_compact(
     Ok(CompactWorkspaceDiffResult {
         diff: result.diff,
         truncated: result.truncated,
+        changed_paths: result.changed_paths,
+        modified_paths: result.modified_paths,
+        added_paths: result.added_paths,
+        deleted_paths: result.deleted_paths,
+        renamed_paths: result.renamed_paths,
         untracked_paths: result.untracked_paths,
     })
 }
