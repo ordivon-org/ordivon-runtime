@@ -38,7 +38,7 @@ scripts/ordivon-runtime-deploy plan \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --env-file /etc/ordivon/ordivon-runtime.env \
   --receipt-root /var/lib/ordivon/deployments \
-  --expected-tool-count 13 \
+  --expected-tool-count 15 \
   --pretty
 
 scripts/ordivon-runtime-deploy apply \
@@ -51,7 +51,7 @@ scripts/ordivon-runtime-deploy apply \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --env-file /etc/ordivon/ordivon-runtime.env \
   --receipt-root /var/lib/ordivon/deployments \
-  --expected-tool-count 13
+  --expected-tool-count 15
 ```
 
 Eligibility requires:
@@ -78,7 +78,7 @@ scripts/ordivon-runtime-deploy rollback \
   --env-file /etc/ordivon/ordivon-runtime.env
 ```
 
-Rollback validates the receipt-bound install directory, service, environment file, binary set, and previous digests. It preserves the displaced current binaries inside the same receipt before restoring the previous set. If restoring the previous set fails, it attempts to restore the displaced current set and receipts both outcomes. Its MCP probe accepts either the modern lifecycle or the prior legacy Session lifecycle, because rollback must be able to prove a genuinely old binary rather than require it to implement the new protocol. Additive query indexes that do not change Registry semantics are maintained outside `schema_migrations`; this preserves previous-binary rollback compatibility while allowing the newer Runtime to recreate missing performance indexes idempotently.
+Rollback validates the receipt-bound install directory, service, environment file, binary set, and previous digests. It preserves the displaced current binaries inside the same receipt before restoring the previous set. If restoring the previous set fails, it attempts to restore the displaced current set and receipts both outcomes. Its MCP probe accepts either the modern lifecycle or the prior legacy Session lifecycle, because rollback must be able to prove a genuinely old binary rather than require it to implement the new protocol. Additive query indexes and the isolated Workspace Patch receipt table are maintained outside `schema_migrations`; neither changes existing Job, Attempt, or repair semantics. This preserves previous-binary rollback compatibility while allowing the newer Runtime to recreate missing derived indexes and Patch storage idempotently.
 
 ### MCP probe module placement
 

@@ -133,7 +133,7 @@ def fixture(root: Path) -> dict[str, Path]:
                         "version": "0.1.0",
                     },
                     "toolCatalogDigest": "sha256:" + "b" * 64,
-                    "toolCount": 13,
+                    "toolCount": 15,
                 },
             }
         ),
@@ -259,7 +259,7 @@ class RuntimeStatusTests(unittest.TestCase):
                 report["deployment"]["toolCatalogDigest"],
                 "sha256:" + "b" * 64,
             )
-            self.assertEqual(report["deployment"]["toolCount"], 13)
+            self.assertEqual(report["deployment"]["toolCount"], 15)
             compatibility = report["compatibility"]
             self.assertEqual(compatibility["canonicalProtocolVersion"], "2026-07-28")
             self.assertEqual(compatibility["deletionCandidates"], [])

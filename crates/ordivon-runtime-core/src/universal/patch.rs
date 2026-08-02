@@ -1,10 +1,35 @@
+use serde::{Deserialize, Serialize};
+
 use super::{
     load_workspace_record, preflight_workspace_write_path, read_workspace_text,
-    remove_workspace_file, workspace_diff_paths, write_workspace_text, UniversalExecError,
-    UniversalExecErrorCode, UniversalExecutorConfig, WorkspacePatchRequest, WorkspacePatchResult,
-    WorkspacePatchedFile, WorkspaceReadRequest, WorkspaceTextPosition, WorkspaceWriteRequest,
-    WorkspaceWriteResult, MAX_WORKSPACE_IO_BYTES,
+    remove_workspace_file, sha256_bytes, workspace_diff_paths, write_workspace_text,
+    UniversalExecError, UniversalExecErrorCode, UniversalExecutorConfig, WorkspacePatchRequest,
+    WorkspacePatchResult, WorkspacePatchedFile, WorkspaceReadRequest, WorkspaceTextPosition,
+    WorkspaceWriteRequest, WorkspaceWriteResult, MAX_WORKSPACE_IO_BYTES,
 };
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspacePatchPlanFile {
+    pub relative_path: String,
+    pub before_digest: Option<String>,
+    pub after_digest: String,
+    pub byte_length: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspacePatchPlan {
+    pub workspace_id: String,
+    pub files: Vec<WorkspacePatchPlanFile>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspacePatchPlanState {
+    Before,
+    After,
+    Mixed,
+}
 
 struct PreparedPatch {
     relative_path: String,
@@ -21,10 +46,125 @@ struct ResolvedEdit {
     source_index: usize,
 }
 
+pub fn plan_workspace_patch(
+    config: &UniversalExecutorConfig,
+    request: &WorkspacePatchRequest,
+) -> Result<WorkspacePatchPlan, UniversalExecError> {
+    let (_, prepared) = prepare_workspace_patch(config, request)?;
+    Ok(plan_from_prepared(request, &prepared))
+}
+
+pub fn inspect_workspace_patch_plan(
+    config: &UniversalExecutorConfig,
+    plan: &WorkspacePatchPlan,
+) -> Result<WorkspacePatchPlanState, UniversalExecError> {
+    let record = load_workspace_record(config, &plan.workspace_id)?;
+    let mut before = 0usize;
+    let mut after = 0usize;
+    for file in &plan.files {
+        let path = preflight_workspace_write_path(&record, &file.relative_path)?;
+        let current = if path.exists() {
+            Some(
+                read_workspace_text(
+                    config,
+                    &WorkspaceReadRequest {
+                        schema_version: super::UNIVERSAL_EXEC_SCHEMA_VERSION,
+                        workspace_id: plan.workspace_id.clone(),
+                        relative_path: file.relative_path.clone(),
+                        max_bytes: MAX_WORKSPACE_IO_BYTES,
+                    },
+                )?
+                .digest,
+            )
+        } else {
+            None
+        };
+        if current == file.before_digest {
+            before += 1;
+        } else if current.as_deref() == Some(file.after_digest.as_str()) {
+            after += 1;
+        } else {
+            return Ok(WorkspacePatchPlanState::Mixed);
+        }
+    }
+    if before == plan.files.len() {
+        Ok(WorkspacePatchPlanState::Before)
+    } else if after == plan.files.len() {
+        Ok(WorkspacePatchPlanState::After)
+    } else {
+        Ok(WorkspacePatchPlanState::Mixed)
+    }
+}
+
+pub fn result_from_workspace_patch_plan(
+    config: &UniversalExecutorConfig,
+    plan: &WorkspacePatchPlan,
+    max_diff_bytes: u64,
+) -> Result<WorkspacePatchResult, UniversalExecError> {
+    if inspect_workspace_patch_plan(config, plan)? != WorkspacePatchPlanState::After {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::WorkspaceMutationIncomplete,
+            "workspace files do not all match the committed patch result",
+            Some("files"),
+            false,
+        ));
+    }
+    let paths = plan
+        .files
+        .iter()
+        .map(|file| file.relative_path.as_str())
+        .collect::<Vec<_>>();
+    let (diff, diff_truncated) =
+        workspace_diff_paths(config, &plan.workspace_id, &paths, max_diff_bytes)?;
+    Ok(WorkspacePatchResult {
+        files: plan
+            .files
+            .iter()
+            .map(|file| WorkspacePatchedFile {
+                relative_path: file.relative_path.clone(),
+                before_digest: file.before_digest.clone(),
+                after_digest: file.after_digest.clone(),
+                byte_length: file.byte_length,
+            })
+            .collect(),
+        diff,
+        diff_truncated,
+    })
+}
+
 pub fn patch_workspace(
     config: &UniversalExecutorConfig,
     request: &WorkspacePatchRequest,
 ) -> Result<WorkspacePatchResult, UniversalExecError> {
+    let (record, prepared) = prepare_workspace_patch(config, request)?;
+    let plan = plan_from_prepared(request, &prepared);
+    let mut results = Vec::with_capacity(prepared.len());
+    for (index, patch) in prepared.iter().enumerate() {
+        let outcome = write_workspace_text(
+            config,
+            &WorkspaceWriteRequest {
+                schema_version: request.schema_version,
+                workspace_id: request.workspace_id.clone(),
+                relative_path: patch.relative_path.clone(),
+                content: patch.after_content.clone(),
+                expected_digest: patch.before_digest.clone(),
+            },
+        );
+        match outcome {
+            Ok(result) => results.push(result),
+            Err(error) => {
+                rollback(config, request, &record, &prepared[..index], &results)?;
+                return Err(error);
+            }
+        }
+    }
+    result_from_workspace_patch_plan(config, &plan, request.max_diff_bytes)
+}
+
+fn prepare_workspace_patch(
+    config: &UniversalExecutorConfig,
+    request: &WorkspacePatchRequest,
+) -> Result<(super::WorkspaceRecord, Vec<PreparedPatch>), UniversalExecError> {
     request.validate_shape()?;
     let record = load_workspace_record(config, &request.workspace_id)?;
     let mut prepared = Vec::with_capacity(request.files.len());
@@ -154,51 +294,25 @@ pub fn patch_workspace(
             after_content,
         });
     }
+    Ok((record, prepared))
+}
 
-    let mut results = Vec::with_capacity(prepared.len());
-    for (index, patch) in prepared.iter().enumerate() {
-        let outcome = write_workspace_text(
-            config,
-            &WorkspaceWriteRequest {
-                schema_version: request.schema_version,
-                workspace_id: request.workspace_id.clone(),
+fn plan_from_prepared(
+    request: &WorkspacePatchRequest,
+    prepared: &[PreparedPatch],
+) -> WorkspacePatchPlan {
+    WorkspacePatchPlan {
+        workspace_id: request.workspace_id.clone(),
+        files: prepared
+            .iter()
+            .map(|patch| WorkspacePatchPlanFile {
                 relative_path: patch.relative_path.clone(),
-                content: patch.after_content.clone(),
-                expected_digest: patch.before_digest.clone(),
-            },
-        );
-        match outcome {
-            Ok(result) => results.push(result),
-            Err(error) => {
-                rollback(config, request, &record, &prepared[..index], &results)?;
-                return Err(error);
-            }
-        }
-    }
-
-    let paths = prepared
-        .iter()
-        .map(|patch| patch.relative_path.as_str())
-        .collect::<Vec<_>>();
-    let (diff, diff_truncated) = workspace_diff_paths(
-        config,
-        &request.workspace_id,
-        &paths,
-        request.max_diff_bytes,
-    )?;
-    Ok(WorkspacePatchResult {
-        files: results
-            .into_iter()
-            .map(|result| WorkspacePatchedFile {
-                relative_path: result.relative_path,
-                before_digest: result.before_digest,
-                after_digest: result.after_digest,
-                byte_length: result.byte_length,
+                before_digest: patch.before_digest.clone(),
+                after_digest: sha256_bytes(patch.after_content.as_bytes()),
+                byte_length: patch.after_content.len() as u64,
             })
             .collect(),
-        diff,
-        diff_truncated,
-    })
+    }
 }
 
 fn position_offset(

@@ -2,7 +2,8 @@ use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::*;
 use crate::universal::{
     CapturedOutput, RunnerTaskResult, TaskTerminalStatus, UniversalExecutorConfig,
-    UNIVERSAL_EXEC_SCHEMA_VERSION,
+    WorkspaceFilePatch, WorkspacePatchRequest, WorkspaceTextEdit, WorkspaceTextPosition,
+    WorkspaceTextRange, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use proptest::prelude::*;
 use rusqlite::Connection;
@@ -11,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use uuid::Uuid;
@@ -203,6 +205,211 @@ fn created(outcome: AdmissionOutcome) -> CreatedAdmission {
         AdmissionOutcome::Created(created) => *created,
         AdmissionOutcome::Existing { .. } => panic!("expected newly created admission"),
     }
+}
+
+fn run_git_command(directory: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn durable_patch_fixture(
+    label: &str,
+    workspace_id: &str,
+) -> (Sandbox, Runtime, UniversalExecutorConfig) {
+    let sandbox = Sandbox::new(label, 5000);
+    let source = sandbox.root.join("patch-source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("README.md"), "alpha\n").unwrap();
+    fs::write(source.join("SECOND.md"), "beta\n").unwrap();
+    run_git_command(&source, &["init", "-q"]);
+    run_git_command(
+        &source,
+        &["config", "user.email", "runtime-tests@ordivon.local"],
+    );
+    run_git_command(&source, &["config", "user.name", "Ordivon Runtime Tests"]);
+    run_git_command(&source, &["add", "."]);
+    run_git_command(&source, &["commit", "-qm", "fixture"]);
+
+    let config = runtime_config(&sandbox);
+    let executor = config.executor.clone();
+    let runtime = Runtime::new(config).unwrap();
+    runtime
+        .open_workspace(&crate::GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        })
+        .unwrap();
+    (sandbox, runtime, executor)
+}
+
+fn durable_patch_request(
+    executor: &UniversalExecutorConfig,
+    workspace_id: &str,
+    client_request_id: &str,
+    include_second: bool,
+) -> DurableWorkspacePatchRequest {
+    let workspace = executor.workspace_path(workspace_id);
+    let mut files = vec![WorkspaceFilePatch {
+        relative_path: "README.md".to_string(),
+        expected_digest: Some(file_digest(&workspace.join("README.md"))),
+        edits: vec![WorkspaceTextEdit {
+            range: WorkspaceTextRange {
+                start: WorkspaceTextPosition { line: 1, column: 0 },
+                end: WorkspaceTextPosition { line: 1, column: 5 },
+            },
+            expected_text: "alpha".to_string(),
+            replacement: "omega".to_string(),
+        }],
+    }];
+    if include_second {
+        files.push(WorkspaceFilePatch {
+            relative_path: "SECOND.md".to_string(),
+            expected_digest: Some(file_digest(&workspace.join("SECOND.md"))),
+            edits: vec![WorkspaceTextEdit {
+                range: WorkspaceTextRange {
+                    start: WorkspaceTextPosition { line: 1, column: 0 },
+                    end: WorkspaceTextPosition { line: 1, column: 4 },
+                },
+                expected_text: "beta".to_string(),
+                replacement: "gamma".to_string(),
+            }],
+        });
+    }
+    DurableWorkspacePatchRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        principal: "principal:durable-patch-test".to_string(),
+        client_request_id: client_request_id.to_string(),
+        patch: WorkspacePatchRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            files,
+            max_diff_bytes: 16 * 1024,
+        },
+    }
+}
+
+#[test]
+fn durable_workspace_patch_replays_exact_receipt_and_conflicts_on_changed_request() {
+    let workspace_id = "workspace-durable-patch-replay";
+    let (_sandbox, runtime, executor) = durable_patch_fixture("durable-patch-replay", workspace_id);
+    let request = durable_patch_request(
+        &executor,
+        workspace_id,
+        "request:durable-patch:replay",
+        false,
+    );
+
+    let first = runtime.patch_workspace_durable(&request).unwrap();
+    assert!(!first.replayed);
+    assert_eq!(
+        fs::read_to_string(executor.workspace_path(workspace_id).join("README.md")).unwrap(),
+        "omega\n"
+    );
+
+    let replay = runtime.patch_workspace_durable(&request).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.operation_id, first.operation_id);
+    assert_eq!(replay.request_digest, first.request_digest);
+    assert_eq!(replay.patch, first.patch);
+
+    let mut changed = request.clone();
+    changed.patch.files[0].edits[0].replacement = "other".to_string();
+    let error = runtime.patch_workspace_durable(&changed).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::IdempotencyConflict);
+    assert_eq!(error.field.as_deref(), Some("clientRequestId"));
+}
+
+#[test]
+fn durable_workspace_patch_recovers_committed_files_after_receipt_loss() {
+    let workspace_id = "workspace-durable-patch-receipt-loss";
+    let (sandbox, runtime, executor) =
+        durable_patch_fixture("durable-patch-receipt-loss", workspace_id);
+    let request = durable_patch_request(
+        &executor,
+        workspace_id,
+        "request:durable-patch:receipt-loss",
+        false,
+    );
+    let first = runtime.patch_workspace_durable(&request).unwrap();
+
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE workspace_patch_operations SET state='prepared',result_json=NULL WHERE operation_id=?1",
+            [&first.operation_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let recovered = runtime.patch_workspace_durable(&request).unwrap();
+    assert!(recovered.replayed);
+    assert_eq!(recovered.operation_id, first.operation_id);
+    assert_eq!(recovered.patch, first.patch);
+    let status = runtime
+        .workspace_patch_status(&WorkspacePatchStatusRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            principal: request.principal.clone(),
+            client_request_id: request.client_request_id.clone(),
+        })
+        .unwrap();
+    assert_eq!(status.state, WorkspacePatchOperationState::Committed);
+    assert_eq!(status.patch, Some(first.patch));
+}
+
+#[test]
+fn durable_workspace_patch_marks_mixed_physical_state_unknown_without_replay() {
+    let workspace_id = "workspace-durable-patch-mixed";
+    let (sandbox, runtime, executor) = durable_patch_fixture("durable-patch-mixed", workspace_id);
+    let request =
+        durable_patch_request(&executor, workspace_id, "request:durable-patch:mixed", true);
+    let first = runtime.patch_workspace_durable(&request).unwrap();
+
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE workspace_patch_operations SET state='prepared',result_json=NULL WHERE operation_id=?1",
+            [&first.operation_id],
+        )
+        .unwrap();
+    drop(connection);
+    fs::write(
+        executor.workspace_path(workspace_id).join("README.md"),
+        "alpha\n",
+    )
+    .unwrap();
+
+    let status = runtime
+        .workspace_patch_status(&WorkspacePatchStatusRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            principal: request.principal.clone(),
+            client_request_id: request.client_request_id.clone(),
+        })
+        .unwrap();
+    assert_eq!(status.state, WorkspacePatchOperationState::Unknown);
+    assert_eq!(status.patch, None);
+    assert_eq!(
+        fs::read_to_string(executor.workspace_path(workspace_id).join("README.md")).unwrap(),
+        "alpha\n"
+    );
+    assert_eq!(
+        fs::read_to_string(executor.workspace_path(workspace_id).join("SECOND.md")).unwrap(),
+        "gamma\n"
+    );
+
+    let error = runtime.patch_workspace_durable(&request).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::ReconciliationRequired);
 }
 
 #[test]
@@ -2937,6 +3144,41 @@ fn query_index_is_recreated_without_advancing_schema_version() {
 }
 
 #[test]
+fn workspace_patch_storage_is_recreated_without_advancing_schema_version() {
+    let sandbox = Sandbox::new("workspace-patch-storage-recreate", 5000);
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute("DROP TABLE workspace_patch_operations", [])
+        .unwrap();
+    drop(connection);
+
+    Registry::initialize(sandbox.registry.config().clone()).unwrap();
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    let max_version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let table: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='workspace_patch_operations'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let index: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_workspace_patch_operations_workspace'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(max_version, 4);
+    assert_eq!(table, "workspace_patch_operations");
+    assert_eq!(index, "idx_workspace_patch_operations_workspace");
+}
+
+#[test]
 fn event_log_is_append_only_and_terminal_trigger_blocks_reopen() {
     let sandbox = Sandbox::new("triggers", 5000);
     let created = created(
@@ -3196,6 +3438,22 @@ fn existing_v1_registry_upgrades_and_ensures_lookup_index() {
         )
         .unwrap();
     assert_eq!(reclaim_checksum, RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM);
+    let patch_table: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='workspace_patch_operations'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(patch_table, "workspace_patch_operations");
+    let patch_index: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_workspace_patch_operations_workspace'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(patch_index, "idx_workspace_patch_operations_workspace");
     let lookup_index: String = connection
         .query_row(
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_jobs_client_request_id_created'",

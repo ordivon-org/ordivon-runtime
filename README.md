@@ -11,7 +11,7 @@ participant purpose or Host-admitted work
 → recovery or continuation
 ```
 
-The Runtime owns the deterministic commitment boundary between Agent decisions and reality: Git Workspaces, stable operation identity, Jobs and Attempts, at-most-once physical dispatch, process-tree ownership, bounded evidence, cancellation, reconciliation, and recovery. Higher-level cognition, planning, memory, coordination, and product interfaces belong to Ordivon or other components above the Runtime. The kernel contract is defined in [`docs/effect-kernel.md`](docs/effect-kernel.md).
+The Runtime owns the deterministic commitment boundary between Agent decisions and reality: Git Workspaces, stable operation identity, Jobs and Attempts, durable structured Patch receipts, at-most-once physical dispatch, process-tree ownership, bounded evidence, cancellation, reconciliation, and recovery. Higher-level cognition, planning, memory, coordination, and product interfaces belong to Ordivon or other components above the Runtime. The kernel contract is defined in [`docs/effect-kernel.md`](docs/effect-kernel.md).
 
 An authenticated participant or Host uses the canonical `trusted_local` profile by default and receives the installed service user's local authority. `contained_local` is an explicit no-fallback reduction profile: it removes inherited credentials and capabilities, blocks network access, hides host state directories, and exposes only the Workspace, Attempt bundle, declared caches, Runner, and Git metadata required for source commitment. It is not a strong multi-tenant or hostile-code boundary. Run high-consequence untrusted workloads behind a disposable VM or container owned outside Runtime.
 

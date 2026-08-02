@@ -7,16 +7,17 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use ordivon_runtime_core::{
     read_workspace_slice_compact, read_workspace_text_compact, workspace_diff_compact,
     ArtifactReadRequest, ArtifactReadResult, CompactWorkspaceDiffResult,
-    CompactWorkspaceOpenResult, ExecutionBudget, ExecutionProfile, ForeignReference,
-    GitWorkspaceCreateRequest, Runtime, RuntimeCapacity, RuntimeConfig, RuntimeError,
-    RuntimeJobListRequest, RuntimeJobListResult, RuntimeWorkspaceGetRequest,
-    RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
-    TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunRequest, UniversalExecError,
-    UniversalExecutionRequest, UniversalExecutionStep, UniversalExecutorConfig,
-    WorkspaceCloseRequest, WorkspaceCloseResult, WorkspaceDiffRequest as ExecWorkspaceDiffRequest,
-    WorkspaceMutateRequest, WorkspaceMutateResult,
-    WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
-    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
+    CompactWorkspaceOpenResult, DurableWorkspacePatchRequest, DurableWorkspacePatchResult,
+    ExecutionBudget, ExecutionProfile, ForeignReference, GitWorkspaceCreateRequest, Runtime,
+    RuntimeCapacity, RuntimeConfig, RuntimeError, RuntimeJobListRequest, RuntimeJobListResult,
+    RuntimeWorkspaceGetRequest, RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult,
+    RuntimeWorkspaceSummary, TaskCancelRequest, TaskObservation, TaskObserveRequest,
+    TaskRunRequest, UniversalExecError, UniversalExecutionRequest, UniversalExecutionStep,
+    UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
+    WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceFilePatch, WorkspaceMutateRequest,
+    WorkspaceMutateResult, WorkspacePatchOperationStatus, WorkspacePatchRequest,
+    WorkspacePatchStatusRequest, WorkspaceReadRequest as ExecWorkspaceReadRequest,
+    WorkspaceReadSliceRequest, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{IntoCallToolResult, ToolCallContext};
@@ -103,6 +104,28 @@ pub struct WorkspaceDiffRequest {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspacePatchToolRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    pub schema_version: u32,
+    pub client_request_id: String,
+    pub workspace_id: String,
+    #[schemars(length(min = 1, max = 32))]
+    pub files: Vec<WorkspaceFilePatch>,
+    #[serde(default = "default_patch_diff_bytes")]
+    #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
+    pub max_diff_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspacePatchStatusToolRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    pub schema_version: u32,
+    pub client_request_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceExecRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
@@ -160,6 +183,31 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
+    fn bind_patch(&self, request: WorkspacePatchToolRequest) -> DurableWorkspacePatchRequest {
+        DurableWorkspacePatchRequest {
+            schema_version: request.schema_version,
+            principal: self.principal.clone(),
+            client_request_id: request.client_request_id,
+            patch: WorkspacePatchRequest {
+                schema_version: request.schema_version,
+                workspace_id: request.workspace_id,
+                files: request.files,
+                max_diff_bytes: request.max_diff_bytes,
+            },
+        }
+    }
+
+    fn bind_patch_status(
+        &self,
+        request: WorkspacePatchStatusToolRequest,
+    ) -> WorkspacePatchStatusRequest {
+        WorkspacePatchStatusRequest {
+            schema_version: request.schema_version,
+            principal: self.principal.clone(),
+            client_request_id: request.client_request_id,
+        }
+    }
+
     fn bind(&self, request: WorkspaceExecRequest) -> TaskRunRequest {
         TaskRunRequest {
             schema_version: request.schema_version,
@@ -207,6 +255,10 @@ impl ExecutionContext {
             stderr_tail_bytes: request.stderr_tail_bytes,
         })
     }
+}
+
+fn default_patch_diff_bytes() -> u64 {
+    MAX_WORKSPACE_IO_BYTES
 }
 
 fn default_exec_wait_ms() -> u64 {

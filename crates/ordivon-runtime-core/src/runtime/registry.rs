@@ -40,6 +40,9 @@ const MIGRATION_V4_SQL: &str = include_str!("../../migrations/runtime/0004_orpha
 pub const RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM: &str =
     "sha256:b76afbfaf70645b60456b08ad257e5ac2be1f63499f24a555cbf0157791e19ad";
 pub(crate) const MAX_MIGRATION_VERSION: i64 = 4;
+const WORKSPACE_PATCH_STORAGE_SQL: &str = include_str!("workspace_patch_storage.sql");
+const WORKSPACE_PATCH_TABLE: &str = "workspace_patch_operations";
+const WORKSPACE_PATCH_INDEX: &str = "idx_workspace_patch_operations_workspace";
 const JOB_CLIENT_REQUEST_LOOKUP_INDEX: &str = "idx_jobs_client_request_id_created";
 const JOB_CLIENT_REQUEST_LOOKUP_INDEX_SQL: &str =
     "CREATE INDEX IF NOT EXISTS idx_jobs_client_request_id_created ON jobs(client_request_id, created_at_ms, job_id)";
@@ -137,6 +140,7 @@ impl Registry {
         registry.ensure_wal_mode(&connection)?;
         registry.apply_migrations(&mut connection)?;
         registry.ensure_query_indexes(&mut connection)?;
+        registry.ensure_workspace_patch_storage(&mut connection)?;
         registry.validate_database(&connection)?;
         set_private_file(&registry.config.db_path)?;
         Ok(registry)
@@ -323,7 +327,6 @@ impl Registry {
             RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM,
             "orphan-reclaim migration",
         )?;
-
         Ok(())
     }
 
@@ -353,6 +356,41 @@ impl Registry {
                 None,
                 false,
             ));
+        }
+        Ok(())
+    }
+
+    fn ensure_workspace_patch_storage(&self, connection: &mut Connection) -> RuntimeResult<()> {
+        let transaction = immediate(connection, "Workspace Patch storage maintenance")?;
+        transaction
+            .execute_batch(WORKSPACE_PATCH_STORAGE_SQL)
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot ensure Workspace Patch storage")
+            })?;
+        transaction.commit().map_err(|error| {
+            RuntimeError::from_sql(error, "cannot commit Workspace Patch storage maintenance")
+        })?;
+        for (kind, name) in [
+            ("table", WORKSPACE_PATCH_TABLE),
+            ("index", WORKSPACE_PATCH_INDEX),
+        ] {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2)",
+                    params![kind, name],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot verify Workspace Patch storage")
+                })?;
+            if !exists {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    format!("Workspace Patch {kind} {name} is missing after maintenance"),
+                    None,
+                    false,
+                ));
+            }
         }
         Ok(())
     }

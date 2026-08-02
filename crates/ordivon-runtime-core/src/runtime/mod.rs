@@ -3,6 +3,7 @@ mod engine;
 mod error;
 mod evidence;
 mod inspection;
+mod patch;
 mod registry;
 mod repair;
 mod supervisor;
@@ -24,6 +25,10 @@ pub use inspection::{
     RuntimeInspectionCondition, RuntimeInspectionConfig, RuntimeInspectionEpisodes,
     RuntimeInspectionEvent, RuntimeInspectionJob, RuntimeJobInspection,
     DEFAULT_INSPECTION_EVENT_LIMIT, MAX_INSPECTION_EVENT_LIMIT, RUNTIME_INSPECTION_SCHEMA_VERSION,
+};
+pub use patch::{
+    DurableWorkspacePatchRequest, DurableWorkspacePatchResult, WorkspacePatchOperationState,
+    WorkspacePatchOperationStatus, WorkspacePatchStatusRequest,
 };
 pub use registry::{
     Registry, RegistryConfig, RUNTIME_MIGRATION_CHECKSUM,

@@ -106,6 +106,8 @@ fn tool_catalog_uses_transactional_job_contract() {
             "workspace.list",
             "workspace.mutate",
             "workspace.open",
+            "workspace.patch",
+            "workspace.patch.get",
             "workspace.read",
         ]
     );
@@ -234,6 +236,45 @@ fn tool_catalog_uses_transactional_job_contract() {
                 |description| description.contains("Required when the target already exists")
             )
     );
+
+    let patch = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "workspace.patch")
+        .unwrap();
+    assert_eq!(
+        patch
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.idempotent_hint),
+        Some(true)
+    );
+    let patch_schema = serde_json::to_value(&patch.input_schema).unwrap();
+    assert!(patch_schema
+        .pointer("/properties/clientRequestId")
+        .is_some());
+    assert!(patch_schema.pointer("/properties/files/minItems").is_some());
+    assert!(patch_schema.pointer("/properties/principal").is_none());
+    assert_eq!(
+        patch_schema.pointer("/$defs/WorkspaceTextPosition/properties/line/minimum"),
+        Some(&serde_json::json!(1))
+    );
+
+    let patch_get = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "workspace.patch.get")
+        .unwrap();
+    assert_eq!(
+        patch_get
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.read_only_hint),
+        Some(true)
+    );
+    let patch_get_schema = serde_json::to_value(&patch_get.input_schema).unwrap();
+    assert!(patch_get_schema
+        .pointer("/properties/clientRequestId")
+        .is_some());
+    assert!(patch_get_schema.pointer("/properties/principal").is_none());
 
     let observe = tools
         .iter()

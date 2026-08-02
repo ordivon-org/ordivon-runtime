@@ -32,6 +32,8 @@ DEFAULT_REQUIRED_TOOLS = (
     "workspace.execPlan",
     "workspace.get",
     "workspace.list",
+    "workspace.patch",
+    "workspace.patch.get",
 )
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 ATTEMPT_UNIT_PATTERN = re.compile(r"/ordivon-(attempt-[^.\s/]+)\.service(?:$|/)")

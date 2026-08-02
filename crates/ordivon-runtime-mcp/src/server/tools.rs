@@ -178,6 +178,56 @@ impl RuntimeServer {
     }
 
     #[tool(
+        name = "workspace.patch",
+        description = "Apply one digest-guarded atomic text patch under a durable clientRequestId. Exact replay returns the committed receipt; changed input conflicts; uncertain mixed outcomes require reconciliation.",
+        annotations(
+            title = "Apply durable workspace patch",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_patch(
+        &self,
+        Parameters(request): Parameters<WorkspacePatchToolRequest>,
+    ) -> ToolOutcome<DurableWorkspacePatchResult> {
+        let runtime = self.state.runtime.clone();
+        let request = self.state.execution.bind_patch(request);
+        self.run_core("workspace.patch", move || {
+            runtime
+                .patch_workspace_durable(&request)
+                .map_err(ToolError::from)
+        })
+        .await
+    }
+
+    #[tool(
+        name = "workspace.patch.get",
+        description = "Read and reconcile one durable Workspace Patch receipt by exact clientRequestId without applying an uncommitted patch.",
+        annotations(
+            title = "Inspect durable workspace patch",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_patch_get(
+        &self,
+        Parameters(request): Parameters<WorkspacePatchStatusToolRequest>,
+    ) -> ToolOutcome<WorkspacePatchOperationStatus> {
+        let runtime = self.state.runtime.clone();
+        let request = self.state.execution.bind_patch_status(request);
+        self.run_core("workspace.patch.get", move || {
+            runtime
+                .workspace_patch_status(&request)
+                .map_err(ToolError::from)
+        })
+        .await
+    }
+
+    #[tool(
         name = "workspace.diff",
         description = "Return a bounded Git diff plus structured changed, modified, added, deleted, renamed, and untracked paths for an isolated Workspace.",
         annotations(

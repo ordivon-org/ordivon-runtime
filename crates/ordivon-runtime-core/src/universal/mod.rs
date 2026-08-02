@@ -16,7 +16,11 @@ pub use config::{
 };
 pub use error::{UniversalExecError, UniversalExecErrorCode};
 pub use mutation::{mutate_workspace, read_workspace_slice};
-pub use patch::patch_workspace;
+pub use patch::{
+    inspect_workspace_patch_plan, patch_workspace, plan_workspace_patch,
+    result_from_workspace_patch_plan, WorkspacePatchPlan, WorkspacePatchPlanFile,
+    WorkspacePatchPlanState,
+};
 pub use projection::{
     create_git_workspace_compact, read_workspace_slice_compact, read_workspace_text_compact,
     workspace_diff_compact,

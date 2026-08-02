@@ -10,6 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::evidence::prepare_runner_terminal_from_bundle;
+use super::patch::{
+    durable_patch_request_digest, validate_durable_patch_request, validate_patch_status_request,
+};
 use super::registry::JobSnapshot;
 use super::supervisor::{
     classify_supervisor_recovery, SupervisorIdentity, SupervisorObservation,
@@ -17,25 +20,28 @@ use super::supervisor::{
 };
 use super::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
-    ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, JobDesiredState,
-    JobResolution, Registry, RegistryConfig, RunnerIdentity, RuntimeArtifactRecord, RuntimeError,
+    ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent,
+    DurableWorkspacePatchRequest, DurableWorkspacePatchResult, JobDesiredState, JobResolution,
+    Registry, RegistryConfig, RunnerIdentity, RuntimeArtifactRecord, RuntimeError,
     RuntimeErrorCode, RuntimeExecutionPlan, RuntimeExecutionStep, RuntimeJobListRequest,
     RuntimeJobListResult, RuntimeResult, RuntimeWorkspaceGetRequest, RuntimeWorkspaceIssue,
     RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
     SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskObserveWaitUntil,
-    TaskRunRequest, TerminalCommit, MAX_ARTIFACT_READ_BYTES, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
+    TaskRunRequest, TerminalCommit, WorkspacePatchOperationState, WorkspacePatchOperationStatus,
+    WorkspacePatchStatusRequest, MAX_ARTIFACT_READ_BYTES, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
     RUNTIME_SCHEMA_VERSION,
 };
 use crate::universal::{
-    canonical_directory, create_git_workspace_compact, list_workspace_records,
-    load_workspace_record, mutate_workspace, patch_workspace, remove_git_workspace,
-    resolve_workspace_cwd, sha256_bytes, sha256_file, workspace_git_common_dir_at,
+    canonical_directory, create_git_workspace_compact, inspect_workspace_patch_plan,
+    list_workspace_records, load_workspace_record, mutate_workspace, patch_workspace,
+    plan_workspace_patch, remove_git_workspace, resolve_workspace_cwd,
+    result_from_workspace_patch_plan, sha256_bytes, sha256_file, workspace_git_common_dir_at,
     workspace_is_dirty, workspace_source_state_digest, write_bytes_atomic, write_json_atomic,
     CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
     RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskProgress, RunnerTaskRequest,
     RunnerTaskResult, UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
-    WorkspaceDiffRequest, WorkspaceMutateRequest, WorkspaceMutateResult, WorkspacePatchRequest,
-    WorkspacePatchResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    WorkspaceDiffRequest, WorkspaceMutateRequest, WorkspaceMutateResult, WorkspacePatchPlanState,
+    WorkspacePatchRequest, WorkspacePatchResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
 const RUNNER_REQUEST_FILE: &str = "request.json";
@@ -446,6 +452,176 @@ impl Runtime {
             ));
         }
         patch_workspace(&self.executor, request).map_err(map_universal_error)
+    }
+
+    pub fn patch_workspace_durable(
+        &self,
+        request: &DurableWorkspacePatchRequest,
+    ) -> RuntimeResult<DurableWorkspacePatchResult> {
+        validate_durable_patch_request(request)?;
+        let request_digest = durable_patch_request_digest(request)?;
+        let _guard = self.lock_lifecycle()?;
+        let _ = self.reconcile_workspace(&request.patch.workspace_id)?;
+        let active = self
+            .registry
+            .active_job_ids_for_workspace(&request.patch.workspace_id, 20)?;
+        if !active.is_empty() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::WorkspaceBusy,
+                format!(
+                    "workspace source state is committed by active or held Jobs: {}",
+                    active.join(", ")
+                ),
+                Some("patch.workspaceId"),
+                true,
+            ));
+        }
+
+        let (operation, replayed) = if let Some(existing) = self
+            .registry
+            .find_workspace_patch_operation(&request.principal, &request.client_request_id)?
+        {
+            if existing.request_digest != request_digest {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::IdempotencyConflict,
+                    "clientRequestId is already bound to a different Workspace Patch request",
+                    Some("clientRequestId"),
+                    false,
+                ));
+            }
+            (existing, true)
+        } else {
+            let plan = plan_workspace_patch(&self.executor, &request.patch)
+                .map_err(map_universal_error)?;
+            self.registry
+                .prepare_workspace_patch_operation(request, &request_digest, &plan)?
+        };
+
+        if operation.state == WorkspacePatchOperationState::Unknown {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ReconciliationRequired,
+                "Workspace Patch files no longer match a wholly uncommitted or committed state",
+                Some("clientRequestId"),
+                false,
+            ));
+        }
+        if operation.state == WorkspacePatchOperationState::Committed {
+            let patch = operation.result.ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "committed Workspace Patch omitted its result",
+                    Some("result"),
+                    false,
+                )
+            })?;
+            return Ok(DurableWorkspacePatchResult {
+                operation_id: operation.operation_id,
+                client_request_id: operation.client_request_id,
+                request_digest: operation.request_digest,
+                replayed: true,
+                patch,
+            });
+        }
+
+        let patch = match inspect_workspace_patch_plan(&self.executor, &operation.plan)
+            .map_err(map_universal_error)?
+        {
+            WorkspacePatchPlanState::Before => {
+                match patch_workspace(&self.executor, &request.patch) {
+                    Ok(result) => result,
+                    Err(error)
+                        if error.code
+                            == crate::UniversalExecErrorCode::WorkspaceMutationIncomplete =>
+                    {
+                        self.registry
+                            .mark_workspace_patch_unknown(&operation.operation_id)?;
+                        return Err(RuntimeError::new(
+                            RuntimeErrorCode::ReconciliationRequired,
+                            error.message,
+                            error.field.as_deref(),
+                            false,
+                        ));
+                    }
+                    Err(error) => return Err(map_universal_error(error)),
+                }
+            }
+            WorkspacePatchPlanState::After => result_from_workspace_patch_plan(
+                &self.executor,
+                &operation.plan,
+                operation.max_diff_bytes,
+            )
+            .map_err(map_universal_error)?,
+            WorkspacePatchPlanState::Mixed => {
+                self.registry
+                    .mark_workspace_patch_unknown(&operation.operation_id)?;
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::ReconciliationRequired,
+                    "Workspace Patch has a mixed or externally changed file state",
+                    Some("clientRequestId"),
+                    false,
+                ));
+            }
+        };
+        self.registry
+            .commit_workspace_patch_operation(&operation.operation_id, &patch)?;
+        Ok(DurableWorkspacePatchResult {
+            operation_id: operation.operation_id,
+            client_request_id: operation.client_request_id,
+            request_digest: operation.request_digest,
+            replayed,
+            patch,
+        })
+    }
+
+    pub fn workspace_patch_status(
+        &self,
+        request: &WorkspacePatchStatusRequest,
+    ) -> RuntimeResult<WorkspacePatchOperationStatus> {
+        validate_patch_status_request(request)?;
+        let _guard = self.lock_lifecycle()?;
+        let mut operation = self
+            .registry
+            .find_workspace_patch_operation(&request.principal, &request.client_request_id)?
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::JobNotFound,
+                    "Workspace Patch operation not found",
+                    Some("clientRequestId"),
+                    false,
+                )
+            })?;
+        if operation.state == WorkspacePatchOperationState::Prepared {
+            match inspect_workspace_patch_plan(&self.executor, &operation.plan)
+                .map_err(map_universal_error)?
+            {
+                WorkspacePatchPlanState::Before => {}
+                WorkspacePatchPlanState::After => {
+                    let result = result_from_workspace_patch_plan(
+                        &self.executor,
+                        &operation.plan,
+                        operation.max_diff_bytes,
+                    )
+                    .map_err(map_universal_error)?;
+                    self.registry
+                        .commit_workspace_patch_operation(&operation.operation_id, &result)?;
+                    operation.state = WorkspacePatchOperationState::Committed;
+                    operation.result = Some(result);
+                }
+                WorkspacePatchPlanState::Mixed => {
+                    self.registry
+                        .mark_workspace_patch_unknown(&operation.operation_id)?;
+                    operation.state = WorkspacePatchOperationState::Unknown;
+                }
+            }
+        }
+        Ok(WorkspacePatchOperationStatus {
+            operation_id: operation.operation_id,
+            client_request_id: operation.client_request_id,
+            request_digest: operation.request_digest,
+            workspace_id: operation.workspace_id,
+            state: operation.state,
+            patch: operation.result,
+        })
     }
 
     pub fn close_workspace(
