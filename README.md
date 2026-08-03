@@ -166,6 +166,12 @@ Runtime persists commands, Job/Attempt state, bounded output, Artifacts, Workspa
 
 Read [`CONTRIBUTING.md`](CONTRIBUTING.md). A change must identify an observed failure or repeatedly missing operation, preserve one execution path, and include tests or live evidence that can falsify it.
 
+## Project family
+
+- [Public project directory](https://ordivon.com/projects) — reader-facing role, maturity, and next steps.
+- [Cross-project map](https://github.com/zycxfyh/ordivon-computing/blob/main/projects/README.md) — stable roles, repository links, and authority entry points for all nine repositories.
+- Related owners: [Ordivon Host](https://github.com/zycxfyh/ordivon-host) preserves durable Task continuity; [Ordivon Harness](https://github.com/zycxfyh/ordivon-harness) owns Assignment-scoped Agent Runs.
+
 ## License
 
 Apache-2.0. See [`LICENSE`](LICENSE).

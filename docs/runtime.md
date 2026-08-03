@@ -189,7 +189,7 @@ A successful process exit is execution evidence, not proof of semantic completio
 
 ## Read-only experience projection
 
-The append-only Runtime Registry remains the only task-fact database. `ordivon-runtime-inspect` derives bounded reports without adding tables, events, or a second history store:
+The append-only Runtime Registry remains the only physical execution-fact database for Runtime Jobs and Attempts. `ordivon-runtime-inspect` derives bounded reports without adding tables, events, or a second history store:
 
 ```text
 ordivon-runtime-inspect job --database <registry> --job-id <job> --pretty
