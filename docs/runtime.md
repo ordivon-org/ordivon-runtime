@@ -1,10 +1,40 @@
+---
+schema_version: 1
+id: runtime.model
+title: Ordivon Runtime Model
+type: architecture
+profile: engineering
+lifecycle: active
+source_role: canonical
+visibility: public
+owners:
+  - ordivon-runtime
+audience:
+  - builder
+  - operator
+  - agent
+updated: 2026-08-03
+summary: Canonical Runtime architecture for Workspace-bound admission, Jobs, Attempts, execution evidence, reconciliation, and recovery.
+evidence_status: verified
+readiness: READY
+applies_to:
+  - ordivon-runtime
+related:
+  - runtime.effect-kernel
+  - runtime.operations
+  - runtime.authority
+---
 # Ordivon Runtime Model
 
 ## Purpose
 
 A participant, Agent, or Host forms and admits work. Ordivon Runtime executes it, owns the resulting process tree, records non-reconstructable execution truth, and reconciles that truth after interruption.
 
-## Execution path
+## Boundaries
+
+Runtime owns physical operation admission, process-tree supervision, durable execution identity, bounded result evidence, cancellation, reconciliation, and Workspace lifecycle. Git, SQLite, systemd/cgroups, digest-bound files, and generated MCP schemas remain the strongest owners of their respective facts. Host and participants retain semantic completion, purpose, and commitment judgments.
+
+## Data flow
 
 ```text
 request
@@ -32,7 +62,7 @@ A Workspace isolates the checked-out code tree and Git state. It does not reduce
 
 Information reconstructable from these owners should not be persisted as a second proof system.
 
-## Runtime objects
+## Components
 
 ```text
 Principal
@@ -59,6 +89,10 @@ The Job expresses desired state and final resolution. The Attempt expresses one 
 - Work that cannot be proven running or terminal becomes `lost` or `orphaned`; it is not guessed successful, guessed failed, or automatically redispatched.
 
 The complete Agent Effect Commit Kernel contract, current proof boundary, costs, and implementation gate are in [`effect-kernel.md`](effect-kernel.md). Other exact limits, states, fields, transitions, Tool arguments, and configuration belong to source, migrations, tests, generated schemas, and the live Runtime.
+
+## Failure modes
+
+Runtime preserves ambiguous dispatch, missing terminal evidence, residual process ownership, stale source commitment, capacity exhaustion, and cancellation races as explicit failure or recovery states. It must not guess success, hide uncertainty, or redispatch an opaque operation merely because a response was lost.
 
 ## Reconciliation
 
@@ -165,6 +199,10 @@ The MCP HTTP request body remains bounded to `ORDIVON_BODY_LIMIT_BYTES` (1 MiB i
 `server/discover` returns a deterministic SHA-256 `toolCatalogDigest` over the complete name-sorted Tool definitions with `ttlMs=0` and private cache scope. Deployment receipts bind this digest. The Adapter no longer advertises or implements the experimental Core Tasks methods (`tasks/list`, enqueue, get, result, cancel). `workspace.exec` and `workspace.execPlan` return Ordivon Job observations, while `task.observe`, `task.list`, and `task.cancel` remain ordinary Tools. MCP adapts transport and discovery; it does not become Runtime's persistence model.
 
 Runtime trace JSONL files rotate at 64 MiB and retain one previous segment. Rotation and append are serialized by one process-local mutex so concurrent MCP requests cannot race the rename/open sequence. `scripts/ordivon-runtime-status` scans the current and rotated segments within its existing bounded byte budget, and projects a compatibility inventory from the current deployment receipt, recent protocol observations, and the immediately previous receipted deployment. Every retained protocol version therefore names a current production, live-client, or rollback consumer plus a deletion trigger. Missing, truncated, or not-yet-long-enough trace evidence blocks deletion conclusions but does not make Runtime unhealthy. The complete inventory, including persisted-state compatibility, is defined in [`compatibility.md`](compatibility.md).
+
+## Verification
+
+The architecture is verified by the canonical Runtime test suite, migration and Registry checks, generated MCP schemas, deployment receipts, capacity acceptance, recovery inspection, and identity-bound terminal evidence. Live source and tests take precedence over prose when an exact field, limit, or transition is required.
 
 ## Extension boundary
 

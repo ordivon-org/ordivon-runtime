@@ -1,3 +1,29 @@
+---
+schema_version: 1
+id: runtime.effect-kernel
+title: Ordivon Agent Effect Commit Kernel
+type: concept
+profile: engineering
+lifecycle: active
+source_role: canonical
+visibility: public
+owners:
+  - ordivon-runtime
+audience:
+  - builder
+  - researcher
+  - agent
+updated: 2026-08-03
+summary: Canonical concept and admission boundary for turning one Agent proposal into an identifiable, evidenced, recoverable physical commitment.
+evidence_status: verified
+readiness: READY
+applies_to:
+  - ordivon-runtime
+related:
+  - runtime.model
+  - runtime.operations
+  - runtime.authority
+---
 # Ordivon Agent Effect Commit Kernel
 
 ## Problem
@@ -24,6 +50,10 @@ Ordivon delegates established facts to their strongest owners:
 | Tool transport and schema exposure | MCP adapter |
 
 A new Runtime abstraction is justified only when these owners cannot express the cross-boundary commitment needed by a nondeterministic Agent.
+
+## Model
+
+The kernel separates proposal, durable operation identity, one physical dispatch generation, identity-bound evidence, and reconciliation. Effect classes are enforceable recovery contracts owned by structured adapters, never caller assertions attached to arbitrary execution.
 
 ## Core objects
 
@@ -201,6 +231,14 @@ canonical effect identity
 ```
 
 Until such an operation is selected, the current execution path remains deliberately opaque and fail-closed.
+
+## Boundary
+
+The kernel owns only the narrow commitment between admitted operation and physical reality. It does not own Agent reasoning, workflow planning, semantic completion, provider policy, generic scheduling, or guarantees that the target command's external effects are exactly once.
+
+## Related work
+
+[`runtime.md`](runtime.md) defines the complete Runtime architecture, [`operations.md`](operations.md) defines deployment and recovery practice, and [`effect-comparison.md`](effect-comparison.md) preserves the bounded comparison protocol used to evaluate future effect-aware adapters.
 
 ## Non-goals
 

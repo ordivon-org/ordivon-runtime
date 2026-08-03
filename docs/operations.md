@@ -1,4 +1,50 @@
+---
+schema_version: 1
+id: runtime.operations
+title: Runtime Operations
+type: operations
+profile: engineering
+lifecycle: active
+source_role: canonical
+visibility: public
+owners:
+  - ordivon-runtime
+audience:
+  - operator
+  - builder
+  - agent
+updated: 2026-08-03
+summary: Canonical deployment, health, capacity, Workspace lifecycle, reclaim, rollback, and operational verification contract.
+evidence_status: verified
+readiness: READY
+applies_to:
+  - ordivon-runtime
+related:
+  - runtime.model
+  - runtime.recovery
+  - runtime.authority
+---
 # Runtime Operations
+
+## Scope
+
+This document owns the operational path for local deployment, health inspection, capacity acceptance, Workspace lifecycle, reclaim, cache hygiene, rollback, and contained-local acceptance.
+
+## Normal operation
+
+Operate through the receipted service, bounded health path, configured lifecycle timers, explicit Workspace ownership, and the canonical deployment scripts described below. Frequent automation should use the fast health path rather than maintenance scans.
+
+## Failure detection
+
+Treat unhealthy service state, unresolved Registry conditions, held reservations, orphan directories, dirty or active Workspaces, digest mismatches, failed cache cleanup, and deployment-receipt mismatch as explicit operational signals rather than inferred success.
+
+## Recovery
+
+Recover through Runtime reconciliation, documented repair or quarantine paths, explicit Workspace close/reclaim operations, and receipt-bound Git rollback. Never delete live state or redispatch ambiguous work as a substitute for diagnosis.
+
+## Verification
+
+Use service status, Runtime doctor and inspect commands, capacity acceptance, lifecycle receipts, contained-local acceptance, deployment manifests, and the repository test suite. The architecture is defined in [`runtime.md`](runtime.md), focused repair guidance is in [`recovery.md`](recovery.md), and exact command sequences and acceptance conditions follow in the detailed sections.
 
 Operational tools are narrow wrappers around existing truth owners. They do not create a second deployment database, scheduler, or Workspace lifecycle service.
 
@@ -127,7 +173,6 @@ The default policy is seven days and includes only `stale_record` and `closable`
 
 The apply command is a policy executor, not a timer. Scheduling is intentionally separate because retention age and cadence are user policy. Failed items are recorded independently and produce a partial result instead of hiding successful actions or deleting a broader set.
 
-
 ### Policy-driven lifecycle
 
 The low-level reclaim command remains the only release executor. `ordivon-runtime-lifecycle` adds the installed retention policy without creating another Workspace database. It derives the retention basis from Workspace creation and the latest durable Job/Attempt activity and treats active or held Jobs as leases. The packaged policy defaults every Workspace identity—generated or readable—to `ephemeral` for 24 hours; only explicit exact/prefix rules promote selected identities to `review` or `pinned`. Naming is therefore no longer mistaken for retention intent.
@@ -250,6 +295,7 @@ scripts/ordivon-runtime-status --diagnose --json \
 ```
 
 The JSON schema reports separate `health` and `maintenance` states. Exit code `1` is reserved for operational health failures such as service, deployment, Registry, recovery, or exact-binary inconsistency. Maintenance findings such as a stale dirty Workspace produce top-level `status=attention` but retain exit code `0`; automation must inspect `maintenanceAction` when maintenance policy should gate a workflow. Compatibility observations remain advisory deletion evidence: an unreadable or truncated trace, unknown rollback protocol, or incomplete observation window blocks deletion but does not create a health incident. Exit code `2` remains reserved for an invalid invocation or unreadable mandatory input.
+
 ## Contained-local acceptance
 
 The contained profile has a root/systemd integration fixture that uses the real Runner and cgroup v2. It proves that an unmounted secret below host `/var` is invisible, network socket creation or connection is blocked, the Workspace remains writable, inherited credential variables are absent, the systemd/Runner cgroup identity remains consistent, and `terminal_evidence` reports a clean process tree with the supplied foreign reference.

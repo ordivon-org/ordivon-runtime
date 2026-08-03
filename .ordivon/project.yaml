@@ -13,8 +13,13 @@ documentation_roots:
   - CONTRIBUTING.md
   - SECURITY.md
   - docs
-managed_paths: []
-enforcement: advisory
+managed_paths:
+  - README.md
+  - docs/runtime.md
+  - docs/effect-kernel.md
+  - docs/operations.md
+  - docs/authority.md
+enforcement: strict
 maintainers:
   - zycxfyh
 public_projection: ordivon-web
