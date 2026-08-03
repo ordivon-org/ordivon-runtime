@@ -12,7 +12,7 @@ import shutil
 import sqlite3
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
@@ -107,7 +107,7 @@ def directory_bytes(path: Path) -> int:
 
 def active_workspace_ids(database: Path) -> set[str]:
     uri = f"file:{quote(str(database))}?mode=ro"
-    with sqlite3.connect(uri, uri=True, timeout=5) as connection:
+    with closing(sqlite3.connect(uri, uri=True, timeout=5)) as connection:
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA trusted_schema=OFF")
         required = {

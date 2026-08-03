@@ -3,6 +3,11 @@ name = "ordivon-runtime-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Trusted-local Workspace execution, durable Job state, evidence, reconciliation, and recovery core for Ordivon."
+publish = false
 
 [features]
 default = ["transactional-runtime"]

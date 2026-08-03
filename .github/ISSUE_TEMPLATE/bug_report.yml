@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a reproducible Runtime defect or incorrect recovery outcome
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report vulnerabilities here. Use the private security channel in SECURITY.md.
+  - type: input
+    id: commit
+    attributes:
+      label: Source commit or deployment receipt
+      description: Exact Git commit, release, or deployment receipt identity
+      placeholder: 40-character commit or receipt ID
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected boundary
+      options:
+        - Workspace
+        - Job or Attempt admission
+        - Runner or systemd/cgroup supervision
+        - Observation or cancellation
+        - Reconciliation or recovery
+        - Artifact or evidence
+        - MCP protocol or Tool schema
+        - Deployment, rollback, lifecycle, or backup
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Include exact state, error, and whether an external effect may already have occurred.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Include commands or Tool requests with secrets removed.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Tests, status output, Job/Attempt IDs, terminal evidence, or recovery receipts. Do not attach sensitive state.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed tokens, credentials, private source, and sensitive Artifact content.
+          required: true
+        - label: This is not a vulnerability report.
+          required: true

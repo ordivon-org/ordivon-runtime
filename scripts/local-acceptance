@@ -7,6 +7,8 @@ usage: scripts/local-acceptance check|run
 
 check  validate that the local-only acceptance contract is present
 run    execute real systemd/cgroup tests and MCP end-to-end acceptance
+
+Set ORDIVON_ACCEPTANCE_OUTPUT to write the MCP journey receipt to an explicit path.
 EOF
 }
 
@@ -18,6 +20,7 @@ case "$mode" in
     test -f "$repo/crates/ordivon-runtime-core/tests/transactional_runtime.rs"
     test -f "$repo/scripts/mcp_e2e.py"
     test -f "$repo/scripts/mcp_probe.py"
+    test -f "$repo/scripts/check_docs.py"
     test -f "$repo/crates/ordivon-runtime-core/src/bin/ordivon-runtime-inspect.rs"
     test -x "$repo/scripts/ordivon-runtime-lifecycle"
     test -x "$repo/scripts/ordivon-runtime-status"
@@ -27,6 +30,7 @@ case "$mode" in
     test -f "$repo/packaging/systemd/ordivon-workspace-retention.json"
     grep -q 'requires root, systemd, cgroup v2' "$repo/crates/ordivon-runtime-core/tests/systemd_supervisor.rs"
     grep -q 'requires root, systemd, cgroup v2' "$repo/crates/ordivon-runtime-core/tests/transactional_runtime.rs"
+    python3 "$repo/scripts/check_docs.py"
     printf '%s\n' \
       'local acceptance contract: present' \
       'run with: scripts/local-acceptance run'
@@ -40,6 +44,7 @@ case "$mode" in
     command -v systemd-run >/dev/null
     test -f /sys/fs/cgroup/cgroup.controllers
     cd "$repo"
+    python3 scripts/check_docs.py
     cargo build -p ordivon-runtime-core --bin ordivon-runtime-runner
     target_dir=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
     export ORDIVON_RUN_SYSTEMD_SPIKE=1
@@ -50,7 +55,12 @@ case "$mode" in
       --test systemd_supervisor -- --ignored --test-threads=1 --nocapture
     cargo test -p ordivon-runtime-core --test transactional_runtime -- \
       --ignored --test-threads=1 --nocapture
-    python scripts/mcp_e2e.py --repo .
+    output_args=()
+    if [[ -n ${ORDIVON_ACCEPTANCE_OUTPUT:-} ]]; then
+      mkdir -p "$(dirname "$ORDIVON_ACCEPTANCE_OUTPUT")"
+      output_args=(--output "$ORDIVON_ACCEPTANCE_OUTPUT")
+    fi
+    python3 scripts/mcp_e2e.py --repo . "${output_args[@]}"
     ;;
   --help|-h)
     usage

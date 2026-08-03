@@ -1,0 +1,40 @@
+name: Bounded capability proposal
+description: Propose a Runtime operation justified by a repeated real workload failure
+title: "proposal: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: failure
+    attributes:
+      label: Repeated missing operation or observed failure
+      description: Describe the real workload that cannot be handled safely through the current path.
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current path and limitation
+      description: Explain why workspace.exec, existing Tools, Host, Harness, or an external owner cannot already solve it.
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Smallest enforceable contract
+      description: State identity, preconditions, evidence, ambiguity, reconciliation, and authority boundaries.
+    validations:
+      required: true
+  - type: textarea
+    id: replacement
+    attributes:
+      label: Existing path replaced or extended
+    validations:
+      required: true
+  - type: textarea
+    id: falsification
+    attributes:
+      label: Acceptance and falsification evidence
+      description: Name tests or live scenarios that would disprove the proposal.
+    validations:
+      required: true

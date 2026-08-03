@@ -7,6 +7,7 @@ mod patch;
 mod registry;
 mod repair;
 mod supervisor;
+mod systemd;
 mod types;
 
 pub use doctor::{

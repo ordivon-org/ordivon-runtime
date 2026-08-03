@@ -10,66 +10,161 @@ visibility: public
 owners:
   - ordivon-runtime
 audience:
+  - user
   - builder
   - operator
   - agent
 updated: 2026-08-04
-summary: Canonical entry to the Runtime execution, evidence, reconciliation, recovery, and authority boundary.
+summary: Public entry to Runtime execution, evidence, reconciliation, recovery, and authority boundaries.
 evidence_status: not_applicable
 readiness: READY
 applies_to:
   - ordivon-runtime
 related:
+  - runtime.quickstart
+  - runtime.status
   - runtime.model
   - runtime.effect-kernel
   - runtime.operations
+  - runtime.data-privacy
+  - runtime.releases
   - runtime.authority
 ---
 # Ordivon Runtime
 
-## Purpose
+Ordivon Runtime is the trusted-local execution subsystem of Ordivon. It turns an admitted operation into a durable Job, owns its process tree, preserves bounded evidence, and makes interruption, cancellation, reconciliation, and recovery explicit.
 
-Ordivon Runtime is the owner-trusted effect execution and recovery subsystem of **Ordivon**. It is not the complete Ordivon system.
+It is **not** the complete Ordivon system. Host or another participant decides what work means and whether the user's objective is satisfied; Runtime owns the physical execution facts needed to make that judgment.
 
 ```text
-participant purpose or Host-admitted work
-→ cognition and coordination
-→ Ordivon Runtime
-→ durable execution
-→ observable result
-→ recovery or continuation
+participant or Host admits work
+→ Runtime commits one operation identity
+→ isolated Git Workspace + durable Job/Attempt
+→ owned systemd/cgroup process tree
+→ bounded Result and Artifacts
+→ observation, cancellation, reconciliation, or recovery
 ```
 
-The Runtime owns the deterministic commitment boundary between Agent decisions and reality: Git Workspaces, stable operation identity, Jobs and Attempts, durable structured Patch receipts, at-most-once physical dispatch, process-tree ownership, bounded evidence, cancellation, reconciliation, and recovery. Higher-level cognition, planning, memory, coordination, and product interfaces belong to Ordivon or other components above the Runtime. The kernel contract is defined in [`docs/effect-kernel.md`](docs/effect-kernel.md).
+## Status
 
-## Current boundary
+Runtime is operational for owner-trusted Linux environments and is used for real Ordivon work. The public interface remains pre-1.0: current `main` is supported, persisted state and protocol compatibility are managed explicitly, and breaking public changes require a documented migration or cutover.
 
-Runtime owns physical execution commitment and recoverable evidence under the installed service user's authority. It does not own Agent planning, semantic task completion, product policy, hostile multi-tenant isolation, or external-world authority beyond the operation contracts it can enforce.
+See [`docs/status.md`](docs/status.md) for the exact maturity claim, supported platform, known limits, and the commands that report live state.
 
-An authenticated participant or Host uses the canonical `trusted_local` profile by default and receives the installed service user's local authority. `contained_local` is an explicit no-fallback reduction profile: it removes inherited credentials and capabilities, blocks network access, hides host state directories, and exposes only the Workspace, Attempt bundle, declared caches, Runner, and Git metadata required for source commitment. It is not a strong multi-tenant or hostile-code boundary. Run high-consequence untrusted workloads behind a disposable VM or container owned outside Runtime.
+## What it does
 
-## Repository selection
+- creates detached Git Workspaces bound to an exact local revision;
+- reads, writes, patches, diffs, and safely closes Workspace state;
+- admits idempotent Jobs and ordered execution plans;
+- binds execution to the observed source state before dispatch;
+- owns one systemd unit and cgroup process tree per Attempt;
+- bounds time, output, memory, process count, and CPU when requested;
+- records digest-bound Results, Artifacts, and terminal supervision evidence;
+- exposes Job observation, cancellation, listing, reconciliation, backup, restore, and repair paths;
+- preserves ambiguous outcomes as `lost`, `orphaned`, or unknown instead of guessing success or redispatching opaque work.
 
-| Change concerns | Use | Do not put here |
+The generated public Tool inventory is [`docs/reference/tools.md`](docs/reference/tools.md).
+
+## What it does not do
+
+Runtime does not own:
+
+- Goal, Task, or semantic-completion decisions;
+- model selection, Provider loops, cognition, or planning;
+- hostile multi-tenant isolation;
+- approval policy for arbitrary commands;
+- domain-specific proof that an external-world effect occurred;
+- a scheduler or hidden work queue.
+
+`trusted_local` intentionally grants the installed service user's local authority. `contained_local` removes common ambient credentials, network access, capabilities, and host-state visibility, but it is not a hostile-code sandbox. Use an external disposable VM or container boundary for untrusted workloads.
+
+## Requirements
+
+The complete Runtime path requires:
+
+- Linux with systemd as PID 1 and cgroup v2;
+- Git;
+- Rust 1.95.0, fixed by [`rust-toolchain.toml`](rust-toolchain.toml);
+- Python 3.11 or newer for operational scripts;
+- root or an equivalently privileged dedicated service account for the current trusted-local deployment model.
+
+Portable unit and protocol checks run on ordinary Linux CI. Real process-supervision acceptance requires the local systemd/cgroup environment.
+
+## Quick start
+
+Build and run the portable verification contract:
+
+```bash
+cargo build --workspace --all-features
+cargo test --workspace --all-targets --all-features
+python3 -m unittest discover -s scripts/tests -v
+python3 scripts/check_docs.py
+scripts/local-acceptance check
+```
+
+Run the complete real-system journey on a disposable or owner-trusted machine:
+
+```bash
+sudo scripts/local-acceptance run
+```
+
+That command builds the Runtime and Runner, executes the ignored systemd/cgroup tests, starts a temporary loopback MCP server, and exercises Workspace creation, mutation, durable Patch replay, execution, observation, Artifact reading, cancellation, restart recovery, and safe closure.
+
+For installation and receipted deployment, follow [`docs/quickstart.md`](docs/quickstart.md) and [`docs/operations.md`](docs/operations.md).
+
+## First Runtime workflow
+
+A normal client journey is:
+
+```text
+workspace.open
+→ workspace.read / workspace.patch
+→ workspace.exec or workspace.execPlan
+→ task.observe
+→ artifact.read
+→ workspace.diff
+→ workspace.get
+→ workspace.close
+```
+
+After response loss, reuse the exact `clientRequestId` or reconnect through `workspace.list`, `workspace.get`, `task.list`, and `task.observe`. Do not create a new operation merely because delivery is uncertain.
+
+## Responsibility boundary
+
+| Concern | Canonical owner | Not owned here |
 | --- | --- | --- |
-| Workspace, Job, Attempt, process tree, Artifact, physical cancellation, or execution recovery | `ordivon-runtime` | Task meaning, Agent Run policy, or domain completion |
-| durable Task continuity, Journal/CAS, commitment admission, verification records, or Task outcomes | `ordivon-host` | Provider loops, Harness Run semantics, or physical process truth |
-| Assignment, Agent Run, Provider adapter, model–Tool loop, Tool-step checkpoint, or Run recovery | `ordivon-harness` | a second Task database, Runtime supervision, or domain-world authority |
+| Workspace, Job, Attempt, process tree, Artifact, physical cancellation, execution recovery | `ordivon-runtime` | Task meaning or domain completion |
+| durable Task continuity, Journal/CAS, commitment admission, verification records, Task outcomes | `ordivon-host` | physical process truth |
+| Assignment, Agent Run, Provider adapter, model–Tool loop, Tool-step checkpoint, Run recovery | `ordivon-harness` | another Task database or Runtime supervisor |
 
-## Start here
+The exact architecture and truth owners are defined in [`docs/runtime.md`](docs/runtime.md). The effect-commit contract is [`docs/effect-kernel.md`](docs/effect-kernel.md).
 
-For repository work, start with [`AGENTS.md`](AGENTS.md). Current Runtime authority is [`docs/runtime.md`](docs/runtime.md), [`docs/effect-kernel.md`](docs/effect-kernel.md), [`docs/operations.md`](docs/operations.md), and [`docs/authority.md`](docs/authority.md). Supporting operational or compatibility guidance lives in [`docs/recovery.md`](docs/recovery.md), [`docs/agent-ux.md`](docs/agent-ux.md), and [`docs/compatibility.md`](docs/compatibility.md). [`docs/effect-comparison.md`](docs/effect-comparison.md) is a retained research protocol, and [`docs/host-boundary-stage2.md`](docs/host-boundary-stage2.md) is historical correlation evidence rather than a second current architecture.
+## Security and data
 
-## Identity
+Read [`SECURITY.md`](SECURITY.md) before exposing the service or executing high-consequence work. The MCP origin must remain loopback-bound and authenticated; remote access must terminate at an operator-owned authenticated tunnel boundary.
 
-- Project family: **Ordivon**
-- Component: **Ordivon Runtime**
-- Repository: `ordivon-runtime`
-- Service binary: `ordivon-runtime`
-- MCP adapter: `ordivon-runtime-mcp`
-- Runtime core crate: `ordivon-runtime-core`
+Runtime persists commands, Job/Attempt state, bounded output, Artifacts, Workspace records, traces, and operational receipts. It does not automatically redact sensitive content. Storage, retention, export, migration, and deletion behavior are defined in [`docs/data-and-privacy.md`](docs/data-and-privacy.md).
 
-The persisted `/var/lib/ordivon` namespace and `ORDIVON_*` environment variables remain stable because they belong to the Ordivon project family rather than one executable name.
+## Documentation map
+
+| Need | Start here |
+| --- | --- |
+| install and verify | [`docs/quickstart.md`](docs/quickstart.md) |
+| current maturity and limits | [`docs/status.md`](docs/status.md) |
+| architecture and truth owners | [`docs/runtime.md`](docs/runtime.md) |
+| effect commitment and uncertainty | [`docs/effect-kernel.md`](docs/effect-kernel.md) |
+| deployment, health, lifecycle, rollback | [`docs/operations.md`](docs/operations.md) |
+| recovery and administrative repair | [`docs/recovery.md`](docs/recovery.md) |
+| compatibility and deletion gates | [`docs/compatibility.md`](docs/compatibility.md) |
+| security and vulnerability reporting | [`SECURITY.md`](SECURITY.md) |
+| data, retention, export, deletion | [`docs/data-and-privacy.md`](docs/data-and-privacy.md) |
+| versions and release gates | [`docs/releases.md`](docs/releases.md) |
+| canonical document ownership | [`docs/authority.md`](docs/authority.md) |
+| repository work by an Agent | [`AGENTS.md`](AGENTS.md) |
+
+## Contributing
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md). A change must identify an observed failure or repeatedly missing operation, preserve one execution path, and include tests or live evidence that can falsify it.
 
 ## License
 

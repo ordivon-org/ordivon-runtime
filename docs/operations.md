@@ -110,11 +110,13 @@ Eligibility requires:
 - the source repository is clean;
 - `prepare` proves the source is clean both before and after the build;
 - the candidate manifest binds the exact source repository, Commit, candidate directory, binary set, sizes, and digests;
+- the candidate manifest binds the resolved Cargo and rustc executables, their SHA-256 digests, version output, and Rust host target;
+- `plan` verifies the complete candidate-manifest digest before installation eligibility is reported;
 - every candidate and currently installed binary is a regular executable file;
 - no active or held Job exists, except the deployment Job itself when the tool can prove its own Attempt identity from cgroup and Registry state;
 - the confirmation commit exactly matches the requested commit.
 
-The tool stages `.next` files, retains both receipt-local previous binaries and installed `.previous` binaries, stops admission, rechecks that no other active or held Job appeared, installs the candidate, waits for `active`, requires a 2026 `server/discover` lifecycle, verifies the exact tool catalog, and records the protocol lifecycle, supported versions, `toolCatalogDigest`, candidate digests, and installed digests. After a successful standard-layout deployment it keeps the current and immediately previous candidate build trees and removes older exact-commit candidate directories; rollback remains receipt-owned and does not depend on those build trees. A newly installed candidate may not pass through the legacy fallback. Recovery of an uncommitted replacement and explicit rollback probe modern discovery first but may use the previous service's 2025 `initialize` Session lifecycle, preserving old-binary rollback. If the post-stop race check fails before replacement, the original service is restarted and the receipt is `not_committed`; a failure after replacement automatically restores the receipt-local previous binaries. There is no general active-Job override in the normal deployment contract.
+The tool stages `.next` files, retains both receipt-local previous binaries and installed `.previous` binaries, stops admission, rechecks that no other active or held Job appeared, installs the candidate, waits for `active`, requires a 2026 `server/discover` lifecycle, verifies the exact tool catalog, and records the candidate-manifest digest, build toolchain identity, protocol lifecycle, supported versions, `toolCatalogDigest`, candidate digests, and installed digests. After a successful standard-layout deployment it keeps the current and immediately previous candidate build trees and removes older exact-commit candidate directories; rollback remains receipt-owned and does not depend on those build trees. A newly installed candidate may not pass through the legacy fallback. Recovery of an uncommitted replacement and explicit rollback probe modern discovery first but may use the previous service's 2025 `initialize` Session lifecycle, preserving old-binary rollback. If the post-stop race check fails before replacement, the original service is restarted and the receipt is `not_committed`; a failure after replacement automatically restores the receipt-local previous binaries. There is no general active-Job override in the normal deployment contract.
 
 Rollback is explicit and receipt-bound:
 
@@ -299,6 +301,21 @@ scripts/ordivon-runtime-status --diagnose --json \
 ```
 
 The JSON schema reports separate `health` and `maintenance` states. Exit code `1` is reserved for operational health failures such as service, deployment, Registry, recovery, or exact-binary inconsistency. Maintenance findings such as a stale dirty Workspace produce top-level `status=attention` but retain exit code `0`; automation must inspect `maintenanceAction` when maintenance policy should gate a workflow. Compatibility observations remain advisory deletion evidence: an unreadable or truncated trace, unknown rollback protocol, or incomplete observation window blocks deletion but does not create a health incident. Exit code `2` remains reserved for an invalid invocation or unreadable mandatory input.
+
+## Real-system release acceptance
+
+Portable CI proves source, schema, Registry, protocol, operational-script, documentation, dependency, and secret-scanning contracts. It cannot prove the production systemd/cgroup path.
+
+The real-system gate is:
+
+```bash
+export ORDIVON_ACCEPTANCE_OUTPUT=target/acceptance/runtime-system-acceptance.json
+scripts/local-acceptance run
+```
+
+This executes all ignored systemd/cgroup fixtures serially and then performs the complete public MCP journey against a temporary loopback Runtime. The optional output path receives a JSON receipt binding the tested source commit, candidate binary digests, Tool catalog digest, and every asserted journey check.
+
+`.github/workflows/system-acceptance.yml` runs this path only on an operator-owned self-hosted runner labeled `ordivon-runtime-systemd`; ordinary hosted CI is not represented as equivalent evidence. A release that changes dispatch, Runner behavior, supervision, cancellation, authority profiles, resource controls, or recovery must retain a successful receipt for the exact candidate commit.
 
 ## Contained-local acceptance
 

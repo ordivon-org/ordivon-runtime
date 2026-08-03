@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 
@@ -34,7 +35,7 @@ class OperationalScriptTests(unittest.TestCase):
             control = root / "control"
             control.mkdir()
             database = control / "registry.sqlite3"
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 connection.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL)")
                 connection.execute("INSERT INTO jobs VALUES ('job-1', 'succeeded')")
                 connection.commit()
@@ -71,7 +72,7 @@ class OperationalScriptTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
             )
-            with sqlite3.connect(restored / "registry.sqlite3") as connection:
+            with closing(sqlite3.connect(restored / "registry.sqlite3")) as connection:
                 self.assertEqual(connection.execute("SELECT * FROM jobs").fetchall(), [("job-1", "succeeded")])
             self.assertEqual((restored / "control/note.txt").read_text(encoding="utf-8"), "control-data\n")
 
@@ -82,7 +83,7 @@ class OperationalScriptTests(unittest.TestCase):
             runtime = root / "runtime"
             (runtime / "workspace-records").mkdir(parents=True)
             (runtime / "workspaces").mkdir(parents=True)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 connection.executescript(
                     """
                     CREATE TABLE schema_migrations(version INTEGER);
@@ -118,7 +119,7 @@ class OperationalScriptTests(unittest.TestCase):
             database = root / "registry.sqlite3"
             runtime = root / "runtime"
             runtime.mkdir()
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 connection.executescript(
                     """
                     CREATE TABLE schema_migrations(version INTEGER);
@@ -174,7 +175,7 @@ class OperationalScriptTests(unittest.TestCase):
             snapshot = root / "snapshot"
             snapshot.mkdir()
             database = snapshot / "registry.sqlite3"
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 connection.execute("CREATE TABLE t (v INTEGER)")
             (snapshot / "manifest.json").write_text(
                 json.dumps(

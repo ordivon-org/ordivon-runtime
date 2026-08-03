@@ -10,7 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -156,7 +156,7 @@ def mcp_server(tool_names: list[str], close_callback=None, *, modern: bool = Tru
 
 
 def initialize_registry(database: Path, *, active_workspace: str | None = None) -> None:
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         connection.executescript(
             """
             CREATE TABLE schema_migrations(version INTEGER);
@@ -241,6 +241,23 @@ def write_candidate_manifest(
                 "candidateDir": str(candidate.resolve()),
                 "builtAtMs": 1,
                 "cargo": "/test/cargo",
+                "toolchain": {
+                    "cargo": {
+                        "path": "/test/cargo",
+                        "resolvedPath": "/test/cargo",
+                        "digest": "sha256:" + "c" * 64,
+                        "version": "cargo 1.95.0",
+                        "details": [],
+                    },
+                    "rustc": {
+                        "path": "/test/rustc",
+                        "resolvedPath": "/test/rustc",
+                        "digest": "sha256:" + "d" * 64,
+                        "version": "rustc 1.95.0",
+                        "details": ["host: x86_64-unknown-linux-gnu"],
+                    },
+                    "host": "x86_64-unknown-linux-gnu",
+                },
                 "binaries": binaries,
             }
         ),
@@ -276,8 +293,14 @@ class DeployReclaimTests(unittest.TestCase):
             manifest = root / "candidate-manifest.json"
             cargo = root / "cargo"
             write_executable(
+                root / "rustc",
+                "#!/bin/sh\n"
+                "printf 'rustc 1.95.0 (test)\nbinary: rustc\nhost: x86_64-unknown-linux-gnu\n'\n",
+            )
+            write_executable(
                 cargo,
                 "#!/bin/sh\n"
+                'if [ "${1:-}" = --version ]; then printf "cargo 1.95.0 (test)\nrelease: 1.95.0\n"; exit 0; fi\n'
                 "target=''\n"
                 "while [ $# -gt 0 ]; do\n"
                 '  if [ "$1" = --target-dir ]; then target=$2; shift 2; else shift; fi\n'
@@ -312,7 +335,10 @@ class DeployReclaimTests(unittest.TestCase):
             report = json.loads(result.stdout)
             self.assertEqual(report["commit"], commit)
             self.assertEqual(report["binaries"][0]["name"], "runtime")
-            self.assertEqual(json.loads(manifest.read_text())["commit"], commit)
+            self.assertEqual(report["toolchain"]["host"], "x86_64-unknown-linux-gnu")
+            stored = json.loads(manifest.read_text())
+            self.assertEqual(stored["commit"], commit)
+            self.assertEqual(stored["toolchain"]["cargo"]["version"], "cargo 1.95.0 (test)")
 
     def test_deploy_prepare_rejects_build_that_changes_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -323,8 +349,14 @@ class DeployReclaimTests(unittest.TestCase):
             manifest = root / "candidate-manifest.json"
             cargo = root / "cargo"
             write_executable(
+                root / "rustc",
+                "#!/bin/sh\n"
+                "printf 'rustc 1.95.0 (test)\nbinary: rustc\nhost: x86_64-unknown-linux-gnu\n'\n",
+            )
+            write_executable(
                 cargo,
                 "#!/bin/sh\n"
+                'if [ "${1:-}" = --version ]; then printf "cargo 1.95.0 (test)\nrelease: 1.95.0\n"; exit 0; fi\n'
                 "target=''\n"
                 "while [ $# -gt 0 ]; do\n"
                 '  if [ "$1" = --target-dir ]; then target=$2; shift 2; else shift; fi\n'
@@ -983,7 +1015,7 @@ class DeployReclaimTests(unittest.TestCase):
                 "    print(state.read_text().strip())\n"
                 "elif command == 'stop':\n"
                 "    state.write_text('inactive\\n')\n"
-                "    with sqlite3.connect(database) as connection:\n"
+                "    with closing(sqlite3.connect(database)) as connection:\n"
                 "        connection.execute(\"INSERT INTO jobs VALUES ('job-race','other',NULL,2)\")\n"
                 "        connection.execute(\"INSERT INTO attempts VALUES ('attempt-race','job-race','running')\")\n"
                 "        connection.execute(\"INSERT INTO concurrency_reservations VALUES ('attempt-race','active')\")\n"

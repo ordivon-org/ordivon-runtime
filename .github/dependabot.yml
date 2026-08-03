@@ -3,10 +3,15 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
+      day: monday
       time: "09:00"
       timezone: Asia/Shanghai
-    open-pull-requests-limit: 0
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
     labels:
       - dependencies
       - security/supply-chain
@@ -14,10 +19,15 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
+      day: monday
       time: "09:00"
       timezone: Asia/Shanghai
-    open-pull-requests-limit: 0
+    open-pull-requests-limit: 5
+    groups:
+      rust-runtime:
+        patterns:
+          - "*"
     labels:
       - dependencies
       - security/supply-chain

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 
@@ -14,7 +15,7 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 def initialize_registry(database: Path, workspace_id: str | None = None, activity_ms: int = 0) -> None:
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         connection.executescript(
             """
             CREATE TABLE schema_migrations(version INTEGER);

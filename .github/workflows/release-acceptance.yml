@@ -8,22 +8,29 @@ permissions:
   contents: read
 
 jobs:
-  portable-merge-checks:
+  portable-release-gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
+          toolchain: 1.95.0
           components: clippy,rustfmt
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
       - run: cargo fmt --check
-      - run: cargo test --workspace
+      - run: cargo test --workspace --all-targets --all-features
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test -p ordivon-runtime-core --no-default-features --features transactional-runtime
       - run: uvx ruff check scripts/
       - run: python -m unittest discover -s scripts/tests -v
-      - name: Validate local-only acceptance contract
-        run: scripts/local-acceptance check
+      - run: python scripts/check_docs.py
+      - run: scripts/local-acceptance check
+      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
+        with:
+          command: check
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

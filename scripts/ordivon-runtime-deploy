@@ -14,7 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
@@ -155,6 +155,45 @@ def git_text(git: Path, repo: Path, arguments: list[str]) -> str:
     return run([str(git), "-C", str(repo), *arguments]).stdout.strip()
 
 
+def executable_identity(path: Path) -> dict[str, object]:
+    resolved = path.resolve(strict=True)
+    if resolved.is_symlink() or not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise RuntimeError(f"toolchain executable is missing or unsafe: {path}")
+    version = run([str(path), "--version", "--verbose"]).stdout.strip().splitlines()
+    if not version:
+        raise RuntimeError(f"toolchain executable returned no version: {path}")
+    return {
+        "path": str(path),
+        "resolvedPath": str(resolved),
+        "digest": sha256(resolved),
+        "version": version[0],
+        "details": version[1:],
+    }
+
+
+def build_toolchain_identity(cargo: Path) -> dict[str, object]:
+    rustc = cargo.with_name("rustc")
+    if not rustc.is_file() or not os.access(rustc, os.X_OK):
+        discovered = shutil.which("rustc")
+        if discovered is None:
+            raise RuntimeError("rustc is unavailable beside Cargo and not present on PATH")
+        rustc = Path(discovered)
+    cargo_identity = executable_identity(cargo)
+    rustc_identity = executable_identity(rustc)
+    host = None
+    for line in rustc_identity["details"]:
+        if isinstance(line, str) and line.startswith("host: "):
+            host = line.removeprefix("host: ")
+            break
+    if not host:
+        raise RuntimeError("rustc --version --verbose omitted host target")
+    return {
+        "cargo": cargo_identity,
+        "rustc": rustc_identity,
+        "host": host,
+    }
+
+
 def current_attempt_id() -> str | None:
     try:
         cgroup = Path("/proc/self/cgroup").read_text(encoding="utf-8")
@@ -166,7 +205,7 @@ def current_attempt_id() -> str | None:
 
 def active_job_ids(database: Path) -> tuple[list[str], str | None]:
     uri = f"file:{quote(str(database))}?mode=ro"
-    with sqlite3.connect(uri, uri=True, timeout=5) as connection:
+    with closing(sqlite3.connect(uri, uri=True, timeout=5)) as connection:
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA trusted_schema=OFF")
         required = {
@@ -263,6 +302,7 @@ def prepare_candidate(args: argparse.Namespace) -> dict[str, object]:
         "candidateDir": str(args.candidate_dir.resolve()),
         "builtAtMs": int(time.time() * 1000),
         "cargo": str(args.cargo),
+        "toolchain": build_toolchain_identity(args.cargo),
         "binaries": candidate,
     }
     write_json_atomic(args.candidate_manifest, manifest)
@@ -282,6 +322,22 @@ def validate_candidate_manifest(
         blockers.append("candidate manifest source repository does not match source-repo")
     if Path(str(manifest.get("candidateDir"))).resolve() != args.candidate_dir.resolve():
         blockers.append("candidate manifest directory does not match candidate-dir")
+    toolchain = manifest.get("toolchain")
+    if not isinstance(toolchain, dict):
+        blockers.append("candidate manifest lacks build toolchain identity")
+    else:
+        for name in ("cargo", "rustc"):
+            identity = toolchain.get(name)
+            if (
+                not isinstance(identity, dict)
+                or not isinstance(identity.get("version"), str)
+                or not isinstance(identity.get("resolvedPath"), str)
+                or not isinstance(identity.get("digest"), str)
+                or not str(identity.get("digest")).startswith("sha256:")
+            ):
+                blockers.append(f"candidate manifest has invalid {name} identity")
+        if not isinstance(toolchain.get("host"), str) or not toolchain.get("host"):
+            blockers.append("candidate manifest lacks Rust host target")
     manifest_by_name = {
         str(item.get("name")): item
         for item in manifest.get("binaries", [])
@@ -298,10 +354,12 @@ def validate_candidate_manifest(
         blockers.append("candidate manifest binary set does not match requested binary set")
     summary = {
         "path": str(args.candidate_manifest.resolve()),
+        "digest": sha256(args.candidate_manifest),
         "commit": manifest.get("commit"),
         "sourceRepo": manifest.get("sourceRepo"),
         "candidateDir": manifest.get("candidateDir"),
         "builtAtMs": manifest.get("builtAtMs"),
+        "toolchain": toolchain,
     }
     return summary, blockers
 

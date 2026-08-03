@@ -3,6 +3,11 @@ name = "ordivon-runtime-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Loopback MCP adapter for the Ordivon trusted-local execution Runtime."
+publish = false
 
 [[bin]]
 name = "ordivon-runtime"
@@ -10,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum.workspace = true
-ordivon-runtime-core = { path = "../ordivon-runtime-core" }
+ordivon-runtime-core = { version = "=0.1.0", path = "../ordivon-runtime-core" }
 rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 schemars.workspace = true
 serde.workspace = true

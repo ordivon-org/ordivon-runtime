@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -72,7 +73,7 @@ def load_and_verify(source: Path) -> tuple[dict[str, Any], list[tuple[Path, dict
 
 def verify_sqlite(path: Path) -> None:
     uri = f"file:{path}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as database:
+    with closing(sqlite3.connect(uri, uri=True)) as database:
         result = database.execute("PRAGMA integrity_check").fetchone()
         if result != ("ok",):
             raise sqlite3.DatabaseError(f"restored registry integrity check failed: {result}")

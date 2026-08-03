@@ -7,13 +7,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 
 
 def initialize_registry(database: Path, active_workspace: str | None = None) -> None:
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         connection.executescript(
             """
             CREATE TABLE jobs(job_id TEXT,workspace_id TEXT,resolution TEXT);
