@@ -1,6 +1,8 @@
 # Host Boundary Stage 2
 
-Status: R1 and R2 complete; Stage 2 retained the existing Runtime contract without production expansion
+> **Historical boundary evidence:** This report preserves the Stage 2 Host/Runtime correlation experiment and closeout. It is not a current architecture or policy source. Current Runtime ownership is defined by [`runtime.md`](runtime.md), [`operations.md`](operations.md), and [`authority.md`](authority.md); current Host and Harness semantics live in their own repositories.
+
+Status: historical evidence; R1 and R2 completed without Runtime production expansion
 Canonical experiment: `ordivon-computing/research/experiments/harness-boundary-v0/`
 
 ## R1 result

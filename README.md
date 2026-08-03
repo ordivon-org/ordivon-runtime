@@ -13,7 +13,7 @@ audience:
   - builder
   - operator
   - agent
-updated: 2026-08-03
+updated: 2026-08-04
 summary: Canonical entry to the Runtime execution, evidence, reconciliation, recovery, and authority boundary.
 evidence_status: not_applicable
 readiness: READY
@@ -48,9 +48,17 @@ Runtime owns physical execution commitment and recoverable evidence under the in
 
 An authenticated participant or Host uses the canonical `trusted_local` profile by default and receives the installed service user's local authority. `contained_local` is an explicit no-fallback reduction profile: it removes inherited credentials and capabilities, blocks network access, hides host state directories, and exposes only the Workspace, Attempt bundle, declared caches, Runner, and Git metadata required for source commitment. It is not a strong multi-tenant or hostile-code boundary. Run high-consequence untrusted workloads behind a disposable VM or container owned outside Runtime.
 
+## Repository selection
+
+| Change concerns | Use | Do not put here |
+| --- | --- | --- |
+| Workspace, Job, Attempt, process tree, Artifact, physical cancellation, or execution recovery | `ordivon-runtime` | Task meaning, Agent Run policy, or domain completion |
+| durable Task continuity, Journal/CAS, commitment admission, verification records, or Task outcomes | `ordivon-host` | Provider loops, Harness Run semantics, or physical process truth |
+| Assignment, Agent Run, Provider adapter, model–Tool loop, Tool-step checkpoint, or Run recovery | `ordivon-harness` | a second Task database, Runtime supervision, or domain-world authority |
+
 ## Start here
 
-For repository work, start with [`AGENTS.md`](AGENTS.md). Read [`docs/runtime.md`](docs/runtime.md) only when the task crosses Runtime boundaries, [`docs/recovery.md`](docs/recovery.md) for Registry diagnosis and repair, [`docs/agent-ux.md`](docs/agent-ux.md) for Patch, ExecPlan, progress, report, Git, and GitHub adapter contracts, [`docs/host-boundary-stage2.md`](docs/host-boundary-stage2.md) for Host Task/Assignment/Harness-Run correlation, [`docs/compatibility.md`](docs/compatibility.md) for retained consumers and deletion triggers, [`docs/effect-comparison.md`](docs/effect-comparison.md) for the Issue #56 baseline, and [`docs/operations.md`](docs/operations.md) for deployment, rollback, and Workspace reclaim.
+For repository work, start with [`AGENTS.md`](AGENTS.md). Current Runtime authority is [`docs/runtime.md`](docs/runtime.md), [`docs/effect-kernel.md`](docs/effect-kernel.md), [`docs/operations.md`](docs/operations.md), and [`docs/authority.md`](docs/authority.md). Supporting operational or compatibility guidance lives in [`docs/recovery.md`](docs/recovery.md), [`docs/agent-ux.md`](docs/agent-ux.md), and [`docs/compatibility.md`](docs/compatibility.md). [`docs/effect-comparison.md`](docs/effect-comparison.md) is a retained research protocol, and [`docs/host-boundary-stage2.md`](docs/host-boundary-stage2.md) is historical correlation evidence rather than a second current architecture.
 
 ## Identity
 

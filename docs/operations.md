@@ -13,7 +13,7 @@ audience:
   - operator
   - builder
   - agent
-updated: 2026-08-03
+updated: 2026-08-04
 summary: Canonical deployment, health, capacity, Workspace lifecycle, reclaim, rollback, and operational verification contract.
 evidence_status: verified
 readiness: READY
@@ -24,11 +24,15 @@ related:
   - runtime.recovery
   - runtime.authority
 ---
+<!-- cspell:words libexec nocapture nonselected toplevel -->
+
 # Runtime Operations
 
 ## Scope
 
 This document owns the operational path for local deployment, health inspection, capacity acceptance, Workspace lifecycle, reclaim, cache hygiene, rollback, and contained-local acceptance.
+
+Runtime operations stop at physical execution and Workspace state. They do not assess Host Task completion, resume a Harness Run, invoke a Provider, or decide whether domain evidence is sufficient. Use Host operations for Journal/CAS and Task reconciliation, and Harness operations for Assignment/Run recovery.
 
 ## Normal operation
 

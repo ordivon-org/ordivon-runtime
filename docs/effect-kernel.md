@@ -13,7 +13,7 @@ audience:
   - builder
   - researcher
   - agent
-updated: 2026-08-03
+updated: 2026-08-04
 summary: Canonical concept and admission boundary for turning one Agent proposal into an identifiable, evidenced, recoverable physical commitment.
 evidence_status: verified
 readiness: READY
@@ -24,6 +24,8 @@ related:
   - runtime.operations
   - runtime.authority
 ---
+<!-- cspell:words nonignored unreplayable -->
+
 # Ordivon Agent Effect Commit Kernel
 
 ## Problem

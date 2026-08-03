@@ -13,7 +13,7 @@ audience:
   - builder
   - operator
   - agent
-updated: 2026-08-03
+updated: 2026-08-04
 summary: Canonical Runtime architecture for Workspace-bound admission, Jobs, Attempts, execution evidence, reconciliation, and recovery.
 evidence_status: verified
 readiness: READY
@@ -24,6 +24,8 @@ related:
   - runtime.operations
   - runtime.authority
 ---
+<!-- cspell:words bubblewrap nonignored procs redispatched -->
+
 # Ordivon Runtime Model
 
 ## Purpose
@@ -33,6 +35,14 @@ A participant, Agent, or Host forms and admits work. Ordivon Runtime executes it
 ## Boundaries
 
 Runtime owns physical operation admission, process-tree supervision, durable execution identity, bounded result evidence, cancellation, reconciliation, and Workspace lifecycle. Git, SQLite, systemd/cgroups, digest-bound files, and generated MCP schemas remain the strongest owners of their respective facts. Host and participants retain semantic completion, purpose, and commitment judgments.
+
+### Component responsibility matrix
+
+| Component | Owns | Explicitly does not own |
+| --- | --- | --- |
+| Runtime | Workspace lifecycle, physical operation admission, Jobs, Attempts, process trees, bounded Artifacts, cancellation, reconciliation, and enforceable effect receipts | Task/Goal semantics, Assignment or Run policy, Provider execution, domain verification, or product policy |
+| Host | durable Task continuity, Journal/CAS, generic extension admission, commitment identities, verification records, and Task outcomes | Harness-specific Run schemas, Provider loops, physical execution truth, or domain-world truth |
+| Harness | Task Attempt and Assignment semantics, Agent Runs, Provider adapters, model–Tool loops, Tool-step checkpoints, Run recovery, and completion proposals | generic Task persistence, another database or scheduler, Runtime supervision, promoted protocol, or final domain authority |
 
 ## Data flow
 
