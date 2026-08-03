@@ -2,7 +2,7 @@
 schema_version: 1
 id: runtime.quickstart
 title: Runtime Quick Start
-type: guide
+type: quickstart
 profile: engineering
 lifecycle: active
 source_role: canonical
@@ -25,13 +25,14 @@ related:
   - runtime.operations
   - runtime.data-privacy
 ---
+<!-- cspell:words rustc clippy toplevel -->
 # Runtime Quick Start
 
-## Choose the path
+## Goal
 
 Use the portable path to inspect or contribute from any supported Linux development environment. Use the real-system path only on an owner-trusted machine with systemd, cgroup v2, and root authority. Use the production path when installing the long-running service.
 
-## 1. Prepare the source
+## Prerequisites
 
 ```bash
 git clone https://github.com/zycxfyh/ordivon-runtime.git
@@ -42,6 +43,10 @@ python3 --version
 ```
 
 The repository fixes Rust 1.95.0 through `rust-toolchain.toml`. Python operational scripts support Python 3.11 or newer.
+
+## Steps
+
+Follow the portable, real-system, configuration, deployment, and first-use steps below in order.
 
 ## 2. Run portable checks
 
@@ -122,6 +127,10 @@ scripts/ordivon-runtime-deploy prepare \
 ```
 
 Continue with the exact `plan` and `apply` commands in [`operations.md`](operations.md). The deployment receipt binds the source commit, build toolchain identity, binary digests, installed digests, protocol lifecycle, and Tool catalog digest.
+
+## Verification
+
+Verification combines the portable contract, the explicit real-system acceptance path, and the installed service checks below.
 
 ## 6. Verify the live service
 

@@ -30,7 +30,10 @@ related:
   - runtime.releases
   - runtime.authority
 ---
+<!-- cspell:words redispatching -->
 # Ordivon Runtime
+
+## Purpose
 
 Ordivon Runtime is the trusted-local execution subsystem of Ordivon. It turns an admitted operation into a durable Job, owns its process tree, preserves bounded evidence, and makes interruption, cancellation, reconciliation, and recovery explicit.
 
@@ -44,6 +47,12 @@ participant or Host admits work
 → bounded Result and Artifacts
 → observation, cancellation, reconciliation, or recovery
 ```
+
+## Start here
+
+- Use [`docs/quickstart.md`](docs/quickstart.md) to build, verify, install, and exercise Runtime.
+- Use [`docs/status.md`](docs/status.md) for the current maturity and support boundary.
+- Use [`docs/runtime.md`](docs/runtime.md) for the canonical execution model and [`docs/operations.md`](docs/operations.md) for operation and recovery.
 
 ## Status
 
@@ -64,6 +73,10 @@ See [`docs/status.md`](docs/status.md) for the exact maturity claim, supported p
 - preserves ambiguous outcomes as `lost`, `orphaned`, or unknown instead of guessing success or redispatching opaque work.
 
 The generated public Tool inventory is [`docs/reference/tools.md`](docs/reference/tools.md).
+
+## Current boundary
+
+Runtime owns physical local execution facts. Host, Harness, providers, and domains retain Task meaning, Agent Run semantics, provider truth, and final verification.
 
 ## What it does not do
 

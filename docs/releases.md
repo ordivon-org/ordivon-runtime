@@ -2,7 +2,7 @@
 schema_version: 1
 id: runtime.releases
 title: Runtime Releases and Versioning
-type: policy
+type: release
 profile: engineering
 lifecycle: active
 source_role: canonical
@@ -26,9 +26,10 @@ related:
   - runtime.operations
   - runtime.data-privacy
 ---
+<!-- cspell:words Clippy -->
 # Runtime Releases and Versioning
 
-## Multiple identities are intentional
+## Release identity
 
 Runtime does not compress every compatibility question into one SemVer number.
 
@@ -56,7 +57,7 @@ Pre-1.0 changes still require:
 - updated generated Tool reference when the catalog changes;
 - portable and real-system evidence appropriate to the boundary.
 
-## Change classes
+## Changes
 
 ### Patch
 
@@ -76,7 +77,7 @@ A major release may intentionally remove or reinterpret a supported contract. It
 - acceptance evidence;
 - the point after which the old contract is no longer supported.
 
-## Required release evidence
+## Verification
 
 A releasable commit must have:
 
@@ -92,6 +93,10 @@ A releasable commit must have:
 
 Documentation-only changes do not require redeploying identical binaries, but public canonical documents must pass the documentation contract and identify when production behavior remains on an earlier code-equivalent commit.
 
+## Compatibility
+
+A release must state Tool, protocol, persisted-state, client, and rollback compatibility explicitly. Version numbers do not replace schema, migration, catalog, or deployment identities.
+
 ## Changelog policy
 
 `CHANGELOG.md` is the human-facing record of user-visible change. Record:
@@ -105,6 +110,10 @@ Documentation-only changes do not require redeploying identical binaries, but pu
 - Migration notes.
 
 Do not copy every commit. Include changes that affect use, operation, compatibility, safety, recovery, or understanding.
+
+## Rollback
+
+The receipt-bound previous binary remains the supported rollback boundary while its migrations and compatibility storage remain valid. A release that removes that path requires an explicit major cutover and archival decision.
 
 ## Deprecation and deletion
 

@@ -2,7 +2,7 @@
 schema_version: 1
 id: runtime.status
 title: Runtime Status
-type: status
+type: reference
 profile: organization
 lifecycle: active
 source_role: canonical
@@ -28,6 +28,22 @@ related:
   - runtime.releases
 ---
 # Runtime Status
+
+## Scope
+
+This document states the stable public maturity, supported environment, known limits, and verification route for the current Runtime repository.
+
+## Contract
+
+“Operational” means the owner-trusted local execution and recovery paths are implemented and verified; “pre-1.0” means public interfaces may still change only through explicit compatibility, migration, rollback, or cutover evidence.
+
+## Errors
+
+This page is not live state. It must not be used to infer active Jobs, installed binary digests, current storage size, service health, or semantic Task completion.
+
+## Compatibility
+
+Current `main` and the receipt-bound previous production binary are the supported code boundaries. Protocol, Tool catalog, Runtime schema, and Registry migrations remain separately identified.
 
 ## Maturity
 

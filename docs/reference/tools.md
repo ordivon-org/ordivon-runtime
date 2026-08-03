@@ -3,7 +3,7 @@ schema_version: 1
 id: runtime.tools
 title: Runtime Tool Reference
 type: reference
-profile: provider
+profile: engineering
 lifecycle: active
 source_role: generated
 visibility: public
@@ -15,7 +15,7 @@ audience:
   - agent
 updated: 2026-08-04
 summary: Generated names and descriptions for the current public Runtime MCP Tool surface.
-evidence_status: generated
+evidence_status: verified
 readiness: READY
 applies_to:
   - ordivon-runtime
@@ -25,6 +25,22 @@ related:
   - runtime.model
 ---
 # Runtime Tool Reference
+
+## Scope
+
+This reference lists the current generated public MCP Tool names and descriptions. Exact request and result schemas remain machine-owned by discovery.
+
+## Contract
+
+The checked-in table must be reproducible from the Tool registry and must change whenever the public generated catalog changes.
+
+## Errors
+
+Invalid Tool names, arguments, versions, identities, or bounded-output requests fail through the generated schemas and Runtime error contracts; this page does not redefine them.
+
+## Compatibility
+
+Compatibility is bound by protocol lifecycle, Runtime schema, and Tool catalog digest. See the canonical Runtime model and release policy for migration obligations.
 
 This file is generated from `crates/ordivon-runtime-mcp/src/server/tools.rs`. Do not edit it by hand. Exact argument and result schemas remain machine-owned by `server/discover` and `tools/list`.
 

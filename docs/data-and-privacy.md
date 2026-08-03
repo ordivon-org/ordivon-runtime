@@ -2,7 +2,7 @@
 schema_version: 1
 id: runtime.data-privacy
 title: Runtime Data and Privacy
-type: policy
+type: decision
 profile: organization
 lifecycle: active
 source_role: canonical
@@ -28,6 +28,22 @@ related:
   - runtime.releases
 ---
 # Runtime Data and Privacy
+
+## Context
+
+Runtime persists source, commands, process output, Artifacts, identifiers, operational receipts, and recovery state under owner-trusted local authority. Those bytes may contain sensitive information that Runtime cannot classify reliably.
+
+## Decision
+
+Treat the complete Runtime state root, exports, receipts, and backups as sensitive operator-owned data. Retention, export, migration, sharing, redaction, and deletion remain explicit operations rather than implicit background policy.
+
+## Consequences
+
+Runtime preserves evidence needed for idempotency and recovery, does not promise automatic redaction, and requires whole-instance archival or a future versioned cutover when historical state must be bounded.
+
+## Status
+
+Accepted and active for the current owner-trusted deployment model. Reopen when Runtime gains a new authority profile, remote storage owner, archival contract, or automatic deletion mechanism.
 
 ## Principle
 
