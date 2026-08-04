@@ -166,3 +166,16 @@ The exact Tool names and descriptions are generated in [`reference/tools.md`](re
 - Repair only through the documented doctor/repair sequence in [`recovery.md`](recovery.md).
 - Release Workspaces through `workspace.close` or the receipted lifecycle tools, never by deleting directories directly.
 - For instance retirement, export required state, stop the service, preserve any mandated evidence, then delete the operator-owned state roots described in [`data-and-privacy.md`](data-and-privacy.md).
+
+## Run the bounded Runtime demonstration
+
+The repository includes a small presentation-ready proof that targets the installed loopback service. It does not build or launch a second Runtime and it never prints the bearer token.
+
+```bash
+python3 scripts/demo_runtime_flow.py \
+  --receipt /tmp/ordivon-runtime-demo.json
+```
+
+The demonstration creates a temporary Git source repository from `examples/runtime-demo`, opens an exact-revision Workspace, applies one digest-guarded durable Patch, admits a three-step `workspace.execPlan`, recreates the MCP client, replays the exact request, recovers the same Job through `task.list`, reads terminal evidence, reviews the structured diff, and compare-and-closes the reviewed `sourceStateDigest`.
+
+Its terminal output is a compact projection of real Runtime responses. The receipt contains selected identities, statuses, timings and digests for media or documentation use; it excludes the bearer token, local source paths, Runtime state roots and unrelated Jobs.
