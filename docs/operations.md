@@ -13,7 +13,7 @@ audience:
   - operator
   - builder
   - agent
-updated: 2026-08-04
+updated: 2026-08-05
 summary: Canonical deployment, health, capacity, Workspace lifecycle, reclaim, rollback, and operational verification contract.
 evidence_status: verified
 readiness: READY
@@ -24,7 +24,7 @@ related:
   - runtime.recovery
   - runtime.authority
 ---
-<!-- cspell:words libexec nocapture nonselected toplevel -->
+<!-- cspell:words aria2c hyperfine libexec nocapture nonselected rclone rsync toplevel -->
 
 # Runtime Operations
 
@@ -51,6 +51,45 @@ Recover through Runtime reconciliation, documented repair or quarantine paths, e
 Use service status, Runtime doctor and inspect commands, capacity acceptance, lifecycle receipts, contained-local acceptance, deployment manifests, and the repository test suite. The architecture is defined in [`runtime.md`](runtime.md), focused repair guidance is in [`recovery.md`](recovery.md), and exact command sequences and acceptance conditions follow in the detailed sections.
 
 Operational tools are narrow wrappers around existing truth owners. They do not create a second deployment database, scheduler, or Workspace lifecycle service.
+
+## Prefer mature host utilities
+
+Do not recreate mature file transfer, structured-data filtering, archive, media, PDF, database, GitHub, or benchmarking behavior in one-off Python or shell scripts. Use the installed host utility through `workspace.exec` or `workspace.execPlan` with an absolute executable and explicit arguments. Runtime owns admission, execution, observation, cancellation, evidence, and process state; the utility remains responsible for its own operation semantics.
+
+The canonical Arch WSL workstation currently provisions the following additional utilities:
+
+```bash
+pacman -S --needed aria2 rsync yq hyperfine rclone
+```
+
+These packages are host capabilities, not mandatory Runtime server dependencies and not additional MCP Tools. Query their live paths and versions before a version-sensitive operation rather than copying version claims into durable documentation.
+
+| Need | Preferred utility | Operational rule |
+| --- | --- | --- |
+| repository and text search | `/usr/bin/rg`, `/usr/bin/fd` | Prefer them over recursive `grep` and complex `find` expressions. |
+| JSON and YAML inspection | `/usr/bin/jq`, `/usr/bin/yq` | Use jq-style queries. Do not rewrite comment- or formatting-sensitive YAML with `yq`; use a parser or an exact text patch. |
+| ordinary API calls and small probes | `/usr/bin/curl` | Keep API requests and bounded health probes on `curl`; do not substitute a download manager for protocol-aware application calls. |
+| large or interruption-prone HTTP downloads | `/usr/bin/aria2c` | Enable continuation and write to an explicit destination. Prefer this over custom retry loops and partial-file scripts. |
+| local or SSH directory copying | `/usr/bin/rsync` | Preserve trailing-slash intent. Use `--dry-run` before any deletion-capable invocation; never add `--delete` by default. |
+| remote or object-storage transfer | `/usr/bin/rclone` | Start with `copy` and verify with `check`. Treat `sync` as deletion-capable and require explicit target semantics. Installation does not configure a remote. |
+| archive inspection and creation | `/usr/bin/7z`, `/usr/bin/bsdtar`, `/usr/bin/zstd` | Prefer mature format support over new `zipfile` or `tarfile` scripts unless product code genuinely requires a library API. |
+| repeatable command benchmarks | `/usr/bin/hyperfine` | Use warmups and multiple runs; use `--shell=none` when shell behavior is not part of the measurement. |
+| media inspection | `/usr/bin/ffprobe` | Request JSON output instead of parsing human-oriented FFmpeg logs. |
+| PDF inspection and text extraction | `/usr/bin/qpdf`, `/usr/bin/pdfinfo`, `/usr/bin/pdftotext` | Use `qpdf --check` for structural validity and the Poppler tools for metadata or text. |
+| SQLite and GitHub operations | `/usr/bin/sqlite3`, `/usr/bin/gh` | Prefer direct read-only queries and official CLI operations over temporary Python or REST wrappers. |
+
+Typical invocations are intentionally thin:
+
+```bash
+/usr/bin/aria2c --continue=true --dir "$destination" --out "$name" "$url"
+/usr/bin/rsync -aH --partial --info=progress2 "$source/" "$destination/"
+/usr/bin/yq -r '.runtime.preferred' configuration.yaml
+/usr/bin/hyperfine --warmup 3 --runs 10 --shell=none '/absolute/command'
+/usr/bin/rclone copy "$source" remote:path
+/usr/bin/rclone check "$source" remote:path
+```
+
+Do not add a Runtime wrapper or MCP projection merely to rename one of these commands. Add a narrow adapter only after repeated real failures show that callers cannot safely express the operation through explicit arguments, or when structured effect semantics must be enforced rather than merely documented.
 
 ## Local deployment
 
