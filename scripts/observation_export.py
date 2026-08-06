@@ -87,6 +87,19 @@ def _connection(database: Path) -> sqlite3.Connection:
     return connection
 
 
+def _relation_digest(value: str, label: str) -> str:
+    candidate = value if value.startswith("sha256:") else value[value.rfind("sha256:") :]
+    if (
+        len(candidate) != 71
+        or not candidate.startswith("sha256:")
+        or any(ch not in "0123456789abcdef" for ch in candidate[7:])
+    ):
+        raise RuntimeObservationExportError(
+            f"{label} does not contain a canonical SHA-256 digest"
+        )
+    return candidate
+
+
 def _relations(core: Any, row: sqlite3.Row) -> tuple[Any, ...]:
     values = [
         core.ObservationRelation(
@@ -104,13 +117,13 @@ def _relations(core: Any, row: sqlite3.Row) -> tuple[Any, ...]:
             "references",
             "ordivon.runtime.request",
             row["request_digest"],
-            row["request_digest"],
+            _relation_digest(row["request_digest"], "request_digest"),
         ),
         core.ObservationRelation(
             "references",
             "ordivon.runtime.operation",
             row["operation_digest"],
-            row["operation_digest"],
+            _relation_digest(row["operation_digest"], "operation_digest"),
         ),
     ]
     if row["attempt_id"] is not None:

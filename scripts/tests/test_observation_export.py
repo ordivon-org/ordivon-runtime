@@ -49,7 +49,7 @@ class RuntimeObservationExporterTests(unittest.TestCase):
                     "job-019fd000-0000-7000-8000-000000000001",
                     "principal:test",
                     "request:observation-a",
-                    DIGEST_A,
+                    "runtime-request-v1:" + DIGEST_A,
                     DIGEST_B,
                     "workspace:observation-a",
                     '{"private":"workspace snapshot must not be exported"}',
@@ -281,6 +281,14 @@ class RuntimeObservationExporterTests(unittest.TestCase):
                 any(
                     item["targetKind"] == "ordivon.runtime.client-request"
                     and item["targetId"] == "request:observation-a"
+                    for item in relations
+                )
+            )
+            self.assertTrue(
+                any(
+                    item["targetKind"] == "ordivon.runtime.request"
+                    and item["targetId"] == "runtime-request-v1:" + DIGEST_A
+                    and item["targetDigest"] == DIGEST_A
                     for item in relations
                 )
             )
