@@ -1,0 +1,66 @@
+{
+  "acceptance": {
+    "attemptLink": "passed",
+    "cargoClippyAllTargetsAllFeatures": "passed",
+    "cargoFmt": "passed",
+    "clientRequestLink": "passed",
+    "documentationContract": "passed",
+    "durableBundleBeforeCheckpointRecovery": "passed",
+    "fixtureEvents": 3,
+    "fixtureJobs": 2,
+    "fixtureStreams": 2,
+    "gatewayAcceptedEvents": 3,
+    "gatewayFullDoctor": "passed",
+    "jobCountBound": "passed_fail_closed",
+    "ownerDatabaseBytesUnchanged": true,
+    "perJobPagination": "passed",
+    "perJobSequences": "passed_[1,2]_and_[1]",
+    "portableAcceptanceContract": "passed",
+    "pythonOperationalTests": {
+      "failures": 0,
+      "optionalExporterSkippedWithoutContract": 3,
+      "tests": 52
+    },
+    "rawPrivateContentAbsent": "passed",
+    "ruff": "passed",
+    "rustWorkspaceAllTargetsAllFeatures": {
+      "core": 110,
+      "failures": 0,
+      "mcpBinary": 2,
+      "mcpLibrary": 14
+    },
+    "sidecarOutsideOwnerRoot": "passed",
+    "targetedExporterTests": 3,
+    "transactionalRuntimeCore": {
+      "failures": 0,
+      "tests": 110
+    }
+  },
+  "authority": {
+    "daemonAdded": false,
+    "ownerDatabaseWrites": false,
+    "productionActivated": false,
+    "runtimeDependencyAdded": false,
+    "serviceRestarted": false
+  },
+  "implementationRevision": "8c22c2b409e99a0fd07fd72a9029ef8c74c6cb47",
+  "integrity": {
+    "algorithm": "sha256",
+    "canonicalization": "ordivon-evidence-json-v1",
+    "payloadDigest": "sha256:26e065915d8de93a8ff075330446b3d74b2ad0238a98d1cb3a7f4ddb0fedd772"
+  },
+  "kind": "ordivon.observation-owner-exporter-acceptance",
+  "knownLimits": [
+    "run_once_only",
+    "total_job_scan_is_bounded_and_fails_closed_when_job_limit_is_exceeded",
+    "artifacts_are_not_attached_to_existing_job_events_because_late_artifacts_would_change_historical_event_digests",
+    "artifact_projection_requires_an_independent_append_only_mapping_decision_in_B3",
+    "sqlite_read_only_wal_connections_may_create_transient_shm_files"
+  ],
+  "mappingVersion": "runtime-observation-v1",
+  "owner": "ordivon-runtime",
+  "schemaVersion": 1,
+  "sharedContractRevision": "b0973311d84b0debe30ca002e15e02401e16ee36",
+  "streamSemantics": "one_stream_per_runtime_job_native_event_sequence",
+  "workPackage": "B2-R"
+}
