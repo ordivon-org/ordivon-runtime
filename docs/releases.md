@@ -67,6 +67,10 @@ A patch release fixes behavior without intentionally changing the supported Tool
 
 A minor release may add Tools, fields, authority profiles, operational capabilities, or additive persisted state. Existing supported callers and rollback dependencies must remain valid or receive an explicit migration.
 
+`schemaVersion` names a compatible request/response family, not every exact generated shape. Additive response fields may remain in the same schema family when existing supported callers can ignore them safely; `toolCatalogDigest` binds the exact generated Tool definitions and schemas for deployment, discovery, and acceptance. Removing, reinterpreting, or making a previously optional field mandatory requires an explicit compatibility decision rather than relying on the unchanged schema number.
+
+Error codes are control semantics, not diagnostic prose. Reclassifying an error is compatible only when named live consumers either already understand the precise code or are migrated first with a bounded old/new compatibility branch. A semantic correction must not silently route infrastructure corruption into a caller-correctable branch, or vice versa.
+
 ### Major
 
 A major release may intentionally remove or reinterpret a supported contract. It requires a cutover plan that names:

@@ -29,12 +29,12 @@ pub use runner::run_task_runner;
 pub use types::{
     CompactWorkspaceDiffResult, CompactWorkspaceOpenResult, CompactWorkspaceReadResult,
     CompactWorkspaceSliceResult, GitWorkspaceCreateRequest, WorkspaceCloseRequest,
-    WorkspaceCloseResult, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceFilePatch,
-    WorkspaceMutateRequest, WorkspaceMutateResult, WorkspaceMutation, WorkspaceMutationMode,
-    WorkspaceMutationResult, WorkspacePatchRequest, WorkspacePatchResult, WorkspacePatchedFile,
-    WorkspaceReadRequest, WorkspaceReadResult, WorkspaceReadSliceRequest, WorkspaceReadSliceResult,
-    WorkspaceRecord, WorkspaceRenamedPath, WorkspaceTextEdit, WorkspaceTextPosition,
-    WorkspaceTextRange, WorkspaceWriteRequest, WorkspaceWriteResult,
+    WorkspaceCloseResult, WorkspaceClosureDisposition, WorkspaceDiffRequest, WorkspaceDiffResult,
+    WorkspaceFilePatch, WorkspaceMutateRequest, WorkspaceMutateResult, WorkspaceMutation,
+    WorkspaceMutationMode, WorkspaceMutationResult, WorkspacePatchRequest, WorkspacePatchResult,
+    WorkspacePatchedFile, WorkspaceReadRequest, WorkspaceReadResult, WorkspaceReadSliceRequest,
+    WorkspaceReadSliceResult, WorkspaceRecord, WorkspaceRenamedPath, WorkspaceTextEdit,
+    WorkspaceTextPosition, WorkspaceTextRange, WorkspaceWriteRequest, WorkspaceWriteResult,
     MAX_WORKSPACE_PATCH_EDITS_PER_FILE, MAX_WORKSPACE_PATCH_FILES,
 };
 pub use workspace::{
@@ -56,8 +56,9 @@ pub(crate) use types::{
 #[cfg(feature = "transactional-runtime")]
 pub(crate) use workspace::resolve_workspace_cwd;
 pub(crate) use workspace::{
-    preflight_workspace_write_path, remove_workspace_file, resolve_existing_workspace_path,
-    workspace_diff_paths, workspace_git_common_dir_at, workspace_source_state_digest_at,
+    list_workspace_record_inventory, preflight_workspace_write_path, remove_workspace_file,
+    resolve_existing_workspace_path, workspace_diff_paths, workspace_git_common_dir_at,
+    workspace_source_state_digest_at,
 };
 
 #[cfg(test)]

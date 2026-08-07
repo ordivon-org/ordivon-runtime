@@ -431,6 +431,9 @@ impl From<RuntimeError> for ToolError {
             | ordivon_runtime_core::RuntimeErrorCode::ReconciliationRequired => {
                 ("reconcile_first", "unknown")
             }
+            ordivon_runtime_core::RuntimeErrorCode::WorkspaceExists => {
+                ("reconcile_first", "not_started")
+            }
             ordivon_runtime_core::RuntimeErrorCode::ConcurrencyLimit
             | ordivon_runtime_core::RuntimeErrorCode::RegistryBusy
             | ordivon_runtime_core::RuntimeErrorCode::WorkspaceBusy => {

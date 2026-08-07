@@ -1,5 +1,8 @@
 use super::*;
-use ordivon_runtime_core::{ArtifactDescriptor, RegistryConfig, TaskObservation};
+use ordivon_runtime_core::{
+    ArtifactDescriptor, AttemptState, AttemptTerminationIntent, JobDesiredState, RegistryConfig,
+    RuntimeDeliveryDisposition, TaskObservation,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -323,8 +326,18 @@ fn task_observation_serializes_discoverable_artifacts() {
     let observation = TaskObservation {
         job_id: "job-test".to_string(),
         status: "succeeded".to_string(),
+        desired_state: JobDesiredState::Run,
         attempt_id: Some("attempt-test".to_string()),
+        attempt_state: Some(AttemptState::Succeeded),
+        termination_intent: Some(AttemptTerminationIntent::Natural),
         exit_code: Some(0),
+        execution_terminal: true,
+        execution_disposition: Some(ordivon_runtime_core::JobResolution::Succeeded),
+        execution_reason_code: Some("PROCESS_EXIT_ZERO".to_string()),
+        delivery_disposition: RuntimeDeliveryDisposition::Committed,
+        recovery_required: false,
+        semantic_completion_evaluated: false,
+        result_available: true,
         stdout_tail: "ok\n".to_string(),
         stderr_tail: String::new(),
         stdout_offset: None,
@@ -371,6 +384,46 @@ fn task_observation_serializes_discoverable_artifacts() {
             .pointer("/artifacts/0/droppedBytes")
             .and_then(Value::as_u64),
         Some(0)
+    );
+    assert_eq!(
+        value.pointer("/desiredState").and_then(Value::as_str),
+        Some("run")
+    );
+    assert_eq!(
+        value.pointer("/attemptState").and_then(Value::as_str),
+        Some("succeeded")
+    );
+    assert_eq!(
+        value.pointer("/terminationIntent").and_then(Value::as_str),
+        Some("natural")
+    );
+    assert_eq!(
+        value
+            .pointer("/executionDisposition")
+            .and_then(Value::as_str),
+        Some("succeeded")
+    );
+    assert_eq!(
+        value
+            .pointer("/executionReasonCode")
+            .and_then(Value::as_str),
+        Some("PROCESS_EXIT_ZERO")
+    );
+    assert_eq!(
+        value
+            .pointer("/deliveryDisposition")
+            .and_then(Value::as_str),
+        Some("committed")
+    );
+    assert_eq!(
+        value.pointer("/resultAvailable").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        value
+            .pointer("/semanticCompletionEvaluated")
+            .and_then(Value::as_bool),
+        Some(false)
     );
 }
 
@@ -452,6 +505,29 @@ fn capacity_failure_preserves_retry_and_scope_metadata() {
     assert_eq!(
         value.pointer("/commitState").and_then(Value::as_str),
         Some("not_started")
+    );
+}
+
+#[test]
+fn workspace_exists_guides_reconciliation_instead_of_blind_retry() {
+    let error = RuntimeError::new(
+        ordivon_runtime_core::RuntimeErrorCode::WorkspaceExists,
+        "workspace already exists",
+        Some("workspaceId"),
+        false,
+    );
+    let value = serde_json::to_value(ToolError::from(error)).unwrap();
+    assert_eq!(
+        value.pointer("/retryClass").and_then(Value::as_str),
+        Some("reconcile_first")
+    );
+    assert_eq!(
+        value.pointer("/commitState").and_then(Value::as_str),
+        Some("not_started")
+    );
+    assert_eq!(
+        value.pointer("/retryable").and_then(Value::as_bool),
+        Some(false)
     );
 }
 

@@ -13,10 +13,10 @@ use super::{
     operation_request_identity_digest_from_plan, AdmissionOutcome, ArtifactRegistration,
     AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate, CreatedAdmission,
     JobDesiredState, JobProjection, JobResolution, ReservationRecord, ReservationState,
-    RunnerIdentity, RuntimeArtifactRecord, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
-    RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult,
-    RuntimeJobRecord, RuntimeJobSummary, RuntimeResult, SubmitRequest, TerminalCommit,
-    MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
+    RunnerIdentity, RuntimeArtifactRecord, RuntimeDeliveryDisposition, RuntimeError,
+    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeInvariantViolation, RuntimeJobListCursor,
+    RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary,
+    RuntimeResult, SubmitRequest, TerminalCommit, MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
 };
 
 const MIGRATION_V1: i64 = 1;
@@ -920,11 +920,14 @@ impl Registry {
             validate_identifier(client_request_id, "clientRequestId")?;
         }
         let connection = self.open_connection()?;
+        let transaction = connection.unchecked_transaction().map_err(|error| {
+            RuntimeError::from_sql(error, "cannot begin Job list read snapshot")
+        })?;
         let fetch_limit = request.limit + 1;
         let mut jobs = Vec::new();
         match (&request.client_request_id, &request.cursor) {
             (Some(client_request_id), Some(cursor)) => {
-                let mut statement = connection
+                let mut statement = transaction
                     .prepare(
                         "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE client_request_id=?1 AND (created_at_ms<?2 OR (created_at_ms=?2 AND job_id<?3)) ORDER BY created_at_ms DESC,job_id DESC LIMIT ?4",
                     )
@@ -952,7 +955,7 @@ impl Registry {
                 }
             }
             (Some(client_request_id), None) => {
-                let mut statement = connection
+                let mut statement = transaction
                     .prepare(
                         "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE client_request_id=?1 ORDER BY created_at_ms DESC,job_id DESC LIMIT ?2",
                     )
@@ -972,7 +975,7 @@ impl Registry {
                 }
             }
             (None, Some(cursor)) => {
-                let mut statement = connection
+                let mut statement = transaction
                     .prepare(
                         "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE created_at_ms<?1 OR (created_at_ms=?1 AND job_id<?2) ORDER BY created_at_ms DESC,job_id DESC LIMIT ?3",
                     )
@@ -993,7 +996,7 @@ impl Registry {
                 }
             }
             (None, None) => {
-                let mut statement = connection
+                let mut statement = transaction
                     .prepare(
                         "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs ORDER BY created_at_ms DESC,job_id DESC LIMIT ?1",
                     )
@@ -1026,9 +1029,9 @@ impl Registry {
         let mut summaries = Vec::with_capacity(jobs.len());
         for job in jobs {
             let attempt = match job.current_attempt_id.as_deref() {
-                Some(attempt_id) => Some(load_attempt(&connection, attempt_id)?),
+                Some(attempt_id) => Some(load_attempt(&transaction, attempt_id)?),
                 None => {
-                    let attempt_id: Option<String> = connection
+                    let attempt_id: Option<String> = transaction
                         .query_row(
                             "SELECT attempt_id FROM attempts WHERE job_id=?1 ORDER BY attempt_number DESC LIMIT 1",
                             [&job.job_id],
@@ -1037,11 +1040,31 @@ impl Registry {
                         .optional()
                         .map_err(|error| RuntimeError::from_sql(error, "cannot find latest Attempt"))?;
                     attempt_id
-                        .map(|attempt_id| load_attempt(&connection, &attempt_id))
+                        .map(|attempt_id| load_attempt(&transaction, &attempt_id))
                         .transpose()?
                 }
             };
-            let projection = project_job(&job, attempt.as_ref());
+            let recovery_condition_active = attempt
+                .as_ref()
+                .map(|attempt| attempt_recovery_condition_active(&transaction, &attempt.attempt_id))
+                .transpose()?
+                .unwrap_or(false);
+            let artifact_count: u32 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM artifacts WHERE job_id=?1",
+                    [&job.job_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| RuntimeError::from_sql(error, "cannot count Job Artifacts"))?;
+            let execution_reason_code =
+                job_execution_reason_code(&transaction, &job.job_id, job.resolution.is_some())?;
+            let projection = project_job(
+                &job,
+                attempt.as_ref(),
+                recovery_condition_active,
+                artifact_count > 0,
+                execution_reason_code,
+            );
             let plan: RuntimeExecutionPlan = serde_json::from_str(&job.execution_plan_json)
                 .map_err(|error| {
                     RuntimeError::new(
@@ -1067,18 +1090,20 @@ impl Registry {
             let finished_at_ms = attempt.as_ref().and_then(|attempt| attempt.finished_at_ms);
             let duration_start = started_at_ms.unwrap_or(job.created_at_ms);
             let duration_end = finished_at_ms.unwrap_or(observed_at_ms);
-            let artifact_count: u32 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM artifacts WHERE job_id=?1",
-                    [&job.job_id],
-                    |row| row.get(0),
-                )
-                .map_err(|error| RuntimeError::from_sql(error, "cannot count Job Artifacts"))?;
             summaries.push(RuntimeJobSummary {
                 job_id: job.job_id,
                 status: projection.status,
+                desired_state: projection.desired_state,
                 attempt_id: projection.attempt_id,
+                attempt_state: projection.attempt_state,
+                termination_intent: projection.termination_intent,
                 exit_code: projection.exit_code,
+                execution_terminal: projection.execution_terminal,
+                execution_disposition: projection.execution_disposition,
+                execution_reason_code: projection.execution_reason_code,
+                delivery_disposition: projection.delivery_disposition,
+                recovery_required: projection.recovery_required,
+                semantic_completion_evaluated: projection.semantic_completion_evaluated,
                 client_request_id: job.client_request_id,
                 workspace_id: job.workspace_id,
                 source_revision: plan.source_revision,
@@ -1094,6 +1119,9 @@ impl Registry {
                 poll_after_ms: projection.poll_after_ms,
             });
         }
+        transaction.commit().map_err(|error| {
+            RuntimeError::from_sql(error, "cannot close Job list read snapshot")
+        })?;
         Ok(RuntimeJobListResult {
             jobs: summaries,
             next_cursor,
@@ -2911,7 +2939,49 @@ pub(crate) fn inspect_runtime_invariants_connection(
     Ok(violations)
 }
 
+fn job_execution_reason_code(
+    connection: &Connection,
+    job_id: &str,
+    resolved: bool,
+) -> RuntimeResult<Option<String>> {
+    if !resolved {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT reason_code FROM job_events WHERE job_id=?1 AND (event_type IN ('JOB_TERMINAL','JOB_RESOLUTION_CORRECTED','JOB_RESOLUTION_ADMIN_CORRECTED') OR (event_type='STOP_REQUESTED' AND new_state='cancelled')) ORDER BY event_sequence DESC LIMIT 1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| RuntimeError::from_sql(error, "cannot read Job execution reason"))
+}
+
+fn attempt_recovery_condition_active(
+    connection: &Connection,
+    attempt_id: &str,
+) -> RuntimeResult<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required' AND status='true')",
+            [attempt_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| RuntimeError::from_sql(error, "cannot inspect Attempt recovery condition"))
+}
+
 fn load_job_snapshot(connection: &Connection, job_id: &str) -> RuntimeResult<JobSnapshot> {
+    let transaction = connection.unchecked_transaction().map_err(|error| {
+        RuntimeError::from_sql(error, "cannot begin Job projection read snapshot")
+    })?;
+    let snapshot = load_job_snapshot_in(&transaction, job_id)?;
+    transaction.commit().map_err(|error| {
+        RuntimeError::from_sql(error, "cannot close Job projection read snapshot")
+    })?;
+    Ok(snapshot)
+}
+
+fn load_job_snapshot_in(connection: &Connection, job_id: &str) -> RuntimeResult<JobSnapshot> {
     let job = load_job(connection, job_id)?;
     let attempt = match job.current_attempt_id.as_deref() {
         Some(attempt_id) => Some(load_attempt(connection, attempt_id)?),
@@ -2929,7 +2999,27 @@ fn load_job_snapshot(connection: &Connection, job_id: &str) -> RuntimeResult<Job
                 .transpose()?
         }
     };
-    let projection = project_job(&job, attempt.as_ref());
+    let recovery_condition_active = attempt
+        .as_ref()
+        .map(|attempt| attempt_recovery_condition_active(connection, &attempt.attempt_id))
+        .transpose()?
+        .unwrap_or(false);
+    let artifacts_available: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM artifacts WHERE job_id=?1)",
+            [&job.job_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| RuntimeError::from_sql(error, "cannot inspect Job Artifacts"))?;
+    let execution_reason_code =
+        job_execution_reason_code(connection, &job.job_id, job.resolution.is_some())?;
+    let projection = project_job(
+        &job,
+        attempt.as_ref(),
+        recovery_condition_active,
+        artifacts_available,
+        execution_reason_code,
+    );
     Ok(JobSnapshot {
         job,
         attempt,
@@ -2937,7 +3027,13 @@ fn load_job_snapshot(connection: &Connection, job_id: &str) -> RuntimeResult<Job
     })
 }
 
-fn project_job(job: &RuntimeJobRecord, attempt: Option<&AttemptRecord>) -> JobProjection {
+fn project_job(
+    job: &RuntimeJobRecord,
+    attempt: Option<&AttemptRecord>,
+    recovery_condition_active: bool,
+    artifacts_available: bool,
+    execution_reason_code: Option<String>,
+) -> JobProjection {
     let status = if let Some(resolution) = job.resolution {
         resolution.as_db().to_string()
     } else if let Some(attempt) = attempt {
@@ -2951,15 +3047,47 @@ fn project_job(job: &RuntimeJobRecord, attempt: Option<&AttemptRecord>) -> JobPr
     } else {
         "unknown".to_string()
     };
+    let execution_terminal = job.resolution.is_some();
+    let recovery_required = recovery_condition_active
+        || attempt.is_some_and(|attempt| {
+            matches!(
+                attempt.state,
+                AttemptState::Recovering | AttemptState::Orphaned
+            )
+        });
+    let delivery_disposition = if recovery_required {
+        RuntimeDeliveryDisposition::ReconciliationRequired
+    } else {
+        match job.resolution {
+            None => RuntimeDeliveryDisposition::InProgress,
+            Some(JobResolution::Orphaned) => RuntimeDeliveryDisposition::ReconciliationRequired,
+            Some(JobResolution::Lost) => RuntimeDeliveryDisposition::Unknown,
+            Some(_) => RuntimeDeliveryDisposition::Committed,
+        }
+    };
+    let poll_after_ms = matches!(
+        delivery_disposition,
+        RuntimeDeliveryDisposition::InProgress | RuntimeDeliveryDisposition::ReconciliationRequired
+    )
+    .then_some(250);
     JobProjection {
         job_id: job.job_id.clone(),
         status,
+        desired_state: job.desired_state,
         attempt_id: attempt.map(|attempt| attempt.attempt_id.clone()),
+        attempt_state: attempt.map(|attempt| attempt.state),
+        termination_intent: attempt.map(|attempt| attempt.termination_intent),
         exit_code: attempt.and_then(|attempt| attempt.exit_code),
+        execution_terminal,
+        execution_disposition: job.resolution,
+        execution_reason_code,
+        delivery_disposition,
+        recovery_required,
+        semantic_completion_evaluated: false,
         result_available: job.resolution.is_some(),
-        artifacts_available: attempt.is_some_and(|attempt| attempt.result_digest.is_some()),
+        artifacts_available,
         artifacts: Vec::new(),
-        poll_after_ms: job.resolution.is_none().then_some(250),
+        poll_after_ms,
     }
 }
 

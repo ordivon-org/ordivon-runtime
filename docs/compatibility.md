@@ -32,6 +32,15 @@ Its `compatibility` section combines the current deployment receipt, a bounded t
 
 Serde defaults that express ordinary optional API fields are not classified as legacy merely because they are defaults. They become deletion candidates only when a concrete old representation is retired.
 
+## Agent-facing semantic compatibility
+
+| Contract | Current consumer | Protected failure | Deletion trigger |
+| --- | --- | --- | --- |
+| Legacy `INVALID_REQUEST` fallback for a missing `workspaceId` | `ordivon-host` Workspace ensure/close compatibility path | Host mistakes a precise `WORKSPACE_NOT_FOUND` response for an unrecoverable Runtime failure during staged rollout | Runtime with precise Workspace errors is deployed and one complete compatibility observation window shows no supported Runtime returning the legacy missing-Workspace form |
+| Coarse Job `status` (`queued`, `working`, terminal resolution) | Existing callers that display or log the historical summary | A minor Runtime release breaks callers that do not yet consume explicit execution semantics | Named live callers consume `attemptState`, `executionDisposition`, `deliveryDisposition`, and recovery fields for control decisions; the coarse field may then be reviewed separately rather than removed automatically |
+
+The precise Workspace error migration is intentionally two-sided: Host accepts both the old `INVALID_REQUEST` form and `WORKSPACE_NOT_FOUND` before Runtime emits the precise code in production. The compatibility branch exists to order the rollout safely; it does not make the old classification semantically canonical.
+
 ## Deletion rule
 
 A branch is eligible for deletion only when all of the following are true:

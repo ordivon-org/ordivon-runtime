@@ -9,9 +9,9 @@ use super::{
     canonical_directory, invalid, io_error, now_unix_ms, sha256_bytes, sha256_file,
     validate_relative_path, write_bytes_atomic, write_json_atomic, GitWorkspaceCreateRequest,
     UniversalExecError, UniversalExecErrorCode, UniversalExecutorConfig, WorkspaceCloseRequest,
-    WorkspaceCloseResult, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceReadRequest,
-    WorkspaceReadResult, WorkspaceRecord, WorkspaceRenamedPath, WorkspaceWriteRequest,
-    WorkspaceWriteResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    WorkspaceCloseResult, WorkspaceClosureDisposition, WorkspaceDiffRequest, WorkspaceDiffResult,
+    WorkspaceReadRequest, WorkspaceReadResult, WorkspaceRecord, WorkspaceRenamedPath,
+    WorkspaceWriteRequest, WorkspaceWriteResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -260,16 +260,29 @@ fn validate_closed_identity(
     Ok(())
 }
 
-pub fn list_workspace_records(
+#[derive(Debug)]
+pub(crate) struct WorkspaceRecordInventoryIssue {
+    pub workspace_id: String,
+    pub error: UniversalExecError,
+}
+
+#[derive(Debug)]
+pub(crate) struct WorkspaceRecordInventory {
+    pub records: Vec<WorkspaceRecord>,
+    pub issues: Vec<WorkspaceRecordInventoryIssue>,
+}
+
+pub(crate) fn list_workspace_record_inventory(
     config: &UniversalExecutorConfig,
     limit: u32,
-) -> Result<Vec<WorkspaceRecord>, UniversalExecError> {
+) -> Result<WorkspaceRecordInventory, UniversalExecError> {
     config.ensure_store()?;
     if limit == 0 || limit > 100 {
         return Err(invalid("limit must be in 1..=100", "limit"));
     }
     let records_root = config.workspace_records_root();
     let mut records = Vec::new();
+    let mut issues = Vec::new();
     for entry in
         fs::read_dir(&records_root).map_err(|error| io_error(&records_root, "list", error))?
     {
@@ -282,35 +295,48 @@ pub fn list_workspace_records(
         let Some(workspace_id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        match load_workspace_record_metadata(config, workspace_id) {
-            Ok(record) => {
-                let expected_path = config.workspace_path(workspace_id);
-                if Path::new(&record.workspace_path) != expected_path {
-                    return Err(UniversalExecError::new(
-                        UniversalExecErrorCode::MetadataCorrupt,
-                        "workspace record path does not match its identity",
-                        Some("workspaceId"),
-                        false,
-                    ));
-                }
-                match fs::symlink_metadata(&expected_path) {
-                    Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                        records.push(record);
-                    }
-                    Ok(_) => {
-                        return Err(UniversalExecError::new(
-                            UniversalExecErrorCode::MetadataCorrupt,
-                            "workspace record target must be a non-symlink directory",
-                            Some("workspaceId"),
-                            false,
-                        ));
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(io_error(&expected_path, "inspect", error)),
-                }
-            }
+        let record = match load_workspace_record_metadata(config, workspace_id) {
+            Ok(record) => record,
             Err(error) if error.code == UniversalExecErrorCode::WorkspaceNotFound => continue,
-            Err(error) => return Err(error),
+            Err(error) => {
+                issues.push(WorkspaceRecordInventoryIssue {
+                    workspace_id: workspace_id.to_string(),
+                    error,
+                });
+                continue;
+            }
+        };
+        let expected_path = config.workspace_path(workspace_id);
+        if Path::new(&record.workspace_path) != expected_path {
+            issues.push(WorkspaceRecordInventoryIssue {
+                workspace_id: workspace_id.to_string(),
+                error: UniversalExecError::new(
+                    UniversalExecErrorCode::MetadataCorrupt,
+                    "workspace record path does not match its identity",
+                    Some("workspaceId"),
+                    false,
+                ),
+            });
+            continue;
+        }
+        match fs::symlink_metadata(&expected_path) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                records.push(record);
+            }
+            Ok(_) => issues.push(WorkspaceRecordInventoryIssue {
+                workspace_id: workspace_id.to_string(),
+                error: UniversalExecError::new(
+                    UniversalExecErrorCode::MetadataCorrupt,
+                    "workspace record target must be a non-symlink directory",
+                    Some("workspaceId"),
+                    false,
+                ),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => issues.push(WorkspaceRecordInventoryIssue {
+                workspace_id: workspace_id.to_string(),
+                error: io_error(&expected_path, "inspect", error),
+            }),
         }
     }
     records.sort_by(|left, right| {
@@ -320,7 +346,20 @@ pub fn list_workspace_records(
             .then_with(|| left.workspace_id.cmp(&right.workspace_id))
     });
     records.truncate(limit as usize);
-    Ok(records)
+    issues.sort_by(|left, right| left.workspace_id.cmp(&right.workspace_id));
+    issues.truncate(limit as usize);
+    Ok(WorkspaceRecordInventory { records, issues })
+}
+
+pub fn list_workspace_records(
+    config: &UniversalExecutorConfig,
+    limit: u32,
+) -> Result<Vec<WorkspaceRecord>, UniversalExecError> {
+    let inventory = list_workspace_record_inventory(config, limit)?;
+    if let Some(issue) = inventory.issues.into_iter().next() {
+        return Err(issue.error);
+    }
+    Ok(inventory.records)
 }
 
 pub fn read_workspace_text(
@@ -998,6 +1037,7 @@ pub fn remove_git_workspace(
         return Ok(WorkspaceCloseResult {
             workspace_id: request.workspace_id.clone(),
             removed: false,
+            closure_disposition: WorkspaceClosureDisposition::AlreadyAbsent,
             source_state_digest: None,
         });
     }
@@ -1019,6 +1059,7 @@ pub fn remove_git_workspace(
         return Ok(WorkspaceCloseResult {
             workspace_id: request.workspace_id.clone(),
             removed: false,
+            closure_disposition: WorkspaceClosureDisposition::AlreadyClosed,
             source_state_digest: closed.source_state_digest,
         });
     }
@@ -1056,6 +1097,7 @@ pub fn remove_git_workspace(
         return Ok(WorkspaceCloseResult {
             workspace_id: request.workspace_id.clone(),
             removed: false,
+            closure_disposition: WorkspaceClosureDisposition::RecoveredMissing,
             source_state_digest: None,
         });
     }
@@ -1114,6 +1156,7 @@ pub fn remove_git_workspace(
     Ok(WorkspaceCloseResult {
         workspace_id: request.workspace_id.clone(),
         removed: true,
+        closure_disposition: WorkspaceClosureDisposition::Removed,
         source_state_digest: Some(source_state_digest),
     })
 }

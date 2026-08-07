@@ -94,11 +94,27 @@ impl WorkspaceCloseRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceClosureDisposition {
+    /// This call physically removed the Workspace and committed its closed tombstone.
+    Removed,
+    /// A closed tombstone already proved the Workspace was closed.
+    AlreadyClosed,
+    /// Neither Workspace identity record nor directory existed; no exact source state was proven.
+    AlreadyAbsent,
+    /// The identity record existed but the directory was already missing; Runtime repaired closure metadata.
+    RecoveredMissing,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceCloseResult {
     pub workspace_id: String,
+    /// Compatibility flag: true only when this call physically removed the Workspace.
     pub removed: bool,
+    /// How Runtime proved or completed the closed state.
+    pub closure_disposition: WorkspaceClosureDisposition,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_state_digest: Option<String>,
 }

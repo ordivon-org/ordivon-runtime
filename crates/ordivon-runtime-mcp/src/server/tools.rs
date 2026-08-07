@@ -4,7 +4,7 @@ use super::*;
 impl RuntimeServer {
     #[tool(
         name = "workspace.open",
-        description = "Resolve a local revision and create one detached Git Workspace. Omit workspaceId to receive a server-generated immutable ws-* handle; explicit IDs remain supported for compatibility. This tool does not fetch remote refs.",
+        description = "Resolve a local revision and create one detached Git Workspace. Omit workspaceId for a server-generated immutable ws-* handle; provide an explicit unique workspaceId when deterministic response-loss reconciliation matters. Repeating workspace.open is not an idempotent replay: after an uncertain response, use workspace.get on the explicit ID. This tool does not fetch remote refs.",
         annotations(
             title = "Open isolated workspace",
             read_only_hint = false,
@@ -27,7 +27,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.close",
-        description = "Close one Workspace. By default, reject tracked or untracked changes; force=true may remove dirty files. expectedSourceStateDigest compare-and-closes only the exact committed source state and remains replayable through the closed tombstone. Active or held Jobs always block closure.",
+        description = "Close one Workspace. By default, reject tracked or untracked changes; force=true may remove dirty files. expectedSourceStateDigest compare-and-closes only the exact committed source state and remains replayable through the closed tombstone. closureDisposition distinguishes removed, already_closed, already_absent, and recovered_missing; removed only says whether this call performed physical removal. Active or held Jobs always block closure.",
         annotations(
             title = "Close workspace",
             read_only_hint = false,
@@ -49,7 +49,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.get",
-        description = "Return one Workspace's exact source commit, detached-head mode, dirty state, complete sourceStateDigest, creation time, and active Job identities. Use this after reconnecting instead of reconstructing Workspace state from memory.",
+        description = "Return one Workspace's canonical sourceRepo, exact source commit, detached-head mode, dirty state, complete sourceStateDigest, creation time, and active Job identities. Use this after reconnecting or after an uncertain workspace.open instead of reconstructing Workspace identity or state from memory.",
         annotations(
             title = "Get workspace state",
             read_only_hint = true,
@@ -71,7 +71,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.list",
-        description = "List newest healthy open Workspaces using a lightweight Git status probe. Exact sourceStateDigest is omitted by default and may be requested explicitly; workspace.get remains the precise proof boundary. Missing historical records are omitted and unusable Workspaces are isolated in issues.",
+        description = "List newest healthy open Workspaces with canonical sourceRepo and exact source revision. Exact sourceStateDigest is omitted by default and may be requested explicitly; workspace.get remains the precise proof boundary. Missing historical records are omitted; Workspace-local inventory/reconciliation/projection failures are isolated in issues with a machine-readable stage, while authority-wide failures still fail closed.",
         annotations(
             title = "List open workspaces",
             read_only_hint = true,
@@ -157,7 +157,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.mutate",
-        description = "Apply one atomic validated batch. mode must be exactly WRITE, APPEND, or REPLACE_EXACT; REPLACE_EXACT requires expectedText. expectedDigest is required when a target already exists and protects the complete file version.",
+        description = "Apply one atomic validated batch. mode must be exactly WRITE, APPEND, or REPLACE_EXACT; REPLACE_EXACT requires expectedText. expectedDigest is required when a target already exists and protects the complete file version. This tool has no durable clientRequestId replay receipt: after an uncertain response, inspect current Workspace state before retrying. Prefer workspace.patch when response-loss reconciliation is required.",
         annotations(
             title = "Mutate workspace files",
             read_only_hint = false,
@@ -259,7 +259,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.exec",
-        description = "Run one effect-opaque command inside a workspace with the installed service user's trusted-local authority. execution.executable must be an absolute host path and execution.cwdRelative must be relative to the Workspace root. The server makes duplicate clientRequestId admission idempotent and binds current Git source state, but it does not claim the command's external effects are idempotent.",
+        description = "Run one effect-opaque command inside a workspace with the installed service user's trusted-local authority. execution.executable must be an absolute host path and execution.cwdRelative must be relative to the Workspace root. Duplicate clientRequestId admission is idempotent and current Git source state is bound. Results expose exact Attempt state, execution and delivery disposition, recovery requirement, and explicitly do not claim semantic completion or external-effect idempotency.",
         annotations(
             title = "Execute transactional workspace job",
             read_only_hint = false,
@@ -282,7 +282,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.execPlan",
-        description = "Run an ordered structured execution plan inside one Workspace. Steps use absolute executables and explicit args, run sequentially, stop on the first failure by default, and continue only when that step explicitly sets continueOnError. The Job exposes current and failed step progress without parsing shell text.",
+        description = "Run an ordered structured execution plan inside one Workspace. Steps use absolute executables and explicit args, run sequentially, stop on the first failure by default, and continue only when that step explicitly sets continueOnError. The Job exposes step progress plus exact Attempt state, execution and delivery disposition, and recovery requirement without asking the caller to infer them from output.",
         annotations(
             title = "Execute fail-fast workspace plan",
             read_only_hint = false,
@@ -308,7 +308,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "task.observe",
-        description = "Observe or briefly await one Job. Omit offsets for tail mode, or pass stdoutOffset/stderrOffset with at least 4 tail bytes to read only new retained UTF-8 text and continue from returned next offsets.",
+        description = "Observe or briefly await one Job. Exact Attempt state, terminal execution disposition, delivery certainty, recovery requirement, result availability, and semanticCompletionEvaluated=false are projected explicitly. Omit offsets for tail mode, or pass stdoutOffset/stderrOffset with at least 4 tail bytes to read only new retained UTF-8 text and continue from returned next offsets.",
         annotations(
             title = "Observe transactional job",
             read_only_hint = true,
@@ -352,7 +352,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "task.list",
-        description = "List newest Jobs first with semantic identity, Workspace, command summary, timestamps, duration, and Artifact count using a stable cursor. Optionally filter by exact clientRequestId.",
+        description = "List newest Jobs first with request identity, Workspace, command summary, exact Attempt state, execution and delivery disposition, recovery requirement, timestamps, duration, and Artifact count using a stable cursor. Optionally filter by exact clientRequestId; Runtime never claims Task/domain semantic completion.",
         annotations(
             title = "List transactional jobs",
             read_only_hint = true,

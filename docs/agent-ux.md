@@ -26,9 +26,33 @@ A successful Runtime Job or Runtime Attempt is not a Host completion decision. R
 
 ## Workspace recovery
 
-`workspace.open` accepts a caller-provided compatibility ID or generates an immutable `ws-*` handle when `workspaceId` is omitted. Use an explicit ID when response-loss replay identity matters; generated handles are a low-friction convenience for interactive opens. `workspace.list` and `workspace.get` are the reconnection entry points and expose exact source revision, detached-head mode, dirty state, complete `sourceStateDigest`, creation time, and active Jobs. A caller that verifies one exact source state can pass that digest to `workspace.close.expectedSourceStateDigest`; Runtime compares it under the Workspace lifecycle lock, persists it in the closed tombstone, and permits exact replay after response loss. `workspace.diff` returns the bounded patch together with sorted `changedPaths`, `modifiedPaths`, `addedPaths`, `deletedPaths`, structured `renamedPaths`, and `untrackedPaths`; callers do not need to infer the exact changed set from patch headers.
+`workspace.open` accepts a caller-provided ID or generates an immutable `ws-*` handle when `workspaceId` is omitted. Use an explicit unique ID when deterministic response-loss reconciliation matters; `workspace.open` itself is not an idempotent replay operation, so an uncertain response should be reconciled with `workspace.get` rather than blindly repeated. Generated handles are a low-friction convenience when response-loss identity is not required. `workspace.list` and `workspace.get` are the reconnection entry points and expose canonical `sourceRepo`, exact source revision, detached-head mode, dirty state, complete `sourceStateDigest`, creation time, and active Jobs. A caller that verifies one exact source state can pass that digest to `workspace.close.expectedSourceStateDigest`; Runtime compares it under the Workspace lifecycle lock, persists it in the closed tombstone, and permits exact replay after response loss. `workspace.diff` returns the bounded patch together with sorted `changedPaths`, `modifiedPaths`, `addedPaths`, `deletedPaths`, structured `renamedPaths`, and `untrackedPaths`; callers do not need to infer the exact changed set from patch headers.
 
 Compiler-report normalization, Git publication, GitHub orchestration, coding-agent evaluation, and benchmark harnesses are not Runtime state owners. They remain outside the Runtime repository unless a concrete execution contract requires them.
+
+## Execution semantic projection
+
+Runtime preserves state distinctions that change a caller's safe next action. `status` remains a coarse compatibility summary (`queued`, `working`, or a terminal resolution) and must not be used as the sole control signal. `workspace.exec`, `workspace.execPlan`, `task.observe`, and `task.list` project the following explicit execution semantics:
+
+- `desiredState` preserves the persisted Job intent (`run` or `cancelled`) across reconnects;
+- `attemptState` is the exact current or latest Runtime Attempt state, including `starting`, `stopping`, and `recovering`;
+- `terminationIntent` distinguishes natural execution from persisted stop or deadline intent;
+- `executionTerminal` says only whether the Runtime Job has a terminal physical execution resolution;
+- `executionDisposition` is absent while unresolved and otherwise carries the terminal Runtime resolution such as `succeeded`, `failed`, `timed_out`, `cancelled`, `lost`, or `orphaned`;
+- `executionReasonCode` carries the stable machine reason for that terminal resolution when the append-only event history records one;
+- `deliveryDisposition` separates `in_progress`, `committed`, `reconciliation_required`, and `unknown` result certainty;
+- `recoveryRequired` is a derived Runtime fact: it is true for active recovery conditions and recovery-bearing states such as `recovering` or `orphaned`, rather than exposing an internal condition-table implementation detail;
+- `resultAvailable` means a durable Runtime terminal result exists, not that the result is semantically correct;
+- `artifactsAvailable` means at least one registered Runtime Artifact actually exists; it is not inferred from the presence of a result digest;
+- `semanticCompletionEvaluated` is always `false`. Runtime does not decide Task, Goal, Assignment, or domain completion.
+
+`resultAvailable=true` is therefore compatible with `deliveryDisposition=reconciliation_required` or `deliveryDisposition=unknown`. A caller must not translate terminality into certainty, certainty into semantic correctness, or `lost` into permission to redispatch an effect-opaque operation. `pollAfterMs` is emitted for `in_progress` and `reconciliation_required`; a terminal `unknown` disposition intentionally carries no implication that repeated polling will make the external effect safe to repeat.
+
+The projection rule is: **if two Runtime-owned states imply different safe Agent behavior, the Agent-facing contract must preserve that distinction through a machine-readable field.** Runtime may spend additional bounded read work to preserve this semantic certainty; later mechanical optimization must not collapse it again. `task.list` and single-Job projections construct their multi-field semantic view from one bounded Registry read snapshot, so a caller does not receive a state vector assembled across different concurrent moments.
+
+Workspace mutation follows the same rule. `workspace.mutate` is atomic and digest-guarded but does not own a durable request identity or replay receipt; if its response is uncertain, the caller must re-read/reconcile the affected Workspace before deciding whether to retry. `workspace.patch` is the preferred text-mutation primitive when response-loss safety matters because `clientRequestId` and `workspace.patch.get` make committed, uncommitted, and unknown outcomes distinguishable without guessing.
+
+Workspace closure also separates state from action. `WorkspaceCloseResult.removed` is a compatibility fact about whether the current call physically removed the directory; `closureDisposition` says how the closed state was established (`removed`, `already_closed`, `already_absent`, or `recovered_missing`). A false `removed` value therefore does not mean close failed.
 
 ## RT0 Agent-path measurement
 

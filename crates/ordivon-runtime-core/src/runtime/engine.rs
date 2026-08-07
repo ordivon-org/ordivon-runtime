@@ -26,15 +26,15 @@ use super::{
     Registry, RegistryConfig, RunnerIdentity, RuntimeArtifactRecord, RuntimeError,
     RuntimeErrorCode, RuntimeExecutionPlan, RuntimeExecutionStep, RuntimeJobListRequest,
     RuntimeJobListResult, RuntimeResult, RuntimeWorkspaceGetRequest, RuntimeWorkspaceIssue,
-    RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
-    SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskObserveWaitUntil,
-    TaskRunRequest, TerminalCommit, WorkspacePatchOperationState, WorkspacePatchOperationStatus,
-    WorkspacePatchStatusRequest, MAX_ARTIFACT_READ_BYTES, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
-    RUNTIME_SCHEMA_VERSION,
+    RuntimeWorkspaceIssueStage, RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult,
+    RuntimeWorkspaceSummary, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
+    TaskObserveWaitUntil, TaskRunRequest, TerminalCommit, WorkspacePatchOperationState,
+    WorkspacePatchOperationStatus, WorkspacePatchStatusRequest, MAX_ARTIFACT_READ_BYTES,
+    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
 };
 use crate::universal::{
     canonical_directory, create_git_workspace_compact, inspect_workspace_patch_plan,
-    list_workspace_records, load_workspace_record, mutate_workspace, patch_workspace,
+    list_workspace_record_inventory, load_workspace_record, mutate_workspace, patch_workspace,
     plan_workspace_patch, remove_git_workspace, resolve_workspace_cwd,
     result_from_workspace_patch_plan, sha256_bytes, sha256_file, workspace_git_common_dir_at,
     workspace_is_dirty, workspace_source_state_digest, write_bytes_atomic, write_json_atomic,
@@ -329,38 +329,79 @@ impl Runtime {
         if request.limit == 0 || request.limit > 100 {
             return Err(RuntimeError::invalid("limit must be in 1..=100", "limit"));
         }
-        let records =
-            list_workspace_records(&self.executor, request.limit).map_err(map_universal_error)?;
-        let mut workspaces = Vec::with_capacity(records.len());
-        let mut issues = Vec::new();
-        for record in records {
-            let _ = self.reconcile_workspace(&record.workspace_id)?;
-            let active_job_ids = self
-                .registry
-                .active_job_ids_for_workspace(&record.workspace_id, 20)?;
-            match workspace_is_dirty(&self.executor, &record.workspace_id) {
-                Ok(dirty) => {
-                    let source_state_digest = request
-                        .include_source_state_digest
-                        .then(|| {
-                            workspace_source_state_digest(&self.executor, &record.workspace_id)
-                        })
-                        .transpose()
-                        .map_err(map_universal_error)?;
-                    workspaces.push(Self::workspace_summary_from_parts(
-                        &record,
-                        dirty,
-                        source_state_digest,
-                        active_job_ids,
-                    ));
+        let inventory = list_workspace_record_inventory(&self.executor, request.limit)
+            .map_err(map_universal_error)?;
+        let mut workspaces = Vec::with_capacity(inventory.records.len());
+        let mut issues = inventory
+            .issues
+            .into_iter()
+            .map(|issue| {
+                workspace_issue(
+                    &issue.workspace_id,
+                    RuntimeWorkspaceIssueStage::Inventory,
+                    map_universal_error(issue.error),
+                )
+            })
+            .collect::<Vec<_>>();
+        for record in inventory.records {
+            if let Err(error) = self.reconcile_workspace(&record.workspace_id) {
+                if error.is_reconciliation_fatal() {
+                    return Err(error);
                 }
-                Err(error) => issues.push(RuntimeWorkspaceIssue {
-                    workspace_id: record.workspace_id,
-                    code: error.code.as_str().to_string(),
-                    message: error.message,
-                    retryable: error.retryable,
-                }),
+                issues.push(workspace_issue(
+                    &record.workspace_id,
+                    RuntimeWorkspaceIssueStage::Reconcile,
+                    error,
+                ));
+                continue;
             }
+            let active_job_ids = match self
+                .registry
+                .active_job_ids_for_workspace(&record.workspace_id, 20)
+            {
+                Ok(active_job_ids) => active_job_ids,
+                Err(error) if error.is_reconciliation_fatal() => return Err(error),
+                Err(error) => {
+                    issues.push(workspace_issue(
+                        &record.workspace_id,
+                        RuntimeWorkspaceIssueStage::ActiveJobs,
+                        error,
+                    ));
+                    continue;
+                }
+            };
+            let dirty = match workspace_is_dirty(&self.executor, &record.workspace_id) {
+                Ok(dirty) => dirty,
+                Err(error) => {
+                    issues.push(workspace_issue(
+                        &record.workspace_id,
+                        RuntimeWorkspaceIssueStage::DirtyProbe,
+                        map_universal_error(error),
+                    ));
+                    continue;
+                }
+            };
+            let source_state_digest = if request.include_source_state_digest {
+                match workspace_source_state_digest(&self.executor, &record.workspace_id) {
+                    Ok(digest) => Some(digest),
+                    Err(error) => {
+                        issues.push(workspace_issue(
+                            &record.workspace_id,
+                            RuntimeWorkspaceIssueStage::SourceStateDigest,
+                            map_universal_error(error),
+                        ));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            workspaces.push(Self::workspace_summary_from_parts(
+                &record,
+                dirty,
+                source_state_digest,
+                active_job_ids,
+            ));
         }
         Ok(RuntimeWorkspaceListResult { workspaces, issues })
     }
@@ -400,6 +441,7 @@ impl Runtime {
     ) -> RuntimeWorkspaceSummary {
         RuntimeWorkspaceSummary {
             workspace_id: record.workspace_id.clone(),
+            source_repo: record.source_repo.clone(),
             source_revision: record.source_revision.clone(),
             created_at_ms: u64::try_from(record.created_unix_ms).unwrap_or(u64::MAX),
             head_mode: "detached".to_string(),
@@ -1363,8 +1405,18 @@ impl Runtime {
         Ok(TaskObservation {
             job_id,
             status: projection.status,
+            desired_state: projection.desired_state,
             attempt_id: attempt.as_ref().map(|attempt| attempt.attempt_id.clone()),
+            attempt_state: projection.attempt_state,
+            termination_intent: projection.termination_intent,
             exit_code: projection.exit_code,
+            execution_terminal: projection.execution_terminal,
+            execution_disposition: projection.execution_disposition,
+            execution_reason_code: projection.execution_reason_code,
+            delivery_disposition: projection.delivery_disposition,
+            recovery_required: projection.recovery_required,
+            semantic_completion_evaluated: projection.semantic_completion_evaluated,
+            result_available: projection.result_available,
             stdout_tail: stdout_view.content,
             stderr_tail: stderr_view.content,
             stdout_offset: stdout_view.offset,
@@ -3004,13 +3056,46 @@ fn serialization_error(error: serde_json::Error) -> RuntimeError {
     )
 }
 
+fn workspace_issue(
+    workspace_id: &str,
+    stage: RuntimeWorkspaceIssueStage,
+    error: RuntimeError,
+) -> RuntimeWorkspaceIssue {
+    RuntimeWorkspaceIssue {
+        workspace_id: workspace_id.to_string(),
+        stage,
+        code: error.code.as_str().to_string(),
+        message: error.message,
+        retryable: error.retryable,
+    }
+}
+
 fn map_universal_error(error: crate::UniversalExecError) -> RuntimeError {
+    use crate::UniversalExecErrorCode as UniversalCode;
+
     let code = match error.code {
-        crate::UniversalExecErrorCode::WorkspaceDirty => RuntimeErrorCode::WorkspaceDirty,
-        crate::UniversalExecErrorCode::WorkspaceCapacityExceeded => {
-            RuntimeErrorCode::WorkspaceCapacityExceeded
-        }
-        _ => RuntimeErrorCode::InvalidRequest,
+        UniversalCode::InvalidRequest => RuntimeErrorCode::InvalidRequest,
+        UniversalCode::WorkspaceExists => RuntimeErrorCode::WorkspaceExists,
+        UniversalCode::WorkspaceNotFound => RuntimeErrorCode::WorkspaceNotFound,
+        UniversalCode::WorkspacePathNotFound => RuntimeErrorCode::WorkspacePathNotFound,
+        UniversalCode::WorkspaceDirty => RuntimeErrorCode::WorkspaceDirty,
+        UniversalCode::WorkspacePathDenied => RuntimeErrorCode::WorkspacePathDenied,
+        UniversalCode::RevisionNotFound => RuntimeErrorCode::RevisionNotFound,
+        UniversalCode::RevisionMismatch => RuntimeErrorCode::RevisionMismatch,
+        UniversalCode::WorkspaceStateMismatch => RuntimeErrorCode::WorkspaceStateMismatch,
+        UniversalCode::WorkspaceMutationIncomplete => RuntimeErrorCode::ReconciliationRequired,
+        UniversalCode::TaskExists => RuntimeErrorCode::IdempotencyConflict,
+        UniversalCode::TaskNotFound => RuntimeErrorCode::JobNotFound,
+        UniversalCode::TaskStartFailed => RuntimeErrorCode::ToolFailed,
+        UniversalCode::TaskStateUnavailable => RuntimeErrorCode::ReconciliationRequired,
+        UniversalCode::ArtifactNotFound => RuntimeErrorCode::ArtifactNotFound,
+        UniversalCode::ArtifactNotUtf8 => RuntimeErrorCode::ArtifactNotUtf8,
+        UniversalCode::OutputLimitExceeded => RuntimeErrorCode::OutputLimitExceeded,
+        UniversalCode::ToolUnavailable => RuntimeErrorCode::ToolUnavailable,
+        UniversalCode::ToolFailed => RuntimeErrorCode::ToolFailed,
+        UniversalCode::IoError => RuntimeErrorCode::IoError,
+        UniversalCode::WorkspaceCapacityExceeded => RuntimeErrorCode::WorkspaceCapacityExceeded,
+        UniversalCode::MetadataCorrupt => RuntimeErrorCode::MetadataCorrupt,
     };
     RuntimeError::new(code, error.message, error.field.as_deref(), error.retryable)
 }
@@ -3521,6 +3606,41 @@ mod trusted_systemd_command_tests {
             .any(|arg| arg.starts_with("--setenv=GITHUB_TOKEN=")));
         assert!(joined.contains("--setenv=GIT_OPTIONAL_LOCKS=0"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn universal_error_mapping_preserves_agent_control_semantics() {
+        let cases = [
+            (
+                crate::UniversalExecErrorCode::WorkspaceNotFound,
+                RuntimeErrorCode::WorkspaceNotFound,
+            ),
+            (
+                crate::UniversalExecErrorCode::RevisionMismatch,
+                RuntimeErrorCode::RevisionMismatch,
+            ),
+            (
+                crate::UniversalExecErrorCode::MetadataCorrupt,
+                RuntimeErrorCode::MetadataCorrupt,
+            ),
+            (
+                crate::UniversalExecErrorCode::WorkspaceMutationIncomplete,
+                RuntimeErrorCode::ReconciliationRequired,
+            ),
+            (
+                crate::UniversalExecErrorCode::TaskStateUnavailable,
+                RuntimeErrorCode::ReconciliationRequired,
+            ),
+        ];
+        for (source, expected) in cases {
+            let mapped = map_universal_error(crate::UniversalExecError::new(
+                source,
+                "test",
+                Some("field"),
+                false,
+            ));
+            assert_eq!(mapped.code, expected);
+        }
     }
 
     #[test]

@@ -688,16 +688,56 @@ pub struct TerminalCommit {
     pub reason_code: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+/// Runtime certainty about delivery of the physical execution result.
+/// This is not a Task/domain semantic-completion judgment.
+pub enum RuntimeDeliveryDisposition {
+    /// The Runtime Job has not reached a terminal execution resolution.
+    InProgress,
+    /// Runtime has committed a conclusive execution result.
+    Committed,
+    /// Runtime has a result/state that still requires reconciliation before mechanical convergence.
+    ReconciliationRequired,
+    /// Runtime cannot prove a conclusive execution result; callers must not infer effect-safe redispatch.
+    Unknown,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobProjection {
     pub job_id: String,
+    /// Compatibility summary only. Use the explicit semantic fields below for control decisions.
     pub status: String,
+    /// Persisted Runtime Job intent (`run` or `cancelled`).
+    pub desired_state: JobDesiredState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,
+    /// Exact current or latest Runtime Attempt state; never collapsed into queued/working.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_state: Option<AttemptState>,
+    /// Exact current/latest Attempt termination intent, including stop and deadline intent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub termination_intent: Option<AttemptTerminationIntent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// True only when Runtime has committed a terminal Job resolution.
+    pub execution_terminal: bool,
+    /// Terminal physical execution resolution; absent while execution is unresolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_disposition: Option<JobResolution>,
+    /// Stable machine reason for the current terminal execution resolution, when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_reason_code: Option<String>,
+    /// Runtime certainty/reconciliation class for the physical result.
+    pub delivery_disposition: RuntimeDeliveryDisposition,
+    /// True when Runtime requires mechanical recovery/reconciliation for this Job.
+    pub recovery_required: bool,
+    /// Always false: Runtime does not judge Task/domain semantic completion.
+    pub semantic_completion_evaluated: bool,
+    /// A Runtime terminal result is durably available; this does not imply semantic completion.
     pub result_available: bool,
+    /// True only when at least one registered Runtime Artifact exists for this Job.
     pub artifacts_available: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactDescriptor>,
@@ -729,6 +769,8 @@ pub struct RuntimeWorkspaceListRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeWorkspaceSummary {
     pub workspace_id: String,
+    /// Canonical source repository identity used to create this Workspace.
+    pub source_repo: String,
     pub source_revision: String,
     pub created_at_ms: u64,
     pub head_mode: String,
@@ -739,10 +781,22 @@ pub struct RuntimeWorkspaceSummary {
     pub active_job_ids: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeWorkspaceIssueStage {
+    Inventory,
+    Reconcile,
+    ActiveJobs,
+    DirtyProbe,
+    SourceStateDigest,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeWorkspaceIssue {
     pub workspace_id: String,
+    /// Workspace-local projection stage that could not be proven.
+    pub stage: RuntimeWorkspaceIssueStage,
     pub code: String,
     pub message: String,
     pub retryable: bool,
@@ -779,11 +833,34 @@ pub struct RuntimeJobListRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeJobSummary {
     pub job_id: String,
+    /// Compatibility summary only. Use the explicit semantic fields below for control decisions.
     pub status: String,
+    /// Persisted Runtime Job intent (`run` or `cancelled`).
+    pub desired_state: JobDesiredState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,
+    /// Exact current or latest Runtime Attempt state; never collapsed into queued/working.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_state: Option<AttemptState>,
+    /// Exact current/latest Attempt termination intent, including stop and deadline intent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub termination_intent: Option<AttemptTerminationIntent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// True only when Runtime has committed a terminal Job resolution.
+    pub execution_terminal: bool,
+    /// Terminal physical execution resolution; absent while execution is unresolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_disposition: Option<JobResolution>,
+    /// Stable machine reason for the current terminal execution resolution, when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_reason_code: Option<String>,
+    /// Runtime certainty/reconciliation class for the physical result.
+    pub delivery_disposition: RuntimeDeliveryDisposition,
+    /// True when Runtime requires mechanical recovery/reconciliation for this Job.
+    pub recovery_required: bool,
+    /// Always false: Runtime does not judge Task/domain semantic completion.
+    pub semantic_completion_evaluated: bool,
     pub client_request_id: String,
     pub workspace_id: String,
     pub source_revision: String,
@@ -795,7 +872,9 @@ pub struct RuntimeJobSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at_ms: Option<u64>,
     pub duration_ms: u64,
+    /// A Runtime terminal result is durably available; this does not imply semantic completion.
     pub result_available: bool,
+    /// True only when at least one registered Runtime Artifact exists for this Job.
     pub artifacts_available: bool,
     pub artifact_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -939,11 +1018,36 @@ pub struct TaskCancelRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskObservation {
     pub job_id: String,
+    /// Compatibility summary only. Use the explicit semantic fields below for control decisions.
     pub status: String,
+    /// Persisted Runtime Job intent (`run` or `cancelled`).
+    pub desired_state: JobDesiredState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,
+    /// Exact current or latest Runtime Attempt state; never collapsed into queued/working.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_state: Option<AttemptState>,
+    /// Exact current/latest Attempt termination intent, including stop and deadline intent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub termination_intent: Option<AttemptTerminationIntent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// True only when Runtime has committed a terminal Job resolution.
+    pub execution_terminal: bool,
+    /// Terminal physical execution resolution; absent while execution is unresolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_disposition: Option<JobResolution>,
+    /// Stable machine reason for the current terminal execution resolution, when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_reason_code: Option<String>,
+    /// Runtime certainty/reconciliation class for the physical result.
+    pub delivery_disposition: RuntimeDeliveryDisposition,
+    /// True when Runtime requires mechanical recovery/reconciliation for this Job.
+    pub recovery_required: bool,
+    /// Always false: Runtime does not judge Task/domain semantic completion.
+    pub semantic_completion_evaluated: bool,
+    /// A Runtime terminal result is durably available; this does not imply semantic completion.
+    pub result_available: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stdout_tail: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -969,6 +1073,7 @@ pub struct TaskObservation {
     #[serde(default, skip_serializing_if = "is_false")]
     pub stderr_truncated: bool,
     #[serde(default, skip_serializing_if = "is_false")]
+    /// True only when at least one registered Runtime Artifact exists for this Job.
     pub artifacts_available: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactDescriptor>,

@@ -1282,6 +1282,53 @@ fn list_is_bounded_and_cursor_stable() {
     assert!(second.next_cursor.is_none());
 }
 
+#[test]
+fn workspace_get_preserves_source_repository_identity() {
+    let (sandbox, runtime, _executor) =
+        durable_patch_fixture("workspace-get-source-repo", "workspace-get-source-repo");
+    let summary = runtime
+        .get_workspace(&RuntimeWorkspaceGetRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            workspace_id: "workspace-get-source-repo".to_string(),
+        })
+        .unwrap();
+    assert_eq!(
+        Path::new(&summary.source_repo),
+        fs::canonicalize(sandbox.root.join("patch-source")).unwrap()
+    );
+}
+
+#[test]
+fn workspace_list_isolates_workspace_local_projection_failure_with_stage() {
+    let (_sandbox, runtime, executor) =
+        durable_patch_fixture("workspace-list-local-issue", "workspace-list-local-issue");
+    let record_path = executor.workspace_record_path("workspace-list-local-issue");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    record["workspacePath"] = serde_json::Value::String(
+        executor
+            .workspace_path("different-workspace")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let result = runtime
+        .list_workspaces(&RuntimeWorkspaceListRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            limit: 20,
+            include_source_state_digest: false,
+        })
+        .unwrap();
+
+    assert!(result.workspaces.is_empty());
+    assert_eq!(result.issues.len(), 1);
+    let issue = &result.issues[0];
+    assert_eq!(issue.workspace_id, "workspace-list-local-issue");
+    assert_eq!(issue.stage, RuntimeWorkspaceIssueStage::Inventory);
+    assert_eq!(issue.code, "METADATA_CORRUPT");
+}
+
 proptest! {
     #[test]
     fn newest_first_cursor_pagination_is_complete_and_unique(
@@ -1349,6 +1396,20 @@ fn list_filters_by_exact_client_request_id() {
         .unwrap();
     assert_eq!(filtered.jobs.len(), 1);
     assert_eq!(filtered.jobs[0].client_request_id, target_id);
+    assert_eq!(filtered.jobs[0].desired_state, JobDesiredState::Run);
+    assert_eq!(filtered.jobs[0].attempt_state, Some(AttemptState::Accepted));
+    assert_eq!(
+        filtered.jobs[0].termination_intent,
+        Some(AttemptTerminationIntent::Natural)
+    );
+    assert!(!filtered.jobs[0].execution_terminal);
+    assert_eq!(filtered.jobs[0].execution_disposition, None);
+    assert_eq!(
+        filtered.jobs[0].delivery_disposition,
+        RuntimeDeliveryDisposition::InProgress
+    );
+    assert!(!filtered.jobs[0].recovery_required);
+    assert!(!filtered.jobs[0].semantic_completion_evaluated);
     assert!(filtered.next_cursor.is_none());
 
     let absent = sandbox
@@ -1470,6 +1531,24 @@ fn terminal_commit_is_atomic_idempotent_and_releases_capacity() {
     };
     let projection = sandbox.registry.commit_terminal(&terminal).unwrap();
     assert_eq!(projection.status, "succeeded");
+    assert_eq!(projection.attempt_state, Some(AttemptState::Succeeded));
+    assert!(projection.execution_terminal);
+    assert_eq!(
+        projection.execution_disposition,
+        Some(JobResolution::Succeeded)
+    );
+    assert_eq!(
+        projection.execution_reason_code.as_deref(),
+        Some("PROCESS_EXIT_ZERO")
+    );
+    assert_eq!(
+        projection.delivery_disposition,
+        RuntimeDeliveryDisposition::Committed
+    );
+    assert!(!projection.recovery_required);
+    assert!(!projection.semantic_completion_evaluated);
+    assert!(projection.result_available);
+    assert!(projection.artifacts_available);
     assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
     assert_eq!(
         sandbox
@@ -1644,6 +1723,23 @@ fn runtime_job_inspection_projects_bounded_read_only_timeline() {
         .registry
         .record_reconciliation_failure(&terminal, &failure, base + 21)
         .unwrap();
+    let recovery_projection = sandbox.registry.project_job(&created.job.job_id).unwrap();
+    assert!(recovery_projection.execution_terminal);
+    assert_eq!(
+        recovery_projection.attempt_state,
+        Some(AttemptState::Failed)
+    );
+    assert!(recovery_projection.recovery_required);
+    assert_eq!(
+        recovery_projection.execution_disposition,
+        Some(JobResolution::Failed)
+    );
+    assert_eq!(
+        recovery_projection.delivery_disposition,
+        RuntimeDeliveryDisposition::ReconciliationRequired
+    );
+    assert_eq!(recovery_projection.poll_after_ms, Some(250));
+    assert!(!recovery_projection.semantic_completion_evaluated);
     let attention = inspect_job(
         &inspection_config(&sandbox),
         &created.job.job_id,
@@ -2747,6 +2843,19 @@ fn cancel_before_dispatch_resolves_without_launch() {
         .request_cancel(&created.job.job_id, 20)
         .unwrap();
     assert_eq!(projection.status, "cancelled");
+    assert_eq!(projection.desired_state, JobDesiredState::Cancelled);
+    assert_eq!(
+        projection.execution_disposition,
+        Some(JobResolution::Cancelled)
+    );
+    assert_eq!(
+        projection.execution_reason_code.as_deref(),
+        Some("CANCELLED_BEFORE_DISPATCH")
+    );
+    assert_eq!(
+        projection.delivery_disposition,
+        RuntimeDeliveryDisposition::Committed
+    );
     assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
     assert_eq!(
         sandbox
@@ -2780,6 +2889,19 @@ fn orphaned_terminal_keeps_capacity_reserved() {
     };
     let projection = sandbox.registry.commit_terminal(&terminal).unwrap();
     assert_eq!(projection.status, "orphaned");
+    assert_eq!(projection.attempt_state, Some(AttemptState::Orphaned));
+    assert!(projection.execution_terminal);
+    assert_eq!(
+        projection.execution_disposition,
+        Some(JobResolution::Orphaned)
+    );
+    assert_eq!(
+        projection.delivery_disposition,
+        RuntimeDeliveryDisposition::ReconciliationRequired
+    );
+    assert!(projection.recovery_required);
+    assert!(!projection.artifacts_available);
+    assert_eq!(projection.poll_after_ms, Some(250));
     assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 1);
     assert_eq!(
         sandbox
@@ -2820,6 +2942,17 @@ fn orphaned_cancel_intent_is_persisted_without_unsafe_release() {
         .request_cancel(&created.job.job_id, 21)
         .unwrap();
     assert_eq!(projection.status, "orphaned");
+    assert_eq!(projection.desired_state, JobDesiredState::Cancelled);
+    assert_eq!(projection.attempt_state, Some(AttemptState::Orphaned));
+    assert_eq!(
+        projection.termination_intent,
+        Some(AttemptTerminationIntent::StopRequested)
+    );
+    assert!(projection.recovery_required);
+    assert_eq!(
+        projection.delivery_disposition,
+        RuntimeDeliveryDisposition::ReconciliationRequired
+    );
     assert_eq!(
         sandbox
             .registry
@@ -2891,6 +3024,19 @@ fn absent_orphan_can_converge_to_lost_and_release_capacity() {
         .unwrap();
 
     assert_eq!(projection.status, "lost");
+    assert_eq!(projection.attempt_state, Some(AttemptState::Lost));
+    assert!(projection.execution_terminal);
+    assert_eq!(projection.execution_disposition, Some(JobResolution::Lost));
+    assert_eq!(
+        projection.execution_reason_code.as_deref(),
+        Some("ORPHANED_PROCESS_TREE_GONE")
+    );
+    assert_eq!(
+        projection.delivery_disposition,
+        RuntimeDeliveryDisposition::Unknown
+    );
+    assert!(!projection.recovery_required);
+    assert_eq!(projection.poll_after_ms, None);
     assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
     assert_eq!(
         sandbox

@@ -538,7 +538,34 @@ fn workspace_close_rejects_dirty_state_unless_force_is_explicit() {
     )
     .unwrap();
     assert!(closed.removed);
+    assert_eq!(
+        closed.closure_disposition,
+        WorkspaceClosureDisposition::Removed
+    );
     assert!(!workspace.exists());
+}
+
+#[test]
+fn workspace_close_distinguishes_already_absent_from_closed_tombstone() {
+    let sandbox = Sandbox::new("close-already-absent");
+    let config = sandbox.config();
+    config.ensure_store().unwrap();
+    let closed = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-never-created".to_string(),
+            force: false,
+            expected_source_state_digest: None,
+        },
+    )
+    .unwrap();
+    assert!(!closed.removed);
+    assert_eq!(
+        closed.closure_disposition,
+        WorkspaceClosureDisposition::AlreadyAbsent
+    );
+    assert!(closed.source_state_digest.is_none());
 }
 
 #[test]
@@ -588,6 +615,10 @@ fn workspace_close_fences_exact_source_state_and_replays_tombstone() {
     )
     .unwrap();
     assert!(first.removed);
+    assert_eq!(
+        first.closure_disposition,
+        WorkspaceClosureDisposition::Removed
+    );
     assert_eq!(first.source_state_digest.as_deref(), Some(current.as_str()));
 
     let replay = remove_git_workspace(
@@ -601,6 +632,10 @@ fn workspace_close_fences_exact_source_state_and_replays_tombstone() {
     )
     .unwrap();
     assert!(!replay.removed);
+    assert_eq!(
+        replay.closure_disposition,
+        WorkspaceClosureDisposition::AlreadyClosed
+    );
     assert_eq!(
         replay.source_state_digest.as_deref(),
         Some(current.as_str())
@@ -736,6 +771,10 @@ fn workspace_close_preserves_changed_head_and_is_idempotent() {
     )
     .unwrap();
     assert!(first.removed);
+    assert_eq!(
+        first.closure_disposition,
+        WorkspaceClosureDisposition::Removed
+    );
     assert!(!workspace.exists());
     assert_eq!(
         git_text(
@@ -762,6 +801,10 @@ fn workspace_close_preserves_changed_head_and_is_idempotent() {
     )
     .unwrap();
     assert!(!second.removed);
+    assert_eq!(
+        second.closure_disposition,
+        WorkspaceClosureDisposition::AlreadyClosed
+    );
     assert_eq!(
         create_git_workspace(
             &config,
@@ -824,6 +867,10 @@ fn workspace_close_recovers_final_head_after_physical_removal() {
     )
     .unwrap();
     assert!(!closed.removed);
+    assert_eq!(
+        closed.closure_disposition,
+        WorkspaceClosureDisposition::RecoveredMissing
+    );
     let tombstone: serde_json::Value =
         serde_json::from_slice(&fs::read(config.workspace_record_path(workspace_id)).unwrap())
             .unwrap();
@@ -865,6 +912,10 @@ fn workspace_close_repairs_missing_directory_but_rejects_orphan_directory() {
     )
     .unwrap();
     assert!(!repaired.removed);
+    assert_eq!(
+        repaired.closure_disposition,
+        WorkspaceClosureDisposition::RecoveredMissing
+    );
     let tombstone: serde_json::Value =
         serde_json::from_slice(&fs::read(config.workspace_record_path(workspace_id)).unwrap())
             .unwrap();
