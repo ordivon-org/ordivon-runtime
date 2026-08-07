@@ -113,6 +113,9 @@ pub struct RuntimeError {
     pub retry_after_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity: Option<Box<RuntimeCapacity>>,
+    /// Durable Runtime operation identity when the failing path has already committed one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 impl RuntimeError {
     pub fn new(
@@ -128,7 +131,13 @@ impl RuntimeError {
             retryable,
             retry_after_ms: None,
             capacity: None,
+            operation_id: None,
         }
+    }
+
+    pub fn with_operation_id(mut self, operation_id: impl Into<String>) -> Self {
+        self.operation_id = Some(operation_id.into());
+        self
     }
 
     pub fn concurrency(message: impl Into<String>, field: &str, capacity: RuntimeCapacity) -> Self {
@@ -139,6 +148,7 @@ impl RuntimeError {
             retryable: true,
             retry_after_ms: Some(1_000),
             capacity: Some(Box::new(capacity)),
+            operation_id: None,
         }
     }
 

@@ -273,7 +273,8 @@ impl Runtime {
                 match self.registry.submit(&submit)? {
                     AdmissionOutcome::Created(created) => {
                         let job_id = created.job.job_id.clone();
-                        self.ensure_attempt_dispatched(&created.attempt)?;
+                        self.ensure_attempt_dispatched(&created.attempt)
+                            .map_err(|error| error.with_operation_id(job_id.clone()))?;
                         job_id
                     }
                     AdmissionOutcome::Existing { job } => job.job_id.clone(),
@@ -282,7 +283,7 @@ impl Runtime {
         };
         self.observe_task(&TaskObserveRequest {
             schema_version: RUNTIME_SCHEMA_VERSION,
-            job_id,
+            job_id: job_id.clone(),
             wait_ms: request.wait_ms,
             wait_until: TaskObserveWaitUntil::Terminal,
             stdout_tail_bytes: request.stdout_tail_bytes,
@@ -290,6 +291,7 @@ impl Runtime {
             stdout_offset: None,
             stderr_offset: None,
         })
+        .map_err(|error| error.with_operation_id(job_id))
     }
 
     pub fn open_workspace(

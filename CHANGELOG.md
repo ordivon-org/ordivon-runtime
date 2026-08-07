@@ -33,7 +33,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - Python operational and test helpers explicitly close temporary SQLite connections instead of emitting resource warnings;
 - `artifactsAvailable` now reflects registered Artifact existence rather than merely the presence of an Attempt result digest;
 - recovery-bearing states such as `orphaned` explicitly project reconciliation requirements instead of appearing mechanically complete;
-- multi-field Job projections are assembled from one Registry read snapshot so execution, recovery, Artifact, and terminal-reason facts cannot drift across concurrent reads.
+- multi-field Job projections are assembled from one Registry read snapshot so execution, recovery, Artifact, and terminal-reason facts cannot drift across concurrent reads;
+- post-admission execution errors now carry the durable Job identity and report `commitState=committed` with `retryClass=reconcile_first` instead of incorrectly claiming that a Runtime operation was not committed.
 
 ## 0.1.0 — Operational baseline
 

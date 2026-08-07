@@ -668,6 +668,7 @@ fn workspace_open_output_schema_exposes_success_and_error_contract() {
         "reconcile_first",
         "not_started",
         "not_committed",
+        "committed",
         "unknown",
     ] {
         assert!(
@@ -752,6 +753,34 @@ fn workspace_list_schema_makes_exact_source_digest_opt_in() {
         schema
             .pointer("/properties/includeSourceStateDigest/default")
             .and_then(Value::as_bool),
+        Some(false)
+    );
+}
+
+#[test]
+fn committed_operation_error_requires_exact_reattachment() {
+    let error = RuntimeError::new(
+        ordivon_runtime_core::RuntimeErrorCode::IoError,
+        "result projection failed after Job admission",
+        Some("bundlePath"),
+        false,
+    )
+    .with_operation_id("job-committed-operation");
+    let value = serde_json::to_value(ToolError::from(error)).unwrap();
+    assert_eq!(
+        value.pointer("/retryClass").and_then(Value::as_str),
+        Some("reconcile_first")
+    );
+    assert_eq!(
+        value.pointer("/commitState").and_then(Value::as_str),
+        Some("committed")
+    );
+    assert_eq!(
+        value.pointer("/operationId").and_then(Value::as_str),
+        Some("job-committed-operation")
+    );
+    assert_eq!(
+        value.pointer("/retryable").and_then(Value::as_bool),
         Some(false)
     );
 }

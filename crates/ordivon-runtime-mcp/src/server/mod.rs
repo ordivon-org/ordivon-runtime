@@ -361,6 +361,8 @@ pub enum ToolRetryClass {
 pub enum ToolCommitState {
     NotStarted,
     NotCommitted,
+    /// A durable Runtime operation identity is known to exist; reconcile it instead of creating new work.
+    Committed,
     Unknown,
 }
 
@@ -450,24 +452,29 @@ impl From<RuntimeError> for ToolError {
             .ok()
             .and_then(|value| value.as_str().map(ToString::to_string))
             .unwrap_or_else(|| "EXECUTION_ERROR".to_string());
-        let (retry_class, commit_state) = match error.code {
-            ordivon_runtime_core::RuntimeErrorCode::DispatchOutcomeUnknown
-            | ordivon_runtime_core::RuntimeErrorCode::ReconciliationRequired => {
-                (ToolRetryClass::ReconcileFirst, ToolCommitState::Unknown)
+        let committed_operation = error.operation_id.is_some();
+        let (retry_class, commit_state) = if committed_operation {
+            (ToolRetryClass::ReconcileFirst, ToolCommitState::Committed)
+        } else {
+            match error.code {
+                ordivon_runtime_core::RuntimeErrorCode::DispatchOutcomeUnknown
+                | ordivon_runtime_core::RuntimeErrorCode::ReconciliationRequired => {
+                    (ToolRetryClass::ReconcileFirst, ToolCommitState::Unknown)
+                }
+                ordivon_runtime_core::RuntimeErrorCode::WorkspaceExists => {
+                    (ToolRetryClass::ReconcileFirst, ToolCommitState::NotStarted)
+                }
+                ordivon_runtime_core::RuntimeErrorCode::ConcurrencyLimit
+                | ordivon_runtime_core::RuntimeErrorCode::RegistryBusy
+                | ordivon_runtime_core::RuntimeErrorCode::WorkspaceBusy => {
+                    (ToolRetryClass::SafeSameRequest, ToolCommitState::NotStarted)
+                }
+                _ if error.retryable => (
+                    ToolRetryClass::SafeSameRequest,
+                    ToolCommitState::NotCommitted,
+                ),
+                _ => (ToolRetryClass::Never, ToolCommitState::NotCommitted),
             }
-            ordivon_runtime_core::RuntimeErrorCode::WorkspaceExists => {
-                (ToolRetryClass::ReconcileFirst, ToolCommitState::NotStarted)
-            }
-            ordivon_runtime_core::RuntimeErrorCode::ConcurrencyLimit
-            | ordivon_runtime_core::RuntimeErrorCode::RegistryBusy
-            | ordivon_runtime_core::RuntimeErrorCode::WorkspaceBusy => {
-                (ToolRetryClass::SafeSameRequest, ToolCommitState::NotStarted)
-            }
-            _ if error.retryable => (
-                ToolRetryClass::SafeSameRequest,
-                ToolCommitState::NotCommitted,
-            ),
-            _ => (ToolRetryClass::Never, ToolCommitState::NotCommitted),
         };
         Self {
             code,
@@ -477,11 +484,15 @@ impl From<RuntimeError> for ToolError {
                 origin: ToolErrorOrigin::RuntimeCore,
                 retry_class,
                 commit_state,
-                retryable: error.retryable,
+                retryable: if committed_operation {
+                    false
+                } else {
+                    error.retryable
+                },
                 retry_after_ms: error.retry_after_ms,
                 capacity: error.capacity,
                 trace_id: None,
-                operation_id: None,
+                operation_id: error.operation_id,
             }),
         }
     }
