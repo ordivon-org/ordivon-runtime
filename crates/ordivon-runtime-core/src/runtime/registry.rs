@@ -46,6 +46,9 @@ const WORKSPACE_PATCH_INDEX: &str = "idx_workspace_patch_operations_workspace";
 const JOB_CLIENT_REQUEST_LOOKUP_INDEX: &str = "idx_jobs_client_request_id_created";
 const JOB_CLIENT_REQUEST_LOOKUP_INDEX_SQL: &str =
     "CREATE INDEX IF NOT EXISTS idx_jobs_client_request_id_created ON jobs(client_request_id, created_at_ms, job_id)";
+const JOB_WORKSPACE_LOOKUP_INDEX: &str = "idx_jobs_workspace_created";
+const JOB_WORKSPACE_LOOKUP_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_jobs_workspace_created ON jobs(workspace_id, created_at_ms, job_id)";
 const WORKSPACE_EXECUTION_LIMIT: u32 = 1;
 
 #[derive(Clone, Debug)]
@@ -332,30 +335,50 @@ impl Registry {
 
     fn ensure_query_indexes(&self, connection: &mut Connection) -> RuntimeResult<()> {
         let transaction = immediate(connection, "Runtime query index maintenance")?;
-        transaction
-            .execute(JOB_CLIENT_REQUEST_LOOKUP_INDEX_SQL, [])
-            .map_err(|error| {
-                RuntimeError::from_sql(error, "cannot ensure Job client request lookup index")
-            })?;
+        for (sql, error_context) in [
+            (
+                JOB_CLIENT_REQUEST_LOOKUP_INDEX_SQL,
+                "cannot ensure Job client request lookup index",
+            ),
+            (
+                JOB_WORKSPACE_LOOKUP_INDEX_SQL,
+                "cannot ensure Job Workspace lookup index",
+            ),
+        ] {
+            transaction
+                .execute(sql, [])
+                .map_err(|error| RuntimeError::from_sql(error, error_context))?;
+        }
         transaction.commit().map_err(|error| {
             RuntimeError::from_sql(error, "cannot commit Runtime query index maintenance")
         })?;
-        let exists: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)",
-                [JOB_CLIENT_REQUEST_LOOKUP_INDEX],
-                |row| row.get(0),
-            )
-            .map_err(|error| {
-                RuntimeError::from_sql(error, "cannot verify Job client request lookup index")
-            })?;
-        if !exists {
-            return Err(RuntimeError::new(
-                RuntimeErrorCode::RegistryCorrupt,
+        for (index, verify_context, missing_message) in [
+            (
+                JOB_CLIENT_REQUEST_LOOKUP_INDEX,
+                "cannot verify Job client request lookup index",
                 "Job client request lookup index is missing after maintenance",
-                None,
-                false,
-            ));
+            ),
+            (
+                JOB_WORKSPACE_LOOKUP_INDEX,
+                "cannot verify Job Workspace lookup index",
+                "Job Workspace lookup index is missing after maintenance",
+            ),
+        ] {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)",
+                    [index],
+                    |row| row.get(0),
+                )
+                .map_err(|error| RuntimeError::from_sql(error, verify_context))?;
+            if !exists {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    missing_message,
+                    None,
+                    false,
+                ));
+            }
         }
         Ok(())
     }
@@ -919,14 +942,73 @@ impl Registry {
         if let Some(client_request_id) = request.client_request_id.as_deref() {
             validate_identifier(client_request_id, "clientRequestId")?;
         }
+        if let Some(workspace_id) = request.workspace_id.as_deref() {
+            validate_identifier(workspace_id, "workspaceId")?;
+        }
         let connection = self.open_connection()?;
         let transaction = connection.unchecked_transaction().map_err(|error| {
             RuntimeError::from_sql(error, "cannot begin Job list read snapshot")
         })?;
         let fetch_limit = request.limit + 1;
         let mut jobs = Vec::new();
-        match (&request.client_request_id, &request.cursor) {
-            (Some(client_request_id), Some(cursor)) => {
+        match (
+            &request.client_request_id,
+            &request.workspace_id,
+            &request.cursor,
+        ) {
+            (Some(client_request_id), Some(workspace_id), Some(cursor)) => {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE client_request_id=?1 AND workspace_id=?2 AND (created_at_ms<?3 OR (created_at_ms=?3 AND job_id<?4)) ORDER BY created_at_ms DESC,job_id DESC LIMIT ?5",
+                    )
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot prepare identity-bounded Job list"))?;
+                let rows = statement
+                    .query_map(
+                        params![
+                            client_request_id,
+                            workspace_id,
+                            cursor.created_at_ms,
+                            cursor.job_id,
+                            fetch_limit
+                        ],
+                        raw_job_from_row,
+                    )
+                    .map_err(|error| {
+                        RuntimeError::from_sql(error, "cannot query identity-bounded Job list")
+                    })?;
+                for row in rows {
+                    jobs.push(
+                        row.map_err(|error| {
+                            RuntimeError::from_sql(error, "cannot decode Job row")
+                        })?
+                        .into_record()?,
+                    );
+                }
+            }
+            (Some(client_request_id), Some(workspace_id), None) => {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE client_request_id=?1 AND workspace_id=?2 ORDER BY created_at_ms DESC,job_id DESC LIMIT ?3",
+                    )
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot prepare identity-bounded Job list"))?;
+                let rows = statement
+                    .query_map(
+                        params![client_request_id, workspace_id, fetch_limit],
+                        raw_job_from_row,
+                    )
+                    .map_err(|error| {
+                        RuntimeError::from_sql(error, "cannot query identity-bounded Job list")
+                    })?;
+                for row in rows {
+                    jobs.push(
+                        row.map_err(|error| {
+                            RuntimeError::from_sql(error, "cannot decode Job row")
+                        })?
+                        .into_record()?,
+                    );
+                }
+            }
+            (Some(client_request_id), None, Some(cursor)) => {
                 let mut statement = transaction
                     .prepare(
                         "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE client_request_id=?1 AND (created_at_ms<?2 OR (created_at_ms=?2 AND job_id<?3)) ORDER BY created_at_ms DESC,job_id DESC LIMIT ?4",
@@ -954,7 +1036,7 @@ impl Registry {
                     );
                 }
             }
-            (Some(client_request_id), None) => {
+            (Some(client_request_id), None, None) => {
                 let mut statement = transaction
                     .prepare(
                         "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE client_request_id=?1 ORDER BY created_at_ms DESC,job_id DESC LIMIT ?2",
@@ -974,7 +1056,55 @@ impl Registry {
                     );
                 }
             }
-            (None, Some(cursor)) => {
+            (None, Some(workspace_id), Some(cursor)) => {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE workspace_id=?1 AND (created_at_ms<?2 OR (created_at_ms=?2 AND job_id<?3)) ORDER BY created_at_ms DESC,job_id DESC LIMIT ?4",
+                    )
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot prepare Workspace Job list"))?;
+                let rows = statement
+                    .query_map(
+                        params![
+                            workspace_id,
+                            cursor.created_at_ms,
+                            cursor.job_id,
+                            fetch_limit
+                        ],
+                        raw_job_from_row,
+                    )
+                    .map_err(|error| {
+                        RuntimeError::from_sql(error, "cannot query Workspace Job list")
+                    })?;
+                for row in rows {
+                    jobs.push(
+                        row.map_err(|error| {
+                            RuntimeError::from_sql(error, "cannot decode Job row")
+                        })?
+                        .into_record()?,
+                    );
+                }
+            }
+            (None, Some(workspace_id), None) => {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE workspace_id=?1 ORDER BY created_at_ms DESC,job_id DESC LIMIT ?2",
+                    )
+                    .map_err(|error| RuntimeError::from_sql(error, "cannot prepare Workspace Job list"))?;
+                let rows = statement
+                    .query_map(params![workspace_id, fetch_limit], raw_job_from_row)
+                    .map_err(|error| {
+                        RuntimeError::from_sql(error, "cannot query Workspace Job list")
+                    })?;
+                for row in rows {
+                    jobs.push(
+                        row.map_err(|error| {
+                            RuntimeError::from_sql(error, "cannot decode Job row")
+                        })?
+                        .into_record()?,
+                    );
+                }
+            }
+            (None, None, Some(cursor)) => {
                 let mut statement = transaction
                     .prepare(
                         "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs WHERE created_at_ms<?1 OR (created_at_ms=?1 AND job_id<?2) ORDER BY created_at_ms DESC,job_id DESC LIMIT ?3",
@@ -995,7 +1125,7 @@ impl Registry {
                     );
                 }
             }
-            (None, None) => {
+            (None, None, None) => {
                 let mut statement = transaction
                     .prepare(
                         "SELECT job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version FROM jobs ORDER BY created_at_ms DESC,job_id DESC LIMIT ?1",

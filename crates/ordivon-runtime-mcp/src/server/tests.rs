@@ -623,6 +623,28 @@ fn workspace_open_output_schema_exposes_success_and_error_contract() {
 }
 
 #[test]
+fn task_list_schema_exposes_workspace_reattachment_filter() {
+    let sandbox = Sandbox::new("task-list-workspace-filter-schema");
+    let server = sandbox.server();
+    let task_list = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .find(|tool| tool.name.as_ref() == "task.list")
+        .unwrap();
+    let schema = serde_json::to_value(&task_list.input_schema).unwrap();
+    assert!(schema.pointer("/properties/workspaceId").is_some());
+    let required = schema
+        .pointer("/required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(!required
+        .iter()
+        .any(|value| value.as_str() == Some("workspaceId")));
+}
+
+#[test]
 fn workspace_open_schema_prefers_server_generated_handles() {
     let sandbox = Sandbox::new("workspace-open-schema");
     let server = sandbox.server();

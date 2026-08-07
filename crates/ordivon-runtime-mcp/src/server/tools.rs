@@ -365,7 +365,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "task.list",
-        description = "List newest Jobs first with request identity, Workspace, command summary, exact Attempt state, execution and delivery disposition, recovery requirement, timestamps, duration, and Artifact count using a stable cursor. Optionally filter by exact clientRequestId; Runtime never claims Task/domain semantic completion.",
+        description = "List newest Jobs first with request identity, Workspace, command summary, exact Attempt state, execution and delivery disposition, recovery requirement, timestamps, duration, and Artifact count using a stable cursor. Optionally filter by exact workspaceId, clientRequestId, or their intersection so a reconnecting caller can recover historical Jobs without scanning the global ledger; Runtime never claims Task/domain semantic completion.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeJobListResult>>(),
         annotations(
             title = "List transactional jobs",

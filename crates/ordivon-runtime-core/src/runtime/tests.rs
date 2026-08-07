@@ -977,6 +977,7 @@ fn host_boundary_references_replay_conflict_and_survive_terminal_evidence() {
             limit: 10,
             cursor: None,
             client_request_id: Some(submit.client_request_id.clone()),
+            workspace_id: None,
         })
         .unwrap();
     assert_eq!(located.jobs.len(), 1);
@@ -1266,6 +1267,7 @@ fn list_is_bounded_and_cursor_stable() {
             limit: 2,
             cursor: None,
             client_request_id: None,
+            workspace_id: None,
         })
         .unwrap();
     assert_eq!(first.jobs.len(), 2);
@@ -1276,6 +1278,7 @@ fn list_is_bounded_and_cursor_stable() {
             limit: 2,
             cursor: first.next_cursor,
             client_request_id: None,
+            workspace_id: None,
         })
         .unwrap();
     assert_eq!(second.jobs.len(), 1);
@@ -1348,6 +1351,7 @@ proptest! {
                 limit: page_size,
                 cursor,
                 client_request_id: None,
+                workspace_id: None,
             }).unwrap();
             observed.extend(page.jobs.iter().map(|job| (
                 job.created_at_ms,
@@ -1392,6 +1396,7 @@ fn list_filters_by_exact_client_request_id() {
             limit: 100,
             cursor: None,
             client_request_id: Some(target_id.to_string()),
+            workspace_id: None,
         })
         .unwrap();
     assert_eq!(filtered.jobs.len(), 1);
@@ -1418,10 +1423,85 @@ fn list_filters_by_exact_client_request_id() {
             limit: 100,
             cursor: None,
             client_request_id: Some("request:list-client-request:absent".to_string()),
+            workspace_id: None,
         })
         .unwrap();
     assert!(absent.jobs.is_empty());
     assert!(absent.next_cursor.is_none());
+}
+
+#[test]
+fn list_filters_and_paginates_by_exact_workspace_id() {
+    let sandbox = Sandbox::new("list-workspace", 5000);
+    let target_workspace = "workspace:list-workspace:target";
+    for index in 0..5 {
+        let mut list_request = request(&sandbox, &format!("request:list-workspace:{index}"), 8);
+        list_request.plan.workspace_id = if index < 3 {
+            target_workspace.to_string()
+        } else {
+            format!("workspace:list-workspace:other:{index}")
+        };
+        let admitted = created(sandbox.registry.submit(&list_request).unwrap());
+        sandbox
+            .registry
+            .request_cancel(&admitted.job.job_id, 100 + index)
+            .unwrap();
+    }
+
+    let mut cursor = None;
+    let mut observed = Vec::new();
+    loop {
+        let page = sandbox
+            .registry
+            .list_jobs(&RuntimeJobListRequest {
+                limit: 1,
+                cursor,
+                client_request_id: None,
+                workspace_id: Some(target_workspace.to_string()),
+            })
+            .unwrap();
+        observed.extend(page.jobs);
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(observed.len(), 3);
+    assert!(observed
+        .iter()
+        .all(|job| job.workspace_id == target_workspace));
+    let unique: BTreeSet<_> = observed.iter().map(|job| &job.job_id).collect();
+    assert_eq!(unique.len(), 3);
+}
+
+#[test]
+fn list_intersects_workspace_and_client_request_identity() {
+    let sandbox = Sandbox::new("list-workspace-request-intersection", 5000);
+    let target_request = "request:list-workspace-request:shared";
+    let target_workspace = "workspace:list-workspace-request:target";
+    for index in 0..3 {
+        let mut list_request = request(&sandbox, target_request, 8);
+        list_request.plan.principal = format!("principal:list-workspace-request:{index}");
+        list_request.plan.workspace_id = if index == 1 {
+            target_workspace.to_string()
+        } else {
+            format!("workspace:list-workspace-request:other:{index}")
+        };
+        sandbox.registry.submit(&list_request).unwrap();
+    }
+
+    let result = sandbox
+        .registry
+        .list_jobs(&RuntimeJobListRequest {
+            limit: 100,
+            cursor: None,
+            client_request_id: Some(target_request.to_string()),
+            workspace_id: Some(target_workspace.to_string()),
+        })
+        .unwrap();
+    assert_eq!(result.jobs.len(), 1);
+    assert_eq!(result.jobs[0].client_request_id, target_request);
+    assert_eq!(result.jobs[0].workspace_id, target_workspace);
 }
 
 #[test]
@@ -1445,6 +1525,7 @@ fn filtered_list_paginates_same_request_across_principals() {
                 limit: 1,
                 cursor,
                 client_request_id: Some(target_id.to_string()),
+                workspace_id: None,
             })
             .unwrap();
         observed.extend(page.jobs);
@@ -1470,10 +1551,27 @@ fn list_rejects_invalid_client_request_filter() {
             limit: 100,
             cursor: None,
             client_request_id: Some(String::new()),
+            workspace_id: None,
         })
         .unwrap_err();
     assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
     assert_eq!(error.field.as_deref(), Some("clientRequestId"));
+}
+
+#[test]
+fn list_rejects_invalid_workspace_filter() {
+    let sandbox = Sandbox::new("list-workspace-invalid", 5000);
+    let error = sandbox
+        .registry
+        .list_jobs(&RuntimeJobListRequest {
+            limit: 100,
+            cursor: None,
+            client_request_id: None,
+            workspace_id: Some(String::new()),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert_eq!(error.field.as_deref(), Some("workspaceId"));
 }
 
 #[test]
@@ -3263,12 +3361,17 @@ fn newer_schema_and_checksum_drift_fail_closed() {
 }
 
 #[test]
-fn query_index_is_recreated_without_advancing_schema_version() {
+fn query_indexes_are_recreated_without_advancing_schema_version() {
     let sandbox = Sandbox::new("query-index-recreate", 5000);
     let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
-    connection
-        .execute("DROP INDEX idx_jobs_client_request_id_created", [])
-        .unwrap();
+    for index in [
+        "idx_jobs_client_request_id_created",
+        "idx_jobs_workspace_created",
+    ] {
+        connection
+            .execute(&format!("DROP INDEX {index}"), [])
+            .unwrap();
+    }
     drop(connection);
 
     Registry::initialize(sandbox.registry.config().clone()).unwrap();
@@ -3278,15 +3381,20 @@ fn query_index_is_recreated_without_advancing_schema_version() {
             row.get(0)
         })
         .unwrap();
-    let lookup_index: String = connection
-        .query_row(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_jobs_client_request_id_created'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
     assert_eq!(max_version, 4);
-    assert_eq!(lookup_index, "idx_jobs_client_request_id_created");
+    for index in [
+        "idx_jobs_client_request_id_created",
+        "idx_jobs_workspace_created",
+    ] {
+        let actual: String = connection
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name=?1",
+                [index],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(actual, index);
+    }
 }
 
 #[test]
@@ -3608,6 +3716,14 @@ fn existing_v1_registry_upgrades_and_ensures_lookup_index() {
         )
         .unwrap();
     assert_eq!(lookup_index, "idx_jobs_client_request_id_created");
+    let workspace_lookup_index: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_jobs_workspace_created'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(workspace_lookup_index, "idx_jobs_workspace_created");
     drop(connection);
     fs::remove_dir_all(root).unwrap();
 }

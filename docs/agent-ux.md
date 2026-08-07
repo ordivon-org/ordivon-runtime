@@ -18,6 +18,10 @@ All public Runtime MCP Tools publish an `outputSchema` for their `structuredCont
 
 The error envelope keeps `code` as the stable machine reason while constraining the control vocabulary that changes safe Agent behavior: `origin` is one of `mcp_adapter`, `runtime_core`, or `workspace_executor`; `retryClass` is one of `never`, `safe_same_request`, or `reconcile_first`; and `commitState` is one of `not_started`, `not_committed`, or `unknown`. The wire values are unchanged from the pre-schema envelope. `toolCatalogDigest` binds these generated output schemas together with Tool names, descriptions, annotations, and input schemas, so a discovery refresh can detect an exact contract change without creating another Runtime authority.
 
+## Workspace-bounded Job reattachment
+
+`task.list` accepts an exact `workspaceId` in addition to the existing exact `clientRequestId`. The filters may be used independently or together. This is a read-only projection over the existing `jobs.workspace_id` relation: it creates no new recovery state and does not make Workspace metadata a Job authority. A reconnecting Agent that retained a Workspace identity can therefore enumerate that Workspace's historical terminal and nonterminal Jobs with the normal newest-first cursor instead of paging through the global Job ledger. Runtime maintains a derived `(workspace_id, created_at_ms, job_id)` query index alongside the existing client-request lookup index; both are recreatable query accelerators outside `schema_migrations`.
+
 ## Correlated Patch recovery
 
 A durable Patch records its Intent and before/after file digest plan before physical mutation. On response loss, reissue the exact same `workspace.patch` request or call `workspace.patch.get` with the same `clientRequestId`. Runtime applies the Patch only when every file still matches the complete before state. If every file already matches the after state, Runtime commits the missing receipt. Any mixed state is isolated as `unknown`; Runtime never guesses whether a partial external write should be completed or rolled back.

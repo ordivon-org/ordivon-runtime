@@ -827,6 +827,9 @@ pub struct RuntimeJobListRequest {
     pub cursor: Option<RuntimeJobListCursor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
+    /// Exact Runtime Workspace identity used to bound Job reattachment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

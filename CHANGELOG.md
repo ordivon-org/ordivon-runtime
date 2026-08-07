@@ -13,7 +13,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - structured GitHub issue forms;
 - explicit Agent-facing execution semantics for Runtime Jobs and Attempts, including persisted Job intent, exact Attempt state, termination intent, terminal execution disposition and reason, delivery certainty, recovery requirement, result availability, and an explicit `semanticCompletionEvaluated=false` boundary;
 - Workspace source-repository identity, closure disposition, and machine-readable Workspace inventory issue stages;
-- machine-discoverable `outputSchema` contracts for all public MCP Tools, covering both exact success results and the standard structured error envelope with finite origin, retry, and commit-state vocabularies.
+- machine-discoverable `outputSchema` contracts for all public MCP Tools, covering both exact success results and the standard structured error envelope with finite origin, retry, and commit-state vocabularies;
+- Workspace-bounded Runtime Job reattachment through `task.list(workspaceId=...)`, backed by a recreatable query index rather than a new state owner.
 
 ### Changed
 
