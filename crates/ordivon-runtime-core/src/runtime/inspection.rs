@@ -1,24 +1,93 @@
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use super::engine::{
+    latest_output_modified_ms, load_runner_progress_if_present, map_universal_error,
+};
 use super::registry::{load_attempt, load_job, load_reservation, MAX_MIGRATION_VERSION};
 use super::{
     AttemptState, AttemptTerminationIntent, JobDesiredState, JobResolution, ReservationState,
     RuntimeError, RuntimeErrorCode, RuntimeResult,
 };
+use crate::universal::{
+    load_workspace_record, workspace_change_projection_at, workspace_head_revision_at,
+    UniversalExecutorConfig,
+};
 
 pub const RUNTIME_INSPECTION_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_INSPECTION_EVENT_LIMIT: u32 = 200;
 pub const MAX_INSPECTION_EVENT_LIMIT: u32 = 1_000;
+pub const DEFAULT_WORKSPACE_INSPECTION_JOB_LIMIT: u32 = 20;
+pub const MAX_WORKSPACE_INSPECTION_JOB_LIMIT: u32 = 100;
 const MAX_INSPECTION_ATTEMPTS: u32 = 32;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeInspectionConfig {
     pub db_path: PathBuf,
     pub busy_timeout_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeWorkspaceInspectionConfig {
+    pub db_path: PathBuf,
+    pub store_root: PathBuf,
+    pub busy_timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeWorkspaceInspection {
+    pub schema_version: u32,
+    pub generated_at_ms: u64,
+    pub migration_version: i64,
+    pub workspace_id: String,
+    pub source_repo: String,
+    pub source_revision: String,
+    pub current_head_revision: String,
+    pub dirty: bool,
+    pub changed_paths: Vec<String>,
+    pub modified_paths: Vec<String>,
+    pub added_paths: Vec<String>,
+    pub deleted_paths: Vec<String>,
+    pub renamed_paths: Vec<crate::WorkspaceRenamedPath>,
+    pub untracked_paths: Vec<String>,
+    pub active_job_ids: Vec<String>,
+    pub recent_jobs: Vec<RuntimeWorkspaceInspectionJob>,
+    pub recent_jobs_truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeWorkspaceInspectionJob {
+    pub created_at_ms: u64,
+    pub client_request_id: String,
+    pub job_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_state: Option<AttemptState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_disposition: Option<JobResolution>,
+    pub recovery_required: bool,
+    pub duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_output_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step_elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_step_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_step_index: Option<u32>,
+    pub artifact_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -234,6 +303,64 @@ pub struct RuntimeExperienceArtifactSummary {
     pub count: u64,
     pub bytes: u64,
     pub truncated: u64,
+}
+
+pub fn inspect_workspace(
+    config: &RuntimeWorkspaceInspectionConfig,
+    workspace_id: &str,
+    job_limit: u32,
+) -> RuntimeResult<RuntimeWorkspaceInspection> {
+    if !config.store_root.is_absolute() {
+        return Err(RuntimeError::invalid(
+            "store root must be absolute",
+            "storeRoot",
+        ));
+    }
+    if job_limit == 0 || job_limit > MAX_WORKSPACE_INSPECTION_JOB_LIMIT {
+        return Err(RuntimeError::invalid(
+            format!("jobLimit must be in 1..={MAX_WORKSPACE_INSPECTION_JOB_LIMIT}"),
+            "jobLimit",
+        ));
+    }
+    crate::universal::validate_id(workspace_id, "workspaceId")
+        .map_err(|error| RuntimeError::invalid(error.message, "workspaceId"))?;
+    let (connection, migration_version) = open_read_only(&RuntimeInspectionConfig {
+        db_path: config.db_path.clone(),
+        busy_timeout_ms: config.busy_timeout_ms,
+    })?;
+    let executor = projection_executor(&config.store_root);
+    let record = load_workspace_record(&executor, workspace_id).map_err(map_universal_error)?;
+    let current_head_revision = workspace_head_revision_at(Path::new(&record.workspace_path))
+        .map_err(map_universal_error)?;
+    let changes = workspace_change_projection_at(Path::new(&record.workspace_path))
+        .map_err(map_universal_error)?;
+    let dirty = !changes.changed.is_empty() || !changes.untracked.is_empty();
+    let active_job_ids = load_active_workspace_job_ids(&connection, workspace_id)?;
+    let registry_store_root = config
+        .db_path
+        .parent()
+        .ok_or_else(|| RuntimeError::invalid("database has no parent directory", "database"))?;
+    let (recent_jobs, recent_jobs_truncated) =
+        load_recent_workspace_jobs(&connection, registry_store_root, workspace_id, job_limit)?;
+    Ok(RuntimeWorkspaceInspection {
+        schema_version: RUNTIME_INSPECTION_SCHEMA_VERSION,
+        generated_at_ms: now_ms()?,
+        migration_version,
+        workspace_id: record.workspace_id,
+        source_repo: record.source_repo,
+        source_revision: record.source_revision,
+        current_head_revision,
+        dirty,
+        changed_paths: changes.changed,
+        modified_paths: changes.modified,
+        added_paths: changes.added,
+        deleted_paths: changes.deleted,
+        renamed_paths: changes.renamed,
+        untracked_paths: changes.untracked,
+        active_job_ids,
+        recent_jobs,
+        recent_jobs_truncated,
+    })
 }
 
 pub fn inspect_job(
@@ -695,6 +822,164 @@ fn duration_summary(values: &[u64]) -> RuntimeExperienceDurationSummary {
         p95: percentile(values, 95),
         max: values.last().copied(),
     }
+}
+
+fn projection_executor(store_root: &Path) -> UniversalExecutorConfig {
+    UniversalExecutorConfig {
+        store_root: store_root.to_path_buf(),
+        workspace_root: None,
+        workspace_uid: None,
+        workspace_gid: None,
+        runner_path: PathBuf::from("/usr/bin/true"),
+        allowed_executable_roots: vec![PathBuf::from("/")],
+        max_runtime_ms: 1,
+        max_output_bytes: 1,
+    }
+}
+
+fn load_active_workspace_job_ids(
+    connection: &Connection,
+    workspace_id: &str,
+) -> RuntimeResult<Vec<String>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT jobs.job_id FROM jobs LEFT JOIN attempts ON attempts.job_id=jobs.job_id LEFT JOIN concurrency_reservations ON concurrency_reservations.attempt_id=attempts.attempt_id WHERE jobs.workspace_id=?1 AND (jobs.resolution IS NULL OR concurrency_reservations.state IN ('active','held_orphaned')) ORDER BY jobs.created_at_ms DESC,jobs.job_id DESC",
+        )
+        .map_err(|error| RuntimeError::from_sql(error, "prepare active Workspace Job inspection"))?;
+    let rows = statement
+        .query_map([workspace_id], |row| row.get::<_, String>(0))
+        .map_err(|error| RuntimeError::from_sql(error, "query active Workspace Jobs"))?;
+    rows.map(|row| {
+        row.map_err(|error| RuntimeError::from_sql(error, "decode active Workspace Job"))
+    })
+    .collect()
+}
+
+fn load_recent_workspace_jobs(
+    connection: &Connection,
+    registry_store_root: &Path,
+    workspace_id: &str,
+    limit: u32,
+) -> RuntimeResult<(Vec<RuntimeWorkspaceInspectionJob>, bool)> {
+    let mut statement = connection
+        .prepare(
+            "SELECT job_id FROM jobs WHERE workspace_id=?1 ORDER BY created_at_ms DESC,job_id DESC LIMIT ?2",
+        )
+        .map_err(|error| RuntimeError::from_sql(error, "prepare recent Workspace Job inspection"))?;
+    let rows = statement
+        .query_map(params![workspace_id, limit + 1], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| RuntimeError::from_sql(error, "query recent Workspace Jobs"))?;
+    let mut job_ids = rows
+        .map(|row| {
+            row.map_err(|error| RuntimeError::from_sql(error, "decode recent Workspace Job"))
+        })
+        .collect::<RuntimeResult<Vec<_>>>()?;
+    let truncated = job_ids.len() > limit as usize;
+    job_ids.truncate(limit as usize);
+    let observed_at_ms = now_ms()?;
+    let mut jobs = Vec::with_capacity(job_ids.len());
+    for job_id in job_ids {
+        let job = load_job(connection, &job_id)?;
+        let latest_attempt_id = connection
+            .query_row(
+                "SELECT attempt_id FROM attempts WHERE job_id=?1 ORDER BY attempt_number DESC LIMIT 1",
+                [&job.job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| RuntimeError::from_sql(error, "query latest Workspace Job Attempt"))?;
+        let attempt_id = job
+            .current_attempt_id
+            .as_ref()
+            .or(latest_attempt_id.as_ref());
+        let attempt = attempt_id
+            .map(|attempt_id| load_attempt(connection, attempt_id))
+            .transpose()?;
+        let recovery_required = if let Some(attempt) = attempt.as_ref() {
+            let condition: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required' AND status='true')",
+                    [&attempt.attempt_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| RuntimeError::from_sql(error, "inspect Workspace Job recovery state"))?;
+            condition
+                || matches!(
+                    attempt.state,
+                    AttemptState::Recovering | AttemptState::Orphaned
+                )
+        } else {
+            false
+        };
+        let artifact_count: u64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM artifacts WHERE job_id=?1",
+                [&job.job_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| RuntimeError::from_sql(error, "count Workspace Job Artifacts"))?;
+        let (progress, last_output_at_ms) = if let Some(attempt) = attempt.as_ref() {
+            let expected_bundle = registry_store_root
+                .join("attempts")
+                .join(&attempt.attempt_id);
+            if Path::new(&attempt.bundle_path) != expected_bundle {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Attempt bundle path is outside the canonical Runtime store",
+                    Some("bundlePath"),
+                    false,
+                ));
+            }
+            (
+                load_runner_progress_if_present(attempt)?,
+                latest_output_modified_ms(attempt)?,
+            )
+        } else {
+            (None, None)
+        };
+        let duration_start = attempt
+            .as_ref()
+            .and_then(|attempt| attempt.started_at_ms)
+            .unwrap_or(job.created_at_ms);
+        let duration_end = attempt
+            .as_ref()
+            .and_then(|attempt| attempt.finished_at_ms)
+            .unwrap_or(observed_at_ms);
+        jobs.push(RuntimeWorkspaceInspectionJob {
+            created_at_ms: job.created_at_ms,
+            client_request_id: job.client_request_id,
+            job_id: job.job_id,
+            attempt_id: attempt.as_ref().map(|attempt| attempt.attempt_id.clone()),
+            attempt_state: attempt.as_ref().map(|attempt| attempt.state),
+            execution_disposition: job.resolution,
+            recovery_required,
+            duration_ms: duration_end.saturating_sub(duration_start),
+            last_output_at_ms,
+            progress_revision: progress.as_ref().map(|progress| progress.revision),
+            current_step_id: progress
+                .as_ref()
+                .and_then(|progress| progress.current_step_id.clone()),
+            current_step_index: progress
+                .as_ref()
+                .and_then(|progress| progress.current_step_index),
+            current_step_elapsed_ms: progress.as_ref().and_then(|progress| {
+                progress
+                    .current_step_started_unix_ms
+                    .and_then(|started| u64::try_from(started).ok())
+                    .map(|started| observed_at_ms.saturating_sub(started))
+            }),
+            failed_step_id: progress
+                .as_ref()
+                .and_then(|progress| progress.failed_step_id.clone()),
+            failed_step_index: progress
+                .as_ref()
+                .and_then(|progress| progress.failed_step_index),
+            artifact_count,
+        });
+    }
+    Ok((jobs, truncated))
 }
 
 fn open_read_only(config: &RuntimeInspectionConfig) -> RuntimeResult<(Connection, i64)> {

@@ -18,14 +18,17 @@ pub use doctor::{
 pub use engine::{ReconciliationFailure, ReconciliationReport, Runtime, RuntimeConfig};
 pub use error::{RuntimeCapacity, RuntimeError, RuntimeErrorCode, RuntimeResult};
 pub use inspection::{
-    inspect_job, summarize_experience, RuntimeExperienceArtifactSummary,
+    inspect_job, inspect_workspace, summarize_experience, RuntimeExperienceArtifactSummary,
     RuntimeExperienceCancellationSummary, RuntimeExperienceDispatchSummary,
     RuntimeExperienceDurationSummary, RuntimeExperienceJobSummary,
     RuntimeExperienceMechanicalLatencySummary, RuntimeExperienceRecoverySummary,
     RuntimeExperienceSummary, RuntimeInspectionArtifactSummary, RuntimeInspectionAttempt,
     RuntimeInspectionCondition, RuntimeInspectionConfig, RuntimeInspectionEpisodes,
-    RuntimeInspectionEvent, RuntimeInspectionJob, RuntimeJobInspection,
-    DEFAULT_INSPECTION_EVENT_LIMIT, MAX_INSPECTION_EVENT_LIMIT, RUNTIME_INSPECTION_SCHEMA_VERSION,
+    RuntimeInspectionEvent, RuntimeInspectionJob, RuntimeJobInspection, RuntimeWorkspaceInspection,
+    RuntimeWorkspaceInspectionConfig, RuntimeWorkspaceInspectionJob,
+    DEFAULT_INSPECTION_EVENT_LIMIT, DEFAULT_WORKSPACE_INSPECTION_JOB_LIMIT,
+    MAX_INSPECTION_EVENT_LIMIT, MAX_WORKSPACE_INSPECTION_JOB_LIMIT,
+    RUNTIME_INSPECTION_SCHEMA_VERSION,
 };
 pub use patch::{
     DurableWorkspacePatchRequest, DurableWorkspacePatchResult, WorkspacePatchOperationState,

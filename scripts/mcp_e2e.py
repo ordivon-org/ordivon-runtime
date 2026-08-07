@@ -548,13 +548,22 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         )
         check(
             "workspace-get",
-            workspace_get.get("workspaceId") == workspace_id and workspace_get.get("headMode") == "detached",
+            workspace_get.get("workspaceId") == workspace_id
+            and workspace_get.get("headMode") == "detached"
+            and workspace_get.get("sourceRevision") == revision
+            and workspace_get.get("currentHeadRevision") == revision,
             workspace_get,
         )
         workspace_list = client.tool("workspace.list", {"schemaVersion": SCHEMA_VERSION})
+        listed_workspace = next(
+            (item for item in workspace_list.get("workspaces", []) if item.get("workspaceId") == workspace_id),
+            None,
+        )
         check(
             "workspace-list",
-            any(item.get("workspaceId") == workspace_id for item in workspace_list.get("workspaces", [])),
+            listed_workspace is not None
+            and listed_workspace.get("sourceRevision") == revision
+            and listed_workspace.get("currentHeadRevision") == revision,
             workspace_list,
         )
 

@@ -734,6 +734,27 @@ fn workspace_open_schema_prefers_server_generated_handles() {
 }
 
 #[test]
+fn workspace_projection_output_schema_distinguishes_lineage_from_current_head() {
+    let sandbox = Sandbox::new("workspace-revision-output-schema");
+    let tools = sandbox.server().tool_router.list_all();
+    for name in ["workspace.get", "workspace.list"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == name)
+            .unwrap();
+        let schema = serde_json::to_string(tool.output_schema.as_ref().unwrap()).unwrap();
+        assert!(
+            schema.contains("sourceRevision"),
+            "{name} omitted sourceRevision"
+        );
+        assert!(
+            schema.contains("currentHeadRevision"),
+            "{name} omitted currentHeadRevision"
+        );
+    }
+}
+
+#[test]
 fn workspace_list_schema_makes_exact_source_digest_opt_in() {
     let sandbox = Sandbox::new("workspace-list-schema");
     let server = sandbox.server();

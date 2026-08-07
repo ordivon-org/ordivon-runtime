@@ -208,6 +208,22 @@ fn created(outcome: AdmissionOutcome) -> CreatedAdmission {
     }
 }
 
+fn git_output(directory: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
 fn run_git_command(directory: &Path, args: &[&str]) {
     let output = Command::new("git")
         .arg("-C")
@@ -1566,18 +1582,149 @@ fn list_is_bounded_and_cursor_stable() {
 }
 
 #[test]
-fn workspace_get_preserves_source_repository_identity() {
-    let (sandbox, runtime, _executor) =
+fn workspace_get_distinguishes_opening_revision_from_current_head() {
+    let (sandbox, runtime, executor) =
         durable_patch_fixture("workspace-get-source-repo", "workspace-get-source-repo");
-    let summary = runtime
+    let initial = runtime
         .get_workspace(&RuntimeWorkspaceGetRequest {
             schema_version: RUNTIME_SCHEMA_VERSION,
             workspace_id: "workspace-get-source-repo".to_string(),
         })
         .unwrap();
     assert_eq!(
-        Path::new(&summary.source_repo),
+        Path::new(&initial.source_repo),
         fs::canonicalize(sandbox.root.join("patch-source")).unwrap()
+    );
+    assert_eq!(initial.source_revision, initial.current_head_revision);
+
+    let workspace = executor.workspace_path("workspace-get-source-repo");
+    fs::write(workspace.join("README.md"), "advanced\n").unwrap();
+    run_git_command(&workspace, &["add", "README.md"]);
+    run_git_command(&workspace, &["commit", "-qm", "advance workspace head"]);
+    let current_head = git_output(&workspace, &["rev-parse", "HEAD"]);
+
+    let advanced = runtime
+        .get_workspace(&RuntimeWorkspaceGetRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            workspace_id: "workspace-get-source-repo".to_string(),
+        })
+        .unwrap();
+    assert_eq!(advanced.source_revision, initial.source_revision);
+    assert_ne!(advanced.source_revision, current_head);
+    assert_eq!(advanced.current_head_revision, current_head);
+
+    let listed = runtime
+        .list_workspaces(&RuntimeWorkspaceListRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            limit: 20,
+            cursor: None,
+            include_source_state_digest: false,
+        })
+        .unwrap();
+    let listed = listed
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.workspace_id == "workspace-get-source-repo")
+        .unwrap();
+    assert_eq!(listed.source_revision, initial.source_revision);
+    assert_eq!(listed.current_head_revision, current_head);
+}
+
+#[test]
+fn workspace_inspection_is_projection_only_and_keeps_terminal_attempt_truth() {
+    let (sandbox, _runtime, executor) =
+        durable_patch_fixture("workspace-inspection", "workspace-inspection");
+    let workspace = executor.workspace_path("workspace-inspection");
+    fs::write(workspace.join("UNTRACKED.txt"), "observer\n").unwrap();
+
+    let mut submit = request(&sandbox, "request:workspace-inspection", 4);
+    submit.plan.workspace_id = "workspace-inspection".to_string();
+    submit.plan.workspace_path = workspace.to_string_lossy().into_owned();
+    submit.plan.cwd = workspace.to_string_lossy().into_owned();
+    submit.plan.source_revision = git_output(&workspace, &["rev-parse", "HEAD"]);
+    let created = created(sandbox.registry.submit(&submit).unwrap());
+
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    let before_active = fs::read(&sandbox.registry.config().db_path).unwrap();
+    let git_index = PathBuf::from(git_output(
+        &workspace,
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    ));
+    let before_index = fs::read(&git_index).unwrap();
+    let config = RuntimeWorkspaceInspectionConfig {
+        db_path: sandbox.registry.config().db_path.clone(),
+        store_root: executor.store_root.clone(),
+        busy_timeout_ms: 5_000,
+    };
+    let active = inspect_workspace(&config, "workspace-inspection", 20).unwrap();
+    assert_eq!(
+        before_active,
+        fs::read(&sandbox.registry.config().db_path).unwrap()
+    );
+    assert_eq!(before_index, fs::read(&git_index).unwrap());
+    assert!(active.dirty);
+    assert!(active
+        .untracked_paths
+        .contains(&"UNTRACKED.txt".to_string()));
+    assert_eq!(active.active_job_ids, vec![created.job.job_id.clone()]);
+    assert_eq!(active.recent_jobs.len(), 1);
+    assert_eq!(active.recent_jobs[0].job_id, created.job.job_id);
+    assert_eq!(
+        active.recent_jobs[0].attempt_state,
+        Some(AttemptState::Accepted)
+    );
+    assert_eq!(active.recent_jobs[0].execution_disposition, None);
+    assert!(!active.recent_jobs_truncated);
+
+    sandbox
+        .registry
+        .commit_terminal(&TerminalCommit {
+            attempt_id: created.attempt.attempt_id.clone(),
+            expected_row_version: created.attempt.row_version,
+            state: AttemptState::Cancelled,
+            result_digest: digest(b"workspace-inspection-terminal"),
+            exit_code: None,
+            infrastructure_error_digest: None,
+            finished_at_ms: created.job.created_at_ms + 1,
+            artifacts: Vec::new(),
+            reason_code: "TEST_CANCELLED".to_string(),
+        })
+        .unwrap();
+    assert!(sandbox
+        .registry
+        .get_job(&created.job.job_id)
+        .unwrap()
+        .current_attempt_id
+        .is_none());
+
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    let before_terminal = fs::read(&sandbox.registry.config().db_path).unwrap();
+    let terminal = inspect_workspace(&config, "workspace-inspection", 20).unwrap();
+    assert_eq!(
+        before_terminal,
+        fs::read(&sandbox.registry.config().db_path).unwrap()
+    );
+    assert!(terminal.active_job_ids.is_empty());
+    assert_eq!(terminal.recent_jobs.len(), 1);
+    assert_eq!(
+        terminal.recent_jobs[0].attempt_id.as_deref(),
+        Some(created.attempt.attempt_id.as_str())
+    );
+    assert_eq!(
+        terminal.recent_jobs[0].attempt_state,
+        Some(AttemptState::Cancelled)
+    );
+    assert_eq!(
+        terminal.recent_jobs[0].execution_disposition,
+        Some(JobResolution::Cancelled)
     );
 }
 

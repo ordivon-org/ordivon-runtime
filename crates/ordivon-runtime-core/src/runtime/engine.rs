@@ -37,8 +37,8 @@ use crate::universal::{
     list_workspace_record_inventory, load_workspace_record, mutate_workspace, patch_workspace,
     plan_workspace_patch, remove_git_workspace, resolve_workspace_cwd,
     result_from_workspace_patch_plan, sha256_bytes, sha256_file, workspace_git_common_dir_at,
-    workspace_is_dirty, workspace_source_state_digest, write_bytes_atomic, write_json_atomic,
-    CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
+    workspace_head_revision, workspace_is_dirty, workspace_source_state_digest, write_bytes_atomic,
+    write_json_atomic, CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
     RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskProgress, RunnerTaskRequest,
     RunnerTaskResult, UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
     WorkspaceDiffRequest, WorkspaceMutateRequest, WorkspaceMutateResult, WorkspacePatchPlanState,
@@ -393,6 +393,18 @@ impl Runtime {
                     continue;
                 }
             };
+            let current_head_revision =
+                match workspace_head_revision(&self.executor, &record.workspace_id) {
+                    Ok(revision) => revision,
+                    Err(error) => {
+                        issues.push(workspace_issue(
+                            &record.workspace_id,
+                            RuntimeWorkspaceIssueStage::HeadRevision,
+                            map_universal_error(error),
+                        ));
+                        continue;
+                    }
+                };
             let source_state_digest = if request.include_source_state_digest {
                 match workspace_source_state_digest(&self.executor, &record.workspace_id) {
                     Ok(digest) => Some(digest),
@@ -410,6 +422,7 @@ impl Runtime {
             };
             workspaces.push(Self::workspace_summary_from_parts(
                 &record,
+                current_head_revision,
                 dirty,
                 source_state_digest,
                 active_job_ids,
@@ -440,6 +453,8 @@ impl Runtime {
         .map_err(map_universal_error)?;
         Ok(Self::workspace_summary_from_parts(
             record,
+            workspace_head_revision(&self.executor, &record.workspace_id)
+                .map_err(map_universal_error)?,
             diff.byte_length > 0 || !diff.untracked_paths.is_empty(),
             Some(
                 workspace_source_state_digest(&self.executor, &record.workspace_id)
@@ -451,6 +466,7 @@ impl Runtime {
 
     fn workspace_summary_from_parts(
         record: &crate::universal::WorkspaceRecord,
+        current_head_revision: String,
         dirty: bool,
         source_state_digest: Option<String>,
         active_job_ids: Vec<String>,
@@ -459,6 +475,7 @@ impl Runtime {
             workspace_id: record.workspace_id.clone(),
             source_repo: record.source_repo.clone(),
             source_revision: record.source_revision.clone(),
+            current_head_revision,
             created_at_ms: u64::try_from(record.created_unix_ms).unwrap_or(u64::MAX),
             head_mode: "detached".to_string(),
             dirty,
@@ -2756,7 +2773,7 @@ fn file_length_if_present(path: &Path) -> RuntimeResult<u64> {
     }
 }
 
-fn load_runner_progress_if_present(
+pub(crate) fn load_runner_progress_if_present(
     attempt: &AttemptRecord,
 ) -> RuntimeResult<Option<RunnerTaskProgress>> {
     let path = Path::new(&attempt.bundle_path).join(PROGRESS_FILE);
@@ -2774,7 +2791,7 @@ fn load_runner_progress_if_present(
     })
 }
 
-fn latest_output_modified_ms(attempt: &AttemptRecord) -> RuntimeResult<Option<u64>> {
+pub(crate) fn latest_output_modified_ms(attempt: &AttemptRecord) -> RuntimeResult<Option<u64>> {
     let bundle = Path::new(&attempt.bundle_path);
     let mut latest = None;
     for path in [bundle.join(STDOUT_FILE), bundle.join(STDERR_FILE)] {
@@ -3098,7 +3115,7 @@ fn workspace_issue(
     }
 }
 
-fn map_universal_error(error: crate::UniversalExecError) -> RuntimeError {
+pub(crate) fn map_universal_error(error: crate::UniversalExecError) -> RuntimeError {
     use crate::UniversalExecErrorCode as UniversalCode;
 
     let code = match error.code {

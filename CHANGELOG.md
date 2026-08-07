@@ -15,7 +15,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - Workspace source-repository identity, closure disposition, and machine-readable Workspace inventory issue stages;
 - machine-discoverable `outputSchema` contracts for all public MCP Tools, covering both exact success results and the standard structured error envelope with finite origin, retry, and commit-state vocabularies;
 - Workspace-bounded Runtime Job reattachment through `task.list(workspaceId=...)`, backed by a recreatable query index rather than a new state owner;
-- stable cursor pagination for `workspace.list`, so bounded Workspace inventory no longer silently stops at the first page.
+- stable cursor pagination for `workspace.list`, so bounded Workspace inventory no longer silently stops at the first page;
+- exact `currentHeadRevision` on Workspace projections and a projection-only `ordivon-runtime-inspect workspace` view over Git state, active Jobs, recent Attempts, progress, output activity, and Artifact counts.
 
 ### Changed
 

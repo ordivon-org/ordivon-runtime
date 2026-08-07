@@ -772,7 +772,10 @@ pub struct RuntimeWorkspaceSummary {
     pub workspace_id: String,
     /// Canonical source repository identity used to create this Workspace.
     pub source_repo: String,
+    /// Exact commit from which the Workspace was opened; this is lineage, not the current HEAD.
     pub source_revision: String,
+    /// Exact commit currently checked out at Workspace HEAD.
+    pub current_head_revision: String,
     pub created_at_ms: u64,
     pub head_mode: String,
     pub dirty: bool,
@@ -790,6 +793,7 @@ pub enum RuntimeWorkspaceIssueStage {
     ActiveJobs,
     DirtyProbe,
     SourceStateDigest,
+    HeadRevision,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

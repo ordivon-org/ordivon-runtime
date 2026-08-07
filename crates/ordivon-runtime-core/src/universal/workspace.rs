@@ -32,12 +32,13 @@ struct ClosedWorkspaceRecord {
 }
 
 #[derive(Debug, Default)]
-struct WorkspaceChangedPaths {
-    changed: Vec<String>,
-    modified: Vec<String>,
-    added: Vec<String>,
-    deleted: Vec<String>,
-    renamed: Vec<WorkspaceRenamedPath>,
+pub(crate) struct WorkspaceChangeProjection {
+    pub(crate) changed: Vec<String>,
+    pub(crate) modified: Vec<String>,
+    pub(crate) added: Vec<String>,
+    pub(crate) deleted: Vec<String>,
+    pub(crate) renamed: Vec<WorkspaceRenamedPath>,
+    pub(crate) untracked: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -464,6 +465,7 @@ pub fn workspace_diff(
     let record = load_workspace_record(config, &request.workspace_id)?;
     let workspace = Path::new(&record.workspace_path);
     let output = Command::new("git")
+        .arg("--no-optional-locks")
         .arg("-C")
         .arg(workspace)
         .args(["diff", "HEAD", "--no-ext-diff", "--no-color", "--binary"])
@@ -483,48 +485,27 @@ pub fn workspace_diff(
             false,
         )
     })?;
-    let changed = workspace_changed_paths(workspace)?;
-    let untracked_output = Command::new("git")
-        .arg("-C")
-        .arg(workspace)
-        .args(["ls-files", "--others", "--exclude-standard", "-z"])
-        .output()
-        .map_err(|error| tool_unavailable("git ls-files", error))?;
-    if !untracked_output.status.success() {
-        return Err(tool_failed("git ls-files", &untracked_output.stderr));
-    }
-    let mut untracked_paths = Vec::new();
-    for raw in untracked_output.stdout.split(|byte| *byte == 0) {
-        if raw.is_empty() {
-            continue;
-        }
-        let path = String::from_utf8(raw.to_vec()).map_err(|error| {
-            UniversalExecError::new(
-                UniversalExecErrorCode::ArtifactNotUtf8,
-                format!("untracked Git path is not UTF-8: {error}"),
-                None,
-                false,
-            )
-        })?;
-        untracked_paths.push(path);
-    }
+    let changes = workspace_change_projection_at(workspace)?;
     Ok(WorkspaceDiffResult {
         workspace_id: request.workspace_id.clone(),
         diff,
         digest: sha256_bytes(bytes),
         byte_length: retained as u64,
         truncated: retained < total,
-        changed_paths: changed.changed,
-        modified_paths: changed.modified,
-        added_paths: changed.added,
-        deleted_paths: changed.deleted,
-        renamed_paths: changed.renamed,
-        untracked_paths,
+        changed_paths: changes.changed,
+        modified_paths: changes.modified,
+        added_paths: changes.added,
+        deleted_paths: changes.deleted,
+        renamed_paths: changes.renamed,
+        untracked_paths: changes.untracked,
     })
 }
 
-fn workspace_changed_paths(workspace: &Path) -> Result<WorkspaceChangedPaths, UniversalExecError> {
+fn workspace_changed_paths(
+    workspace: &Path,
+) -> Result<WorkspaceChangeProjection, UniversalExecError> {
     let output = Command::new("git")
+        .arg("--no-optional-locks")
         .arg("-C")
         .arg(workspace)
         .args([
@@ -653,13 +634,47 @@ fn workspace_changed_paths(workspace: &Path) -> Result<WorkspaceChangedPaths, Un
             }
         }
     }
-    Ok(WorkspaceChangedPaths {
+    Ok(WorkspaceChangeProjection {
         changed: changed.into_iter().collect(),
         modified: modified.into_iter().collect(),
         added: added.into_iter().collect(),
         deleted: deleted.into_iter().collect(),
         renamed,
+        untracked: Vec::new(),
     })
+}
+
+pub(crate) fn workspace_change_projection_at(
+    workspace: &Path,
+) -> Result<WorkspaceChangeProjection, UniversalExecError> {
+    let workspace = canonical_directory(workspace, "workspacePath")?;
+    let mut changes = workspace_changed_paths(&workspace)?;
+    let output = Command::new("git")
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(&workspace)
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output()
+        .map_err(|error| tool_unavailable("git ls-files", error))?;
+    if !output.status.success() {
+        return Err(tool_failed("git ls-files", &output.stderr));
+    }
+    for raw in output.stdout.split(|byte| *byte == 0) {
+        if raw.is_empty() {
+            continue;
+        }
+        changes
+            .untracked
+            .push(String::from_utf8(raw.to_vec()).map_err(|error| {
+                UniversalExecError::new(
+                    UniversalExecErrorCode::ArtifactNotUtf8,
+                    format!("untracked Git path is not UTF-8: {error}"),
+                    None,
+                    false,
+                )
+            })?);
+    }
+    Ok(changes)
 }
 
 pub(crate) fn workspace_diff_paths(
@@ -673,6 +688,7 @@ pub(crate) fn workspace_diff_paths(
     let mut combined = Vec::new();
     for relative_path in relative_paths {
         let tracked = Command::new("git")
+            .arg("--no-optional-locks")
             .arg("-C")
             .arg(workspace)
             .args(["ls-files", "--error-unmatch", "--"])
@@ -681,6 +697,7 @@ pub(crate) fn workspace_diff_paths(
             .map_err(|error| tool_unavailable("git ls-files", error))?;
         let output = if tracked.status.success() {
             Command::new("git")
+                .arg("--no-optional-locks")
                 .arg("-C")
                 .arg(workspace)
                 .args([
@@ -696,6 +713,7 @@ pub(crate) fn workspace_diff_paths(
                 .map_err(|error| tool_unavailable("git diff", error))?
         } else {
             let output = Command::new("git")
+                .arg("--no-optional-locks")
                 .arg("-C")
                 .arg(workspace)
                 .args([
@@ -763,6 +781,30 @@ fn workspace_is_dirty_at(workspace: &Path) -> Result<bool, UniversalExecError> {
 }
 
 #[cfg(any(feature = "transactional-runtime", test))]
+pub fn workspace_head_revision(
+    config: &UniversalExecutorConfig,
+    workspace_id: &str,
+) -> Result<String, UniversalExecError> {
+    let record = load_workspace_record(config, workspace_id)?;
+    workspace_head_revision_at(Path::new(&record.workspace_path))
+}
+
+pub(crate) fn workspace_head_revision_at(workspace: &Path) -> Result<String, UniversalExecError> {
+    let workspace = canonical_directory(workspace, "workspacePath")?;
+    let revision = git_output(&workspace, ["rev-parse", "HEAD"])?
+        .trim()
+        .to_string();
+    if revision.len() != 40 && revision.len() != 64 {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::RevisionNotFound,
+            "workspace HEAD did not resolve to a commit",
+            Some("workspaceId"),
+            false,
+        ));
+    }
+    Ok(revision)
+}
+
 pub fn workspace_source_state_digest(
     config: &UniversalExecutorConfig,
     workspace_id: &str,
@@ -784,9 +826,7 @@ pub(crate) fn workspace_source_state_digest_at(
     workspace: &Path,
 ) -> Result<String, UniversalExecError> {
     let workspace = canonical_directory(workspace, "workspacePath")?;
-    let head_revision = git_output(&workspace, ["rev-parse", "HEAD"])?
-        .trim()
-        .to_string();
+    let head_revision = workspace_head_revision_at(&workspace)?;
     let staged_index = git_output_bytes(&workspace, ["ls-files", "--stage", "-z"])?;
     let index_flags = git_output_bytes(&workspace, ["ls-files", "-v", "-z"])?;
     let index_digest = sha256_bytes(
@@ -1476,6 +1516,7 @@ fn git_output<'a>(
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<String, UniversalExecError> {
     let output = Command::new("git")
+        .arg("--no-optional-locks")
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -1526,6 +1567,7 @@ fn git_output_bytes<'a>(
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<Vec<u8>, UniversalExecError> {
     let output = Command::new("git")
+        .arg("--no-optional-locks")
         .arg("-C")
         .arg(repo)
         .args(args)

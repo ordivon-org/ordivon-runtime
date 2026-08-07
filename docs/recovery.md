@@ -27,6 +27,7 @@ Inspect one durable Job or summarize Runtime-owned experience without mutation:
 
 ```text
 ordivon-runtime-inspect job --database <registry> --job-id <job> --pretty
+ordivon-runtime-inspect workspace --database <registry> --store-root <runtime-store> --workspace-id <workspace> --pretty
 ordivon-runtime-inspect summary --database <registry> --since-ms <unix-ms> --pretty
 ```
 
