@@ -205,9 +205,18 @@ struct TerminalProcessEvidence {
 impl Runtime {
     pub fn new(config: RuntimeConfig) -> RuntimeResult<Self> {
         config.executor.validate().map_err(map_universal_error)?;
-        if config.startup_grace_ms == 0 || config.startup_grace_ms > 30_000 {
+        if config.startup_grace_ms == 0 {
             return Err(RuntimeError::invalid(
-                "startupGraceMs must be in 1..=30000",
+                "startupGraceMs must be positive",
+                "startupGraceMs",
+            ));
+        }
+        if Instant::now()
+            .checked_add(Duration::from_millis(config.startup_grace_ms))
+            .is_none()
+        {
+            return Err(RuntimeError::invalid(
+                "startupGraceMs exceeds platform monotonic clock range",
                 "startupGraceMs",
             ));
         }
@@ -242,7 +251,11 @@ impl Runtime {
     }
 
     pub fn run_task(&self, request: &TaskRunRequest) -> RuntimeResult<TaskObservation> {
-        validate_run_request(request, self.executor.max_output_bytes)?;
+        validate_run_request(
+            request,
+            self.executor.max_runtime_ms,
+            self.executor.max_output_bytes,
+        )?;
         let job_id = {
             let _guard = self.lifecycle_lock.lock().map_err(|_| {
                 RuntimeError::new(
@@ -327,12 +340,21 @@ impl Runtime {
                 "schemaVersion",
             ));
         }
-        if request.limit == 0 || request.limit > 100 {
-            return Err(RuntimeError::invalid("limit must be in 1..=100", "limit"));
+        if request.limit == 0 || request.limit > super::MAX_RUNTIME_LIST_LIMIT {
+            return Err(RuntimeError::invalid(
+                format!("limit must be in 1..={}", super::MAX_RUNTIME_LIST_LIMIT),
+                "limit",
+            ));
         }
-        let inventory = list_workspace_record_inventory(&self.executor, request.limit)
-            .map_err(map_universal_error)?;
-        let mut workspaces = Vec::with_capacity(inventory.records.len());
+        if let Some(cursor) = &request.cursor {
+            crate::universal::validate_id(&cursor.workspace_id, "cursor.workspaceId")
+                .map_err(map_universal_error)?;
+        }
+        let inventory =
+            list_workspace_record_inventory(&self.executor).map_err(map_universal_error)?;
+        let (records, next_cursor) =
+            workspace_record_page(inventory.records, request.limit, request.cursor.as_ref());
+        let mut workspaces = Vec::with_capacity(records.len());
         let mut issues = inventory
             .issues
             .into_iter()
@@ -344,10 +366,10 @@ impl Runtime {
                 )
             })
             .collect::<Vec<_>>();
-        for record in inventory.records {
+        for record in records {
             let active_job_ids = match self
                 .registry
-                .active_job_ids_for_workspace(&record.workspace_id, 20)
+                .active_job_ids_for_workspace(&record.workspace_id)
             {
                 Ok(active_job_ids) => active_job_ids,
                 Err(error) if error.is_reconciliation_fatal() => return Err(error),
@@ -393,7 +415,11 @@ impl Runtime {
                 active_job_ids,
             ));
         }
-        Ok(RuntimeWorkspaceListResult { workspaces, issues })
+        Ok(RuntimeWorkspaceListResult {
+            workspaces,
+            next_cursor,
+            issues,
+        })
     }
 
     fn workspace_summary(
@@ -402,7 +428,7 @@ impl Runtime {
     ) -> RuntimeResult<RuntimeWorkspaceSummary> {
         let active_job_ids = self
             .registry
-            .active_job_ids_for_workspace(&record.workspace_id, 20)?;
+            .active_job_ids_for_workspace(&record.workspace_id)?;
         let diff = crate::universal::workspace_diff(
             &self.executor,
             &WorkspaceDiffRequest {
@@ -448,7 +474,7 @@ impl Runtime {
         let _guard = self.lock_lifecycle()?;
         let active = self
             .registry
-            .active_job_ids_for_workspace(&request.workspace_id, 20)?;
+            .active_job_ids_for_workspace(&request.workspace_id)?;
         if !active.is_empty() {
             return Err(RuntimeError::new(
                 RuntimeErrorCode::WorkspaceBusy,
@@ -470,7 +496,7 @@ impl Runtime {
         let _guard = self.lock_lifecycle()?;
         let active = self
             .registry
-            .active_job_ids_for_workspace(&request.workspace_id, 20)?;
+            .active_job_ids_for_workspace(&request.workspace_id)?;
         if !active.is_empty() {
             return Err(RuntimeError::new(
                 RuntimeErrorCode::WorkspaceBusy,
@@ -494,7 +520,7 @@ impl Runtime {
         let _guard = self.lock_lifecycle()?;
         let active = self
             .registry
-            .active_job_ids_for_workspace(&request.patch.workspace_id, 20)?;
+            .active_job_ids_for_workspace(&request.patch.workspace_id)?;
         if !active.is_empty() {
             return Err(RuntimeError::new(
                 RuntimeErrorCode::WorkspaceBusy,
@@ -661,7 +687,7 @@ impl Runtime {
         let _guard = self.lock_lifecycle()?;
         let active = self
             .registry
-            .active_job_ids_for_workspace(&request.workspace_id, 20)?;
+            .active_job_ids_for_workspace(&request.workspace_id)?;
         if !active.is_empty() {
             return Err(RuntimeError::new(
                 RuntimeErrorCode::WorkspaceBusy,
@@ -1050,7 +1076,14 @@ impl Runtime {
     }
 
     fn await_launch_evidence(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
-        let deadline = Instant::now() + Duration::from_millis(self.startup_grace_ms);
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(self.startup_grace_ms))
+            .ok_or_else(|| {
+                RuntimeError::invalid(
+                    "startupGraceMs exceeds platform monotonic clock range",
+                    "startupGraceMs",
+                )
+            })?;
         let mut poll_index = 0;
         loop {
             if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
@@ -1900,9 +1933,7 @@ impl Runtime {
             attempt_id: current.attempt_id.clone(),
             status: state.as_db().to_string(),
             reason_code: reason_code.to_string(),
-            detail: detail
-                .as_ref()
-                .map(|value| value.chars().take(4096).collect()),
+            detail: detail.clone(),
             observed_at_ms,
         };
         let evidence_path = Path::new(&current.bundle_path).join(CONTROL_RESULT_FILE);
@@ -2168,14 +2199,15 @@ fn configured_execution_path() -> RuntimeResult<String> {
     let value =
         std::env::var("ORDIVON_EXEC_PATH").unwrap_or_else(|_| DEFAULT_EXECUTION_PATH.to_string());
     if value.is_empty()
-        || value.len() > 16 * 1024
         || value.as_bytes().contains(&0)
+        || crate::universal::validate_env(&BTreeMap::from([("PATH".to_string(), value.clone())]))
+            .is_err()
         || value
             .split(':')
             .any(|entry| entry.is_empty() || !Path::new(entry).is_absolute())
     {
         return Err(RuntimeError::invalid(
-            "ORDIVON_EXEC_PATH must be a bounded colon-separated list of absolute paths",
+            "ORDIVON_EXEC_PATH must fit the Linux execve per-string boundary and contain only absolute paths",
             "ORDIVON_EXEC_PATH",
         ));
     }
@@ -2187,12 +2219,13 @@ fn configured_execution_home() -> RuntimeResult<String> {
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| DEFAULT_EXECUTION_HOME.to_string());
     if value.is_empty()
-        || value.len() > 4096
         || value.as_bytes().contains(&0)
+        || crate::universal::validate_env(&BTreeMap::from([("HOME".to_string(), value.clone())]))
+            .is_err()
         || !Path::new(&value).is_absolute()
     {
         return Err(RuntimeError::invalid(
-            "ORDIVON_EXEC_HOME must be a bounded absolute path",
+            "ORDIVON_EXEC_HOME must fit the Linux execve per-string boundary and be an absolute path",
             "ORDIVON_EXEC_HOME",
         ));
     }
@@ -2411,7 +2444,43 @@ fn attempt_process_tree_alive(attempt: &AttemptRecord) -> RuntimeResult<bool> {
     Ok(matching_unit_active || recorded_pid_alive || cgroup_alive)
 }
 
-fn validate_run_request(request: &TaskRunRequest, max_output_bytes: u64) -> RuntimeResult<()> {
+fn workspace_record_page(
+    records: Vec<crate::universal::WorkspaceRecord>,
+    limit: u32,
+    cursor: Option<&super::RuntimeWorkspaceListCursor>,
+) -> (
+    Vec<crate::universal::WorkspaceRecord>,
+    Option<super::RuntimeWorkspaceListCursor>,
+) {
+    let mut page = records
+        .into_iter()
+        .filter(|record| {
+            let Some(cursor) = cursor else {
+                return true;
+            };
+            record.created_unix_ms < u128::from(cursor.created_at_ms)
+                || (record.created_unix_ms == u128::from(cursor.created_at_ms)
+                    && record.workspace_id > cursor.workspace_id)
+        })
+        .take(limit as usize + 1)
+        .collect::<Vec<_>>();
+    if page.len() <= limit as usize {
+        return (page, None);
+    }
+    page.truncate(limit as usize);
+    let last = page.last().expect("non-empty page after limit validation");
+    let next_cursor = super::RuntimeWorkspaceListCursor {
+        created_at_ms: u64::try_from(last.created_unix_ms).unwrap_or(u64::MAX),
+        workspace_id: last.workspace_id.clone(),
+    };
+    (page, Some(next_cursor))
+}
+
+fn validate_run_request(
+    request: &TaskRunRequest,
+    max_runtime_ms: u64,
+    max_output_bytes: u64,
+) -> RuntimeResult<()> {
     if request.schema_version != RUNTIME_SCHEMA_VERSION {
         return Err(RuntimeError::invalid(
             "unsupported runtime schema version",
@@ -2470,6 +2539,12 @@ fn validate_run_request(request: &TaskRunRequest, max_output_bytes: u64) -> Runt
             "execution",
         ));
     }
+    if request.execution.timeout_ms > max_runtime_ms {
+        return Err(RuntimeError::invalid(
+            format!("timeoutMs exceeds configured maximum {max_runtime_ms}"),
+            "execution.timeoutMs",
+        ));
+    }
     if request.execution.stdout_limit_bytes > max_output_bytes {
         return Err(RuntimeError::invalid(
             format!("stdoutLimitBytes exceeds configured maximum {max_output_bytes}"),
@@ -2483,15 +2558,12 @@ fn validate_run_request(request: &TaskRunRequest, max_output_bytes: u64) -> Runt
         ));
     }
     validate_execution_budget(&request.execution.budget, "execution.budget")?;
-    if request.execution.foreign_references.len() > super::MAX_FOREIGN_REFERENCES {
-        return Err(RuntimeError::invalid(
-            format!(
-                "foreignReferences exceed the maximum of {}",
-                super::MAX_FOREIGN_REFERENCES
-            ),
-            "execution.foreignReferences",
-        ));
-    }
+    crate::universal::validate_exec_payload(
+        &request.execution.args,
+        &request.execution.env,
+        "execution",
+    )
+    .map_err(map_universal_error)?;
     let mut foreign_reference_keys = std::collections::BTreeSet::new();
     for (index, reference) in request.execution.foreign_references.iter().enumerate() {
         for (value, suffix) in [
@@ -2528,20 +2600,8 @@ fn validate_run_request(request: &TaskRunRequest, max_output_bytes: u64) -> Runt
             ));
         }
     }
-    if request.execution.args.len() > 128 || request.execution.env.len() > 64 {
-        return Err(RuntimeError::invalid(
-            "args or environment exceed runtime bounds",
-            "execution",
-        ));
-    }
     if request.execution.execution_profile == super::ExecutionProfile::ContainedLocal {
         validate_contained_environment(&request.execution.env, "execution.env")?;
-    }
-    if request.execution.steps.len() > 32 {
-        return Err(RuntimeError::invalid(
-            "steps exceed the maximum of 32",
-            "execution.steps",
-        ));
     }
     let mut step_ids = std::collections::BTreeSet::new();
     let mut total_timeout = 0_u64;
@@ -2564,12 +2624,18 @@ fn validate_run_request(request: &TaskRunRequest, max_output_bytes: u64) -> Runt
                 &format!("execution.steps[{index}]"),
             ));
         }
-        if step.timeout_ms == 0 || step.args.len() > 128 || step.env.len() > 64 {
+        if step.timeout_ms == 0 {
             return Err(RuntimeError::invalid(
-                "step runtime, args, or environment exceed bounds",
-                &format!("execution.steps[{index}]"),
+                "step timeoutMs must be positive",
+                &format!("execution.steps[{index}].timeoutMs"),
             ));
         }
+        crate::universal::validate_exec_payload(
+            &step.args,
+            &step.env,
+            &format!("execution.steps[{index}]"),
+        )
+        .map_err(map_universal_error)?;
         if request.execution.execution_profile == super::ExecutionProfile::ContainedLocal {
             validate_contained_environment(&step.env, &format!("execution.steps[{index}].env"))?;
         }
@@ -2590,36 +2656,21 @@ fn validate_execution_budget(
     budget: &super::ExecutionBudget,
     field_prefix: &str,
 ) -> RuntimeResult<()> {
-    if budget.memory_max_bytes.is_some_and(|value| {
-        !(super::MIN_MEMORY_MAX_BYTES..=super::MAX_MEMORY_MAX_BYTES).contains(&value)
-    }) {
+    if budget.memory_max_bytes == Some(0) {
         return Err(RuntimeError::invalid(
-            format!(
-                "memoryMaxBytes must be in {}..={}",
-                super::MIN_MEMORY_MAX_BYTES,
-                super::MAX_MEMORY_MAX_BYTES
-            ),
+            "memoryMaxBytes must be positive",
             &format!("{field_prefix}.memoryMaxBytes"),
         ));
     }
-    if budget
-        .tasks_max
-        .is_some_and(|value| value == 0 || value > super::MAX_TASKS_MAX)
-    {
+    if budget.tasks_max == Some(0) {
         return Err(RuntimeError::invalid(
-            format!("tasksMax must be in 1..={}", super::MAX_TASKS_MAX),
+            "tasksMax must be positive",
             &format!("{field_prefix}.tasksMax"),
         ));
     }
-    if budget
-        .cpu_quota_percent
-        .is_some_and(|value| value == 0 || value > super::MAX_CPU_QUOTA_PERCENT)
-    {
+    if budget.cpu_quota_percent == Some(0) {
         return Err(RuntimeError::invalid(
-            format!(
-                "cpuQuotaPercent must be in 1..={}",
-                super::MAX_CPU_QUOTA_PERCENT
-            ),
+            "cpuQuotaPercent must be positive",
             &format!("{field_prefix}.cpuQuotaPercent"),
         ));
     }
@@ -3229,7 +3280,7 @@ mod trusted_systemd_command_tests {
             stdout_tail_bytes: 0,
             stderr_tail_bytes: 0,
         };
-        let error = validate_run_request(&request, 1_024).unwrap_err();
+        let error = validate_run_request(&request, 60_000, 1_024).unwrap_err();
         assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
         assert_eq!(error.field.as_deref(), Some("execution.stdoutLimitBytes"));
     }
@@ -3259,7 +3310,7 @@ mod trusted_systemd_command_tests {
             stdout_tail_bytes: 0,
             stderr_tail_bytes: 0,
         };
-        let error = validate_run_request(&request, 1_024).unwrap_err();
+        let error = validate_run_request(&request, 60_000, 1_024).unwrap_err();
         assert_eq!(
             error.field.as_deref(),
             Some("execution.env.CARGO_TARGET_DIR")
@@ -3275,7 +3326,7 @@ mod trusted_systemd_command_tests {
             timeout_ms: 1_000,
             continue_on_error: false,
         });
-        let error = validate_run_request(&request, 1_024).unwrap_err();
+        let error = validate_run_request(&request, 60_000, 1_024).unwrap_err();
         assert_eq!(error.field.as_deref(), Some("execution.steps[0].env.HOME"));
     }
 

@@ -4,11 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     invalid, validate_id, validate_relative_path, UniversalExecError, MAX_WORKSPACE_IO_BYTES,
-    MAX_WORKSPACE_MUTATIONS, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
-
-pub const MAX_WORKSPACE_PATCH_FILES: usize = 32;
-pub const MAX_WORKSPACE_PATCH_EDITS_PER_FILE: usize = 128;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -348,7 +345,7 @@ pub struct WorkspaceMutateRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
     pub workspace_id: String,
-    #[schemars(length(min = 1, max = MAX_WORKSPACE_MUTATIONS))]
+    #[schemars(length(min = 1))]
     pub mutations: Vec<WorkspaceMutation>,
 }
 
@@ -356,11 +353,8 @@ impl WorkspaceMutateRequest {
     pub fn validate_shape(&self) -> Result<(), UniversalExecError> {
         require_schema(self.schema_version)?;
         validate_id(&self.workspace_id, "workspaceId")?;
-        if self.mutations.is_empty() || self.mutations.len() > MAX_WORKSPACE_MUTATIONS {
-            return Err(invalid(
-                format!("mutations must contain 1..={MAX_WORKSPACE_MUTATIONS} items"),
-                "mutations",
-            ));
+        if self.mutations.is_empty() {
+            return Err(invalid("mutations must not be empty", "mutations"));
         }
         let mut paths = BTreeSet::new();
         for (mutation_index, mutation) in self.mutations.iter().enumerate() {
@@ -423,7 +417,7 @@ pub struct WorkspaceFilePatch {
     /// Required when the target exists; protects the complete file version.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_digest: Option<String>,
-    #[schemars(length(min = 1, max = MAX_WORKSPACE_PATCH_EDITS_PER_FILE))]
+    #[schemars(length(min = 1))]
     pub edits: Vec<WorkspaceTextEdit>,
 }
 
@@ -433,7 +427,7 @@ pub struct WorkspacePatchRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
     pub workspace_id: String,
-    #[schemars(length(min = 1, max = MAX_WORKSPACE_PATCH_FILES))]
+    #[schemars(length(min = 1))]
     pub files: Vec<WorkspaceFilePatch>,
     #[serde(default = "default_patch_diff_bytes")]
     #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
@@ -444,11 +438,8 @@ impl WorkspacePatchRequest {
     pub fn validate_shape(&self) -> Result<(), UniversalExecError> {
         require_schema(self.schema_version)?;
         validate_id(&self.workspace_id, "workspaceId")?;
-        if self.files.is_empty() || self.files.len() > MAX_WORKSPACE_PATCH_FILES {
-            return Err(invalid(
-                format!("files must contain 1..={MAX_WORKSPACE_PATCH_FILES} items"),
-                "files",
-            ));
+        if self.files.is_empty() {
+            return Err(invalid("files must not be empty", "files"));
         }
         if self.max_diff_bytes == 0 || self.max_diff_bytes > MAX_WORKSPACE_IO_BYTES {
             return Err(invalid(
@@ -478,9 +469,9 @@ impl WorkspacePatchRequest {
                     format!("files[{file_index}].expectedDigest"),
                 ));
             }
-            if file.edits.is_empty() || file.edits.len() > MAX_WORKSPACE_PATCH_EDITS_PER_FILE {
+            if file.edits.is_empty() {
                 return Err(invalid(
-                    format!("edits must contain 1..={MAX_WORKSPACE_PATCH_EDITS_PER_FILE} items"),
+                    "edits must not be empty",
                     format!("files[{file_index}].edits"),
                 ));
             }

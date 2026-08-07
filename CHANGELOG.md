@@ -14,7 +14,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - explicit Agent-facing execution semantics for Runtime Jobs and Attempts, including persisted Job intent, exact Attempt state, termination intent, terminal execution disposition and reason, delivery certainty, recovery requirement, result availability, and an explicit `semanticCompletionEvaluated=false` boundary;
 - Workspace source-repository identity, closure disposition, and machine-readable Workspace inventory issue stages;
 - machine-discoverable `outputSchema` contracts for all public MCP Tools, covering both exact success results and the standard structured error envelope with finite origin, retry, and commit-state vocabularies;
-- Workspace-bounded Runtime Job reattachment through `task.list(workspaceId=...)`, backed by a recreatable query index rather than a new state owner.
+- Workspace-bounded Runtime Job reattachment through `task.list(workspaceId=...)`, backed by a recreatable query index rather than a new state owner;
+- stable cursor pagination for `workspace.list`, so bounded Workspace inventory no longer silently stops at the first page.
 
 ### Changed
 
@@ -26,7 +27,10 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - Universal execution failures preserve precise Runtime error categories instead of collapsing Workspace identity, revision, metadata, Artifact, output, and reconciliation failures into `INVALID_REQUEST`;
 - `workspace.list` isolates Workspace-local inventory/projection failures while authority-wide failures remain fail-closed;
 - Workspace and mutation Tool guidance now distinguishes replay-safe reconciliation from operations that require re-reading state after an uncertain response;
-- projection-only Workspace/Job reads no longer reconcile or dispatch accepted work, Workspace mutation/close guards block directly on durable reservations, `task.observe` remains exact-Job reconciliation, and MCP effect annotations now match those semantics including open-world opaque execution.
+- projection-only Workspace/Job reads no longer reconcile or dispatch accepted work, Workspace mutation/close guards block directly on durable reservations, `task.observe` remains exact-Job reconciliation, and MCP effect annotations now match those semantics including open-world opaque execution;
+- execution and mutation contracts no longer reject work because of bootstrap-era argv, environment, step, foreign-reference, mutation, Patch-file, Patch-edit, or cgroup-budget cardinality ceilings; Linux `execve` string and aggregate argv/environment representability, durable identity, atomicity, isolation, and configured resource ceilings remain enforced;
+- runtime duration, retained output, reconciliation cadence/batch size, startup grace, and SQLite busy timeout are operator policy rather than hard-coded product maxima; `ORDIVON_MAX_OUTPUT_BYTES` now makes the retained-output ceiling explicit alongside `ORDIVON_MAX_RUNTIME_MS`;
+- Workspace diff path classification and active-Job identity projections remain complete instead of imposing hidden path/identity count caps; response-sized projections retain explicit continuation or truncation signals.
 
 ### Fixed
 
@@ -34,7 +38,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - `artifactsAvailable` now reflects registered Artifact existence rather than merely the presence of an Attempt result digest;
 - recovery-bearing states such as `orphaned` explicitly project reconciliation requirements instead of appearing mechanically complete;
 - multi-field Job projections are assembled from one Registry read snapshot so execution, recovery, Artifact, and terminal-reason facts cannot drift across concurrent reads;
-- post-admission execution errors now carry the durable Job identity and report `commitState=committed` with `retryClass=reconcile_first` instead of incorrectly claiming that a Runtime operation was not committed.
+- post-admission execution errors now carry the durable Job identity and report `commitState=committed` with `retryClass=reconcile_first` instead of incorrectly claiming that a Runtime operation was not committed;
+- Doctor capacity-holder projection now reports `capacityHoldersTruncated` instead of silently presenting the first 50 holders as complete, and terminal control evidence no longer silently drops error detail after 4096 characters.
 
 ## 0.1.0 — Operational baseline
 

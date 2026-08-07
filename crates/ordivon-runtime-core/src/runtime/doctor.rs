@@ -54,6 +54,7 @@ pub struct RuntimeDoctorSummary {
     pub artifacts_total: u64,
     pub artifact_bytes: u64,
     pub capacity_holders: Vec<RuntimeDoctorCapacityHolder>,
+    pub capacity_holders_truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -340,7 +341,7 @@ fn inspect_summary(connection: &Connection) -> RuntimeResult<RuntimeDoctorSummar
         )
         .map_err(|error| RuntimeError::from_sql(error, "prepare capacity-holder summary"))?;
     let rows = statement
-        .query_map([MAX_DOCTOR_CAPACITY_HOLDERS as u64], |row| {
+        .query_map([(MAX_DOCTOR_CAPACITY_HOLDERS + 1) as u64], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -365,6 +366,9 @@ fn inspect_summary(connection: &Connection) -> RuntimeResult<RuntimeDoctorSummar
         });
     }
 
+    let capacity_holders_truncated = capacity_holders.len() > MAX_DOCTOR_CAPACITY_HOLDERS;
+    capacity_holders.truncate(MAX_DOCTOR_CAPACITY_HOLDERS);
+
     Ok(RuntimeDoctorSummary {
         status: String::new(),
         jobs_total,
@@ -375,6 +379,7 @@ fn inspect_summary(connection: &Connection) -> RuntimeResult<RuntimeDoctorSummar
         artifacts_total,
         artifact_bytes,
         capacity_holders,
+        capacity_holders_truncated,
     })
 }
 

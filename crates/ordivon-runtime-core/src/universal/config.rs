@@ -4,13 +4,6 @@ use std::path::{Path, PathBuf};
 use super::{invalid, io_error, sha256_bytes, UniversalExecError, UniversalExecErrorCode};
 
 pub const UNIVERSAL_EXEC_SCHEMA_VERSION: u32 = 1;
-pub const MAX_UNIVERSAL_ARGS: usize = 128;
-pub const MAX_UNIVERSAL_ARG_BYTES: usize = 16 * 1024;
-pub const MAX_UNIVERSAL_ENV_VARS: usize = 64;
-pub const MAX_UNIVERSAL_ENV_VALUE_BYTES: usize = 16 * 1024;
-pub const MAX_UNIVERSAL_RUNTIME_MS: u64 = 24 * 60 * 60 * 1000;
-pub const MAX_UNIVERSAL_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
-pub const MAX_WORKSPACE_MUTATIONS: usize = 32;
 pub const MAX_WORKSPACE_IO_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -65,17 +58,24 @@ impl UniversalExecutorConfig {
                 "allowedExecutableRoots",
             ));
         }
-        if self.max_runtime_ms == 0 || self.max_runtime_ms > MAX_UNIVERSAL_RUNTIME_MS {
+        if self.max_runtime_ms == 0 {
+            return Err(invalid("max runtime must be positive", "maxRuntimeMs"));
+        }
+        let dispatch_ceiling_ms = self
+            .max_runtime_ms
+            .checked_add(5_000)
+            .ok_or_else(|| invalid("max runtime exceeds platform timer range", "maxRuntimeMs"))?;
+        if std::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(dispatch_ceiling_ms))
+            .is_none()
+        {
             return Err(invalid(
-                format!("max runtime must be in 1..={MAX_UNIVERSAL_RUNTIME_MS}"),
+                "max runtime exceeds platform monotonic clock range",
                 "maxRuntimeMs",
             ));
         }
-        if self.max_output_bytes == 0 || self.max_output_bytes > MAX_UNIVERSAL_OUTPUT_BYTES {
-            return Err(invalid(
-                format!("max output must be in 1..={MAX_UNIVERSAL_OUTPUT_BYTES}"),
-                "maxOutputBytes",
-            ));
+        if self.max_output_bytes == 0 {
+            return Err(invalid("max output must be positive", "maxOutputBytes"));
         }
         Ok(())
     }

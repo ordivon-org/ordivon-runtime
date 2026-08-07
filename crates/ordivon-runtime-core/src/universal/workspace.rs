@@ -274,12 +274,8 @@ pub(crate) struct WorkspaceRecordInventory {
 
 pub(crate) fn list_workspace_record_inventory(
     config: &UniversalExecutorConfig,
-    limit: u32,
 ) -> Result<WorkspaceRecordInventory, UniversalExecError> {
     config.ensure_store()?;
-    if limit == 0 || limit > 100 {
-        return Err(invalid("limit must be in 1..=100", "limit"));
-    }
     let records_root = config.workspace_records_root();
     let mut records = Vec::new();
     let mut issues = Vec::new();
@@ -345,9 +341,7 @@ pub(crate) fn list_workspace_record_inventory(
             .cmp(&left.created_unix_ms)
             .then_with(|| left.workspace_id.cmp(&right.workspace_id))
     });
-    records.truncate(limit as usize);
     issues.sort_by(|left, right| left.workspace_id.cmp(&right.workspace_id));
-    issues.truncate(limit as usize);
     Ok(WorkspaceRecordInventory { records, issues })
 }
 
@@ -355,7 +349,11 @@ pub fn list_workspace_records(
     config: &UniversalExecutorConfig,
     limit: u32,
 ) -> Result<Vec<WorkspaceRecord>, UniversalExecError> {
-    let inventory = list_workspace_record_inventory(config, limit)?;
+    if limit == 0 {
+        return Err(invalid("limit must be positive", "limit"));
+    }
+    let mut inventory = list_workspace_record_inventory(config)?;
+    inventory.records.truncate(limit as usize);
     if let Some(issue) = inventory.issues.into_iter().next() {
         return Err(issue.error);
     }
@@ -500,14 +498,6 @@ pub fn workspace_diff(
         if raw.is_empty() {
             continue;
         }
-        if untracked_paths.len() >= 256 {
-            return Err(UniversalExecError::new(
-                UniversalExecErrorCode::OutputLimitExceeded,
-                "workspace has more than 256 untracked paths",
-                None,
-                false,
-            ));
-        }
         let path = String::from_utf8(raw.to_vec()).map_err(|error| {
             UniversalExecError::new(
                 UniversalExecErrorCode::ArtifactNotUtf8,
@@ -562,14 +552,6 @@ fn workspace_changed_paths(workspace: &Path) -> Result<WorkspaceChangedPaths, Un
     let mut renamed = Vec::new();
     let mut index = 0usize;
     while index < fields.len() {
-        if changed.len() >= 512 {
-            return Err(UniversalExecError::new(
-                UniversalExecErrorCode::OutputLimitExceeded,
-                "workspace has more than 512 changed paths",
-                None,
-                false,
-            ));
-        }
         let status = std::str::from_utf8(fields[index]).map_err(|error| {
             UniversalExecError::new(
                 UniversalExecErrorCode::ArtifactNotUtf8,

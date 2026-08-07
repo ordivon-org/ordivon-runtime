@@ -106,7 +106,7 @@ Runtime preserves ambiguous dispatch, missing terminal evidence, residual proces
 
 ## Reconciliation
 
-Reconciliation compares Registry state with runner evidence and systemd/cgroup reality. It may run at startup, observation, listing, admission, or Workspace boundaries. One Job's recoverable inconsistency must not expand into a service-wide failure.
+Reconciliation compares Registry state with runner evidence and systemd/cgroup reality. It runs during startup recovery, configured background maintenance, execution admission for the relevant Workspace, explicit maintenance calls, and exact-Job `task.observe`. Projection-only listing/get paths do not reconcile or dispatch work. One Job's recoverable inconsistency must not expand into a service-wide failure.
 
 ## Terminal supervision evidence
 
@@ -116,7 +116,7 @@ Every terminal Attempt registers `terminal-evidence-<digest>.json` as a `termina
 - `deliveryDisposition`: whether the terminal result was committed, is unknown, or still requires reconciliation;
 - `processTreeDisposition`: `terminal_clean`, `unexpected_residual`, or `unknown`.
 
-Runtime prefers the recursive cgroup-v2 `cgroup.events: populated` fact and falls back to direct `cgroup.procs` membership only when the events file is unavailable. The evidence remains an Artifact consumed through `task.observe` and `artifact.read`; Runtime does not add a parallel evidence Tool or foreign-reference database. Foreign references are bounded immutable inputs in the Execution Plan and therefore participate in request identity, replay conflict detection, and the plan digest.
+Runtime prefers the recursive cgroup-v2 `cgroup.events: populated` fact and falls back to direct `cgroup.procs` membership only when the events file is unavailable. The evidence remains an Artifact consumed through `task.observe` and `artifact.read`; Runtime does not add a parallel evidence Tool or foreign-reference database. Foreign references are immutable opaque inputs in the Execution Plan and therefore participate in request identity, replay conflict detection, and the plan digest; Runtime does not impose an arbitrary count ceiling on them.
 
 ### Host correlation convention
 
@@ -147,9 +147,13 @@ This profile protects accidental credential and host-state access by local engin
 
 ## Execution budgets
 
-Time and output bounds are always part of the Execution Plan. `ORDIVON_MAX_RUNTIME_MS` defines the server ceiling, defaults to 15 minutes for compatibility, and may be raised only within the 24-hour executor hard bound; production uses one hour while each Job continues to request its own smaller or equal timeout. A caller may also commit optional physical budgets for memory, process count, and CPU quota. These values participate in the operation Digest and are applied by systemd to the Attempt cgroup through `MemoryMax=`, `TasksMax=`, and `CPUQuota=`. An empty budget is omitted from canonical serialization so requests admitted before this contract remain idempotently replayable.
+Time and output bounds are always part of the Execution Plan. `ORDIVON_MAX_RUNTIME_MS` and `ORDIVON_MAX_OUTPUT_BYTES` define operator-owned server ceilings; production may keep conservative values while another installation may deliberately choose larger ones. Runtime enforces the configured ceilings before durable Job admission but no longer adds a separate 24-hour/64-MiB product law. A caller may also commit optional positive physical budgets for memory, process count, and CPU quota. These values participate in the operation Digest and are applied by systemd to the Attempt cgroup through `MemoryMax=`, `TasksMax=`, and `CPUQuota=`. Runtime validates representability and positivity, while the operator and systemd/kernel own the actual resource policy. An empty budget is omitted from canonical serialization so requests admitted before this contract remain idempotently replayable.
 
 Budgets constrain physical consumption; they are not a scheduler, priority system, sandbox, or approval policy. The trusted-local authority model remains unchanged.
+
+### Bound ownership rule
+
+A Runtime bound must name the invariant it protects. Public page-size limits are acceptable when a stable cursor provides complete continuation; chunk/tail limits are acceptable when offsets or explicit truncation flags preserve recoverability; transport-body and retained-byte ceilings protect control-plane/resource envelopes; identifier and filesystem constraints protect durable addressing; containment rules protect isolation. Representation cardinality by itself is not a reason to reject Agent work. Accordingly, Runtime does not impose bootstrap-era maxima on argv count, environment count, `execPlan` steps, foreign references, mutation count, Patch file/edit count, or cgroup budget values. Individual argv/environment strings and their combined payload remain subject to the host Linux `execve` physical limits (`MAX_ARG_STRLEN` and `_SC_ARG_MAX`).
 
 ## Maintenance reconciliation
 
@@ -159,9 +163,9 @@ This loop does not redispatch ambiguous work or retry failed commands. It only c
 
 ## Semantic health and Workspace lifecycle
 
-`ordivon-runtime-doctor inspect` remains read-only and reports invariant violations, recovery cases, state counts, capacity holders, Artifact volume, and whether the Runtime is `healthy` or needs `attention`. The summary explains current blocking facts; it does not invent a second control plane.
+`ordivon-runtime-doctor inspect` remains read-only and reports invariant violations, recovery cases, state counts, capacity holders, Artifact volume, and whether the Runtime is `healthy` or needs `attention`. Its defensive 50-holder diagnostic projection reports `capacityHoldersTruncated=true` when incomplete rather than silently presenting a prefix as complete. The summary explains current blocking facts; it does not invent a second control plane.
 
-`workspace.get` exposes `sourceStateDigest`, the existing commitment over Workspace HEAD, index flags and entries, tracked source bytes, untracked source bytes, file modes, symlinks, and nested Git worktrees. `workspace.list` is deliberately an inventory operation: it uses a lightweight Git status probe and omits that expensive commitment by default; callers may set `includeSourceStateDigest=true` when a bounded list really needs exact digests. Both operations are projection-only and do not reconcile or dispatch Jobs. `workspace.close.expectedSourceStateDigest` performs compare-and-close while holding the Runtime lifecycle lock; active or held Jobs block closure directly from durable reservation state without being dispatched by the close attempt. A mismatch fails without removal, while a successful close stores the exact digest in the tombstone so the same request can be replayed after response loss. This is a physical source-state fence only: Host remains responsible for deciding which evidence authorizes semantic completion.
+`workspace.get` exposes `sourceStateDigest`, the existing commitment over Workspace HEAD, index flags and entries, tracked source bytes, untracked source bytes, file modes, symlinks, and nested Git worktrees. `workspace.list` is deliberately an inventory operation: it uses a lightweight Git status probe, stable newest-first cursor pagination, and omits that expensive commitment by default; callers may set `includeSourceStateDigest=true` when one page really needs exact digests. Healthy Workspace records are never silently discarded by the page-size limit, and inventory/projection failures remain explicit `issues`. Both operations are projection-only and do not reconcile or dispatch Jobs. `workspace.close.expectedSourceStateDigest` performs compare-and-close while holding the Runtime lifecycle lock; active or held Jobs block closure directly from durable reservation state without being dispatched by the close attempt. A mismatch fails without removal, while a successful close stores the exact digest in the tombstone so the same request can be replayed after response loss. This is a physical source-state fence only: Host remains responsible for deciding which evidence authorizes semantic completion.
 
 Capacity admission remains immediate rather than creating a hidden queue. The production global limit is configurable and set to eight; one Workspace still owns at most one active execution. A `CONCURRENCY_LIMIT` error carries bounded holder Job and Workspace identities so callers can observe the actual occupants instead of polling blindly. The repository-owned `ordivon-runtime-capacity-acceptance` command verifies this contract through MCP by admitting exactly the configured capacity, rejecting the next Job, checking holder identity, observing terminal success, and cleaning every temporary Workspace.
 

@@ -6,8 +6,8 @@ use ordivon_runtime_core::{
     RuntimeConfig, RuntimeExecutionPlan, RuntimeJobListRequest, SubmitRequest, TaskCancelRequest,
     TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest, UniversalExecutionRequest,
     UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceMutateRequest, WorkspaceMutation,
-    WorkspaceMutationMode, WorkspaceWriteRequest, MAX_UNIVERSAL_OUTPUT_BYTES,
-    MAX_UNIVERSAL_RUNTIME_MS, RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    WorkspaceMutationMode, WorkspaceWriteRequest, RUNTIME_SCHEMA_VERSION,
+    UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -70,8 +70,8 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
         workspace_gid: None,
         runner_path,
         allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
-        max_runtime_ms: MAX_UNIVERSAL_RUNTIME_MS,
-        max_output_bytes: MAX_UNIVERSAL_OUTPUT_BYTES,
+        max_runtime_ms: 24 * 60 * 60 * 1000,
+        max_output_bytes: 64 * 1024 * 1024,
     };
     executor.ensure_store().unwrap();
     let workspace_id = format!("runtime-it-{}", Uuid::now_v7());
@@ -237,8 +237,8 @@ impl IntegrationContext {
             workspace_gid: None,
             runner_path,
             allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
-            max_runtime_ms: MAX_UNIVERSAL_RUNTIME_MS,
-            max_output_bytes: MAX_UNIVERSAL_OUTPUT_BYTES,
+            max_runtime_ms: 24 * 60 * 60 * 1000,
+            max_output_bytes: 64 * 1024 * 1024,
         };
         executor.ensure_store().unwrap();
         let workspace_id = format!("runtime-{label}-{}", Uuid::now_v7());
@@ -392,8 +392,8 @@ fn contained_local_hides_unmounted_state_blocks_egress_and_preserves_evidence() 
         workspace_gid: None,
         runner_path,
         allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
-        max_runtime_ms: MAX_UNIVERSAL_RUNTIME_MS,
-        max_output_bytes: MAX_UNIVERSAL_OUTPUT_BYTES,
+        max_runtime_ms: 24 * 60 * 60 * 1000,
+        max_output_bytes: 64 * 1024 * 1024,
     };
     executor.ensure_store().unwrap();
     let workspace_id = format!("runtime-contained-{}", Uuid::now_v7());

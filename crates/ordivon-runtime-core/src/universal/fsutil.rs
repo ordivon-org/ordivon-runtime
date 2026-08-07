@@ -5,10 +5,7 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{
-    UniversalExecError, UniversalExecErrorCode, MAX_UNIVERSAL_ARGS, MAX_UNIVERSAL_ARG_BYTES,
-    MAX_UNIVERSAL_ENV_VALUE_BYTES, MAX_UNIVERSAL_ENV_VARS,
-};
+use super::{UniversalExecError, UniversalExecErrorCode};
 
 pub(crate) fn validate_id(value: &str, field: &str) -> Result<(), UniversalExecError> {
     let mut chars = value.chars();
@@ -56,18 +53,54 @@ pub(crate) fn validate_relative_path(
     Ok(path.to_path_buf())
 }
 
-pub(crate) fn validate_args(args: &[String]) -> Result<(), UniversalExecError> {
-    if args.len() > MAX_UNIVERSAL_ARGS {
+pub(crate) fn linux_exec_string_limit_bytes() -> Result<usize, UniversalExecError> {
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
         return Err(invalid(
-            format!("args supports at most {MAX_UNIVERSAL_ARGS} entries"),
-            "args",
+            "cannot determine Linux execve per-string limit",
+            "execution",
         ));
     }
+    usize::try_from(page_size)
+        .ok()
+        .and_then(|page_size| page_size.checked_mul(32))
+        .and_then(|bytes| bytes.checked_sub(1))
+        .ok_or_else(|| {
+            invalid(
+                "Linux execve per-string limit is not representable",
+                "execution",
+            )
+        })
+}
+
+pub(crate) fn linux_exec_payload_limit_bytes() -> Result<usize, UniversalExecError> {
+    let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+    if arg_max <= 0 {
+        return Err(invalid(
+            "cannot determine Linux execve argv/environment limit",
+            "execution",
+        ));
+    }
+    usize::try_from(arg_max).map_err(|_| {
+        invalid(
+            "Linux execve argv/environment limit is not representable",
+            "execution",
+        )
+    })
+}
+
+pub(crate) fn validate_args(args: &[String]) -> Result<(), UniversalExecError> {
+    let max_string_bytes = linux_exec_string_limit_bytes()?;
     if args
         .iter()
-        .any(|arg| arg.len() > MAX_UNIVERSAL_ARG_BYTES || arg.as_bytes().contains(&0))
+        .any(|arg| arg.len() > max_string_bytes || arg.as_bytes().contains(&0))
     {
-        return Err(invalid("args contains an invalid value", "args"));
+        return Err(invalid(
+            format!(
+                "args contains a value that exceeds the Linux execve per-string limit of {max_string_bytes} bytes or contains NUL"
+            ),
+            "args",
+        ));
     }
     Ok(())
 }
@@ -75,24 +108,66 @@ pub(crate) fn validate_args(args: &[String]) -> Result<(), UniversalExecError> {
 pub(crate) fn validate_env(
     env: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), UniversalExecError> {
-    if env.len() > MAX_UNIVERSAL_ENV_VARS {
-        return Err(invalid(
-            format!("env supports at most {MAX_UNIVERSAL_ENV_VARS} entries"),
-            "env",
-        ));
-    }
+    let max_string_bytes = linux_exec_string_limit_bytes()?;
     for (name, value) in env {
         let mut chars = name.chars();
         let valid_name = chars
             .next()
             .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
             && chars.all(|character| character == '_' || character.is_ascii_alphanumeric());
-        if !valid_name
-            || value.len() > MAX_UNIVERSAL_ENV_VALUE_BYTES
-            || value.as_bytes().contains(&0)
-        {
+        let encoded_len = name.len().saturating_add(1).saturating_add(value.len());
+        if !valid_name || encoded_len > max_string_bytes || value.as_bytes().contains(&0) {
             return Err(invalid(format!("invalid environment entry {name}"), "env"));
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_exec_payload(
+    args: &[String],
+    env: &std::collections::BTreeMap<String, String>,
+    field: &str,
+) -> Result<(), UniversalExecError> {
+    validate_args(args)?;
+    validate_env(env)?;
+
+    let mut string_bytes = 0usize;
+    for arg in args {
+        string_bytes = string_bytes
+            .checked_add(arg.len())
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| invalid("execve payload size overflow", field))?;
+    }
+    for (name, value) in env {
+        string_bytes = string_bytes
+            .checked_add(name.len())
+            .and_then(|total| total.checked_add(1))
+            .and_then(|total| total.checked_add(value.len()))
+            .and_then(|total| total.checked_add(1))
+            .ok_or_else(|| invalid("execve payload size overflow", field))?;
+    }
+
+    // Linux accounts argv/env pointer tables against the same stack-backed exec budget.
+    // Include both terminating null pointers so admission stays on the safe side of E2BIG.
+    let pointer_count = args
+        .len()
+        .checked_add(env.len())
+        .and_then(|count| count.checked_add(2))
+        .ok_or_else(|| invalid("execve pointer count overflow", field))?;
+    let pointer_bytes = pointer_count
+        .checked_mul(std::mem::size_of::<usize>())
+        .ok_or_else(|| invalid("execve pointer size overflow", field))?;
+    let required_bytes = string_bytes
+        .checked_add(pointer_bytes)
+        .ok_or_else(|| invalid("execve payload size overflow", field))?;
+    let max_bytes = linux_exec_payload_limit_bytes()?;
+    if required_bytes > max_bytes {
+        return Err(invalid(
+            format!(
+                "argv and environment require {required_bytes} bytes, exceeding the host Linux execve limit of {max_bytes} bytes"
+            ),
+            field,
+        ));
     }
     Ok(())
 }

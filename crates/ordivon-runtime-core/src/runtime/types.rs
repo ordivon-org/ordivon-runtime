@@ -259,12 +259,6 @@ impl ReservationState {
     }
 }
 
-pub const MIN_MEMORY_MAX_BYTES: u64 = 16 * 1024 * 1024;
-pub const MAX_MEMORY_MAX_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
-pub const MAX_TASKS_MAX: u32 = 1_000_000;
-pub const MAX_CPU_QUOTA_PERCENT: u32 = 10_000;
-pub const MAX_FOREIGN_REFERENCES: usize = 16;
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionProfile {
@@ -299,13 +293,13 @@ pub struct ForeignReference {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionBudget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = MIN_MEMORY_MAX_BYTES, max = MAX_MEMORY_MAX_BYTES))]
+    #[schemars(range(min = 1))]
     pub memory_max_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = MAX_TASKS_MAX))]
+    #[schemars(range(min = 1))]
     pub tasks_max: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = MAX_CPU_QUOTA_PERCENT))]
+    #[schemars(range(min = 1))]
     pub cpu_quota_percent: Option<u32>,
 }
 
@@ -324,13 +318,12 @@ pub struct UniversalExecutionStep {
     /// Absolute host path to the executable; PATH lookup is intentionally not performed.
     pub executable: String,
     #[serde(default)]
-    #[schemars(length(max = 128))]
     pub args: Vec<String>,
     /// Working directory relative to the Workspace root.
     pub cwd_relative: String,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    #[schemars(range(min = 1, max = crate::MAX_UNIVERSAL_RUNTIME_MS))]
+    #[schemars(range(min = 1))]
     pub timeout_ms: u64,
     #[serde(default)]
     pub continue_on_error: bool,
@@ -366,16 +359,15 @@ pub struct RuntimeExecutionPlan {
     pub executable: String,
     pub executable_digest: String,
     #[serde(default)]
-    #[schemars(length(max = 128))]
     pub args: Vec<String>,
     pub cwd: String,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    #[schemars(range(min = 1, max = crate::MAX_UNIVERSAL_RUNTIME_MS))]
+    #[schemars(range(min = 1))]
     pub timeout_ms: u64,
-    #[schemars(range(min = 1, max = crate::MAX_UNIVERSAL_OUTPUT_BYTES))]
+    #[schemars(range(min = 1))]
     pub stdout_limit_bytes: u64,
-    #[schemars(range(min = 1, max = crate::MAX_UNIVERSAL_OUTPUT_BYTES))]
+    #[schemars(range(min = 1))]
     pub stderr_limit_bytes: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<RuntimeExecutionStep>,
@@ -755,12 +747,21 @@ pub struct RuntimeWorkspaceGetRequest {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeWorkspaceListCursor {
+    pub created_at_ms: u64,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeWorkspaceListRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
     #[serde(default = "default_runtime_list_limit")]
-    #[schemars(range(min = 1, max = 100))]
+    #[schemars(range(min = 1, max = MAX_RUNTIME_LIST_LIMIT))]
     pub limit: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<RuntimeWorkspaceListCursor>,
     #[serde(default)]
     pub include_source_state_digest: bool,
 }
@@ -806,6 +807,9 @@ pub struct RuntimeWorkspaceIssue {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeWorkspaceListResult {
     pub workspaces: Vec<RuntimeWorkspaceSummary>,
+    /// Stable continuation over healthy Workspace records. Inventory issues are global diagnostics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<RuntimeWorkspaceListCursor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issues: Vec<RuntimeWorkspaceIssue>,
 }
@@ -947,14 +951,12 @@ pub struct UniversalExecutionRequest {
     pub stderr_limit_bytes: u64,
     /// Optional ordered fail-fast steps. Empty preserves raw single-command execution.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[schemars(length(max = 32))]
     pub steps: Vec<UniversalExecutionStep>,
     #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
     pub budget: ExecutionBudget,
     #[serde(default)]
     pub execution_profile: ExecutionProfile,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[schemars(length(max = MAX_FOREIGN_REFERENCES))]
     pub foreign_references: Vec<ForeignReference>,
 }
 

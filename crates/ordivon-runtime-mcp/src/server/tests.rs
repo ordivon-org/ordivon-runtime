@@ -225,13 +225,9 @@ fn tool_catalog_uses_transactional_job_contract() {
         exec_schema.pointer("/$defs/ExecutionProfile/enum"),
         Some(&serde_json::json!(["trusted_local", "contained_local"]))
     );
-    assert_eq!(
-        exec_schema
-            .pointer("/$defs/UniversalExecutionRequest/properties/foreignReferences/maxItems"),
-        Some(&serde_json::json!(
-            ordivon_runtime_core::MAX_FOREIGN_REFERENCES
-        ))
-    );
+    assert!(exec_schema
+        .pointer("/$defs/UniversalExecutionRequest/properties/foreignReferences/maxItems")
+        .is_none());
     assert_eq!(
         exec_schema
             .pointer("/$defs/UniversalExecutionRequest/properties/foreignReferences/items/$ref"),
@@ -246,28 +242,36 @@ fn tool_catalog_uses_transactional_job_contract() {
         Some(&serde_json::json!(false))
     );
 
-    assert_eq!(
-        exec_schema.pointer("/$defs/ExecutionBudget/properties/memoryMaxBytes/maximum"),
-        Some(&serde_json::json!(
-            ordivon_runtime_core::MAX_MEMORY_MAX_BYTES
-        ))
-    );
-    assert_eq!(
-        exec_schema.pointer("/$defs/ExecutionBudget/properties/tasksMax/maximum"),
-        Some(&serde_json::json!(ordivon_runtime_core::MAX_TASKS_MAX))
-    );
-    assert_eq!(
-        exec_schema.pointer("/$defs/ExecutionBudget/properties/cpuQuotaPercent/maximum"),
-        Some(&serde_json::json!(
-            ordivon_runtime_core::MAX_CPU_QUOTA_PERCENT
-        ))
-    );
+    for budget_field in ["memoryMaxBytes", "tasksMax", "cpuQuotaPercent"] {
+        assert_eq!(
+            exec_schema.pointer(&format!(
+                "/$defs/ExecutionBudget/properties/{budget_field}/minimum"
+            )),
+            Some(&serde_json::json!(1))
+        );
+        assert!(exec_schema
+            .pointer(&format!(
+                "/$defs/ExecutionBudget/properties/{budget_field}/maximum"
+            ))
+            .is_none());
+    }
     for server_owned in ["principal", "globalLimit", "profileLimit"] {
         assert!(
             !schema.contains(server_owned),
             "schema exposes {server_owned}"
         );
     }
+
+    let patch = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "workspace.patch")
+        .unwrap();
+    let patch_schema = serde_json::to_value(&patch.input_schema).unwrap();
+    assert_eq!(
+        patch_schema.pointer("/properties/files/minItems"),
+        Some(&serde_json::json!(1))
+    );
+    assert!(patch_schema.pointer("/properties/files/maxItems").is_none());
 
     let mutate = tools
         .iter()
@@ -282,10 +286,9 @@ fn tool_catalog_uses_transactional_job_contract() {
         mutate_schema.pointer("/properties/mutations/minItems"),
         Some(&serde_json::json!(1))
     );
-    assert_eq!(
-        mutate_schema.pointer("/properties/mutations/maxItems"),
-        Some(&serde_json::json!(32))
-    );
+    assert!(mutate_schema
+        .pointer("/properties/mutations/maxItems")
+        .is_none());
     assert!(
         mutate_schema
             .pointer("/$defs/WorkspaceMutation/properties/expectedDigest/description")
@@ -749,6 +752,16 @@ fn workspace_list_schema_makes_exact_source_digest_opt_in() {
     assert!(!required
         .iter()
         .any(|value| value.as_str() == Some("includeSourceStateDigest")));
+    assert!(!required
+        .iter()
+        .any(|value| value.as_str() == Some("cursor")));
+    assert!(schema.pointer("/properties/cursor").is_some());
+    assert!(schema
+        .pointer("/$defs/RuntimeWorkspaceListCursor/properties/createdAtMs")
+        .is_some());
+    assert!(schema
+        .pointer("/$defs/RuntimeWorkspaceListCursor/properties/workspaceId")
+        .is_some());
     assert_eq!(
         schema
             .pointer("/properties/includeSourceStateDigest/default")

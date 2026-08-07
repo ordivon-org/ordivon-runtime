@@ -152,7 +152,9 @@ fn execute_request(
         request.steps.clone()
     };
     let total_steps = u32::try_from(steps.len()).unwrap_or(u32::MAX);
-    let overall_deadline = Instant::now() + Duration::from_millis(request.timeout_ms);
+    let overall_deadline = Instant::now()
+        .checked_add(Duration::from_millis(request.timeout_ms))
+        .ok_or_else(|| runner_error("task timeout exceeds platform monotonic clock range"))?;
     let mut revision = 0_u64;
     let mut completed_steps = 0_u32;
     let mut step_results = Vec::with_capacity(steps.len());
@@ -366,6 +368,7 @@ fn execute_step(
     if !cwd.starts_with(workspace) {
         return Err(runner_error("runner cwd escaped workspace"));
     }
+    super::validate_exec_payload(&step.args, &step.env, "steps")?;
     let executable =
         validate_executable_identity(&step.executable, &step.executable_digest, "executable")?;
     let mut command = Command::new(&executable);
@@ -420,7 +423,9 @@ fn execute_step(
     let stderr_thread = thread::spawn(move || {
         capture_stream_append(stderr, &stderr_path, stderr_limit, stderr_retained_before)
     });
-    let step_deadline = Instant::now() + Duration::from_millis(step.timeout_ms);
+    let step_deadline = Instant::now()
+        .checked_add(Duration::from_millis(step.timeout_ms))
+        .ok_or_else(|| runner_error("step timeout exceeds platform monotonic clock range"))?;
     let deadline = step_deadline.min(overall_deadline);
     let mut timed_out = false;
     let status = loop {
@@ -688,8 +693,7 @@ fn validate_request_identity(request: &RunnerTaskRequest) -> Result<(), Universa
     }
     super::validate_id(&request.task_id, "taskId")?;
     super::validate_id(&request.workspace_id, "workspaceId")?;
-    super::validate_args(&request.args)?;
-    super::validate_env(&request.env)?;
+    super::validate_exec_payload(&request.args, &request.env, "execution")?;
     if let Some(payload) = &request.payload {
         if payload.uid == 0 || payload.gid == 0 {
             return Err(runner_error("payload identity must be non-root"));

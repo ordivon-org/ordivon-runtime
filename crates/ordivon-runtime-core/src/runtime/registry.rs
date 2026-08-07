@@ -84,9 +84,9 @@ impl RegistryConfig {
                 "storeRoot",
             ));
         }
-        if self.busy_timeout_ms == 0 || self.busy_timeout_ms > 60_000 {
+        if self.busy_timeout_ms == 0 {
             return Err(RuntimeError::invalid(
-                "busy timeout must be in 1..=60000",
+                "busy timeout must be positive",
                 "busyTimeoutMs",
             ));
         }
@@ -876,25 +876,15 @@ impl Registry {
         Ok(self.job_snapshot(job_id)?.projection)
     }
 
-    pub fn active_job_ids_for_workspace(
-        &self,
-        workspace_id: &str,
-        limit: u32,
-    ) -> RuntimeResult<Vec<String>> {
-        if limit == 0 || limit > MAX_RUNTIME_LIST_LIMIT {
-            return Err(RuntimeError::invalid(
-                format!("limit must be in 1..={MAX_RUNTIME_LIST_LIMIT}"),
-                "limit",
-            ));
-        }
+    pub fn active_job_ids_for_workspace(&self, workspace_id: &str) -> RuntimeResult<Vec<String>> {
         let connection = self.open_connection()?;
         let mut statement = connection
             .prepare(
-                "SELECT DISTINCT jobs.job_id FROM jobs LEFT JOIN attempts ON attempts.job_id=jobs.job_id LEFT JOIN concurrency_reservations ON concurrency_reservations.attempt_id=attempts.attempt_id WHERE jobs.workspace_id=?1 AND (jobs.resolution IS NULL OR concurrency_reservations.state IN ('active','held_orphaned')) ORDER BY jobs.created_at_ms DESC,jobs.job_id DESC LIMIT ?2",
+                "SELECT DISTINCT jobs.job_id FROM jobs LEFT JOIN attempts ON attempts.job_id=jobs.job_id LEFT JOIN concurrency_reservations ON concurrency_reservations.attempt_id=attempts.attempt_id WHERE jobs.workspace_id=?1 AND (jobs.resolution IS NULL OR concurrency_reservations.state IN ('active','held_orphaned')) ORDER BY jobs.created_at_ms DESC,jobs.job_id DESC",
             )
             .map_err(|error| RuntimeError::from_sql(error, "cannot prepare active Workspace Job query"))?;
         let rows = statement
-            .query_map(params![workspace_id, limit], |row| row.get::<_, String>(0))
+            .query_map([workspace_id], |row| row.get::<_, String>(0))
             .map_err(|error| RuntimeError::from_sql(error, "cannot query active Workspace Jobs"))?;
         rows.map(|row| {
             row.map_err(|error| RuntimeError::from_sql(error, "cannot decode active Workspace Job"))
@@ -907,11 +897,8 @@ impl Registry {
         workspace_id: &str,
         limit: u32,
     ) -> RuntimeResult<Vec<AttemptRecord>> {
-        if limit == 0 || limit > MAX_RUNTIME_LIST_LIMIT {
-            return Err(RuntimeError::invalid(
-                format!("limit must be in 1..={MAX_RUNTIME_LIST_LIMIT}"),
-                "limit",
-            ));
+        if limit == 0 {
+            return Err(RuntimeError::invalid("limit must be positive", "limit"));
         }
         let connection = self.open_connection()?;
         let mut statement = connection
@@ -1831,11 +1818,8 @@ impl Registry {
         &self,
         limit: u32,
     ) -> RuntimeResult<Vec<AttemptRecord>> {
-        if limit == 0 || limit > MAX_RUNTIME_LIST_LIMIT {
-            return Err(RuntimeError::invalid(
-                format!("limit must be in 1..={MAX_RUNTIME_LIST_LIMIT}"),
-                "limit",
-            ));
+        if limit == 0 {
+            return Err(RuntimeError::invalid("limit must be positive", "limit"));
         }
         self.list_nonterminal_attempts_with_limit(Some(limit))
     }
@@ -1882,11 +1866,8 @@ impl Registry {
         &self,
         limit: u32,
     ) -> RuntimeResult<Vec<AttemptRecord>> {
-        if limit == 0 || limit > MAX_RUNTIME_LIST_LIMIT {
-            return Err(RuntimeError::invalid(
-                format!("limit must be in 1..={MAX_RUNTIME_LIST_LIMIT}"),
-                "limit",
-            ));
+        if limit == 0 {
+            return Err(RuntimeError::invalid("limit must be positive", "limit"));
         }
         let connection = self.open_connection()?;
         let mut statement = connection
@@ -3322,52 +3303,40 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
         ));
     }
     validate_plan_budget(&request.plan.budget)?;
-    if request.plan.args.len() > 128 || request.plan.env.len() > 64 {
-        return Err(RuntimeError::invalid(
-            "execution args or environment exceed runtime bounds",
-            "plan",
-        ));
-    }
-    if request
-        .plan
-        .args
-        .iter()
-        .chain(request.plan.env.keys())
-        .chain(request.plan.env.values())
-        .any(|value| value.as_bytes().contains(&0) || value.len() > 16 * 1024)
-    {
-        return Err(RuntimeError::invalid(
-            "execution args or environment contain invalid values",
-            "plan",
-        ));
+    validate_exec_payload_for_plan(&request.plan.args, &request.plan.env, "plan")?;
+    for (index, step) in request.plan.steps.iter().enumerate() {
+        validate_exec_payload_for_plan(&step.args, &step.env, &format!("plan.steps[{index}]"))?;
     }
     Ok(())
 }
 
+fn validate_exec_payload_for_plan(
+    args: &[String],
+    env: &std::collections::BTreeMap<String, String>,
+    field: &str,
+) -> RuntimeResult<()> {
+    crate::universal::validate_exec_payload(args, env, field).map_err(|error| {
+        let error_field = error.field.unwrap_or_else(|| field.to_string());
+        RuntimeError::invalid(error.message, &error_field)
+    })
+}
+
 fn validate_plan_budget(budget: &super::ExecutionBudget) -> RuntimeResult<()> {
-    if budget.memory_max_bytes.is_some_and(|value| {
-        !(super::MIN_MEMORY_MAX_BYTES..=super::MAX_MEMORY_MAX_BYTES).contains(&value)
-    }) {
+    if budget.memory_max_bytes == Some(0) {
         return Err(RuntimeError::invalid(
-            "plan memoryMaxBytes is outside Runtime bounds",
+            "plan memoryMaxBytes must be positive",
             "plan.budget.memoryMaxBytes",
         ));
     }
-    if budget
-        .tasks_max
-        .is_some_and(|value| value == 0 || value > super::MAX_TASKS_MAX)
-    {
+    if budget.tasks_max == Some(0) {
         return Err(RuntimeError::invalid(
-            "plan tasksMax is outside Runtime bounds",
+            "plan tasksMax must be positive",
             "plan.budget.tasksMax",
         ));
     }
-    if budget
-        .cpu_quota_percent
-        .is_some_and(|value| value == 0 || value > super::MAX_CPU_QUOTA_PERCENT)
-    {
+    if budget.cpu_quota_percent == Some(0) {
         return Err(RuntimeError::invalid(
-            "plan cpuQuotaPercent is outside Runtime bounds",
+            "plan cpuQuotaPercent must be positive",
             "plan.budget.cpuQuotaPercent",
         ));
     }

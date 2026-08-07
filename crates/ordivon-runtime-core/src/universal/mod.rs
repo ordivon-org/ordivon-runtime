@@ -8,12 +8,7 @@ mod runner;
 mod types;
 mod workspace;
 
-pub use config::{
-    UniversalExecutorConfig, MAX_UNIVERSAL_ARGS, MAX_UNIVERSAL_ARG_BYTES,
-    MAX_UNIVERSAL_ENV_VALUE_BYTES, MAX_UNIVERSAL_ENV_VARS, MAX_UNIVERSAL_OUTPUT_BYTES,
-    MAX_UNIVERSAL_RUNTIME_MS, MAX_WORKSPACE_IO_BYTES, MAX_WORKSPACE_MUTATIONS,
-    UNIVERSAL_EXEC_SCHEMA_VERSION,
-};
+pub use config::{UniversalExecutorConfig, MAX_WORKSPACE_IO_BYTES, UNIVERSAL_EXEC_SCHEMA_VERSION};
 pub use error::{UniversalExecError, UniversalExecErrorCode};
 pub use mutation::{mutate_workspace, read_workspace_slice};
 pub use patch::{
@@ -35,7 +30,6 @@ pub use types::{
     WorkspacePatchedFile, WorkspaceReadRequest, WorkspaceReadResult, WorkspaceReadSliceRequest,
     WorkspaceReadSliceResult, WorkspaceRecord, WorkspaceRenamedPath, WorkspaceTextEdit,
     WorkspaceTextPosition, WorkspaceTextRange, WorkspaceWriteRequest, WorkspaceWriteResult,
-    MAX_WORKSPACE_PATCH_EDITS_PER_FILE, MAX_WORKSPACE_PATCH_FILES,
 };
 pub use workspace::{
     create_git_workspace, list_workspace_records, load_workspace_record, read_workspace_text,
@@ -46,8 +40,12 @@ pub use workspace::{workspace_is_dirty, workspace_source_state_digest};
 
 pub(crate) use config::canonical_directory;
 pub(crate) use fsutil::{
-    invalid, io_error, now_unix_ms, sha256_bytes, sha256_file, validate_args, validate_env,
+    invalid, io_error, now_unix_ms, sha256_bytes, sha256_file, validate_env, validate_exec_payload,
     validate_id, validate_relative_path, write_bytes_atomic, write_json_atomic,
+};
+#[cfg(test)]
+pub(crate) use fsutil::{
+    linux_exec_payload_limit_bytes, linux_exec_string_limit_bytes, validate_args,
 };
 pub(crate) use types::{
     CapturedOutput, RunnerExecutionStep, RunnerPayloadConfig, RunnerStartEvidence,

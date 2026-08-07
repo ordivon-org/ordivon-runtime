@@ -704,9 +704,9 @@ fn open_read_only(config: &RuntimeInspectionConfig) -> RuntimeResult<(Connection
             "database",
         ));
     }
-    if config.busy_timeout_ms == 0 || config.busy_timeout_ms > 60_000 {
+    if config.busy_timeout_ms == 0 {
         return Err(RuntimeError::invalid(
-            "busyTimeoutMs must be in 1..=60000",
+            "busyTimeoutMs must be positive",
             "busyTimeoutMs",
         ));
     }

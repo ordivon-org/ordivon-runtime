@@ -228,6 +228,59 @@ fn workspace_diff_includes_staged_changes_and_workspace_listing_recovers_open_ha
 }
 
 #[test]
+fn workspace_diff_keeps_complete_path_sets_beyond_legacy_caps() {
+    let sandbox = Sandbox::new("workspace-large-path-set");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    for index in 0..520 {
+        fs::write(source.join(format!("tracked-{index:03}.txt")), "base\n").unwrap();
+    }
+    run_git(&source, ["add", "."]);
+    run_git(&source, ["commit", "-qm", "add large path fixture"]);
+    let config = sandbox.config();
+    let workspace_id = "workspace-large-path-set";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    for index in 0..520 {
+        fs::write(
+            workspace.join(format!("tracked-{index:03}.txt")),
+            format!("changed-{index}\n"),
+        )
+        .unwrap();
+    }
+    for index in 0..300 {
+        fs::write(
+            workspace.join(format!("untracked-{index:03}.txt")),
+            format!("new-{index}\n"),
+        )
+        .unwrap();
+    }
+
+    let diff = workspace_diff(
+        &config,
+        &WorkspaceDiffRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            max_bytes: 1024,
+        },
+    )
+    .unwrap();
+    assert!(diff.truncated);
+    assert_eq!(diff.changed_paths.len(), 520);
+    assert_eq!(diff.modified_paths.len(), 520);
+    assert_eq!(diff.untracked_paths.len(), 300);
+}
+
+#[test]
 fn workspace_diff_reports_structured_modified_added_deleted_and_renamed_paths() {
     let sandbox = Sandbox::new("workspace-structured-diff");
     let source = sandbox.root.join("source");
@@ -1172,7 +1225,7 @@ fn existing_mutation_requires_digest_before_exact_text_match() {
 }
 
 #[test]
-fn maximum_mutation_batch_preflights_atomically() {
+fn large_mutation_batch_preflights_atomically_without_cardinality_cap() {
     let sandbox = Sandbox::new("mutation-maximum-batch");
     let source = sandbox.root.join("source");
     init_git_repo(&source);
@@ -1205,7 +1258,7 @@ fn maximum_mutation_batch_preflights_atomically() {
         expected_digest: None,
         expected_text: Some("baseline\n".to_string()),
     });
-    assert_eq!(mutations.len(), MAX_WORKSPACE_MUTATIONS);
+    assert_eq!(mutations.len(), 32);
 
     let error = mutate_workspace(
         &config,
@@ -1235,14 +1288,94 @@ fn maximum_mutation_batch_preflights_atomically() {
         expected_digest: None,
         expected_text: None,
     });
-    let overflow = WorkspaceMutateRequest {
+    let large = WorkspaceMutateRequest {
         schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
         workspace_id: workspace_id.to_string(),
         mutations,
+    };
+    assert_eq!(large.mutations.len(), 33);
+    large.validate_shape().unwrap();
+}
+
+#[test]
+fn exec_strings_follow_linux_physical_boundary_without_cardinality_caps() {
+    let args = (0..129)
+        .map(|index| format!("arg-{index}"))
+        .collect::<Vec<_>>();
+    validate_args(&args).unwrap();
+
+    let env = (0..65)
+        .map(|index| (format!("KEY_{index}"), format!("value-{index}")))
+        .collect::<BTreeMap<_, _>>();
+    validate_env(&env).unwrap();
+
+    let per_string_limit = linux_exec_string_limit_bytes().unwrap();
+    validate_args(&["x".repeat(per_string_limit)]).unwrap();
+    let too_large = validate_args(&["x".repeat(per_string_limit + 1)]).unwrap_err();
+    assert_eq!(too_large.field.as_deref(), Some("args"));
+
+    let aggregate_limit = linux_exec_payload_limit_bytes().unwrap();
+    let chunk = 32 * 1024;
+    let aggregate = (0..(aggregate_limit / chunk + 2))
+        .map(|_| "x".repeat(chunk))
+        .collect::<Vec<_>>();
+    let too_large = validate_exec_payload(&aggregate, &BTreeMap::new(), "execution").unwrap_err();
+    assert_eq!(too_large.field.as_deref(), Some("execution"));
+}
+
+#[test]
+fn patch_shape_accepts_batches_beyond_legacy_cardinality_caps() {
+    let files = (0..33)
+        .map(|index| WorkspaceFilePatch {
+            relative_path: format!("file-{index}.txt"),
+            expected_digest: None,
+            edits: vec![WorkspaceTextEdit {
+                range: WorkspaceTextRange {
+                    start: WorkspaceTextPosition { line: 1, column: 0 },
+                    end: WorkspaceTextPosition { line: 1, column: 0 },
+                },
+                expected_text: String::new(),
+                replacement: format!("{index}"),
+            }],
+        })
+        .collect::<Vec<_>>();
+    WorkspacePatchRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        workspace_id: "workspace-large-patch".to_string(),
+        files,
+        max_diff_bytes: 4096,
     }
     .validate_shape()
-    .unwrap_err();
-    assert_eq!(overflow.field.as_deref(), Some("mutations"));
+    .unwrap();
+
+    let edits = (0..129)
+        .map(|index| WorkspaceTextEdit {
+            range: WorkspaceTextRange {
+                start: WorkspaceTextPosition {
+                    line: 1,
+                    column: index,
+                },
+                end: WorkspaceTextPosition {
+                    line: 1,
+                    column: index,
+                },
+            },
+            expected_text: String::new(),
+            replacement: "x".to_string(),
+        })
+        .collect::<Vec<_>>();
+    WorkspacePatchRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        workspace_id: "workspace-many-edits".to_string(),
+        files: vec![WorkspaceFilePatch {
+            relative_path: "file.txt".to_string(),
+            expected_digest: None,
+            edits,
+        }],
+        max_diff_bytes: 4096,
+    }
+    .validate_shape()
+    .unwrap();
 }
 
 #[test]

@@ -74,7 +74,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.list",
-        description = "List newest healthy open Workspaces with canonical sourceRepo and exact source revision. Exact sourceStateDigest is omitted by default and may be requested explicitly; workspace.get remains the precise proof boundary. This is a projection-only read and does not reconcile or dispatch Jobs. Missing historical records are omitted; Workspace-local inventory/projection failures are isolated in issues with a machine-readable stage, while authority-wide failures still fail closed.",
+        description = "List newest healthy open Workspaces using stable cursor pagination, with canonical sourceRepo and exact source revision. Exact sourceStateDigest is omitted by default and may be requested explicitly; workspace.get remains the precise proof boundary. This is a projection-only read and does not reconcile or dispatch Jobs. Missing historical records are omitted; inventory issues are returned as global diagnostics and page-local projection failures are isolated with a machine-readable stage, while authority-wide failures still fail closed.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeWorkspaceListResult>>(),
         annotations(
             title = "List open workspaces",

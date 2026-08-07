@@ -506,6 +506,7 @@ fn projection_and_workspace_guards_do_not_dispatch_accepted_jobs() {
         .list_workspaces(&RuntimeWorkspaceListRequest {
             schema_version: RUNTIME_SCHEMA_VERSION,
             limit: 100,
+            cursor: None,
             include_source_state_digest: false,
         })
         .unwrap();
@@ -791,7 +792,7 @@ fn maintenance_batch_clears_stale_terminal_recovery_condition() {
 fn execution_budget_is_validated_and_part_of_idempotent_identity() {
     let sandbox = Sandbox::new("execution-budget", 5000);
     let mut invalid = request(&sandbox, "request:budget-invalid", 4);
-    invalid.plan.budget.memory_max_bytes = Some(crate::MIN_MEMORY_MAX_BYTES - 1);
+    invalid.plan.budget.memory_max_bytes = Some(0);
     let error = sandbox.registry.submit(&invalid).unwrap_err();
     assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
     assert_eq!(error.field.as_deref(), Some("plan.budget.memoryMaxBytes"));
@@ -803,6 +804,132 @@ fn execution_budget_is_validated_and_part_of_idempotent_identity() {
     changed.plan.budget.tasks_max = Some(65);
     let error = sandbox.registry.submit(&changed).unwrap_err();
     assert_eq!(error.code, RuntimeErrorCode::IdempotencyConflict);
+}
+
+#[test]
+fn representation_cardinality_is_not_runtime_admission_policy() {
+    let sandbox = Sandbox::new("representation-cardinality", 5000);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let steps = (0..33)
+        .map(|index| UniversalExecutionStep {
+            id: format!("step-{index}"),
+            executable: "/usr/bin/true".to_string(),
+            args: vec![format!("arg-{index}")],
+            cwd_relative: ".".to_string(),
+            env: BTreeMap::new(),
+            timeout_ms: 1_000,
+            continue_on_error: false,
+        })
+        .collect::<Vec<_>>();
+    let foreign_references = (0..17)
+        .map(|index| ForeignReference {
+            namespace: "ordivon.test".to_string(),
+            reference_type: "fixture".to_string(),
+            id: format!("reference-{index}"),
+            generation: None,
+            digest: None,
+        })
+        .collect::<Vec<_>>();
+    let request = TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: "request:large-representation".to_string(),
+        principal: "principal:test".to_string(),
+        global_limit: 1,
+        execution: UniversalExecutionRequest {
+            workspace_id: "workspace-does-not-exist".to_string(),
+            executable: "/usr/bin/true".to_string(),
+            args: (0..129).map(|index| format!("arg-{index}")).collect(),
+            cwd_relative: ".".to_string(),
+            env: (0..65)
+                .map(|index| (format!("KEY_{index}"), format!("value-{index}")))
+                .collect(),
+            timeout_ms: 33_000,
+            stdout_limit_bytes: 1_024,
+            stderr_limit_bytes: 1_024,
+            steps,
+            budget: ExecutionBudget::default(),
+            execution_profile: ExecutionProfile::TrustedLocal,
+            foreign_references,
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    let error = runtime.run_task(&request).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::WorkspaceNotFound);
+}
+
+#[test]
+fn operator_runtime_and_output_ceilings_are_enforced_before_admission() {
+    let sandbox = Sandbox::new("operator-ceilings", 5000);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let base = TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: "request:operator-ceiling".to_string(),
+        principal: "principal:test".to_string(),
+        global_limit: 1,
+        execution: UniversalExecutionRequest {
+            workspace_id: "workspace-does-not-exist".to_string(),
+            executable: "/usr/bin/true".to_string(),
+            args: Vec::new(),
+            cwd_relative: ".".to_string(),
+            env: BTreeMap::new(),
+            timeout_ms: 60_000,
+            stdout_limit_bytes: 1_048_576,
+            stderr_limit_bytes: 1_048_576,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            execution_profile: ExecutionProfile::TrustedLocal,
+            foreign_references: Vec::new(),
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+
+    let mut timeout = base.clone();
+    timeout.execution.timeout_ms = 60_001;
+    let error = runtime.run_task(&timeout).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert_eq!(error.field.as_deref(), Some("execution.timeoutMs"));
+
+    let mut output = base;
+    output.execution.stdout_limit_bytes = 1_048_577;
+    let error = runtime.run_task(&output).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert_eq!(error.field.as_deref(), Some("execution.stdoutLimitBytes"));
+}
+
+#[test]
+fn oversized_exec_string_is_rejected_before_admission() {
+    let sandbox = Sandbox::new("exec-string-boundary", 5000);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let request = TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: "request:oversized-arg".to_string(),
+        principal: "principal:test".to_string(),
+        global_limit: 1,
+        execution: UniversalExecutionRequest {
+            workspace_id: "workspace-does-not-exist".to_string(),
+            executable: "/usr/bin/true".to_string(),
+            args: vec!["x".repeat(128 * 1024)],
+            cwd_relative: ".".to_string(),
+            env: BTreeMap::new(),
+            timeout_ms: 1_000,
+            stdout_limit_bytes: 1_024,
+            stderr_limit_bytes: 1_024,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            execution_profile: ExecutionProfile::TrustedLocal,
+            foreign_references: Vec::new(),
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    let error = runtime.run_task(&request).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert_eq!(error.field.as_deref(), Some("args"));
 }
 
 #[test]
@@ -1380,7 +1507,7 @@ fn active_workspace_job_lookup_tracks_reservations_and_resolution() {
     assert_eq!(
         sandbox
             .registry
-            .active_job_ids_for_workspace("workspace:active-workspace", 20)
+            .active_job_ids_for_workspace("workspace:active-workspace")
             .unwrap(),
         vec![created.job.job_id.clone()]
     );
@@ -1400,7 +1527,7 @@ fn active_workspace_job_lookup_tracks_reservations_and_resolution() {
         .unwrap();
     assert!(sandbox
         .registry
-        .active_job_ids_for_workspace("workspace:active-workspace", 20)
+        .active_job_ids_for_workspace("workspace:active-workspace")
         .unwrap()
         .is_empty());
 }
@@ -1455,6 +1582,52 @@ fn workspace_get_preserves_source_repository_identity() {
 }
 
 #[test]
+fn workspace_list_cursor_pagination_is_complete_and_unique() {
+    let (sandbox, runtime, _executor) =
+        durable_patch_fixture("workspace-list-cursor", "workspace-list-cursor-0");
+    let source = sandbox.root.join("patch-source");
+    for index in 1..4 {
+        runtime
+            .open_workspace(&crate::GitWorkspaceCreateRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: format!("workspace-list-cursor-{index}"),
+                source_repo: source.to_string_lossy().into_owned(),
+                source_revision: "HEAD".to_string(),
+            })
+            .unwrap();
+    }
+
+    let mut cursor = None;
+    let mut observed = Vec::new();
+    loop {
+        let page = runtime
+            .list_workspaces(&RuntimeWorkspaceListRequest {
+                schema_version: RUNTIME_SCHEMA_VERSION,
+                limit: 1,
+                cursor,
+                include_source_state_digest: false,
+            })
+            .unwrap();
+        assert!(page.issues.is_empty());
+        observed.extend(
+            page.workspaces
+                .iter()
+                .map(|workspace| workspace.workspace_id.clone()),
+        );
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(observed.len(), 4);
+    let unique = observed.iter().collect::<BTreeSet<_>>();
+    assert_eq!(unique.len(), 4);
+    for index in 0..4 {
+        assert!(observed.contains(&format!("workspace-list-cursor-{index}")));
+    }
+}
+
+#[test]
 fn workspace_list_isolates_workspace_local_projection_failure_with_stage() {
     let (_sandbox, runtime, executor) =
         durable_patch_fixture("workspace-list-local-issue", "workspace-list-local-issue");
@@ -1473,6 +1646,7 @@ fn workspace_list_isolates_workspace_local_projection_failure_with_stage() {
         .list_workspaces(&RuntimeWorkspaceListRequest {
             schema_version: RUNTIME_SCHEMA_VERSION,
             limit: 20,
+            cursor: None,
             include_source_state_digest: false,
         })
         .unwrap();
@@ -2179,6 +2353,7 @@ fn runtime_doctor_summarizes_capacity_holders() {
     assert_eq!(report.summary.unresolved_jobs, 1);
     assert_eq!(report.summary.reservations_by_state.get("active"), Some(&1));
     assert_eq!(report.summary.capacity_holders.len(), 1);
+    assert!(!report.summary.capacity_holders_truncated);
     assert_eq!(
         report.summary.capacity_holders[0].job_id,
         admission.job.job_id
@@ -2187,6 +2362,23 @@ fn runtime_doctor_summarizes_capacity_holders() {
         report.summary.capacity_holders[0].reservation_state,
         ReservationState::Active
     );
+}
+
+#[test]
+fn runtime_doctor_marks_capacity_holder_projection_incomplete() {
+    let sandbox = Sandbox::new("doctor-capacity-truncation", 5000);
+    for index in 0..51 {
+        let mut request = request(
+            &sandbox,
+            &format!("request:doctor-capacity-truncation:{index}"),
+            64,
+        );
+        request.plan.workspace_id = format!("workspace:doctor-capacity:{index}");
+        created(sandbox.registry.submit(&request).unwrap());
+    }
+    let report = inspect_runtime(&doctor_config(&sandbox)).unwrap();
+    assert_eq!(report.summary.capacity_holders.len(), 50);
+    assert!(report.summary.capacity_holders_truncated);
 }
 
 #[test]

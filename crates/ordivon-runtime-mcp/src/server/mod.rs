@@ -109,7 +109,7 @@ pub struct WorkspacePatchToolRequest {
     pub schema_version: u32,
     pub client_request_id: String,
     pub workspace_id: String,
-    #[schemars(length(min = 1, max = 32))]
+    #[schemars(length(min = 1))]
     pub files: Vec<WorkspaceFilePatch>,
     #[serde(default = "default_patch_diff_bytes")]
     #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
@@ -146,7 +146,7 @@ pub struct WorkspaceExecRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceExecPlanInput {
     pub workspace_id: String,
-    #[schemars(length(min = 1, max = 32))]
+    #[schemars(length(min = 1))]
     pub steps: Vec<UniversalExecutionStep>,
     pub stdout_limit_bytes: u64,
     pub stderr_limit_bytes: u64,

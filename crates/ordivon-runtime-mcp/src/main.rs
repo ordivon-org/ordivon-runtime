@@ -317,20 +317,16 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         .map(|value| value.parse())
         .transpose()?
         .unwrap_or(15_000);
-    if !(1_000..=3_600_000).contains(&reconcile_interval_ms) {
-        return Err("ORDIVON_RECONCILE_INTERVAL_MS must be in 1000..=3600000".into());
+    if reconcile_interval_ms == 0 {
+        return Err("ORDIVON_RECONCILE_INTERVAL_MS must be positive".into());
     }
     let reconcile_batch_size: u32 = std::env::var("ORDIVON_RECONCILE_BATCH_SIZE")
         .ok()
         .map(|value| value.parse())
         .transpose()?
         .unwrap_or(32);
-    if !(1..=ordivon_runtime_core::MAX_RUNTIME_LIST_LIMIT).contains(&reconcile_batch_size) {
-        return Err(format!(
-            "ORDIVON_RECONCILE_BATCH_SIZE must be in 1..={}",
-            ordivon_runtime_core::MAX_RUNTIME_LIST_LIMIT
-        )
-        .into());
+    if reconcile_batch_size == 0 {
+        return Err("ORDIVON_RECONCILE_BATCH_SIZE must be positive".into());
     }
 
     let global_limit = std::env::var("ORDIVON_GLOBAL_MAX_CONCURRENCY")
@@ -346,12 +342,16 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         .map(|value| value.parse())
         .transpose()?
         .unwrap_or(900_000);
-    if !(1_000..=ordivon_runtime_core::MAX_UNIVERSAL_RUNTIME_MS).contains(&max_runtime_ms) {
-        return Err(format!(
-            "ORDIVON_MAX_RUNTIME_MS must be in 1000..={}",
-            ordivon_runtime_core::MAX_UNIVERSAL_RUNTIME_MS
-        )
-        .into());
+    if max_runtime_ms == 0 {
+        return Err("ORDIVON_MAX_RUNTIME_MS must be positive".into());
+    }
+    let max_output_bytes: u64 = std::env::var("ORDIVON_MAX_OUTPUT_BYTES")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(16 * 1024 * 1024);
+    if max_output_bytes == 0 {
+        return Err("ORDIVON_MAX_OUTPUT_BYTES must be positive".into());
     }
     let principal =
         std::env::var("ORDIVON_PRINCIPAL").unwrap_or_else(|_| "principal:local-owner".to_string());
@@ -379,7 +379,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                     runner_path,
                     allowed_executable_roots,
                     max_runtime_ms,
-                    max_output_bytes: 16 * 1024 * 1024,
+                    max_output_bytes,
                 },
                 startup_grace_ms,
             },

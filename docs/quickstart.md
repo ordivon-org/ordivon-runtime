@@ -105,7 +105,7 @@ At minimum:
 - replace `ORDIVON_BEARER_TOKEN` with at least 32 random characters;
 - keep `ORDIVON_BIND` on loopback;
 - confirm `ORDIVON_EXEC_PATH` and `ORDIVON_EXEC_HOME` expose only intended trusted toolchains;
-- set concurrency, runtime, output, and cache limits for the host;
+- set host policy explicitly, including `ORDIVON_GLOBAL_MAX_CONCURRENCY`, `ORDIVON_MAX_RUNTIME_MS`, `ORDIVON_MAX_OUTPUT_BYTES`, reconciliation cadence/batch size, and cache limits;
 - enable Cloudflare Access trust only when the loopback origin is reachable exclusively through the operator-owned authenticated tunnel.
 
 ## 5. Deploy with a receipt
