@@ -12,6 +12,12 @@ Ordivon Runtime keeps a small universal execution surface in the core and leaves
 - `task.observe`: projects elapsed time, retained output byte counts, last output time, progress revision, completed and total steps, current step, and first failed step. `waitUntil=change_or_terminal` waits until output, progress, or terminal state changes.
 - typed operation errors: MCP errors carry `origin`, `retryClass`, `commitState`, `traceId`, and, when known, `operationId`. `commitState=unknown` requires reconciliation rather than a new operation identity.
 
+## Machine-discoverable Tool results
+
+All public Runtime MCP Tools publish an `outputSchema` for their `structuredContent`. The schema is a two-branch contract: one branch is the Tool's exact success result and the other is the standard `{ "error": ToolError }` envelope. A caller can therefore discover execution fields, Workspace closure state, Artifact metadata, and error-control semantics before the first Tool call instead of learning result shape from trial execution.
+
+The error envelope keeps `code` as the stable machine reason while constraining the control vocabulary that changes safe Agent behavior: `origin` is one of `mcp_adapter`, `runtime_core`, or `workspace_executor`; `retryClass` is one of `never`, `safe_same_request`, or `reconcile_first`; and `commitState` is one of `not_started`, `not_committed`, or `unknown`. The wire values are unchanged from the pre-schema envelope. `toolCatalogDigest` binds these generated output schemas together with Tool names, descriptions, annotations, and input schemas, so a discovery refresh can detect an exact contract change without creating another Runtime authority.
+
 ## Correlated Patch recovery
 
 A durable Patch records its Intent and before/after file digest plan before physical mutation. On response loss, reissue the exact same `workspace.patch` request or call `workspace.patch.get` with the same `clientRequestId`. Runtime applies the Patch only when every file still matches the complete before state. If every file already matches the after state, Runtime commits the missing receipt. Any mixed state is isolated as `unknown`; Runtime never guesses whether a partial external write should be completed or rolled back.

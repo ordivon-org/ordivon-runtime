@@ -340,6 +340,30 @@ pub struct TraceSummary {
     pub total_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolErrorOrigin {
+    McpAdapter,
+    RuntimeCore,
+    WorkspaceExecutor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRetryClass {
+    Never,
+    SafeSameRequest,
+    ReconcileFirst,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCommitState {
+    NotStarted,
+    NotCommitted,
+    Unknown,
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolError {
@@ -354,9 +378,9 @@ pub struct ToolError {
 pub struct ToolErrorContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
-    pub origin: String,
-    pub retry_class: String,
-    pub commit_state: String,
+    pub origin: ToolErrorOrigin,
+    pub retry_class: ToolRetryClass,
+    pub commit_state: ToolCommitState,
     pub retryable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
@@ -389,9 +413,9 @@ impl ToolError {
             message: message.into(),
             context: Box::new(ToolErrorContext {
                 field: None,
-                origin: "mcp_adapter".to_string(),
-                retry_class: "safe_same_request".to_string(),
-                commit_state: "not_started".to_string(),
+                origin: ToolErrorOrigin::McpAdapter,
+                retry_class: ToolRetryClass::SafeSameRequest,
+                commit_state: ToolCommitState::NotStarted,
                 retryable: true,
                 retry_after_ms: None,
                 capacity: None,
@@ -407,9 +431,9 @@ impl ToolError {
             message: message.into(),
             context: Box::new(ToolErrorContext {
                 field: Some(field.to_string()),
-                origin: "mcp_adapter".to_string(),
-                retry_class: "never".to_string(),
-                commit_state: "not_started".to_string(),
+                origin: ToolErrorOrigin::McpAdapter,
+                retry_class: ToolRetryClass::Never,
+                commit_state: ToolCommitState::NotStarted,
                 retryable: false,
                 retry_after_ms: None,
                 capacity: None,
@@ -429,27 +453,30 @@ impl From<RuntimeError> for ToolError {
         let (retry_class, commit_state) = match error.code {
             ordivon_runtime_core::RuntimeErrorCode::DispatchOutcomeUnknown
             | ordivon_runtime_core::RuntimeErrorCode::ReconciliationRequired => {
-                ("reconcile_first", "unknown")
+                (ToolRetryClass::ReconcileFirst, ToolCommitState::Unknown)
             }
             ordivon_runtime_core::RuntimeErrorCode::WorkspaceExists => {
-                ("reconcile_first", "not_started")
+                (ToolRetryClass::ReconcileFirst, ToolCommitState::NotStarted)
             }
             ordivon_runtime_core::RuntimeErrorCode::ConcurrencyLimit
             | ordivon_runtime_core::RuntimeErrorCode::RegistryBusy
             | ordivon_runtime_core::RuntimeErrorCode::WorkspaceBusy => {
-                ("safe_same_request", "not_started")
+                (ToolRetryClass::SafeSameRequest, ToolCommitState::NotStarted)
             }
-            _ if error.retryable => ("safe_same_request", "not_committed"),
-            _ => ("never", "not_committed"),
+            _ if error.retryable => (
+                ToolRetryClass::SafeSameRequest,
+                ToolCommitState::NotCommitted,
+            ),
+            _ => (ToolRetryClass::Never, ToolCommitState::NotCommitted),
         };
         Self {
             code,
             message: error.message,
             context: Box::new(ToolErrorContext {
                 field: error.field,
-                origin: "runtime_core".to_string(),
-                retry_class: retry_class.to_string(),
-                commit_state: commit_state.to_string(),
+                origin: ToolErrorOrigin::RuntimeCore,
+                retry_class,
+                commit_state,
                 retryable: error.retryable,
                 retry_after_ms: error.retry_after_ms,
                 capacity: error.capacity,
@@ -475,18 +502,18 @@ impl From<UniversalExecError> for ToolError {
             message: error.message,
             context: Box::new(ToolErrorContext {
                 field: error.field,
-                origin: "workspace_executor".to_string(),
+                origin: ToolErrorOrigin::WorkspaceExecutor,
                 retry_class: if mutation_outcome_unknown {
-                    "reconcile_first".to_string()
+                    ToolRetryClass::ReconcileFirst
                 } else if error.retryable {
-                    "safe_same_request".to_string()
+                    ToolRetryClass::SafeSameRequest
                 } else {
-                    "never".to_string()
+                    ToolRetryClass::Never
                 },
                 commit_state: if mutation_outcome_unknown {
-                    "unknown".to_string()
+                    ToolCommitState::Unknown
                 } else {
-                    "not_committed".to_string()
+                    ToolCommitState::NotCommitted
                 },
                 retryable: error.retryable,
                 retry_after_ms: None,
@@ -498,6 +525,12 @@ impl From<UniversalExecError> for ToolError {
     }
 }
 
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolErrorEnvelope {
+    pub error: ToolError,
+}
+
 #[derive(Clone, Debug)]
 pub enum ToolOutcome<T> {
     Success(T),
@@ -506,19 +539,23 @@ pub enum ToolOutcome<T> {
 
 impl<T: JsonSchema> JsonSchema for ToolOutcome<T> {
     fn inline_schema() -> bool {
-        T::inline_schema()
+        true
     }
 
     fn schema_name() -> Cow<'static, str> {
-        T::schema_name()
+        Cow::Owned(format!("ToolOutcome_for_{}", T::schema_name()))
     }
 
     fn schema_id() -> Cow<'static, str> {
-        T::schema_id()
+        Cow::Owned(format!("ordivon::ToolOutcome<{}>", T::schema_id()))
     }
 
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
-        T::json_schema(generator)
+        let success = generator.subschema_for::<T>();
+        let error = generator.subschema_for::<ToolErrorEnvelope>();
+        schemars::json_schema!({
+            "oneOf": [success, error]
+        })
     }
 }
 

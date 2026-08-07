@@ -555,6 +555,74 @@ fn unknown_dispatch_outcome_requires_reconciliation_before_retry() {
 }
 
 #[test]
+fn every_public_tool_publishes_structured_output_contract() {
+    let sandbox = Sandbox::new("all-output-schemas");
+    let server = sandbox.server();
+    let tools = server.tool_router.list_all();
+    assert_eq!(tools.len(), 15);
+    for tool in tools {
+        let schema = tool
+            .output_schema
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} omitted outputSchema", tool.name));
+        let value = serde_json::to_value(schema).unwrap();
+        assert_eq!(
+            value
+                .pointer("/oneOf")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2),
+            "{} outputSchema must distinguish success from error",
+            tool.name
+        );
+        assert!(
+            serde_json::to_string(&value).unwrap().contains("error"),
+            "{} outputSchema omitted the standard error envelope",
+            tool.name
+        );
+    }
+}
+
+#[test]
+fn workspace_open_output_schema_exposes_success_and_error_contract() {
+    let sandbox = Sandbox::new("workspace-open-output-schema");
+    let server = sandbox.server();
+    let open = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .find(|tool| tool.name.as_ref() == "workspace.open")
+        .unwrap();
+    let schema = serde_json::to_value(open.output_schema.as_ref().unwrap()).unwrap();
+    let encoded = serde_json::to_string(&schema).unwrap();
+    assert_eq!(
+        schema
+            .pointer("/oneOf")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(2)
+    );
+    for expected in [
+        "sourceRevision",
+        "error",
+        "runtime_core",
+        "mcp_adapter",
+        "workspace_executor",
+        "never",
+        "safe_same_request",
+        "reconcile_first",
+        "not_started",
+        "not_committed",
+        "unknown",
+    ] {
+        assert!(
+            encoded.contains(expected),
+            "output schema omitted {expected}"
+        );
+    }
+}
+
+#[test]
 fn workspace_open_schema_prefers_server_generated_handles() {
     let sandbox = Sandbox::new("workspace-open-schema");
     let server = sandbox.server();

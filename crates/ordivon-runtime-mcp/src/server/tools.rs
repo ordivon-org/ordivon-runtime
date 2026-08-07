@@ -5,6 +5,7 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.open",
         description = "Resolve a local revision and create one detached Git Workspace. Omit workspaceId for a server-generated immutable ws-* handle; provide an explicit unique workspaceId when deterministic response-loss reconciliation matters. Repeating workspace.open is not an idempotent replay: after an uncertain response, use workspace.get on the explicit ID. This tool does not fetch remote refs.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<CompactWorkspaceOpenResult>>(),
         annotations(
             title = "Open isolated workspace",
             read_only_hint = false,
@@ -28,6 +29,7 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.close",
         description = "Close one Workspace. By default, reject tracked or untracked changes; force=true may remove dirty files. expectedSourceStateDigest compare-and-closes only the exact committed source state and remains replayable through the closed tombstone. closureDisposition distinguishes removed, already_closed, already_absent, and recovered_missing; removed only says whether this call performed physical removal. Active or held Jobs always block closure.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<WorkspaceCloseResult>>(),
         annotations(
             title = "Close workspace",
             read_only_hint = false,
@@ -50,6 +52,7 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.get",
         description = "Return one Workspace's canonical sourceRepo, exact source commit, detached-head mode, dirty state, complete sourceStateDigest, creation time, and active Job identities. Use this after reconnecting or after an uncertain workspace.open instead of reconstructing Workspace identity or state from memory.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeWorkspaceSummary>>(),
         annotations(
             title = "Get workspace state",
             read_only_hint = true,
@@ -72,6 +75,7 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.list",
         description = "List newest healthy open Workspaces with canonical sourceRepo and exact source revision. Exact sourceStateDigest is omitted by default and may be requested explicitly; workspace.get remains the precise proof boundary. Missing historical records are omitted; Workspace-local inventory/reconciliation/projection failures are isolated in issues with a machine-readable stage, while authority-wide failures still fail closed.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeWorkspaceListResult>>(),
         annotations(
             title = "List open workspaces",
             read_only_hint = true,
@@ -94,6 +98,7 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.read",
         description = "Read bounded UTF-8 content from an isolated workspace in FULL or SLICE mode.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<WorkspaceReadResult>>(),
         annotations(
             title = "Read workspace content",
             read_only_hint = true,
@@ -158,6 +163,7 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.mutate",
         description = "Apply one atomic validated batch. mode must be exactly WRITE, APPEND, or REPLACE_EXACT; REPLACE_EXACT requires expectedText. expectedDigest is required when a target already exists and protects the complete file version. This tool has no durable clientRequestId replay receipt: after an uncertain response, inspect current Workspace state before retrying. Prefer workspace.patch when response-loss reconciliation is required.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<WorkspaceMutateResult>>(),
         annotations(
             title = "Mutate workspace files",
             read_only_hint = false,
@@ -180,6 +186,7 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.patch",
         description = "Apply one digest-guarded atomic text patch under a durable clientRequestId. Exact replay returns the committed receipt; changed input conflicts; uncertain mixed outcomes require reconciliation.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<DurableWorkspacePatchResult>>(),
         annotations(
             title = "Apply durable workspace patch",
             read_only_hint = false,
@@ -205,6 +212,7 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.patch.get",
         description = "Read and reconcile one durable Workspace Patch receipt by exact clientRequestId without applying an uncommitted patch.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<WorkspacePatchOperationStatus>>(),
         annotations(
             title = "Inspect durable workspace patch",
             read_only_hint = true,
@@ -230,6 +238,7 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.diff",
         description = "Return a bounded Git diff plus structured changed, modified, added, deleted, renamed, and untracked paths for an isolated Workspace.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<CompactWorkspaceDiffResult>>(),
         annotations(
             title = "Inspect workspace diff",
             read_only_hint = true,
@@ -260,6 +269,7 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.exec",
         description = "Run one effect-opaque command inside a workspace with the installed service user's trusted-local authority. execution.executable must be an absolute host path and execution.cwdRelative must be relative to the Workspace root. Duplicate clientRequestId admission is idempotent and current Git source state is bound. Results expose exact Attempt state, execution and delivery disposition, recovery requirement, and explicitly do not claim semantic completion or external-effect idempotency.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),
         annotations(
             title = "Execute transactional workspace job",
             read_only_hint = false,
@@ -283,6 +293,7 @@ impl RuntimeServer {
     #[tool(
         name = "workspace.execPlan",
         description = "Run an ordered structured execution plan inside one Workspace. Steps use absolute executables and explicit args, run sequentially, stop on the first failure by default, and continue only when that step explicitly sets continueOnError. The Job exposes step progress plus exact Attempt state, execution and delivery disposition, and recovery requirement without asking the caller to infer them from output.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),
         annotations(
             title = "Execute fail-fast workspace plan",
             read_only_hint = false,
@@ -309,6 +320,7 @@ impl RuntimeServer {
     #[tool(
         name = "task.observe",
         description = "Observe or briefly await one Job. Exact Attempt state, terminal execution disposition, delivery certainty, recovery requirement, result availability, and semanticCompletionEvaluated=false are projected explicitly. Omit offsets for tail mode, or pass stdoutOffset/stderrOffset with at least 4 tail bytes to read only new retained UTF-8 text and continue from returned next offsets.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),
         annotations(
             title = "Observe transactional job",
             read_only_hint = true,
@@ -331,6 +343,7 @@ impl RuntimeServer {
     #[tool(
         name = "task.cancel",
         description = "Persist cancellation intent, stop the cgroup-owned process tree, and reconcile the Job.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),
         annotations(
             title = "Cancel transactional job",
             read_only_hint = false,
@@ -353,6 +366,7 @@ impl RuntimeServer {
     #[tool(
         name = "task.list",
         description = "List newest Jobs first with request identity, Workspace, command summary, exact Attempt state, execution and delivery disposition, recovery requirement, timestamps, duration, and Artifact count using a stable cursor. Optionally filter by exact clientRequestId; Runtime never claims Task/domain semantic completion.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeJobListResult>>(),
         annotations(
             title = "List transactional jobs",
             read_only_hint = true,
@@ -375,6 +389,7 @@ impl RuntimeServer {
     #[tool(
         name = "artifact.read",
         description = "Read a bounded verified range from one Job Artifact by Job and Artifact identity.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<ArtifactReadResult>>(),
         annotations(
             title = "Read transactional job artifact",
             read_only_hint = true,
