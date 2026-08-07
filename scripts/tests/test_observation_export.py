@@ -223,6 +223,7 @@ class RuntimeObservationExporterTests(unittest.TestCase):
         job_limit: int = 100,
         fail_after_bundle: bool = False,
         exported_at_ms: int = 2_000,
+        job_ids: tuple[str, ...] = (),
     ) -> dict[str, object]:
         root = Path(directory)
         return runtime_export.export_runtime_observations(
@@ -235,6 +236,7 @@ class RuntimeObservationExporterTests(unittest.TestCase):
             exported_at_ms=exported_at_ms,
             job_limit=job_limit,
             event_limit_per_job=event_limit_per_job,
+            job_ids=job_ids,
             fail_after_bundle=fail_after_bundle,
         )
 
@@ -348,6 +350,48 @@ class RuntimeObservationExporterTests(unittest.TestCase):
                 )["status"],
                 "no_events",
             )
+
+    def test_exact_job_selection_bypasses_unrelated_registry_size(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.create_registry(root / "registry")
+            selected = "job-019fd000-0000-7000-8000-000000000001"
+            result = self.run_export(
+                directory,
+                job_limit=1,
+                job_ids=(selected,),
+            )
+            self.assertEqual(result["eventCount"], 2)
+            self.assertEqual(result["streamCount"], 1)
+            self.assertEqual(result["jobCount"], 1)
+            self.assertEqual(result["registryJobCount"], 2)
+            bundle = observation.ObservationExportBundle.from_dict(
+                json.loads(Path(str(result["bundlePath"])).read_text(encoding="utf-8"))
+            )
+            self.assertEqual(
+                {batch.stream_id for batch in bundle.batches},
+                {f"runtime-job:{selected}"},
+            )
+
+    def test_exact_job_selection_fails_closed_for_missing_or_duplicate_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.create_registry(root / "registry")
+            with self.assertRaisesRegex(
+                runtime_export.RuntimeObservationExportError, "are absent"
+            ):
+                self.run_export(
+                    directory,
+                    job_limit=1,
+                    job_ids=("job-019fd000-0000-7000-8000-ffffffffffff",),
+                )
+            selected = "job-019fd000-0000-7000-8000-000000000001"
+            with self.assertRaisesRegex(ValueError, "must be unique"):
+                self.run_export(
+                    directory,
+                    job_limit=2,
+                    job_ids=(selected, selected),
+                )
 
     def test_job_bound_and_sidecar_boundaries_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

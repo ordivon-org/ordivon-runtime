@@ -148,22 +148,43 @@ def _read_events(
     checkpoint: Any,
     job_limit: int,
     event_limit_per_job: int,
-) -> tuple[tuple[Any, ...], dict[str, int], int]:
+    job_ids: tuple[str, ...],
+) -> tuple[tuple[Any, ...], dict[str, int], int, int]:
     core = _core()
     connection = _connection(_database(registry_root))
     try:
         connection.execute("BEGIN")
         total_jobs = int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
-        if total_jobs > job_limit:
-            raise RuntimeObservationExportError(
-                f"Runtime Job count {total_jobs} exceeds bounded job_limit {job_limit}"
-            )
-        jobs = connection.execute(
+        job_columns = (
             "SELECT job_id,client_request_id,request_digest,operation_digest,"
             "workspace_id,execution_plan_digest,created_at_ms FROM jobs "
-            "ORDER BY created_at_ms,job_id LIMIT ?",
-            (job_limit,),
-        ).fetchall()
+        )
+        if job_ids:
+            if len(job_ids) > job_limit:
+                raise RuntimeObservationExportError(
+                    f"selected Runtime Job count {len(job_ids)} exceeds bounded job_limit {job_limit}"
+                )
+            placeholders = ",".join("?" for _ in job_ids)
+            jobs = connection.execute(
+                job_columns
+                + f"WHERE job_id IN ({placeholders}) ORDER BY created_at_ms,job_id",
+                job_ids,
+            ).fetchall()
+            observed_ids = {str(row["job_id"]) for row in jobs}
+            missing = [job_id for job_id in job_ids if job_id not in observed_ids]
+            if missing:
+                raise RuntimeObservationExportError(
+                    "selected Runtime Jobs are absent: " + ", ".join(missing)
+                )
+        else:
+            if total_jobs > job_limit:
+                raise RuntimeObservationExportError(
+                    f"Runtime Job count {total_jobs} exceeds bounded job_limit {job_limit}"
+                )
+            jobs = connection.execute(
+                job_columns + "ORDER BY created_at_ms,job_id LIMIT ?",
+                (job_limit,),
+            ).fetchall()
         all_events: list[tuple[Any, ...]] = []
         updates: dict[str, int] = {}
         for job in jobs:
@@ -250,7 +271,7 @@ def _read_events(
                 all_events.append(tuple(mapped))
                 updates[stream_id] = mapped[-1].source.sequence
         connection.rollback()
-        return tuple(all_events), updates, total_jobs
+        return tuple(all_events), updates, len(jobs), total_jobs
     finally:
         connection.close()
 
@@ -266,6 +287,7 @@ def export_runtime_observations(
     exported_at_ms: int,
     job_limit: int = 1_000,
     event_limit_per_job: int = 256,
+    job_ids: tuple[str, ...] = (),
     fail_after_bundle: bool = False,
 ) -> dict[str, Any]:
     core = _core()
@@ -275,6 +297,17 @@ def export_runtime_observations(
         raise ValueError("job_limit must be between 1 and 10000")
     if not 1 <= event_limit_per_job <= 10_000:
         raise ValueError("event_limit_per_job must be between 1 and 10000")
+    selected_job_ids = tuple(job_ids)
+    if any(
+        not isinstance(job_id, str)
+        or not job_id
+        or job_id != job_id.strip()
+        for job_id in selected_job_ids
+    ):
+        raise ValueError("job_ids must contain non-empty trimmed strings")
+    if len(selected_job_ids) != len(set(selected_job_ids)):
+        raise ValueError("job_ids must be unique")
+    selected_job_ids = tuple(sorted(selected_job_ids))
     _revision(owner_revision, "owner_revision")
     _revision(exporter_revision, "exporter_revision")
     if exported_at_ms < 0:
@@ -292,12 +325,13 @@ def export_runtime_observations(
         producer_identity=producer,
         mapping_version=MAPPING_VERSION,
     )
-    stream_events, updates, job_count = _read_events(
+    stream_events, updates, job_count, registry_job_count = _read_events(
         owner_root,
         producer=producer,
         checkpoint=before,
         job_limit=job_limit,
         event_limit_per_job=event_limit_per_job,
+        job_ids=selected_job_ids,
     )
     if not stream_events:
         return {
@@ -307,6 +341,7 @@ def export_runtime_observations(
             "eventCount": 0,
             "streamCount": 0,
             "jobCount": job_count,
+            "registryJobCount": registry_job_count,
             "checkpointDigest": before.integrity_digest,
             "bundlePath": None,
             "bundleDigest": None,
@@ -353,6 +388,7 @@ def export_runtime_observations(
         "eventCount": event_count,
         "streamCount": len(stream_events),
         "jobCount": job_count,
+        "registryJobCount": registry_job_count,
         "batchCount": len(batches),
         "checkpointBeforeDigest": before.integrity_digest,
         "checkpointAfterDigest": after.integrity_digest,
@@ -373,6 +409,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--exporter-revision", required=True)
     parser.add_argument("--exported-at-ms", type=int)
     parser.add_argument("--job-limit", type=int, default=1_000)
+    parser.add_argument(
+        "--job-id",
+        action="append",
+        default=[],
+        help="export only this exact Runtime Job; may be repeated",
+    )
     parser.add_argument("--event-limit-per-job", type=int, default=256)
     return parser
 
@@ -394,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             job_limit=args.job_limit,
             event_limit_per_job=args.event_limit_per_job,
+            job_ids=tuple(args.job_id),
         )
     except (RuntimeObservationExportError, OSError, sqlite3.Error, ValueError) as error:
         print(
