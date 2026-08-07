@@ -310,7 +310,6 @@ impl Runtime {
                 "schemaVersion",
             ));
         }
-        let _ = self.reconcile_workspace(&request.workspace_id)?;
         let record = load_workspace_record(&self.executor, &request.workspace_id)
             .map_err(map_universal_error)?;
         self.workspace_summary(&record)
@@ -344,17 +343,6 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for record in inventory.records {
-            if let Err(error) = self.reconcile_workspace(&record.workspace_id) {
-                if error.is_reconciliation_fatal() {
-                    return Err(error);
-                }
-                issues.push(workspace_issue(
-                    &record.workspace_id,
-                    RuntimeWorkspaceIssueStage::Reconcile,
-                    error,
-                ));
-                continue;
-            }
             let active_job_ids = match self
                 .registry
                 .active_job_ids_for_workspace(&record.workspace_id, 20)
@@ -456,7 +444,6 @@ impl Runtime {
         request: &WorkspaceMutateRequest,
     ) -> RuntimeResult<WorkspaceMutateResult> {
         let _guard = self.lock_lifecycle()?;
-        let _ = self.reconcile_workspace(&request.workspace_id)?;
         let active = self
             .registry
             .active_job_ids_for_workspace(&request.workspace_id, 20)?;
@@ -479,7 +466,6 @@ impl Runtime {
         request: &WorkspacePatchRequest,
     ) -> RuntimeResult<WorkspacePatchResult> {
         let _guard = self.lock_lifecycle()?;
-        let _ = self.reconcile_workspace(&request.workspace_id)?;
         let active = self
             .registry
             .active_job_ids_for_workspace(&request.workspace_id, 20)?;
@@ -504,7 +490,6 @@ impl Runtime {
         validate_durable_patch_request(request)?;
         let request_digest = durable_patch_request_digest(request)?;
         let _guard = self.lock_lifecycle()?;
-        let _ = self.reconcile_workspace(&request.patch.workspace_id)?;
         let active = self
             .registry
             .active_job_ids_for_workspace(&request.patch.workspace_id, 20)?;
@@ -672,7 +657,6 @@ impl Runtime {
         request: &WorkspaceCloseRequest,
     ) -> RuntimeResult<WorkspaceCloseResult> {
         let _guard = self.lock_lifecycle()?;
-        let _ = self.reconcile_workspace(&request.workspace_id)?;
         let active = self
             .registry
             .active_job_ids_for_workspace(&request.workspace_id, 20)?;
@@ -1513,13 +1497,6 @@ impl Runtime {
         Ok(report)
     }
 
-    fn reconcile_nonterminal_batch(&self, limit: u32) -> RuntimeResult<ReconciliationReport> {
-        let attempts = self.registry.list_nonterminal_attempts_bounded(limit)?;
-        let mut report = ReconciliationReport::default();
-        self.reconcile_candidates_into(attempts, &mut report)?;
-        Ok(report)
-    }
-
     pub fn reconcile_maintenance_batch(&self, limit: u32) -> RuntimeResult<ReconciliationReport> {
         let attempts = self.registry.list_maintenance_attempts_bounded(limit)?;
         let mut report = ReconciliationReport::default();
@@ -2089,8 +2066,6 @@ impl Runtime {
         &self,
         request: &RuntimeJobListRequest,
     ) -> RuntimeResult<RuntimeJobListResult> {
-        self.reconcile_recoverable_orphans()?;
-        let _ = self.reconcile_nonterminal_batch(INTERACTIVE_RECONCILIATION_LIMIT)?;
         self.registry.list_jobs(request)
     }
 

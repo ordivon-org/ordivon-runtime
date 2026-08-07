@@ -24,8 +24,9 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - repository-internal crates now declare package metadata and are not publishable accidentally;
 - systemd/cgroup launch and observation helpers are physically separated from `runtime/engine.rs` without adding a new state owner, API, or execution path;
 - Universal execution failures preserve precise Runtime error categories instead of collapsing Workspace identity, revision, metadata, Artifact, output, and reconciliation failures into `INVALID_REQUEST`;
-- `workspace.list` isolates Workspace-local inventory/reconciliation/projection failures while authority-wide failures remain fail-closed;
-- Workspace and mutation Tool guidance now distinguishes replay-safe reconciliation from operations that require re-reading state after an uncertain response.
+- `workspace.list` isolates Workspace-local inventory/projection failures while authority-wide failures remain fail-closed;
+- Workspace and mutation Tool guidance now distinguishes replay-safe reconciliation from operations that require re-reading state after an uncertain response;
+- projection-only Workspace/Job reads no longer reconcile or dispatch accepted work, Workspace mutation/close guards block directly on durable reservations, `task.observe` remains exact-Job reconciliation, and MCP effect annotations now match those semantics including open-world opaque execution.
 
 ### Fixed
 

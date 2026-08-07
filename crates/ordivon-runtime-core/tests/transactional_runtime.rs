@@ -4,10 +4,10 @@ use ordivon_runtime_core::{
     create_git_workspace, remove_git_workspace, write_workspace_text, ArtifactReadRequest,
     AttemptState, ExecutionBudget, GitWorkspaceCreateRequest, RegistryConfig, Runtime,
     RuntimeConfig, RuntimeExecutionPlan, RuntimeJobListRequest, SubmitRequest, TaskCancelRequest,
-    TaskObserveRequest, TaskRunRequest, UniversalExecutionRequest, UniversalExecutorConfig,
-    WorkspaceCloseRequest, WorkspaceMutateRequest, WorkspaceMutation, WorkspaceMutationMode,
-    WorkspaceWriteRequest, MAX_UNIVERSAL_OUTPUT_BYTES, MAX_UNIVERSAL_RUNTIME_MS,
-    RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest, UniversalExecutionRequest,
+    UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceMutateRequest, WorkspaceMutation,
+    WorkspaceMutationMode, WorkspaceWriteRequest, MAX_UNIVERSAL_OUTPUT_BYTES,
+    MAX_UNIVERSAL_RUNTIME_MS, RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -1101,7 +1101,7 @@ fn runtime_reconcile_all_isolates_one_broken_job_and_converges_another() {
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
-fn runtime_interactive_close_reconciles_completed_unobserved_job() {
+fn runtime_interactive_close_blocks_until_exact_job_is_reconciled() {
     if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
@@ -1121,6 +1121,42 @@ fn runtime_interactive_close_reconciles_completed_unobserved_job() {
         .unwrap();
     wait_for_file(&Path::new(&attempt.bundle_path).join("result.json"));
 
+    let blocked = runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: context.workspace_id.clone(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap_err();
+    assert_eq!(
+        blocked.code,
+        ordivon_runtime_core::RuntimeErrorCode::WorkspaceBusy
+    );
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 1);
+    assert!(
+        !runtime
+            .registry()
+            .project_job(&started.job_id)
+            .unwrap()
+            .execution_terminal
+    );
+
+    let observed = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: started.job_id.clone(),
+            wait_ms: 0,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 4096,
+            stderr_tail_bytes: 4096,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert_eq!(observed.status, "succeeded");
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+
     let closed = runtime
         .close_workspace(&WorkspaceCloseRequest {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
@@ -1129,17 +1165,7 @@ fn runtime_interactive_close_reconciles_completed_unobserved_job() {
             expected_source_state_digest: None,
         })
         .unwrap();
-
     assert!(closed.removed);
-    assert_eq!(
-        runtime
-            .registry()
-            .project_job(&started.job_id)
-            .unwrap()
-            .status,
-        "succeeded"
-    );
-    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }
 
 #[test]
@@ -1187,7 +1213,7 @@ fn runtime_interactive_admission_reconciles_previous_same_workspace_job() {
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
-fn runtime_interactive_list_reconciles_a_bounded_completed_job() {
+fn runtime_interactive_list_is_projection_only_and_observe_reconciles_exact_job() {
     if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
@@ -1221,7 +1247,24 @@ fn runtime_interactive_list_reconciles_a_bounded_completed_job() {
         .find(|job| job.job_id == started.job_id)
         .unwrap();
 
-    assert_eq!(job.status, "succeeded");
+    assert!(!job.execution_terminal);
+    assert!(!job.result_available);
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 1);
+
+    let observed = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: started.job_id.clone(),
+            wait_ms: 0,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 4096,
+            stderr_tail_bytes: 4096,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert_eq!(observed.status, "succeeded");
+    assert!(observed.execution_terminal);
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }
 

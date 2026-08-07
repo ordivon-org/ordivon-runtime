@@ -2,7 +2,8 @@ use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::*;
 use crate::universal::{
     CapturedOutput, RunnerTaskResult, TaskTerminalStatus, UniversalExecutorConfig,
-    WorkspaceFilePatch, WorkspacePatchRequest, WorkspaceTextEdit, WorkspaceTextPosition,
+    WorkspaceCloseRequest, WorkspaceFilePatch, WorkspaceMutateRequest, WorkspaceMutation,
+    WorkspaceMutationMode, WorkspacePatchRequest, WorkspaceTextEdit, WorkspaceTextPosition,
     WorkspaceTextRange, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use proptest::prelude::*;
@@ -410,6 +411,158 @@ fn durable_workspace_patch_marks_mixed_physical_state_unknown_without_replay() {
 
     let error = runtime.patch_workspace_durable(&request).unwrap_err();
     assert_eq!(error.code, RuntimeErrorCode::ReconciliationRequired);
+}
+
+#[test]
+fn task_observe_reconciliation_is_scoped_to_the_requested_job() {
+    let sandbox = Sandbox::new("observe-scope", 5000);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+
+    let target = created(
+        runtime
+            .registry()
+            .submit(&request(&sandbox, "request:observe-scope:target", 8))
+            .unwrap(),
+    );
+    runtime
+        .registry()
+        .request_cancel(&target.job.job_id, 100)
+        .unwrap();
+
+    let mut unrelated_request = request(&sandbox, "request:observe-scope:other", 8);
+    unrelated_request.plan.workspace_id = "workspace:observe-scope:other".to_string();
+    let unrelated = created(runtime.registry().submit(&unrelated_request).unwrap());
+
+    let observed = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: target.job.job_id.clone(),
+            wait_ms: 0,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 0,
+            stderr_tail_bytes: 0,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert!(observed.execution_terminal);
+    assert_eq!(
+        runtime
+            .registry()
+            .get_attempt(&unrelated.attempt.attempt_id)
+            .unwrap()
+            .state,
+        AttemptState::Accepted
+    );
+}
+
+#[test]
+fn projection_and_workspace_guards_do_not_dispatch_accepted_jobs() {
+    let workspace_id = "workspace-observation-contract";
+    let (sandbox, runtime, executor) = durable_patch_fixture("observation-contract", workspace_id);
+
+    let mut target_request = request(&sandbox, "request:observation-contract:target", 8);
+    target_request.plan.workspace_id = workspace_id.to_string();
+    target_request.plan.workspace_path = executor
+        .workspace_path(workspace_id)
+        .to_string_lossy()
+        .into_owned();
+    target_request.plan.cwd = target_request.plan.workspace_path.clone();
+    let target = created(runtime.registry().submit(&target_request).unwrap());
+
+    let mut unrelated_request = request(&sandbox, "request:observation-contract:other", 8);
+    unrelated_request.plan.workspace_id = "workspace:observation-contract:other".to_string();
+    let unrelated = created(runtime.registry().submit(&unrelated_request).unwrap());
+
+    let assert_still_accepted = || {
+        assert_eq!(
+            runtime
+                .registry()
+                .get_attempt(&target.attempt.attempt_id)
+                .unwrap()
+                .state,
+            AttemptState::Accepted
+        );
+        assert_eq!(
+            runtime
+                .registry()
+                .get_attempt(&unrelated.attempt.attempt_id)
+                .unwrap()
+                .state,
+            AttemptState::Accepted
+        );
+    };
+
+    let workspace = runtime
+        .get_workspace(&RuntimeWorkspaceGetRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+        })
+        .unwrap();
+    assert!(workspace.active_job_ids.contains(&target.job.job_id));
+    assert_still_accepted();
+
+    let listed_workspaces = runtime
+        .list_workspaces(&RuntimeWorkspaceListRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            limit: 100,
+            include_source_state_digest: false,
+        })
+        .unwrap();
+    assert!(listed_workspaces
+        .workspaces
+        .iter()
+        .any(|workspace| workspace.workspace_id == workspace_id));
+    assert_still_accepted();
+
+    let listed_jobs = runtime
+        .list_jobs(&RuntimeJobListRequest {
+            limit: 100,
+            cursor: None,
+            client_request_id: None,
+            workspace_id: Some(workspace_id.to_string()),
+        })
+        .unwrap();
+    assert_eq!(listed_jobs.jobs.len(), 1);
+    assert_eq!(listed_jobs.jobs[0].job_id, target.job.job_id);
+    assert_still_accepted();
+
+    let mutate_error = runtime
+        .mutate_workspace(&WorkspaceMutateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            mutations: vec![WorkspaceMutation {
+                relative_path: "NEW.md".to_string(),
+                mode: WorkspaceMutationMode::Write,
+                content: "new\n".to_string(),
+                expected_digest: None,
+                expected_text: None,
+            }],
+        })
+        .unwrap_err();
+    assert_eq!(mutate_error.code, RuntimeErrorCode::WorkspaceBusy);
+    assert_still_accepted();
+
+    let patch_request = durable_patch_request(
+        &executor,
+        workspace_id,
+        "request:observation-contract:patch",
+        false,
+    );
+    let patch_error = runtime.patch_workspace(&patch_request.patch).unwrap_err();
+    assert_eq!(patch_error.code, RuntimeErrorCode::WorkspaceBusy);
+    assert_still_accepted();
+
+    let close_error = runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: false,
+            expected_source_state_digest: None,
+        })
+        .unwrap_err();
+    assert_eq!(close_error.code, RuntimeErrorCode::WorkspaceBusy);
+    assert_still_accepted();
 }
 
 #[test]

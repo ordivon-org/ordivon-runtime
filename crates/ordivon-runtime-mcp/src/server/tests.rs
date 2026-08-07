@@ -74,6 +74,61 @@ fn server_clones_share_one_runtime_state() {
 }
 
 #[test]
+fn tool_effect_annotations_match_runtime_behavior() {
+    let sandbox = Sandbox::new("effect-annotations");
+    let server = sandbox.server();
+    let tools = server.tool_router.list_all();
+    let expected = [
+        ("artifact.read", true, false, true, false),
+        ("task.cancel", false, true, true, false),
+        ("task.list", true, false, true, false),
+        ("task.observe", false, true, true, true),
+        ("workspace.close", false, true, false, false),
+        ("workspace.diff", true, false, true, false),
+        ("workspace.exec", false, true, false, true),
+        ("workspace.execPlan", false, true, false, true),
+        ("workspace.get", true, false, true, false),
+        ("workspace.list", true, false, true, false),
+        ("workspace.mutate", false, true, false, false),
+        ("workspace.open", false, false, false, false),
+        ("workspace.patch", false, true, true, false),
+        ("workspace.patch.get", false, false, true, false),
+        ("workspace.read", true, false, true, false),
+    ];
+    assert_eq!(tools.len(), expected.len());
+    for (name, read_only, destructive, idempotent, open_world) in expected {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("missing Tool {name}"));
+        let annotations = tool
+            .annotations
+            .as_ref()
+            .unwrap_or_else(|| panic!("Tool {name} omitted annotations"));
+        assert_eq!(
+            annotations.read_only_hint,
+            Some(read_only),
+            "{name} readOnlyHint"
+        );
+        assert_eq!(
+            annotations.destructive_hint,
+            Some(destructive),
+            "{name} destructiveHint"
+        );
+        assert_eq!(
+            annotations.idempotent_hint,
+            Some(idempotent),
+            "{name} idempotentHint"
+        );
+        assert_eq!(
+            annotations.open_world_hint,
+            Some(open_world),
+            "{name} openWorldHint"
+        );
+    }
+}
+
+#[test]
 fn server_identity_names_the_runtime_component() {
     let sandbox = Sandbox::new("identity");
     let info = serde_json::to_value(sandbox.server().get_info()).unwrap();
@@ -271,7 +326,7 @@ fn tool_catalog_uses_transactional_job_contract() {
             .annotations
             .as_ref()
             .and_then(|annotations| annotations.read_only_hint),
-        Some(true)
+        Some(false)
     );
     let patch_get_schema = serde_json::to_value(&patch_get.input_schema).unwrap();
     assert!(patch_get_schema

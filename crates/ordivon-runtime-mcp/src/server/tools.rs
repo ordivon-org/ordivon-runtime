@@ -28,7 +28,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.close",
-        description = "Close one Workspace. By default, reject tracked or untracked changes; force=true may remove dirty files. expectedSourceStateDigest compare-and-closes only the exact committed source state and remains replayable through the closed tombstone. closureDisposition distinguishes removed, already_closed, already_absent, and recovered_missing; removed only says whether this call performed physical removal. Active or held Jobs always block closure.",
+        description = "Close one Workspace. By default, reject tracked or untracked changes; force=true may remove dirty files. expectedSourceStateDigest compare-and-closes only the exact committed source state and remains replayable through the closed tombstone. closureDisposition distinguishes removed, already_closed, already_absent, and recovered_missing; removed only says whether this call performed physical removal. Active or held Jobs block closure without being reconciled or dispatched by this call.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<WorkspaceCloseResult>>(),
         annotations(
             title = "Close workspace",
@@ -51,7 +51,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.get",
-        description = "Return one Workspace's canonical sourceRepo, exact source commit, detached-head mode, dirty state, complete sourceStateDigest, creation time, and active Job identities. Use this after reconnecting or after an uncertain workspace.open instead of reconstructing Workspace identity or state from memory.",
+        description = "Return one Workspace's canonical sourceRepo, exact source commit, detached-head mode, dirty state, complete sourceStateDigest, creation time, and active Job identities. This is a projection-only read: it does not reconcile or dispatch Jobs. Use it after reconnecting or after an uncertain workspace.open instead of reconstructing Workspace identity or state from memory.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeWorkspaceSummary>>(),
         annotations(
             title = "Get workspace state",
@@ -74,7 +74,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.list",
-        description = "List newest healthy open Workspaces with canonical sourceRepo and exact source revision. Exact sourceStateDigest is omitted by default and may be requested explicitly; workspace.get remains the precise proof boundary. Missing historical records are omitted; Workspace-local inventory/reconciliation/projection failures are isolated in issues with a machine-readable stage, while authority-wide failures still fail closed.",
+        description = "List newest healthy open Workspaces with canonical sourceRepo and exact source revision. Exact sourceStateDigest is omitted by default and may be requested explicitly; workspace.get remains the precise proof boundary. This is a projection-only read and does not reconcile or dispatch Jobs. Missing historical records are omitted; Workspace-local inventory/projection failures are isolated in issues with a machine-readable stage, while authority-wide failures still fail closed.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeWorkspaceListResult>>(),
         annotations(
             title = "List open workspaces",
@@ -162,7 +162,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.mutate",
-        description = "Apply one atomic validated batch. mode must be exactly WRITE, APPEND, or REPLACE_EXACT; REPLACE_EXACT requires expectedText. expectedDigest is required when a target already exists and protects the complete file version. This tool has no durable clientRequestId replay receipt: after an uncertain response, inspect current Workspace state before retrying. Prefer workspace.patch when response-loss reconciliation is required.",
+        description = "Apply one atomic validated batch. mode must be exactly WRITE, APPEND, or REPLACE_EXACT; REPLACE_EXACT requires expectedText. expectedDigest is required when a target already exists and protects the complete file version. Active or held Jobs block mutation without being reconciled or dispatched by this call. This tool has no durable clientRequestId replay receipt: after an uncertain response, inspect current Workspace state before retrying. Prefer workspace.patch when response-loss reconciliation is required.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<WorkspaceMutateResult>>(),
         annotations(
             title = "Mutate workspace files",
@@ -185,7 +185,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.patch",
-        description = "Apply one digest-guarded atomic text patch under a durable clientRequestId. Exact replay returns the committed receipt; changed input conflicts; uncertain mixed outcomes require reconciliation.",
+        description = "Apply one digest-guarded atomic text patch under a durable clientRequestId. Active or held Jobs block mutation without being reconciled or dispatched by this call. Exact replay returns the committed receipt; changed input conflicts; uncertain mixed outcomes require reconciliation.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<DurableWorkspacePatchResult>>(),
         annotations(
             title = "Apply durable workspace patch",
@@ -211,11 +211,11 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.patch.get",
-        description = "Read and reconcile one durable Workspace Patch receipt by exact clientRequestId without applying an uncommitted patch.",
+        description = "Reconcile one durable Workspace Patch receipt by exact clientRequestId without applying an uncommitted patch. This call may advance Runtime receipt state from prepared to committed or unknown after inspecting physical file state.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<WorkspacePatchOperationStatus>>(),
         annotations(
             title = "Inspect durable workspace patch",
-            read_only_hint = true,
+            read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = true,
             open_world_hint = false
@@ -275,7 +275,7 @@ impl RuntimeServer {
             read_only_hint = false,
             destructive_hint = true,
             idempotent_hint = false,
-            open_world_hint = false
+            open_world_hint = true
         )
     )]
     async fn workspace_exec(
@@ -299,7 +299,7 @@ impl RuntimeServer {
             read_only_hint = false,
             destructive_hint = true,
             idempotent_hint = false,
-            open_world_hint = false
+            open_world_hint = true
         )
     )]
     async fn workspace_exec_plan(
@@ -319,14 +319,14 @@ impl RuntimeServer {
 
     #[tool(
         name = "task.observe",
-        description = "Observe or briefly await one Job. Exact Attempt state, terminal execution disposition, delivery certainty, recovery requirement, result availability, and semanticCompletionEvaluated=false are projected explicitly. Omit offsets for tail mode, or pass stdoutOffset/stderrOffset with at least 4 tail bytes to read only new retained UTF-8 text and continue from returned next offsets.",
+        description = "Observe or briefly await one exact Job and reconcile that Job before projection. If the durable Job is still accepted with desiredState=run, this call may dispatch that already-committed execution intent; it never creates a new Job. Exact Attempt state, terminal execution disposition, delivery certainty, recovery requirement, result availability, and semanticCompletionEvaluated=false are projected explicitly. Omit offsets for tail mode, or pass stdoutOffset/stderrOffset with at least 4 tail bytes to read only new retained UTF-8 text and continue from returned next offsets.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),
         annotations(
             title = "Observe transactional job",
-            read_only_hint = true,
-            destructive_hint = false,
+            read_only_hint = false,
+            destructive_hint = true,
             idempotent_hint = true,
-            open_world_hint = false
+            open_world_hint = true
         )
     )]
     async fn task_observe(
@@ -365,7 +365,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "task.list",
-        description = "List newest Jobs first with request identity, Workspace, command summary, exact Attempt state, execution and delivery disposition, recovery requirement, timestamps, duration, and Artifact count using a stable cursor. Optionally filter by exact workspaceId, clientRequestId, or their intersection so a reconnecting caller can recover historical Jobs without scanning the global ledger; Runtime never claims Task/domain semantic completion.",
+        description = "List newest Jobs first from the current durable Registry projection with request identity, Workspace, command summary, exact Attempt state, execution and delivery disposition, recovery requirement, timestamps, duration, and Artifact count using a stable cursor. Optionally filter by exact workspaceId, clientRequestId, or their intersection so a reconnecting caller can recover historical Jobs without scanning the global ledger. This call does not reconcile or dispatch Jobs; use task.observe for targeted reconciliation. Runtime never claims Task/domain semantic completion.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeJobListResult>>(),
         annotations(
             title = "List transactional jobs",
