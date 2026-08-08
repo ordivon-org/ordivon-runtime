@@ -176,6 +176,53 @@ struct TerminalSupervisorEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ObservedSupervisorEvidence {
+    boot_id: String,
+    unit_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invocation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control_group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    main_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    main_process_start_identity: Option<String>,
+    recorded_pid_alive: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_pid_start_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exec_main_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exec_main_status: Option<i32>,
+}
+
+impl From<&SupervisorObservation> for ObservedSupervisorEvidence {
+    fn from(observation: &SupervisorObservation) -> Self {
+        Self {
+            boot_id: observation.boot_id.clone(),
+            unit_state: match observation.unit_state {
+                SupervisorUnitState::Running => "running",
+                SupervisorUnitState::Terminal => "terminal",
+                SupervisorUnitState::NotFound => "not_found",
+            }
+            .to_string(),
+            invocation_id: observation.invocation_id.clone(),
+            control_group: observation.control_group.clone(),
+            main_pid: observation.main_pid,
+            main_process_start_identity: observation.main_process_start_identity.clone(),
+            recorded_pid_alive: observation.recorded_pid_alive,
+            recorded_pid_start_identity: observation.recorded_pid_start_identity.clone(),
+            result: observation.result.clone(),
+            exec_main_code: observation.exec_main_code,
+            exec_main_status: observation.exec_main_status,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TerminalProcessEvidence {
     schema_version: u32,
     job_id: String,
@@ -189,6 +236,8 @@ struct TerminalProcessEvidence {
     args: Vec<String>,
     cwd: String,
     supervisor: TerminalSupervisorEvidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_supervisor: Option<ObservedSupervisorEvidence>,
     start_disposition: String,
     cancellation_disposition: String,
     execution_disposition: String,
@@ -2036,24 +2085,32 @@ impl Runtime {
         match disposition {
             SupervisorRecoveryDisposition::Running => Ok(()),
             SupervisorRecoveryDisposition::Terminal(state) => {
-                self.commit_control_terminal(attempt, state, "SUPERVISOR_TERMINAL_FALLBACK", None)?;
+                self.commit_observed_control_terminal(
+                    attempt,
+                    state,
+                    "SUPERVISOR_TERMINAL_FALLBACK",
+                    None,
+                    Some(&observation),
+                )?;
                 Ok(())
             }
             SupervisorRecoveryDisposition::Lost => {
-                self.commit_control_terminal(
+                self.commit_observed_control_terminal(
                     attempt,
                     AttemptState::Lost,
                     "SUPERVISOR_EVIDENCE_LOST",
                     None,
+                    Some(&observation),
                 )?;
                 Ok(())
             }
             SupervisorRecoveryDisposition::Orphaned(reason) => {
-                self.commit_control_terminal(
+                self.commit_observed_control_terminal(
                     attempt,
                     AttemptState::Orphaned,
                     "SUPERVISOR_IDENTITY_ORPHANED",
                     Some(reason),
+                    Some(&observation),
                 )?;
                 let current = self.registry.get_attempt(&attempt.attempt_id)?;
                 if Path::new(&current.bundle_path).join(RESULT_FILE).exists() {
@@ -2070,6 +2127,17 @@ impl Runtime {
         state: AttemptState,
         reason_code: &str,
         detail: Option<String>,
+    ) -> RuntimeResult<TaskObservation> {
+        self.commit_observed_control_terminal(attempt, state, reason_code, detail, None)
+    }
+
+    fn commit_observed_control_terminal(
+        &self,
+        attempt: &AttemptRecord,
+        state: AttemptState,
+        reason_code: &str,
+        detail: Option<String>,
+        observed_supervisor: Option<&SupervisorObservation>,
     ) -> RuntimeResult<TaskObservation> {
         let current = self.registry.get_attempt(&attempt.attempt_id)?;
         if current.state.is_terminal() {
@@ -2134,7 +2202,12 @@ impl Runtime {
             artifacts,
             reason_code: reason_code.to_string(),
         };
-        self.append_terminal_evidence(&current, &mut terminal)?;
+        append_terminal_evidence_for_commit_with_observation(
+            &self.registry,
+            &current,
+            &mut terminal,
+            observed_supervisor,
+        )?;
         let _ = self.registry.commit_terminal(&terminal)?;
         if state != AttemptState::Orphaned {
             release_terminal_unit(&current.unit_name);
@@ -2418,6 +2491,15 @@ pub(crate) fn append_terminal_evidence_for_commit(
     attempt: &AttemptRecord,
     terminal: &mut TerminalCommit,
 ) -> RuntimeResult<()> {
+    append_terminal_evidence_for_commit_with_observation(registry, attempt, terminal, None)
+}
+
+fn append_terminal_evidence_for_commit_with_observation(
+    registry: &Registry,
+    attempt: &AttemptRecord,
+    terminal: &mut TerminalCommit,
+    observed_supervisor: Option<&SupervisorObservation>,
+) -> RuntimeResult<()> {
     let job = registry.get_job(&attempt.job_id)?;
     let plan: RuntimeExecutionPlan =
         serde_json::from_str(&job.execution_plan_json).map_err(|error| {
@@ -2467,6 +2549,7 @@ pub(crate) fn append_terminal_evidence_for_commit(
             process_start_identity: attempt.process_start_identity.clone(),
             runner_start_digest: attempt.runner_start_digest.clone(),
         },
+        observed_supervisor: observed_supervisor.map(ObservedSupervisorEvidence::from),
         start_disposition: if attempt.runner_start_digest.is_some() {
             "identity_bound".to_string()
         } else {
@@ -3405,6 +3488,36 @@ mod trusted_systemd_command_tests {
             prop_assert_eq!(offset, fs::metadata(&path).unwrap().len());
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn observed_supervisor_evidence_preserves_reconciliation_facts() {
+        let missing = SupervisorObservation {
+            boot_id: "boot-a".to_string(),
+            unit_state: SupervisorUnitState::NotFound,
+            invocation_id: None,
+            control_group: None,
+            main_pid: None,
+            main_process_start_identity: None,
+            recorded_pid_alive: false,
+            recorded_pid_start_identity: None,
+            result: Some("success".to_string()),
+            exec_main_code: Some(0),
+            exec_main_status: Some(0),
+        };
+        let mut rebooted = missing.clone();
+        rebooted.boot_id = "boot-b".to_string();
+
+        let missing = serde_json::to_value(ObservedSupervisorEvidence::from(&missing)).unwrap();
+        let rebooted = serde_json::to_value(ObservedSupervisorEvidence::from(&rebooted)).unwrap();
+        assert_eq!(missing["unitState"], "not_found");
+        assert_eq!(missing["recordedPidAlive"], false);
+        assert_eq!(missing["result"], "success");
+        assert_eq!(missing["execMainCode"], 0);
+        assert_eq!(missing["execMainStatus"], 0);
+        assert_eq!(missing["bootId"], "boot-a");
+        assert_eq!(rebooted["bootId"], "boot-b");
+        assert_ne!(missing, rebooted);
     }
 
     fn proposal_runtime(label: &str, max_runtime_ms: u64, max_output_bytes: u64) -> Runtime {
