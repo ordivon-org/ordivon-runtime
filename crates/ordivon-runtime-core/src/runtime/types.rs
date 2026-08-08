@@ -289,6 +289,42 @@ pub struct ForeignReference {
     pub digest: Option<String>,
 }
 
+/// Operator-owned root from which Runtime may resolve immutable input objects.
+/// This is Core configuration/authority, not Agent-authored path authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InputAuthority {
+    pub name: String,
+    pub root: PathBuf,
+}
+
+/// Agent/domain-authored request for one exact object inside a named input authority.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InputBindingRequest {
+    pub authority: String,
+    pub relative_object: String,
+    pub expected_digest: String,
+    pub presentation_relative_path: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputAccessMode {
+    ReadOnly,
+}
+
+/// Concrete immutable input truth frozen into one Runtime execution plan.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EffectiveInputBinding {
+    pub authority: String,
+    pub relative_object: String,
+    pub digest: String,
+    pub byte_length: u64,
+    pub presentation_relative_path: String,
+    pub access: InputAccessMode,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionBudget {
@@ -398,6 +434,10 @@ pub struct RuntimeExecutionPlan {
     pub execution_profile: ExecutionProfile,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_set_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_inputs: Vec<EffectiveInputBinding>,
     pub principal: String,
 }
 
@@ -414,6 +454,7 @@ pub struct SubmitRequest {
 
 pub(crate) const REQUEST_IDENTITY_PREFIX: &str = "runtime-request-v1:";
 pub(crate) const PROPOSAL_IDENTITY_PREFIX: &str = "runtime-request-v2:";
+pub(crate) const INPUT_BOUND_IDENTITY_PREFIX: &str = "runtime-request-input-v1:";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -434,6 +475,22 @@ struct OperationRequestIdentity {
     execution_profile: ExecutionProfile,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     foreign_references: Vec<ForeignReference>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InputBindingIdentity {
+    authority: String,
+    relative_object: String,
+    expected_digest: String,
+    presentation_relative_path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InputBoundRequestIdentity {
+    operation: OperationRequestIdentity,
+    inputs: Vec<InputBindingIdentity>,
 }
 
 #[derive(Serialize)]
@@ -461,7 +518,11 @@ struct ProposalRequestIdentity {
 }
 
 pub(crate) fn operation_request_identity_digest(request: &TaskRunRequest) -> RuntimeResult<String> {
-    operation_request_identity_digest_from_parts(OperationRequestIdentity {
+    operation_request_identity_digest_from_parts(operation_request_identity(request))
+}
+
+fn operation_request_identity(request: &TaskRunRequest) -> OperationRequestIdentity {
+    OperationRequestIdentity {
         schema_version: request.schema_version,
         principal: request.principal.clone(),
         workspace_id: request.execution.workspace_id.clone(),
@@ -476,7 +537,52 @@ pub(crate) fn operation_request_identity_digest(request: &TaskRunRequest) -> Run
         budget: request.execution.budget.clone(),
         execution_profile: request.execution.execution_profile,
         foreign_references: request.execution.foreign_references.clone(),
-    })
+    }
+}
+
+pub(crate) fn input_bound_request_identity_digest(
+    request: &TaskRunRequest,
+    inputs: &[InputBindingRequest],
+) -> RuntimeResult<String> {
+    let mut inputs = inputs
+        .iter()
+        .map(|input| InputBindingIdentity {
+            authority: input.authority.clone(),
+            relative_object: input.relative_object.clone(),
+            expected_digest: input.expected_digest.to_ascii_lowercase(),
+            presentation_relative_path: input.presentation_relative_path.clone(),
+        })
+        .collect::<Vec<_>>();
+    inputs.sort_by(|left, right| {
+        (
+            &left.presentation_relative_path,
+            &left.authority,
+            &left.relative_object,
+            &left.expected_digest,
+        )
+            .cmp(&(
+                &right.presentation_relative_path,
+                &right.authority,
+                &right.relative_object,
+                &right.expected_digest,
+            ))
+    });
+    let identity = InputBoundRequestIdentity {
+        operation: operation_request_identity(request),
+        inputs,
+    };
+    let bytes = serde_json::to_vec(&identity).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::InvalidRequest,
+            format!("cannot serialize input-bound request identity: {error}"),
+            None,
+            false,
+        )
+    })?;
+    Ok(format!(
+        "{INPUT_BOUND_IDENTITY_PREFIX}{}",
+        crate::universal::sha256_bytes(&bytes)
+    ))
 }
 
 pub(crate) fn proposal_request_identity_digest(

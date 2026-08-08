@@ -177,13 +177,15 @@ Current Ordivon Runtime already proves:
 
 The source-state commitment is deliberately scoped. It excludes ignored caches and build outputs and does not make the trusted host filesystem immutable. Direct host writes after the Runner check remain outside this guarantee; eliminating that race would require executing from an immutable snapshot or stronger isolation and then resolving how intentional command changes return to the working Workspace.
 
+Core also supports an explicit immutable-input path for bytes outside the Git Workspace. Operator-owned named authorities are resolved only on new admission; Runtime opens only normal relative regular files beneath the authority, materializes and verifies the expected SHA-256 bytes into a Runtime-owned set, freezes the effective bindings into the plan, re-verifies that set before dispatch, and exposes it read-only only under `contained_local`. This proves those explicitly bound bytes; it does not turn ambient external state into a Runtime world model, and it is not yet exposed as a public MCP request contract.
+
 It does not yet prove:
 
 - the number or identity of external effects performed inside an arbitrary command;
 - a general external effect receipt;
 - tool-contract continuity between Agent decision and effect execution;
 - operation-scoped authority beyond the trusted-local principal;
-- external-world preconditions outside the Git Workspace;
+- external-world preconditions outside the Git Workspace other than bytes explicitly admitted through the immutable-input binding contract;
 - wall-clock time, network responses, ignored Workspace inputs, or other ambient process dependencies; target processes receive a committed configured execution environment plus explicit request overrides rather than inheriting the Runtime service environment;
 - effect-aware retry or reconciliation through a structured adapter.
 

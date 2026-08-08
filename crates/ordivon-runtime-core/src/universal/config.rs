@@ -89,6 +89,7 @@ impl UniversalExecutorConfig {
             self.source_build_caches_root(),
             self.workspace_tmp_root(),
             self.shared_caches_root(),
+            self.input_materializations_root(),
         ] {
             fs::create_dir_all(&path).map_err(|error| io_error(&path, "create", error))?;
         }
@@ -131,6 +132,14 @@ impl UniversalExecutorConfig {
 
     pub fn shared_caches_root(&self) -> PathBuf {
         self.cache_root().join("shared")
+    }
+
+    pub fn input_materializations_root(&self) -> PathBuf {
+        self.store_root.join("input-materializations")
+    }
+
+    pub(crate) fn input_materialization_path(&self, input_set_id: &str) -> PathBuf {
+        self.input_materializations_root().join(input_set_id)
     }
 
     pub(crate) fn workspace_cache_path(&self, workspace_id: &str) -> PathBuf {

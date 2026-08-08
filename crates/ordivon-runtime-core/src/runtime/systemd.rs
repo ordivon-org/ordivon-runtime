@@ -57,12 +57,15 @@ pub(super) fn validate_runner(path: &Path) -> RuntimeResult<PathBuf> {
     fs::canonicalize(path).map_err(|error| io_error("canonicalize Runner", error))
 }
 
+pub(super) const CONTAINED_INPUT_ROOT: &str = "/run/ordivon/inputs";
+
 pub(super) struct SystemdRunSpec<'a> {
     pub(super) unit_name: &'a str,
     pub(super) runner: &'a Path,
     pub(super) bundle_path: &'a Path,
     pub(super) workspace_path: &'a Path,
     pub(super) workspace_git_common_dir: Option<&'a Path>,
+    pub(super) input_set_path: Option<&'a Path>,
     pub(super) runtime_ceiling_ms: u64,
     pub(super) budget: &'a super::ExecutionBudget,
     pub(super) execution_profile: super::ExecutionProfile,
@@ -75,6 +78,7 @@ pub(super) fn build_systemd_run_command(spec: &SystemdRunSpec<'_>) -> RuntimeRes
     let bundle_path = spec.bundle_path;
     let workspace_path = spec.workspace_path;
     let workspace_git_common_dir = spec.workspace_git_common_dir;
+    let input_set_path = spec.input_set_path;
     let runtime_ceiling_ms = spec.runtime_ceiling_ms;
     let budget = spec.budget;
     let execution_profile = spec.execution_profile;
@@ -110,6 +114,7 @@ pub(super) fn build_systemd_run_command(spec: &SystemdRunSpec<'_>) -> RuntimeRes
                 runner,
                 workspace_path,
                 workspace_git_common_dir,
+                input_set_path,
                 bundle_path,
                 environment,
             )?;
@@ -125,6 +130,7 @@ pub(super) fn append_contained_properties(
     runner: &Path,
     workspace_path: &Path,
     workspace_git_common_dir: Option<&Path>,
+    input_set_path: Option<&Path>,
     bundle_path: &Path,
     environment: &BTreeMap<String, String>,
 ) -> RuntimeResult<()> {
@@ -163,6 +169,12 @@ pub(super) fn append_contained_properties(
     if let Some(common_dir) = workspace_git_common_dir {
         let value = systemd_path_value(common_dir)?;
         command.arg(format!("--property=BindReadOnlyPaths={value}:{value}"));
+    }
+    if let Some(input_set_path) = input_set_path {
+        let source = systemd_path_value(input_set_path)?;
+        command.arg(format!(
+            "--property=BindReadOnlyPaths={source}:{CONTAINED_INPUT_ROOT}"
+        ));
     }
     for name in ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "XDG_CACHE_HOME"] {
         if let Some(value) = environment.get(name) {

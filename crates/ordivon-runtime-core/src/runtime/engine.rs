@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -23,15 +26,16 @@ use super::systemd::*;
 use super::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent,
-    DurableWorkspacePatchRequest, DurableWorkspacePatchResult, JobDesiredState, JobResolution,
-    Registry, RegistryConfig, RunnerIdentity, RuntimeArtifactRecord, RuntimeError,
-    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeExecutionStep, RuntimeJobListRequest,
-    RuntimeJobListResult, RuntimeResult, RuntimeWorkspaceGetRequest, RuntimeWorkspaceIssue,
-    RuntimeWorkspaceIssueStage, RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult,
-    RuntimeWorkspaceSummary, SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest,
-    TaskObserveWaitUntil, TaskRunRequest, TerminalCommit, WorkspacePatchOperationState,
-    WorkspacePatchOperationStatus, WorkspacePatchStatusRequest, MAX_ARTIFACT_READ_BYTES,
-    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
+    DurableWorkspacePatchRequest, DurableWorkspacePatchResult, EffectiveInputBinding,
+    InputAccessMode, InputAuthority, InputBindingRequest, JobDesiredState, JobResolution, Registry,
+    RegistryConfig, RunnerIdentity, RuntimeArtifactRecord, RuntimeError, RuntimeErrorCode,
+    RuntimeExecutionPlan, RuntimeExecutionStep, RuntimeJobListRequest, RuntimeJobListResult,
+    RuntimeResult, RuntimeWorkspaceGetRequest, RuntimeWorkspaceIssue, RuntimeWorkspaceIssueStage,
+    RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
+    SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskObserveWaitUntil,
+    TaskRunRequest, TerminalCommit, WorkspacePatchOperationState, WorkspacePatchOperationStatus,
+    WorkspacePatchStatusRequest, MAX_ARTIFACT_READ_BYTES, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
+    RUNTIME_SCHEMA_VERSION,
 };
 use crate::universal::{
     canonical_directory, create_git_workspace_compact, inspect_workspace_patch_plan,
@@ -110,6 +114,7 @@ pub struct Runtime {
     startup_grace_ms: u64,
     execution_path: String,
     execution_home: String,
+    input_authorities: BTreeMap<String, PathBuf>,
     lifecycle_lock: Arc<Mutex<()>>,
 }
 
@@ -233,6 +238,10 @@ struct TerminalProcessEvidence {
     execution_profile: super::ExecutionProfile,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     foreign_references: Vec<super::ForeignReference>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_set_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    effective_inputs: Vec<EffectiveInputBinding>,
     executable: String,
     args: Vec<String>,
     cwd: String,
@@ -263,6 +272,15 @@ struct ObservationOutputRequest {
 
 impl Runtime {
     pub fn new(config: RuntimeConfig) -> RuntimeResult<Self> {
+        Self::new_with_input_authorities(config, Vec::new())
+    }
+
+    /// Construction boundary for operator-owned immutable input authorities.
+    /// Authority roots are Runtime-instance configuration, never action input.
+    pub fn new_with_input_authorities(
+        config: RuntimeConfig,
+        input_authorities: Vec<InputAuthority>,
+    ) -> RuntimeResult<Self> {
         config.executor.validate().map_err(map_universal_error)?;
         if config.startup_grace_ms == 0 {
             return Err(RuntimeError::invalid(
@@ -279,6 +297,25 @@ impl Runtime {
                 "startupGraceMs",
             ));
         }
+        let mut configured_input_authorities = BTreeMap::new();
+        for authority in input_authorities {
+            validate_input_authority_name(&authority.name, "inputAuthorities.name")?;
+            if !authority.root.is_absolute() {
+                return Err(RuntimeError::invalid(
+                    "input authority root must be absolute",
+                    "inputAuthorities.root",
+                ));
+            }
+            if configured_input_authorities
+                .insert(authority.name, authority.root)
+                .is_some()
+            {
+                return Err(RuntimeError::invalid(
+                    "input authority names must be unique",
+                    "inputAuthorities.name",
+                ));
+            }
+        }
         let registry = Registry::initialize(config.registry)?;
         let execution_path = configured_execution_path()?;
         let execution_home = configured_execution_home()?;
@@ -288,6 +325,7 @@ impl Runtime {
             startup_grace_ms: config.startup_grace_ms,
             execution_path,
             execution_home,
+            input_authorities: configured_input_authorities,
             lifecycle_lock: Arc::new(Mutex::new(())),
         };
         runtime.reconcile_recoverable_orphans()?;
@@ -313,6 +351,80 @@ impl Runtime {
         validate_run_request_structure(request)?;
         let request_identity_digest = super::operation_request_identity_digest(request)?;
         self.run_concrete_task(request, request_identity_digest)
+    }
+
+    /// Core execution path for exact immutable foreign inputs.
+    /// Existing Jobs replay before current authority roots are consulted. Public MCP exposure is
+    /// intentionally separate from this Core authority/materialization contract.
+    pub fn run_task_with_inputs(
+        &self,
+        request: &TaskRunRequest,
+        inputs: &[InputBindingRequest],
+    ) -> RuntimeResult<TaskObservation> {
+        validate_run_request_structure(request)?;
+        let inputs = canonical_input_binding_requests(inputs)?;
+        let request_identity_digest = super::input_bound_request_identity_digest(request, &inputs)?;
+        let job_id = {
+            let _guard = self.lock_lifecycle()?;
+            if let Some(existing) = self.registry.find_idempotent_job(
+                &request.principal,
+                &request.client_request_id,
+                &request_identity_digest,
+            )? {
+                existing.job_id
+            } else {
+                if request.execution.execution_profile != super::ExecutionProfile::ContainedLocal {
+                    return Err(RuntimeError::invalid(
+                        "immutable input bindings require contained_local execution",
+                        "execution.executionProfile",
+                    ));
+                }
+                validate_new_admission_policy(
+                    request,
+                    self.executor.max_runtime_ms,
+                    self.executor.max_output_bytes,
+                )?;
+                self.reconcile_recoverable_orphans()?;
+                let _ = self.reconcile_workspace(&request.execution.workspace_id)?;
+                let mut plan = self.resolve_plan(request)?;
+                let (input_set_id, effective_inputs) =
+                    self.materialize_input_bindings(request, &request_identity_digest, &inputs)?;
+                plan.input_set_id = Some(input_set_id);
+                plan.effective_inputs = effective_inputs;
+                plan.env.insert(
+                    "ORDIVON_INPUT_ROOT".to_string(),
+                    CONTAINED_INPUT_ROOT.to_string(),
+                );
+                for step in &mut plan.steps {
+                    step.env.insert(
+                        "ORDIVON_INPUT_ROOT".to_string(),
+                        CONTAINED_INPUT_ROOT.to_string(),
+                    );
+                }
+                let submit = SubmitRequest {
+                    schema_version: RUNTIME_SCHEMA_VERSION,
+                    client_request_id: request.client_request_id.clone(),
+                    request_identity_digest: Some(request_identity_digest),
+                    plan,
+                    global_limit: request.global_limit,
+                };
+                match self.registry.submit(&submit)? {
+                    AdmissionOutcome::Created(created) => {
+                        let job_id = created.job.job_id.clone();
+                        self.ensure_attempt_dispatched(&created.attempt)
+                            .map_err(|error| error.with_operation_id(job_id.clone()))?;
+                        job_id
+                    }
+                    AdmissionOutcome::Existing { job } => job.job_id,
+                }
+            }
+        };
+        self.observe_admitted_task(
+            &job_id,
+            request.wait_ms,
+            request.stdout_tail_bytes,
+            request.stderr_tail_bytes,
+        )
     }
 
     /// Admit an Agent-authored proposal whose proven mechanical execution limits may be omitted.
@@ -952,8 +1064,86 @@ impl Runtime {
             budget: request.execution.budget.clone(),
             execution_profile: request.execution.execution_profile,
             foreign_references: request.execution.foreign_references.clone(),
+            input_set_id: None,
+            effective_inputs: Vec::new(),
             principal: request.principal.clone(),
         })
+    }
+
+    fn materialize_input_bindings(
+        &self,
+        request: &TaskRunRequest,
+        request_identity_digest: &str,
+        inputs: &[InputBindingRequest],
+    ) -> RuntimeResult<(String, Vec<EffectiveInputBinding>)> {
+        let set_digest = sha256_bytes(
+            format!(
+                "{}\0{}\0{}",
+                request.principal, request.client_request_id, request_identity_digest
+            )
+            .as_bytes(),
+        );
+        let input_set_id = set_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&set_digest)
+            .to_string();
+        let final_root = self.executor.input_materialization_path(&input_set_id);
+        if final_root.exists() {
+            let effective = verify_effective_input_set(&final_root, inputs)?;
+            return Ok((input_set_id, effective));
+        }
+
+        let materialization_root = self.executor.input_materializations_root();
+        fs::create_dir_all(&materialization_root)
+            .map_err(|error| io_error("create input materialization root", error))?;
+        let staging =
+            materialization_root.join(format!(".{input_set_id}.staging-{}", Uuid::now_v7()));
+        fs::create_dir(&staging)
+            .map_err(|error| io_error("create input staging directory", error))?;
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+            .map_err(|error| io_error("protect input staging directory", error))?;
+
+        let result = (|| {
+            for (index, input) in inputs.iter().enumerate() {
+                let configured_root =
+                    self.input_authorities
+                        .get(&input.authority)
+                        .ok_or_else(|| {
+                            RuntimeError::invalid(
+                                format!("unknown input authority {}", input.authority),
+                                &format!("inputs[{index}].authority"),
+                            )
+                        })?;
+                let authority_root = canonical_directory(configured_root, "inputAuthority.root")
+                    .map_err(map_universal_error)?;
+                let source = open_authority_file(&authority_root, &input.relative_object, index)?;
+                let target = staging.join(&input.presentation_relative_path);
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|error| io_error("create input presentation tree", error))?;
+                }
+                let observed_digest = copy_input_and_digest(source, &target)?;
+                if observed_digest != input.expected_digest {
+                    return Err(RuntimeError::invalid(
+                        format!(
+                            "materialized input digest mismatch: expected {}, observed {observed_digest}",
+                            input.expected_digest
+                        ),
+                        &format!("inputs[{index}].expectedDigest"),
+                    ));
+                }
+                fs::set_permissions(&target, fs::Permissions::from_mode(0o444))
+                    .map_err(|error| io_error("protect materialized input", error))?;
+            }
+            sync_directory(&staging)?;
+            publish_directory_noreplace(&staging, &final_root)?;
+            sync_directory(&materialization_root)?;
+            verify_effective_input_set(&final_root, inputs)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result.map(|effective| (input_set_id, effective))
     }
 
     fn ensure_attempt_dispatched(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
@@ -1275,6 +1465,14 @@ impl Runtime {
         let bundle_path = canonical_directory(Path::new(&starting.bundle_path), "bundlePath")
             .map_err(map_universal_error)?;
         let runner = validate_runner(&self.executor.runner_path)?;
+        let input_set_path = if let Some(input_set_id) = plan.input_set_id.as_deref() {
+            let path = self.executor.input_materialization_path(input_set_id);
+            let requests = effective_input_requests_from_plan(&plan)?;
+            verify_effective_input_set(&path, &requests)?;
+            Some(path)
+        } else {
+            None
+        };
         let runtime_ceiling = plan.timeout_ms.saturating_add(5_000);
         let output = systemd_run(&SystemdRunSpec {
             unit_name: &starting.unit_name,
@@ -1282,6 +1480,7 @@ impl Runtime {
             bundle_path: &bundle_path,
             workspace_path: Path::new(&plan.workspace_path),
             workspace_git_common_dir: plan.workspace_git_common_dir.as_deref().map(Path::new),
+            input_set_path: input_set_path.as_deref(),
             runtime_ceiling_ms: runtime_ceiling,
             budget: &plan.budget,
             execution_profile: plan.execution_profile,
@@ -2567,6 +2766,8 @@ fn append_terminal_evidence_for_commit_with_observation(
         source_revision: plan.source_revision,
         execution_profile: plan.execution_profile,
         foreign_references: plan.foreign_references,
+        input_set_id: plan.input_set_id,
+        effective_inputs: plan.effective_inputs,
         executable: plan.executable,
         args: plan.args,
         cwd: plan.cwd,
@@ -2782,6 +2983,334 @@ fn verify_published_bundle(
         }
     }
     Ok(())
+}
+
+fn canonical_input_binding_requests(
+    inputs: &[InputBindingRequest],
+) -> RuntimeResult<Vec<InputBindingRequest>> {
+    if inputs.is_empty() {
+        return Err(RuntimeError::invalid(
+            "at least one immutable input is required",
+            "inputs",
+        ));
+    }
+    let mut canonical = Vec::with_capacity(inputs.len());
+    let mut presentation_paths = BTreeSet::<PathBuf>::new();
+    for (index, input) in inputs.iter().enumerate() {
+        validate_input_authority_name(&input.authority, &format!("inputs[{index}].authority"))?;
+        let object = validate_normal_relative_path(
+            &input.relative_object,
+            &format!("inputs[{index}].relativeObject"),
+        )?;
+        let presentation = validate_normal_relative_path(
+            &input.presentation_relative_path,
+            &format!("inputs[{index}].presentationRelativePath"),
+        )?;
+        validate_sha256_digest(
+            &input.expected_digest,
+            &format!("inputs[{index}].expectedDigest"),
+        )?;
+        for existing in &presentation_paths {
+            if presentation == *existing
+                || presentation.starts_with(existing)
+                || existing.starts_with(&presentation)
+            {
+                return Err(RuntimeError::invalid(
+                    "input presentation paths must not overlap as file/ancestor paths",
+                    &format!("inputs[{index}].presentationRelativePath"),
+                ));
+            }
+        }
+        presentation_paths.insert(presentation.clone());
+        canonical.push(InputBindingRequest {
+            authority: input.authority.clone(),
+            relative_object: object.to_string_lossy().into_owned(),
+            expected_digest: input.expected_digest.to_ascii_lowercase(),
+            presentation_relative_path: presentation.to_string_lossy().into_owned(),
+        });
+    }
+    canonical.sort_by(|left, right| {
+        (
+            &left.presentation_relative_path,
+            &left.authority,
+            &left.relative_object,
+            &left.expected_digest,
+        )
+            .cmp(&(
+                &right.presentation_relative_path,
+                &right.authority,
+                &right.relative_object,
+                &right.expected_digest,
+            ))
+    });
+    Ok(canonical)
+}
+
+fn validate_input_authority_name(value: &str, field: &str) -> RuntimeResult<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(RuntimeError::invalid(
+            "input authority name must use 1-128 ASCII alphanumeric/._- characters",
+            field,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_normal_relative_path(value: &str, field: &str) -> RuntimeResult<PathBuf> {
+    let path = Path::new(value);
+    if value.is_empty() || value.as_bytes().contains(&0) || path.is_absolute() {
+        return Err(RuntimeError::invalid(
+            "path must be non-empty, relative, and NUL-free",
+            field,
+        ));
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(value) => normalized.push(value),
+            _ => {
+                return Err(RuntimeError::invalid(
+                    "path must contain only normal relative components",
+                    field,
+                ));
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(RuntimeError::invalid("path must not be empty", field));
+    }
+    Ok(normalized)
+}
+
+fn validate_sha256_digest(value: &str, field: &str) -> RuntimeResult<()> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(RuntimeError::invalid("digest must use sha256:<hex>", field));
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(RuntimeError::invalid(
+            "digest must be 32-byte SHA-256 hex",
+            field,
+        ));
+    }
+    Ok(())
+}
+
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+fn open_authority_file(root: &Path, relative: &str, index: usize) -> RuntimeResult<File> {
+    let root_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(root)
+        .map_err(|error| io_error("open input authority root", error))?;
+    let relative = CString::new(relative).map_err(|_| {
+        RuntimeError::invalid(
+            "input relativeObject contains NUL",
+            &format!("inputs[{index}].relativeObject"),
+        )
+    })?;
+    let how = OpenHow {
+        flags: (libc::O_RDONLY | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: 0x02 | 0x04 | 0x08,
+    };
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            root_file.as_raw_fd(),
+            relative.as_ptr(),
+            &how,
+            std::mem::size_of::<OpenHow>(),
+        )
+    };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(RuntimeError::invalid(
+            format!("cannot resolve input object inside authority: {error}"),
+            &format!("inputs[{index}].relativeObject"),
+        ));
+    }
+    let file = unsafe { File::from_raw_fd(fd as i32) };
+    let metadata = file
+        .metadata()
+        .map_err(|error| io_error("inspect input object", error))?;
+    if !metadata.is_file() {
+        return Err(RuntimeError::invalid(
+            "input object must resolve to a regular file",
+            &format!("inputs[{index}].relativeObject"),
+        ));
+    }
+    Ok(file)
+}
+
+fn copy_input_and_digest(mut source: File, target: &Path) -> RuntimeResult<String> {
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(target)
+        .map_err(|error| io_error("create materialized input", error))?;
+    std::io::copy(&mut source, &mut output)
+        .map_err(|error| io_error("copy input object", error))?;
+    output
+        .sync_all()
+        .map_err(|error| io_error("sync materialized input", error))?;
+    sha256_file(target).map_err(map_universal_error)
+}
+
+fn publish_directory_noreplace(staging: &Path, final_root: &Path) -> RuntimeResult<()> {
+    let staging_c = CString::new(staging.as_os_str().as_bytes())
+        .map_err(|_| RuntimeError::invalid("input staging path contains NUL", "inputs"))?;
+    let final_c = CString::new(final_root.as_os_str().as_bytes())
+        .map_err(|_| RuntimeError::invalid("input materialization path contains NUL", "inputs"))?;
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            staging_c.as_ptr(),
+            libc::AT_FDCWD,
+            final_c.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if rc == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EEXIST) {
+        fs::remove_dir_all(staging)
+            .map_err(|cleanup| io_error("remove losing input staging directory", cleanup))?;
+        return Ok(());
+    }
+    Err(io_error("publish immutable input set", error))
+}
+
+fn collect_materialized_files(
+    root: &Path,
+    current: &Path,
+    files: &mut BTreeSet<PathBuf>,
+) -> RuntimeResult<()> {
+    for entry in
+        fs::read_dir(current).map_err(|error| io_error("scan materialized input set", error))?
+    {
+        let entry = entry.map_err(|error| io_error("read materialized input entry", error))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| io_error("inspect materialized input entry", error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "materialized input set contains a symlink",
+                Some("effectiveInputs"),
+                false,
+            ));
+        }
+        if metadata.is_dir() {
+            collect_materialized_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path.strip_prefix(root).map_err(|_| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "materialized input escaped its set root",
+                    Some("effectiveInputs"),
+                    false,
+                )
+            })?;
+            files.insert(relative.to_path_buf());
+        } else {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "materialized input set contains a non-file entry",
+                Some("effectiveInputs"),
+                false,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_effective_input_set(
+    root: &Path,
+    inputs: &[InputBindingRequest],
+) -> RuntimeResult<Vec<EffectiveInputBinding>> {
+    let root_metadata = fs::symlink_metadata(root)
+        .map_err(|error| io_error("inspect materialized input set", error))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
+            "materialized input set root is not a non-symlink directory",
+            Some("effectiveInputs"),
+            false,
+        ));
+    }
+    let expected = inputs
+        .iter()
+        .map(|input| PathBuf::from(&input.presentation_relative_path))
+        .collect::<BTreeSet<_>>();
+    let mut observed = BTreeSet::new();
+    collect_materialized_files(root, root, &mut observed)?;
+    if observed != expected {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
+            "materialized input set file inventory differs from the committed binding set",
+            Some("effectiveInputs"),
+            false,
+        ));
+    }
+    let mut effective = Vec::with_capacity(inputs.len());
+    for (index, input) in inputs.iter().enumerate() {
+        let path = root.join(&input.presentation_relative_path);
+        let metadata =
+            fs::metadata(&path).map_err(|error| io_error("inspect materialized input", error))?;
+        let digest = sha256_file(&path).map_err(map_universal_error)?;
+        if digest != input.expected_digest {
+            let field = format!("effectiveInputs[{index}].digest");
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                format!(
+                    "materialized input digest mismatch: expected {}, observed {digest}",
+                    input.expected_digest
+                ),
+                Some(&field),
+                false,
+            ));
+        }
+        effective.push(EffectiveInputBinding {
+            authority: input.authority.clone(),
+            relative_object: input.relative_object.clone(),
+            digest,
+            byte_length: metadata.len(),
+            presentation_relative_path: input.presentation_relative_path.clone(),
+            access: InputAccessMode::ReadOnly,
+        });
+    }
+    Ok(effective)
+}
+
+fn effective_input_requests_from_plan(
+    plan: &RuntimeExecutionPlan,
+) -> RuntimeResult<Vec<InputBindingRequest>> {
+    canonical_input_binding_requests(
+        &plan
+            .effective_inputs
+            .iter()
+            .map(|input| InputBindingRequest {
+                authority: input.authority.clone(),
+                relative_object: input.relative_object.clone(),
+                expected_digest: input.digest.clone(),
+                presentation_relative_path: input.presentation_relative_path.clone(),
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn validate_run_request_structure(request: &TaskRunRequest) -> RuntimeResult<()> {
@@ -3567,6 +4096,219 @@ mod trusted_systemd_command_tests {
     }
 
     #[test]
+    fn concurrent_materialization_publishes_one_verified_input_set() {
+        let root = std::env::temp_dir().join(format!(
+            "ordivon-input-publish-race-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let authority_root = root.join("authority");
+        fs::create_dir_all(&authority_root).unwrap();
+        let bytes = vec![b'F'; 2 * 1024 * 1024];
+        fs::write(authority_root.join("fragment.bin"), &bytes).unwrap();
+        let expected_digest = sha256_bytes(&bytes);
+        let request = TaskRunRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            client_request_id: "request:input-publish-race".to_string(),
+            principal: "principal:test".to_string(),
+            global_limit: 4,
+            execution: UniversalExecutionRequest {
+                workspace_id: "workspace-input-publish-race".to_string(),
+                executable: "/usr/bin/true".to_string(),
+                args: Vec::new(),
+                cwd_relative: ".".to_string(),
+                env: BTreeMap::new(),
+                timeout_ms: 5_000,
+                stdout_limit_bytes: 4_096,
+                stderr_limit_bytes: 4_096,
+                steps: Vec::new(),
+                budget: ExecutionBudget::default(),
+                execution_profile: ExecutionProfile::ContainedLocal,
+                foreign_references: Vec::new(),
+            },
+            wait_ms: 0,
+            stdout_tail_bytes: 0,
+            stderr_tail_bytes: 0,
+        };
+        let inputs = canonical_input_binding_requests(&[InputBindingRequest {
+            authority: "finance".to_string(),
+            relative_object: "fragment.bin".to_string(),
+            expected_digest: expected_digest.clone(),
+            presentation_relative_path: "data/fragment.bin".to_string(),
+        }])
+        .unwrap();
+        let identity =
+            super::super::input_bound_request_identity_digest(&request, &inputs).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for index in 0..2 {
+            let root = root.clone();
+            let authority_root = authority_root.clone();
+            let request = request.clone();
+            let inputs = inputs.clone();
+            let identity = identity.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                let runtime = Runtime::new_with_input_authorities(
+                    RuntimeConfig {
+                        registry: RegistryConfig {
+                            db_path: root.join(format!("registry-{index}/registry.sqlite3")),
+                            store_root: root.join(format!("registry-{index}")),
+                            busy_timeout_ms: 5_000,
+                        },
+                        executor: UniversalExecutorConfig {
+                            store_root: root.join("runtime"),
+                            workspace_root: None,
+                            workspace_uid: None,
+                            workspace_gid: None,
+                            runner_path: PathBuf::from("/usr/bin/true"),
+                            allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
+                            max_runtime_ms: 60_000,
+                            max_output_bytes: 1_048_576,
+                        },
+                        startup_grace_ms: 2_000,
+                    },
+                    vec![InputAuthority {
+                        name: "finance".to_string(),
+                        root: authority_root,
+                    }],
+                )
+                .unwrap();
+                barrier.wait();
+                runtime
+                    .materialize_input_bindings(&request, &identity, &inputs)
+                    .unwrap()
+            }));
+        }
+        let left = handles.remove(0).join().unwrap();
+        let right = handles.remove(0).join().unwrap();
+        assert_eq!(left, right);
+        assert_eq!(left.1.len(), 1);
+        assert_eq!(left.1[0].digest, expected_digest);
+        let materialization_root = root.join("runtime/input-materializations");
+        let entries = fs::read_dir(&materialization_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![left.0]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn materialized_input_verification_fails_closed_after_tamper() {
+        let root = std::env::temp_dir().join(format!(
+            "ordivon-input-tamper-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::write(root.join("data/input.bin"), b"S0").unwrap();
+        let request = InputBindingRequest {
+            authority: "finance".to_string(),
+            relative_object: "fragment.bin".to_string(),
+            expected_digest: sha256_bytes(b"S0"),
+            presentation_relative_path: "data/input.bin".to_string(),
+        };
+        let first = verify_effective_input_set(&root, std::slice::from_ref(&request)).unwrap();
+        assert_eq!(first[0].byte_length, 2);
+        assert_eq!(first[0].digest, sha256_bytes(b"S0"));
+
+        fs::write(root.join("data/input.bin"), b"S1").unwrap();
+        let error = verify_effective_input_set(&root, std::slice::from_ref(&request)).unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt);
+        assert!(error.message.contains("digest mismatch"));
+
+        fs::write(root.join("data/input.bin"), b"S0").unwrap();
+        fs::write(root.join("unexpected.bin"), b"extra").unwrap();
+        let error = verify_effective_input_set(&root, &[request]).unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt);
+        assert!(error.message.contains("file inventory differs"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn contained_input_set_is_read_only_bound_at_fixed_runtime_path() {
+        let root = std::env::temp_dir().join(format!(
+            "ordivon-contained-input-command-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let bundle = root.join("bundle");
+        let inputs = root.join("inputs");
+        let cache = root.join("cache");
+        for path in [&workspace, &bundle, &inputs, &cache] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let environment = BTreeMap::from([
+            (
+                "HOME".to_string(),
+                cache.join("home").to_string_lossy().into_owned(),
+            ),
+            (
+                "TMPDIR".to_string(),
+                cache.join("tmp").to_string_lossy().into_owned(),
+            ),
+        ]);
+        for value in environment.values() {
+            fs::create_dir_all(value).unwrap();
+        }
+        let budget = ExecutionBudget::default();
+        let contained = build_systemd_run_command(&SystemdRunSpec {
+            unit_name: "ordivon-input-contained.service",
+            runner: Path::new("/usr/bin/true"),
+            bundle_path: &bundle,
+            workspace_path: &workspace,
+            workspace_git_common_dir: None,
+            input_set_path: Some(&inputs),
+            runtime_ceiling_ms: 10_000,
+            budget: &budget,
+            execution_profile: ExecutionProfile::ContainedLocal,
+            environment: &environment,
+        })
+        .unwrap();
+        let contained_args = contained
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(contained_args.contains(&format!(
+            "BindReadOnlyPaths={}:{CONTAINED_INPUT_ROOT}",
+            inputs.display()
+        )));
+
+        let trusted = build_systemd_run_command(&SystemdRunSpec {
+            unit_name: "ordivon-input-trusted.service",
+            runner: Path::new("/usr/bin/true"),
+            bundle_path: &bundle,
+            workspace_path: &workspace,
+            workspace_git_common_dir: None,
+            input_set_path: Some(&inputs),
+            runtime_ceiling_ms: 10_000,
+            budget: &budget,
+            execution_profile: ExecutionProfile::TrustedLocal,
+            environment: &BTreeMap::new(),
+        })
+        .unwrap();
+        let trusted_args = trusted
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!trusted_args.contains(CONTAINED_INPUT_ROOT));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn observed_supervisor_evidence_preserves_reconciliation_facts() {
         let missing = SupervisorObservation {
             boot_id: "boot-a".to_string(),
@@ -4042,6 +4784,7 @@ mod trusted_systemd_command_tests {
             bundle_path: Path::new("/var/lib/ordivon/attempts/attempt-test"),
             workspace_path: Path::new("/root/projects/ordivon-runtime"),
             workspace_git_common_dir: None,
+            input_set_path: None,
             runtime_ceiling_ms: 10_000,
             budget: &budget,
             execution_profile: crate::runtime::ExecutionProfile::TrustedLocal,
@@ -4095,6 +4838,7 @@ mod trusted_systemd_command_tests {
             bundle_path: Path::new("/var/lib/ordivon/attempts/attempt-budget"),
             workspace_path: Path::new("/root/projects/ordivon-runtime"),
             workspace_git_common_dir: None,
+            input_set_path: None,
             runtime_ceiling_ms: 10_000,
             budget: &budget,
             execution_profile: crate::runtime::ExecutionProfile::TrustedLocal,
@@ -4140,6 +4884,7 @@ mod trusted_systemd_command_tests {
             bundle_path: &bundle,
             workspace_path: &workspace,
             workspace_git_common_dir: None,
+            input_set_path: None,
             runtime_ceiling_ms: 10_000,
             budget: &budget,
             execution_profile: crate::runtime::ExecutionProfile::ContainedLocal,

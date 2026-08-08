@@ -3211,6 +3211,9 @@ fn job_request_identity_digest(job: &RuntimeJobRecord) -> RuntimeResult<String> 
         || job
             .request_digest
             .starts_with(super::PROPOSAL_IDENTITY_PREFIX)
+        || job
+            .request_digest
+            .starts_with(super::INPUT_BOUND_IDENTITY_PREFIX)
     {
         validate_request_identity_digest(&job.request_digest)?;
         return Ok(job.request_digest.clone());
@@ -3231,6 +3234,7 @@ fn validate_request_identity_digest(value: &str) -> RuntimeResult<()> {
     let digest = value
         .strip_prefix(super::REQUEST_IDENTITY_PREFIX)
         .or_else(|| value.strip_prefix(super::PROPOSAL_IDENTITY_PREFIX))
+        .or_else(|| value.strip_prefix(super::INPUT_BOUND_IDENTITY_PREFIX))
         .ok_or_else(|| {
             RuntimeError::invalid(
                 "unsupported request identity digest",
@@ -3293,6 +3297,89 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
     if let Some(digest) = request.plan.workspace_source_digest.as_deref() {
         validate_digest(digest, "plan.workspaceSourceDigest")?;
     }
+    match (
+        request.plan.input_set_id.as_deref(),
+        request.plan.effective_inputs.is_empty(),
+    ) {
+        (None, true) => {}
+        (Some(input_set_id), false) => {
+            if input_set_id.len() != 64
+                || !input_set_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || input_set_id.bytes().any(|byte| byte.is_ascii_uppercase())
+            {
+                return Err(RuntimeError::invalid(
+                    "plan.inputSetId must be lowercase 32-byte SHA-256 hex",
+                    "plan.inputSetId",
+                ));
+            }
+            if request.plan.execution_profile != super::ExecutionProfile::ContainedLocal {
+                return Err(RuntimeError::invalid(
+                    "effective inputs require contained_local execution",
+                    "plan.executionProfile",
+                ));
+            }
+        }
+        (Some(_), true) => {
+            return Err(RuntimeError::invalid(
+                "plan.inputSetId requires effectiveInputs",
+                "plan.inputSetId",
+            ));
+        }
+        (None, false) => {
+            return Err(RuntimeError::invalid(
+                "effectiveInputs require plan.inputSetId",
+                "plan.inputSetId",
+            ));
+        }
+    }
+    let mut input_paths = std::collections::BTreeSet::<PathBuf>::new();
+    for (index, input) in request.plan.effective_inputs.iter().enumerate() {
+        validate_identifier(
+            &input.authority,
+            &format!("plan.effectiveInputs[{index}].authority"),
+        )?;
+        validate_digest(
+            &input.digest,
+            &format!("plan.effectiveInputs[{index}].digest"),
+        )?;
+        let object = Path::new(&input.relative_object);
+        let presentation = Path::new(&input.presentation_relative_path);
+        for (path, field) in [
+            (
+                object,
+                format!("plan.effectiveInputs[{index}].relativeObject"),
+            ),
+            (
+                presentation,
+                format!("plan.effectiveInputs[{index}].presentationRelativePath"),
+            ),
+        ] {
+            if path.is_absolute()
+                || path.as_os_str().is_empty()
+                || path
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err(RuntimeError::invalid(
+                    "effective input paths must contain only normal relative components",
+                    &field,
+                ));
+            }
+        }
+        for existing in &input_paths {
+            if presentation == existing
+                || presentation.starts_with(existing)
+                || existing.starts_with(presentation)
+            {
+                return Err(RuntimeError::invalid(
+                    "effective input presentation paths must not overlap",
+                    &format!("plan.effectiveInputs[{index}].presentationRelativePath"),
+                ));
+            }
+        }
+        input_paths.insert(presentation.to_path_buf());
+    }
+
     if request.plan.source_revision.is_empty() || request.plan.source_revision.len() > 256 {
         return Err(RuntimeError::invalid(
             "sourceRevision must be non-empty and bounded",

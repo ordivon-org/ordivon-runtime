@@ -2,12 +2,12 @@
 
 use ordivon_runtime_core::{
     create_git_workspace, remove_git_workspace, write_workspace_text, ArtifactReadRequest,
-    AttemptState, ExecutionBudget, GitWorkspaceCreateRequest, RegistryConfig, Runtime,
-    RuntimeConfig, RuntimeExecutionPlan, RuntimeJobListRequest, SubmitRequest, TaskCancelRequest,
-    TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest, UniversalExecutionRequest,
-    UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceMutateRequest, WorkspaceMutation,
-    WorkspaceMutationMode, WorkspaceWriteRequest, RUNTIME_SCHEMA_VERSION,
-    UNIVERSAL_EXEC_SCHEMA_VERSION,
+    AttemptState, ExecutionBudget, GitWorkspaceCreateRequest, InputAuthority, InputBindingRequest,
+    RegistryConfig, Runtime, RuntimeConfig, RuntimeExecutionPlan, RuntimeJobListRequest,
+    SubmitRequest, TaskCancelRequest, TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest,
+    UniversalExecutionRequest, UniversalExecutorConfig, WorkspaceCloseRequest,
+    WorkspaceMutateRequest, WorkspaceMutation, WorkspaceMutationMode, WorkspaceWriteRequest,
+    RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -213,6 +213,125 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_immutable_input_freezes_bytes_and_replays_without_source_authority() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("immutable-input-replay");
+    context.write(
+        "input_probe.py",
+        r#"import json, os, time
+from pathlib import Path
+root = Path(os.environ["ORDIVON_INPUT_ROOT"])
+path = root / "finance" / "data.txt"
+write_result = "unexpected-success"
+try:
+    path.write_text("PAYLOAD-MUTATION\n")
+except Exception as error:
+    write_result = f"{type(error).__name__}:{error}"
+time.sleep(1.2)
+print(json.dumps({"input": path.read_text().strip(), "write": write_result}, sort_keys=True), flush=True)
+"#,
+    );
+
+    let authority_root = context.root.join("finance-authority");
+    fs::create_dir_all(&authority_root).unwrap();
+    let source = authority_root.join("data.txt");
+    fs::write(&source, b"S0\n").unwrap();
+    let expected_digest = digest(b"S0\n");
+    let inputs = vec![InputBindingRequest {
+        authority: "finance".to_string(),
+        relative_object: "data.txt".to_string(),
+        expected_digest: expected_digest.clone(),
+        presentation_relative_path: "finance/data.txt".to_string(),
+    }];
+    let authorities = vec![InputAuthority {
+        name: "finance".to_string(),
+        root: authority_root.clone(),
+    }];
+
+    let runtime = context.runtime_with_input_authorities(2_000, authorities);
+    let mut request = context.request("input_probe.py", 0);
+    request.client_request_id = format!("request:immutable-input:{}", Uuid::now_v7());
+    request.execution.execution_profile = ordivon_runtime_core::ExecutionProfile::ContainedLocal;
+    let submitted = runtime.run_task_with_inputs(&request, &inputs).unwrap();
+    fs::write(&source, b"S1\n").unwrap();
+
+    let final_observation = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: submitted.job_id.clone(),
+            wait_ms: 30_000,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 16_384,
+            stderr_tail_bytes: 16_384,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert_eq!(final_observation.status, "succeeded");
+    let stdout: serde_json::Value =
+        serde_json::from_str(final_observation.stdout_tail.trim()).unwrap();
+    assert_eq!(stdout["input"], "S0");
+    assert!(stdout["write"]
+        .as_str()
+        .unwrap()
+        .contains("Read-only file system"));
+    assert_eq!(fs::read_to_string(&source).unwrap(), "S1\n");
+
+    let terminal = final_observation
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "terminal_evidence")
+        .unwrap();
+    let evidence = runtime
+        .read_artifact(&ArtifactReadRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: final_observation.job_id.clone(),
+            artifact_id: terminal.artifact_id.clone(),
+            offset: 0,
+            max_bytes: 65_536,
+        })
+        .unwrap();
+    let evidence_text = evidence.content.clone();
+    let evidence: serde_json::Value = serde_json::from_str(&evidence_text).unwrap();
+    assert!(evidence["inputSetId"].as_str().is_some());
+    assert!(!evidence_text.contains(&authority_root.to_string_lossy().into_owned()));
+    assert!(!evidence_text.contains("input-materializations/"));
+    let bindings = evidence["effectiveInputs"].as_array().unwrap();
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0]["authority"], "finance");
+    assert_eq!(bindings[0]["digest"], expected_digest);
+    assert_eq!(bindings[0]["presentationRelativePath"], "finance/data.txt");
+    assert_eq!(bindings[0]["access"], "read_only");
+
+    drop(runtime);
+    fs::remove_dir_all(&authority_root).unwrap();
+    let restarted = context.runtime_with_input_authorities(
+        2_000,
+        vec![InputAuthority {
+            name: "finance".to_string(),
+            root: authority_root,
+        }],
+    );
+    let replay = restarted.run_task_with_inputs(&request, &inputs).unwrap();
+    assert_eq!(replay.job_id, final_observation.job_id);
+    assert_eq!(replay.status, "succeeded");
+
+    let mut changed_inputs = inputs.clone();
+    changed_inputs[0].expected_digest = digest(b"different-input\n");
+    let conflict = restarted
+        .run_task_with_inputs(&request, &changed_inputs)
+        .unwrap_err();
+    assert_eq!(
+        conflict.code,
+        ordivon_runtime_core::RuntimeErrorCode::IdempotencyConflict
+    );
+    assert_eq!(restarted.registry().active_reservation_count().unwrap(), 0);
+}
+
 struct IntegrationContext {
     root: PathBuf,
     repo: PathBuf,
@@ -273,6 +392,22 @@ impl IntegrationContext {
             executor: self.executor.clone(),
             startup_grace_ms,
         })
+        .unwrap()
+    }
+
+    fn runtime_with_input_authorities(
+        &self,
+        startup_grace_ms: u64,
+        authorities: Vec<InputAuthority>,
+    ) -> Runtime {
+        Runtime::new_with_input_authorities(
+            RuntimeConfig {
+                registry: self.registry.clone(),
+                executor: self.executor.clone(),
+                startup_grace_ms,
+            },
+            authorities,
+        )
         .unwrap()
     }
 
@@ -1452,6 +1587,8 @@ impl IntegrationContext {
                 budget: ordivon_runtime_core::ExecutionBudget::default(),
                 execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
                 foreign_references: Vec::new(),
+                input_set_id: None,
+                effective_inputs: Vec::new(),
                 principal: "principal:integration".to_string(),
             },
             global_limit,

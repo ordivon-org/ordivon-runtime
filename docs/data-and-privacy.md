@@ -49,7 +49,7 @@ Accepted and active for the current owner-trusted deployment model. Reopen when 
 
 Runtime data belongs to the operator and the users whose work it executes. Runtime must make storage and deletion behavior explicit, but it cannot promise that arbitrary commands, output, source trees, or Artifacts are free of sensitive information.
 
-Runtime does **not** automatically redact command arguments, environment values supplied to target processes, source content, stdout, stderr, Artifacts, paths, client identifiers, or foreign references. Treat the entire Runtime state root and every backup or receipt as potentially sensitive.
+Runtime does **not** automatically redact command arguments, environment values supplied to target processes, source content, immutable input materializations, stdout, stderr, Artifacts, paths, client identifiers, or foreign references. Treat the entire Runtime state root and every backup or receipt as potentially sensitive.
 
 ## Data inventory
 
@@ -59,6 +59,7 @@ Runtime does **not** automatically redact command arguments, environment values 
 | Attempt bundles and Artifacts | `/var/lib/ordivon/registry/attempts/` | request, plan, progress, output, result, terminal evidence | retained with Registry history unless the instance is retired or an explicit future archival policy applies |
 | Workspace records and worktrees | `/var/lib/ordivon/runtime/` | isolated source state and lifecycle identity | policy classes: ephemeral, review, or pinned; dirty/active/unknown state is never removed automatically |
 | execution caches | `/var/lib/ordivon/runtime/cache/` | reusable package and build state | capacity-driven reclamation; protected while referenced |
+| immutable input materializations | `/var/lib/ordivon/runtime/input-materializations/` | exact digest-verified foreign input bytes frozen for input-bound Jobs | retained with current Runtime state; no automatic per-set reclamation contract yet |
 | protocol trace | configured `ORDIVON_TRACE_PATH` | bounded protocol-version and client observations | current segment plus one rotated segment |
 | deployment receipts | `/var/lib/ordivon/deployments/` | binary, protocol, rollback, and catalog proof | current rollback and audit evidence; explicit pruning only |
 | lifecycle, reclaim, cache, repair, and quarantine receipts | Runtime state roots | prove administrative actions and preserve uncertain bytes | explicit operator policy; quarantine is never silently deleted |

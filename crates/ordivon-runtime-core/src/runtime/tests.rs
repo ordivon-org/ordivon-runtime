@@ -195,6 +195,8 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
             budget: crate::ExecutionBudget::default(),
             execution_profile: super::ExecutionProfile::TrustedLocal,
             foreign_references: Vec::new(),
+            input_set_id: None,
+            effective_inputs: Vec::new(),
             principal: "principal:test".to_string(),
         },
         global_limit,
@@ -996,6 +998,194 @@ fn request_identity_excludes_observation_preferences_and_capacity_policy() {
     let mut changed = base;
     changed.execution.args.push("different".to_string());
     assert_ne!(operation_request_identity_digest(&changed).unwrap(), digest);
+}
+
+fn input_bound_task_request(workspace_id: &str, client_request_id: &str) -> TaskRunRequest {
+    TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: client_request_id.to_string(),
+        principal: "principal:input-test".to_string(),
+        global_limit: 4,
+        execution: UniversalExecutionRequest {
+            workspace_id: workspace_id.to_string(),
+            executable: "/usr/bin/true".to_string(),
+            args: Vec::new(),
+            cwd_relative: ".".to_string(),
+            env: BTreeMap::new(),
+            timeout_ms: 5_000,
+            stdout_limit_bytes: 4_096,
+            stderr_limit_bytes: 4_096,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            execution_profile: ExecutionProfile::ContainedLocal,
+            foreign_references: Vec::new(),
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    }
+}
+
+#[test]
+fn input_bound_identity_is_order_independent_but_binding_sensitive() {
+    let request = input_bound_task_request("workspace:test", "request:input-identity");
+    let digest_a = digest(b"input-a");
+    let digest_b = digest(b"input-b");
+    let inputs = vec![
+        InputBindingRequest {
+            authority: "finance".to_string(),
+            relative_object: "fragments/a.parquet".to_string(),
+            expected_digest: digest_a.clone(),
+            presentation_relative_path: "data/a.parquet".to_string(),
+        },
+        InputBindingRequest {
+            authority: "finance".to_string(),
+            relative_object: "fragments/b.parquet".to_string(),
+            expected_digest: digest_b.clone(),
+            presentation_relative_path: "data/b.parquet".to_string(),
+        },
+    ];
+    let first = input_bound_request_identity_digest(&request, &inputs).unwrap();
+    assert!(first.starts_with(INPUT_BOUND_IDENTITY_PREFIX));
+
+    let reversed = vec![inputs[1].clone(), inputs[0].clone()];
+    assert_eq!(
+        input_bound_request_identity_digest(&request, &reversed).unwrap(),
+        first
+    );
+
+    let mut changed_digest = inputs.clone();
+    changed_digest[0].expected_digest = digest(b"different");
+    assert_ne!(
+        input_bound_request_identity_digest(&request, &changed_digest).unwrap(),
+        first
+    );
+
+    let mut changed_presentation = inputs;
+    changed_presentation[0].presentation_relative_path = "other/a.parquet".to_string();
+    assert_ne!(
+        input_bound_request_identity_digest(&request, &changed_presentation).unwrap(),
+        first
+    );
+}
+
+#[test]
+fn immutable_inputs_reject_trusted_local_before_workspace_resolution() {
+    let sandbox = Sandbox::new("input-trusted-reject", 5000);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let mut request = input_bound_task_request("workspace-does-not-exist", "request:input-trusted");
+    request.execution.execution_profile = ExecutionProfile::TrustedLocal;
+    let authority = sandbox.root.join("authority");
+    fs::create_dir_all(&authority).unwrap();
+    fs::write(authority.join("input.bin"), b"payload").unwrap();
+    let error = runtime
+        .run_task_with_inputs(
+            &request,
+            &[InputBindingRequest {
+                authority: "finance".to_string(),
+                relative_object: "input.bin".to_string(),
+                expected_digest: digest(b"payload"),
+                presentation_relative_path: "input.bin".to_string(),
+            }],
+        )
+        .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert_eq!(error.field.as_deref(), Some("execution.executionProfile"));
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+fn input_digest_mismatch_fails_before_job_admission() {
+    let (sandbox, original_runtime, _executor) =
+        durable_patch_fixture("input-digest-mismatch", "workspace-input-digest-mismatch");
+    drop(original_runtime);
+    let authority = sandbox.root.join("authority");
+    fs::create_dir_all(&authority).unwrap();
+    fs::write(authority.join("fragment.parquet"), b"actual-bytes").unwrap();
+    let runtime = Runtime::new_with_input_authorities(
+        runtime_config(&sandbox),
+        vec![InputAuthority {
+            name: "finance".to_string(),
+            root: authority,
+        }],
+    )
+    .unwrap();
+    let request = input_bound_task_request(
+        "workspace-input-digest-mismatch",
+        "request:input-digest-mismatch",
+    );
+    let inputs = vec![InputBindingRequest {
+        authority: "finance".to_string(),
+        relative_object: "fragment.parquet".to_string(),
+        expected_digest: digest(b"different-bytes"),
+        presentation_relative_path: "data/fragment.parquet".to_string(),
+    }];
+    let error = runtime.run_task_with_inputs(&request, &inputs).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert!(error.message.contains("materialized input digest mismatch"));
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    let identity = input_bound_request_identity_digest(&request, &inputs).unwrap();
+    assert!(runtime
+        .registry()
+        .find_idempotent_job(&request.principal, &request.client_request_id, &identity)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn input_authority_rejects_dotdot_and_symlink_escape_before_admission() {
+    let (sandbox, original_runtime, _executor) =
+        durable_patch_fixture("input-authority-escape", "workspace-input-authority-escape");
+    drop(original_runtime);
+    let authority = sandbox.root.join("authority");
+    let outside = sandbox.root.join("outside");
+    fs::create_dir_all(&authority).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret.bin"), b"secret").unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.bin"), authority.join("link.bin")).unwrap();
+    let request = input_bound_task_request(
+        "workspace-input-authority-escape",
+        "request:input-authority-escape",
+    );
+    let runtime = Runtime::new_with_input_authorities(
+        runtime_config(&sandbox),
+        vec![InputAuthority {
+            name: "finance".to_string(),
+            root: authority,
+        }],
+    )
+    .unwrap();
+
+    let dotdot = runtime
+        .run_task_with_inputs(
+            &request,
+            &[InputBindingRequest {
+                authority: "finance".to_string(),
+                relative_object: "../outside/secret.bin".to_string(),
+                expected_digest: digest(b"secret"),
+                presentation_relative_path: "secret.bin".to_string(),
+            }],
+        )
+        .unwrap_err();
+    assert_eq!(dotdot.code, RuntimeErrorCode::InvalidRequest);
+    assert!(dotdot.field.as_deref().unwrap().contains("relativeObject"));
+
+    let symlink = runtime
+        .run_task_with_inputs(
+            &request,
+            &[InputBindingRequest {
+                authority: "finance".to_string(),
+                relative_object: "link.bin".to_string(),
+                expected_digest: digest(b"secret"),
+                presentation_relative_path: "secret.bin".to_string(),
+            }],
+        )
+        .unwrap_err();
+    assert_eq!(symlink.code, RuntimeErrorCode::InvalidRequest);
+    assert!(symlink
+        .message
+        .contains("cannot resolve input object inside authority"));
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }
 
 #[test]

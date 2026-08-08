@@ -44,16 +44,18 @@ pub use repair::{
     RuntimeRepairReport, RuntimeRepairRequest, RUNTIME_REPAIR_SCHEMA_VERSION,
 };
 pub(crate) use types::{
-    operation_request_identity_digest, operation_request_identity_digest_from_plan,
-    proposal_request_identity_digest, PROPOSAL_IDENTITY_PREFIX, REQUEST_IDENTITY_PREFIX,
+    input_bound_request_identity_digest, operation_request_identity_digest,
+    operation_request_identity_digest_from_plan, proposal_request_identity_digest,
+    INPUT_BOUND_IDENTITY_PREFIX, PROPOSAL_IDENTITY_PREFIX, REQUEST_IDENTITY_PREFIX,
 };
 pub use types::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,
-    CreatedAdmission, EffectiveExecutionLimits, EffectiveStepTimeout, ExecutionBudget,
-    ExecutionProfile, ExecutionProposal, ExecutionStepProposal, ForeignReference, JobDesiredState,
-    JobProjection, JobResolution, ReservationRecord, ReservationState, RunnerIdentity,
-    RuntimeArtifactRecord, RuntimeDeliveryDisposition, RuntimeExecutionPlan, RuntimeExecutionStep,
+    CreatedAdmission, EffectiveExecutionLimits, EffectiveInputBinding, EffectiveStepTimeout,
+    ExecutionBudget, ExecutionProfile, ExecutionProposal, ExecutionStepProposal, ForeignReference,
+    InputAccessMode, InputAuthority, InputBindingRequest, JobDesiredState, JobProjection,
+    JobResolution, ReservationRecord, ReservationState, RunnerIdentity, RuntimeArtifactRecord,
+    RuntimeDeliveryDisposition, RuntimeExecutionPlan, RuntimeExecutionStep,
     RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult,
     RuntimeJobRecord, RuntimeJobSummary, RuntimeWorkspaceGetRequest, RuntimeWorkspaceIssue,
     RuntimeWorkspaceIssueStage, RuntimeWorkspaceListCursor, RuntimeWorkspaceListRequest,

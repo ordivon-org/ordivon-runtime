@@ -18,6 +18,7 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - stable cursor pagination for `workspace.list`, so bounded Workspace inventory no longer silently stops at the first page;
 - exact `currentHeadRevision` on Workspace projections and a projection-only `ordivon-runtime-inspect workspace` view over Git state, active Jobs, recent Attempts, progress, output activity, and Artifact counts.
 - typed Agent-authored execution proposals for `workspace.exec` and `workspace.execPlan`: Job/output/step mechanical limits may be omitted, Core preserves omission in v2 request identity, resolves only omitted values at first admission, and projects the frozen concrete plan as `effectiveLimits`.
+- Core immutable input binding: operator-owned named authorities resolve only normal relative regular files, new admission copies and verifies expected SHA-256 bytes into a Runtime-owned input set, `contained_local` presents the frozen set read-only at a fixed payload path, durable plans and terminal evidence preserve `inputSetId`/effective bindings without leaking host authority/materialization paths, and exact replay resolves the existing Job before current authority/source access. The public MCP execution schema is unchanged.
 
 ### Changed
 
