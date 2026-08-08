@@ -34,6 +34,7 @@ EXPECTED_TOOLS = {
     "workspace.close",
     "workspace.diff",
     "workspace.exec",
+    "workspace.execBound",
     "workspace.execPlan",
     "workspace.get",
     "workspace.list",
@@ -351,6 +352,7 @@ def start_server(
     *,
     max_runtime_ms: int | None = None,
     max_output_bytes: int | None = None,
+    input_authorities: list[dict[str, str]] | None = None,
 ) -> ServerProcess:
     log_path = root / "server.log"
     log_handle = log_path.open("a", encoding="utf-8")
@@ -370,6 +372,8 @@ def start_server(
         env["ORDIVON_MAX_RUNTIME_MS"] = str(max_runtime_ms)
     if max_output_bytes is not None:
         env["ORDIVON_MAX_OUTPUT_BYTES"] = str(max_output_bytes)
+    if input_authorities is not None:
+        env["ORDIVON_INPUT_AUTHORITIES_JSON"] = json.dumps(input_authorities, separators=(",", ":"))
     process = subprocess.Popen(
         [str(target_dir / "debug/ordivon-runtime")],
         cwd=repo,
@@ -439,9 +443,16 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
     root.mkdir(parents=True)
     source, revision = create_source_repo(root)
     token = secrets.token_urlsafe(48)
+    input_authority_root = root / "input-authorities/finance-prepared"
+    input_authority_root.mkdir(parents=True)
+    input_authority_source = input_authority_root / "payload.txt"
+    input_authority_source.write_text("S0\n", encoding="utf-8")
+    input_authorities = [{"name": "finance-prepared", "root": str(input_authority_root)}]
     port = free_port()
     endpoint = f"http://127.0.0.1:{port}/mcp"
-    server = start_server(repo, target_dir, root, port, token)
+    server = start_server(
+        repo, target_dir, root, port, token, input_authorities=input_authorities
+    )
     running_executable = Path(f"/proc/{server.process.pid}/exe").resolve()
     running_digest = digest_bytes(running_executable.read_bytes())
     if running_digest != binary_digests["ordivon-runtime"]:
@@ -561,6 +572,19 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             "exec-path-contract",
             "Absolute host path" in exec_schema_text and "Workspace root" in exec_schema_text,
             exec_schema_text,
+        )
+        bound_schema = tool_entries["workspace.execBound"].get("inputSchema", {})
+        bound_schema_text = json.dumps(bound_schema, sort_keys=True)
+        bound_execution = bound_schema.get("$defs", {}).get("WorkspaceExecBoundExecution", {})
+        bound_input = bound_schema.get("$defs", {}).get("InputBindingRequest", {})
+        check(
+            "exec-bound-authority-contract",
+            "sourcePath" not in bound_schema_text
+            and "executionProfile" not in bound_execution.get("properties", {})
+            and bound_schema.get("properties", {}).get("inputs", {}).get("minItems") == 1
+            and set(bound_input.get("required", []))
+            == {"authority", "relativeObject", "expectedDigest", "presentationRelativePath"},
+            bound_schema,
         )
         mutate_schema_text = json.dumps(tool_entries["workspace.mutate"].get("inputSchema", {}), sort_keys=True)
         check(
@@ -830,6 +854,119 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         attempt_ids.append(attempt_id)
         check("exec-stdout", submitted.get("stdoutTail") == expected_stdout, submitted)
 
+        bound_request_id = f"request:{uuid.uuid4()}"
+        bound_expected_digest = digest_bytes(b"S0\n")
+        bound_script = "\n".join(
+            [
+                "import json, os, pathlib",
+                "root = pathlib.Path(os.environ['ORDIVON_INPUT_ROOT'])",
+                "path = root / 'finance-lab/payload.txt'",
+                "value = path.read_text()",
+                "try:",
+                "    path.write_text('MUTATED\\n')",
+                "    write = 'unexpected-success'",
+                "except OSError as error:",
+                "    write = str(error)",
+                "pathlib.Path('bound-scratch.txt').write_text('scratch-ok\\n')",
+                "print(json.dumps({'input': value, 'write': write, 'inputRoot': str(root)}, sort_keys=True))",
+            ]
+        )
+        bound_request = {
+            "schemaVersion": SCHEMA_VERSION,
+            "clientRequestId": bound_request_id,
+            "execution": {
+                "workspaceId": workspace_id,
+                "executable": "/usr/bin/python3",
+                "args": ["-c", bound_script],
+                "cwdRelative": ".",
+                "env": {},
+            },
+            "inputs": [
+                {
+                    "authority": "finance-prepared",
+                    "relativeObject": "payload.txt",
+                    "expectedDigest": bound_expected_digest,
+                    "presentationRelativePath": "finance-lab/payload.txt",
+                }
+            ],
+            "waitMs": 30_000,
+            "stdoutTailBytes": 8192,
+            "stderrTailBytes": 8192,
+        }
+        bound = client.tool("workspace.execBound", bound_request)
+        bound_job_id = str(bound["jobId"])
+        bound_attempt_id = str(bound["attemptId"])
+        attempt_ids.append(bound_attempt_id)
+        bound_stdout = json.loads(bound.get("stdoutTail", "").strip())
+        check(
+            "exec-bound-contained-read-only",
+            bound.get("status") == "succeeded"
+            and bound_stdout.get("input") == "S0\n"
+            and "Read-only file system" in str(bound_stdout.get("write"))
+            and bound_stdout.get("inputRoot") == "/run/ordivon/inputs",
+            {"observation": bound, "stdout": bound_stdout},
+        )
+        bound_scratch = client.tool(
+            "workspace.read",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "workspaceId": workspace_id,
+                "relativePath": "bound-scratch.txt",
+                "mode": "FULL",
+                "offset": 0,
+                "maxBytes": 4096,
+            },
+        )
+        check("exec-bound-workspace-scratch", bound_scratch.get("content") == "scratch-ok\n", bound_scratch)
+        terminal_descriptor = next(
+            artifact for artifact in bound.get("artifacts", []) if artifact.get("kind") == "terminal_evidence"
+        )
+        bound_terminal = client.tool(
+            "artifact.read",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "jobId": bound_job_id,
+                "artifactId": terminal_descriptor["artifactId"],
+                "offset": 0,
+                "maxBytes": 65_536,
+            },
+        )
+        bound_terminal_text = bound_terminal.get("content", "")
+        bound_evidence = json.loads(bound_terminal_text)
+        effective_inputs = bound_evidence.get("effectiveInputs", [])
+        check(
+            "exec-bound-terminal-input-closure",
+            isinstance(bound_evidence.get("inputSetId"), str)
+            and len(effective_inputs) == 1
+            and effective_inputs[0].get("authority") == "finance-prepared"
+            and effective_inputs[0].get("digest") == bound_expected_digest
+            and effective_inputs[0].get("presentationRelativePath") == "finance-lab/payload.txt"
+            and effective_inputs[0].get("access") == "read_only"
+            and str(input_authority_root) not in bound_terminal_text
+            and "input-materializations/" not in bound_terminal_text
+            and "job-inputs/" not in bound_terminal_text,
+            bound_evidence,
+        )
+        input_authority_source.write_text("S1\n", encoding="utf-8")
+        bound_replay = client.tool("workspace.execBound", bound_request)
+        check(
+            "exec-bound-replay-ignores-current-authority",
+            bound_replay.get("jobId") == bound_job_id
+            and bound_replay.get("attemptId") == bound_attempt_id
+            and json.loads(bound_replay.get("stdoutTail", "").strip()).get("input") == "S0\n",
+            bound_replay,
+        )
+        conflicting_bound_request = json.loads(json.dumps(bound_request))
+        conflicting_bound_request["inputs"][0]["expectedDigest"] = digest_bytes(b"S1\n")
+        bound_conflict = client.tool_result("workspace.execBound", conflicting_bound_request)
+        bound_conflict_error = bound_conflict.get("structuredContent", {}).get("error", {})
+        check(
+            "exec-bound-idempotency-conflict",
+            bound_conflict.get("isError") is True
+            and bound_conflict_error.get("code") == "IDEMPOTENCY_CONFLICT",
+            bound_conflict,
+        )
+
         exec_plan = client.tool(
             "workspace.execPlan",
             {
@@ -1095,6 +1232,7 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             token,
             max_runtime_ms=5_000,
             max_output_bytes=4_096,
+            input_authorities=input_authorities,
         )
         restarted_executable = Path(f"/proc/{server.process.pid}/exe").resolve()
         restarted_digest = digest_bytes(restarted_executable.read_bytes())
@@ -1125,6 +1263,15 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             },
         )
         check("restart-observe", after_restart.get("status") == "succeeded", after_restart)
+
+        bound_restart_replay = client.tool("workspace.execBound", bound_request)
+        check(
+            "exec-bound-restart-replay-ignores-current-authority-policy",
+            bound_restart_replay.get("jobId") == bound_job_id
+            and bound_restart_replay.get("attemptId") == bound_attempt_id
+            and json.loads(bound_restart_replay.get("stdoutTail", "").strip()).get("input") == "S0\n",
+            bound_restart_replay,
+        )
 
         proposal_replay = client.tool(
             "workspace.exec",

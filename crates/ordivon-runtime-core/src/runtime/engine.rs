@@ -386,8 +386,7 @@ impl Runtime {
     }
 
     /// Core execution path for exact immutable foreign inputs.
-    /// Existing Jobs replay before current authority roots are consulted. Public MCP exposure is
-    /// intentionally separate from this Core authority/materialization contract.
+    /// Existing Jobs replay before current authority roots are consulted.
     pub fn run_task_with_inputs(
         &self,
         request: &TaskRunRequest,
@@ -405,64 +404,7 @@ impl Runtime {
             )? {
                 existing.job_id
             } else {
-                if request.execution.execution_profile != super::ExecutionProfile::ContainedLocal {
-                    return Err(RuntimeError::invalid(
-                        "immutable input bindings require contained_local execution",
-                        "execution.executionProfile",
-                    ));
-                }
-                validate_new_admission_policy(
-                    request,
-                    self.executor.max_runtime_ms,
-                    self.executor.max_output_bytes,
-                )?;
-                self.reconcile_recoverable_orphans()?;
-                let _ = self.reconcile_workspace(&request.execution.workspace_id)?;
-                let mut plan = self.resolve_plan(request)?;
-                let admission_ids = self.registry.preallocate_admission_ids();
-                let prepared = self.materialize_input_bindings(
-                    request,
-                    &request_identity_digest,
-                    &admission_ids.job_id,
-                    &inputs,
-                )?;
-                plan.input_set_id = Some(prepared.input_set_id.clone());
-                plan.effective_inputs = prepared.effective_inputs.clone();
-                plan.env.insert(
-                    "ORDIVON_INPUT_ROOT".to_string(),
-                    CONTAINED_INPUT_ROOT.to_string(),
-                );
-                for step in &mut plan.steps {
-                    step.env.insert(
-                        "ORDIVON_INPUT_ROOT".to_string(),
-                        CONTAINED_INPUT_ROOT.to_string(),
-                    );
-                }
-                let submit = SubmitRequest {
-                    schema_version: RUNTIME_SCHEMA_VERSION,
-                    client_request_id: request.client_request_id.clone(),
-                    request_identity_digest: Some(request_identity_digest),
-                    plan,
-                    global_limit: request.global_limit,
-                };
-                match self.registry.submit_preallocated(&submit, &admission_ids) {
-                    Ok(AdmissionOutcome::Created(created)) => {
-                        let job_id = created.job.job_id.clone();
-                        self.ensure_job_input_ownership(&job_id)
-                            .map_err(|error| error.with_operation_id(job_id.clone()))?;
-                        self.ensure_attempt_dispatched(&created.attempt)
-                            .map_err(|error| error.with_operation_id(job_id.clone()))?;
-                        job_id
-                    }
-                    Ok(AdmissionOutcome::Existing { job }) => {
-                        self.discard_prepared_input_set(&prepared.prepared_root)?;
-                        job.job_id
-                    }
-                    Err(error) => {
-                        self.discard_prepared_input_set(&prepared.prepared_root)?;
-                        return Err(error);
-                    }
-                }
+                self.admit_new_task_with_inputs(request, request_identity_digest, &inputs)?
             }
         };
         self.observe_admitted_task(
@@ -471,6 +413,106 @@ impl Runtime {
             request.stdout_tail_bytes,
             request.stderr_tail_bytes,
         )
+    }
+
+    /// Admit an Agent-authored proposal with exact immutable inputs. Proposal identity plus the
+    /// canonical input bindings is fixed before current operator policy or authority roots are
+    /// consulted, so replay preserves the same semantics as ordinary proposal admission.
+    pub fn run_task_proposal_with_inputs(
+        &self,
+        proposal: &super::TaskRunProposal,
+        inputs: &[InputBindingRequest],
+    ) -> RuntimeResult<TaskObservation> {
+        validate_run_proposal_structure(proposal)?;
+        let inputs = canonical_input_binding_requests(inputs)?;
+        let request_identity_digest =
+            super::input_bound_proposal_request_identity_digest(proposal, &inputs)?;
+        let job_id = {
+            let _guard = self.lock_lifecycle()?;
+            if let Some(existing) = self.registry.find_idempotent_job(
+                &proposal.principal,
+                &proposal.client_request_id,
+                &request_identity_digest,
+            )? {
+                existing.job_id
+            } else {
+                let request = self.resolve_proposal(proposal);
+                validate_run_request_structure(&request)?;
+                self.admit_new_task_with_inputs(&request, request_identity_digest, &inputs)?
+            }
+        };
+        self.observe_admitted_task(
+            &job_id,
+            proposal.wait_ms,
+            proposal.stdout_tail_bytes,
+            proposal.stderr_tail_bytes,
+        )
+    }
+
+    fn admit_new_task_with_inputs(
+        &self,
+        request: &TaskRunRequest,
+        request_identity_digest: String,
+        inputs: &[InputBindingRequest],
+    ) -> RuntimeResult<String> {
+        if request.execution.execution_profile != super::ExecutionProfile::ContainedLocal {
+            return Err(RuntimeError::invalid(
+                "immutable input bindings require contained_local execution",
+                "execution.executionProfile",
+            ));
+        }
+        validate_new_admission_policy(
+            request,
+            self.executor.max_runtime_ms,
+            self.executor.max_output_bytes,
+        )?;
+        self.reconcile_recoverable_orphans()?;
+        let _ = self.reconcile_workspace(&request.execution.workspace_id)?;
+        let mut plan = self.resolve_plan(request)?;
+        let admission_ids = self.registry.preallocate_admission_ids();
+        let prepared = self.materialize_input_bindings(
+            request,
+            &request_identity_digest,
+            &admission_ids.job_id,
+            inputs,
+        )?;
+        plan.input_set_id = Some(prepared.input_set_id.clone());
+        plan.effective_inputs = prepared.effective_inputs.clone();
+        plan.env.insert(
+            "ORDIVON_INPUT_ROOT".to_string(),
+            CONTAINED_INPUT_ROOT.to_string(),
+        );
+        for step in &mut plan.steps {
+            step.env.insert(
+                "ORDIVON_INPUT_ROOT".to_string(),
+                CONTAINED_INPUT_ROOT.to_string(),
+            );
+        }
+        let submit = SubmitRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            client_request_id: request.client_request_id.clone(),
+            request_identity_digest: Some(request_identity_digest),
+            plan,
+            global_limit: request.global_limit,
+        };
+        match self.registry.submit_preallocated(&submit, &admission_ids) {
+            Ok(AdmissionOutcome::Created(created)) => {
+                let job_id = created.job.job_id.clone();
+                self.ensure_job_input_ownership(&job_id)
+                    .map_err(|error| error.with_operation_id(job_id.clone()))?;
+                self.ensure_attempt_dispatched(&created.attempt)
+                    .map_err(|error| error.with_operation_id(job_id.clone()))?;
+                Ok(job_id)
+            }
+            Ok(AdmissionOutcome::Existing { job }) => {
+                self.discard_prepared_input_set(&prepared.prepared_root)?;
+                Ok(job.job_id)
+            }
+            Err(error) => {
+                self.discard_prepared_input_set(&prepared.prepared_root)?;
+                Err(error)
+            }
+        }
     }
 
     /// Admit an Agent-authored proposal whose proven mechanical execution limits may be omitted.

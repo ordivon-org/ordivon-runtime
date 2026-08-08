@@ -12,12 +12,15 @@ use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use ordivon_runtime_core::{RegistryConfig, RuntimeConfig, UniversalExecutorConfig};
+use ordivon_runtime_core::{
+    InputAuthority, RegistryConfig, RuntimeConfig, UniversalExecutorConfig,
+};
 use ordivon_runtime_mcp::server::{ExecutionContext, RuntimeServer, ServerConfig};
 use ordivon_runtime_mcp::{append_rotating_jsonl, DEFAULT_TRACE_ROTATION_BYTES};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
+use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -32,6 +35,13 @@ struct HttpState {
 
 static HTTP_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static HTTP_TRACE_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InputAuthorityConfig {
+    name: String,
+    root: PathBuf,
+}
 
 struct AppConfig {
     bind: SocketAddr,
@@ -288,6 +298,22 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         })
         .filter(|roots| !roots.is_empty())
         .unwrap_or_else(|| vec![PathBuf::from("/")]);
+    let input_authorities = optional_env("ORDIVON_INPUT_AUTHORITIES_JSON")?
+        .map(|value| {
+            serde_json::from_str::<Vec<InputAuthorityConfig>>(&value).map_err(|error| {
+                format!(
+                    "ORDIVON_INPUT_AUTHORITIES_JSON must be a JSON array of named roots: {error}"
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter()
+        .map(|authority| InputAuthority {
+            name: authority.name,
+            root: authority.root,
+        })
+        .collect::<Vec<_>>();
     let trace_path = std::env::var("ORDIVON_TRACE_PATH")
         .ok()
         .map(PathBuf::from)
@@ -385,6 +411,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                 },
                 startup_grace_ms,
             },
+            input_authorities,
             execution: ExecutionContext {
                 principal,
                 global_limit,

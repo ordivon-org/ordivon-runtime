@@ -3238,6 +3238,9 @@ fn job_request_identity_digest(job: &RuntimeJobRecord) -> RuntimeResult<String> 
         || job
             .request_digest
             .starts_with(super::INPUT_BOUND_IDENTITY_PREFIX)
+        || job
+            .request_digest
+            .starts_with(super::INPUT_BOUND_PROPOSAL_IDENTITY_PREFIX)
     {
         validate_request_identity_digest(&job.request_digest)?;
         return Ok(job.request_digest.clone());
@@ -3259,6 +3262,7 @@ fn validate_request_identity_digest(value: &str) -> RuntimeResult<()> {
         .strip_prefix(super::REQUEST_IDENTITY_PREFIX)
         .or_else(|| value.strip_prefix(super::PROPOSAL_IDENTITY_PREFIX))
         .or_else(|| value.strip_prefix(super::INPUT_BOUND_IDENTITY_PREFIX))
+        .or_else(|| value.strip_prefix(super::INPUT_BOUND_PROPOSAL_IDENTITY_PREFIX))
         .ok_or_else(|| {
             RuntimeError::invalid(
                 "unsupported request identity digest",

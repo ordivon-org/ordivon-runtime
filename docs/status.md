@@ -95,7 +95,7 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 | receipted deploy and rollback | operational |
 | Workspace lifecycle and cache reclamation | operational |
 | `contained_local` authority reduction | experimental but verified for the declared boundary |
-| Core immutable input materialization and read-only contained binding | implemented and real-system verified; no public MCP request surface yet |
+| Immutable input materialization and `workspace.execBound` read-only contained admission | implemented and public-MCP real-system verified; named authority roots remain operator configuration |
 | hostile multi-tenant sandboxing | not provided |
 | semantic Task completion | outside Runtime |
 | external-world effect verification | structured adapter dependent; not generic |

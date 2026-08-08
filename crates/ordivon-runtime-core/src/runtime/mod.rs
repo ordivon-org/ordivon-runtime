@@ -44,9 +44,10 @@ pub use repair::{
     RuntimeRepairReport, RuntimeRepairRequest, RUNTIME_REPAIR_SCHEMA_VERSION,
 };
 pub(crate) use types::{
-    input_bound_request_identity_digest, operation_request_identity_digest,
-    operation_request_identity_digest_from_plan, proposal_request_identity_digest,
-    INPUT_BOUND_IDENTITY_PREFIX, PROPOSAL_IDENTITY_PREFIX, REQUEST_IDENTITY_PREFIX,
+    input_bound_proposal_request_identity_digest, input_bound_request_identity_digest,
+    operation_request_identity_digest, operation_request_identity_digest_from_plan,
+    proposal_request_identity_digest, INPUT_BOUND_IDENTITY_PREFIX,
+    INPUT_BOUND_PROPOSAL_IDENTITY_PREFIX, PROPOSAL_IDENTITY_PREFIX, REQUEST_IDENTITY_PREFIX,
 };
 pub use types::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,

@@ -294,6 +294,32 @@ impl RuntimeServer {
     }
 
     #[tool(
+        name = "workspace.execBound",
+        description = "Admit one contained-local execution with exact immutable inputs from operator-configured named authorities. Each input names only an authority, a relative object, an expected SHA-256 digest, and its presentation-relative path. Runtime resolves and copies those bytes only on new admission, freezes effective input commitments into the Job, presents them read-only under /run/ordivon/inputs, and replays an existing Job before consulting current authority state. This is physical execution evidence only and does not imply domain semantic completion.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),
+        annotations(
+            title = "Execute with immutable inputs",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_exec_bound(
+        &self,
+        Parameters(request): Parameters<WorkspaceExecBoundRequest>,
+    ) -> ToolOutcome<TaskObservation> {
+        let runtime = self.state.runtime.clone();
+        let (proposal, inputs) = self.state.execution.bind_bound(request);
+        self.run_core("workspace.execBound", move || {
+            runtime
+                .run_task_proposal_with_inputs(&proposal, &inputs)
+                .map_err(ToolError::from)
+        })
+        .await
+    }
+
+    #[tool(
         name = "workspace.execPlan",
         description = "Run an ordered structured execution plan inside one Workspace. Steps use absolute executables and explicit args, run sequentially, stop on the first failure by default, and continue only when that step explicitly sets continueOnError. The Job exposes step progress plus exact Attempt state, execution and delivery disposition, and recovery requirement without asking the caller to infer them from output.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),

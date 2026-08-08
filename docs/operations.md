@@ -128,7 +128,7 @@ scripts/ordivon-runtime-deploy plan \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --env-file /etc/ordivon/ordivon-runtime.env \
   --receipt-root /var/lib/ordivon/deployments \
-  --expected-tool-count 15 \
+  --expected-tool-count 16 \
   --pretty
 
 scripts/ordivon-runtime-deploy apply \
@@ -141,7 +141,7 @@ scripts/ordivon-runtime-deploy apply \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --env-file /etc/ordivon/ordivon-runtime.env \
   --receipt-root /var/lib/ordivon/deployments \
-  --expected-tool-count 15
+  --expected-tool-count 16
 ```
 
 The default production release has one artifact authority rather than separate binary and operator-script installations. It contains five Rust binaries, the six installed Runtime operator executables (`deploy`, `lifecycle`, `reclaim`, `cache`, `status`, and `capacity-acceptance`), and their shared `mcp_probe.py` support module. Every artifact is bound by name, kind, byte length, SHA-256 digest, and canonical mode (`0755` for executable artifacts and `0644` for `mcp_probe.py`). Passing explicit `--binary` values intentionally selects a binary-only subset for focused testing or exceptional maintenance; it is not the canonical production release set.

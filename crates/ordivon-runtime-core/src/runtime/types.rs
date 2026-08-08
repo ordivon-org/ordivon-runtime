@@ -455,6 +455,7 @@ pub struct SubmitRequest {
 pub(crate) const REQUEST_IDENTITY_PREFIX: &str = "runtime-request-v1:";
 pub(crate) const PROPOSAL_IDENTITY_PREFIX: &str = "runtime-request-v2:";
 pub(crate) const INPUT_BOUND_IDENTITY_PREFIX: &str = "runtime-request-input-v1:";
+pub(crate) const INPUT_BOUND_PROPOSAL_IDENTITY_PREFIX: &str = "runtime-request-input-v2:";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -490,6 +491,13 @@ struct InputBindingIdentity {
 #[serde(rename_all = "camelCase")]
 struct InputBoundRequestIdentity {
     operation: OperationRequestIdentity,
+    inputs: Vec<InputBindingIdentity>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InputBoundProposalIdentity {
+    proposal: ProposalRequestIdentity,
     inputs: Vec<InputBindingIdentity>,
 }
 
@@ -540,10 +548,7 @@ fn operation_request_identity(request: &TaskRunRequest) -> OperationRequestIdent
     }
 }
 
-pub(crate) fn input_bound_request_identity_digest(
-    request: &TaskRunRequest,
-    inputs: &[InputBindingRequest],
-) -> RuntimeResult<String> {
+fn input_binding_identities(inputs: &[InputBindingRequest]) -> Vec<InputBindingIdentity> {
     let mut inputs = inputs
         .iter()
         .map(|input| InputBindingIdentity {
@@ -567,9 +572,16 @@ pub(crate) fn input_bound_request_identity_digest(
                 &right.expected_digest,
             ))
     });
+    inputs
+}
+
+pub(crate) fn input_bound_request_identity_digest(
+    request: &TaskRunRequest,
+    inputs: &[InputBindingRequest],
+) -> RuntimeResult<String> {
     let identity = InputBoundRequestIdentity {
         operation: operation_request_identity(request),
-        inputs,
+        inputs: input_binding_identities(inputs),
     };
     let bytes = serde_json::to_vec(&identity).map_err(|error| {
         RuntimeError::new(
@@ -585,10 +597,8 @@ pub(crate) fn input_bound_request_identity_digest(
     ))
 }
 
-pub(crate) fn proposal_request_identity_digest(
-    proposal: &TaskRunProposal,
-) -> RuntimeResult<String> {
-    let identity = ProposalRequestIdentity {
+fn proposal_request_identity(proposal: &TaskRunProposal) -> ProposalRequestIdentity {
+    ProposalRequestIdentity {
         schema_version: proposal.schema_version,
         principal: proposal.principal.clone(),
         workspace_id: proposal.execution.workspace_id.clone(),
@@ -616,8 +626,13 @@ pub(crate) fn proposal_request_identity_digest(
         budget: proposal.execution.budget.clone(),
         execution_profile: proposal.execution.execution_profile,
         foreign_references: proposal.execution.foreign_references.clone(),
-    };
-    let bytes = serde_json::to_vec(&identity).map_err(|error| {
+    }
+}
+
+pub(crate) fn proposal_request_identity_digest(
+    proposal: &TaskRunProposal,
+) -> RuntimeResult<String> {
+    let bytes = serde_json::to_vec(&proposal_request_identity(proposal)).map_err(|error| {
         RuntimeError::new(
             RuntimeErrorCode::InvalidRequest,
             format!("cannot serialize execution proposal identity: {error}"),
@@ -627,6 +642,28 @@ pub(crate) fn proposal_request_identity_digest(
     })?;
     Ok(format!(
         "{PROPOSAL_IDENTITY_PREFIX}{}",
+        crate::universal::sha256_bytes(&bytes)
+    ))
+}
+
+pub(crate) fn input_bound_proposal_request_identity_digest(
+    proposal: &TaskRunProposal,
+    inputs: &[InputBindingRequest],
+) -> RuntimeResult<String> {
+    let identity = InputBoundProposalIdentity {
+        proposal: proposal_request_identity(proposal),
+        inputs: input_binding_identities(inputs),
+    };
+    let bytes = serde_json::to_vec(&identity).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::InvalidRequest,
+            format!("cannot serialize input-bound proposal identity: {error}"),
+            None,
+            false,
+        )
+    })?;
+    Ok(format!(
+        "{INPUT_BOUND_PROPOSAL_IDENTITY_PREFIX}{}",
         crate::universal::sha256_bytes(&bytes)
     ))
 }

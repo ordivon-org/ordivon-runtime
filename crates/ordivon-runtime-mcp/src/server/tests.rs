@@ -49,6 +49,7 @@ impl Sandbox {
                 },
                 startup_grace_ms: 1000,
             },
+            input_authorities: Vec::new(),
             execution: ExecutionContext {
                 principal: "principal:mcp-test".to_string(),
                 global_limit: 4,
@@ -127,6 +128,93 @@ fn workspace_exec_schema_exposes_mechanical_limits_as_optional() {
     assert!(!required.contains(&"timeoutMs"));
     assert!(!required.contains(&"stdoutLimitBytes"));
     assert!(!required.contains(&"stderrLimitBytes"));
+}
+
+#[test]
+fn workspace_exec_bound_schema_exposes_only_named_immutable_input_authority() {
+    let server = Sandbox::new("bound-schema").server();
+    let tools = server.tool_router.list_all();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "workspace.execBound")
+        .expect("workspace.execBound");
+    let schema = serde_json::to_value(&tool.input_schema).unwrap();
+    assert_eq!(
+        schema.pointer("/properties/inputs/minItems"),
+        Some(&serde_json::json!(1))
+    );
+    assert!(schema
+        .pointer("/$defs/WorkspaceExecBoundExecution/properties/executionProfile")
+        .is_none());
+    let required = schema
+        .pointer("/$defs/WorkspaceExecBoundExecution/required")
+        .and_then(Value::as_array)
+        .expect("WorkspaceExecBoundExecution required")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(required.contains(&"workspaceId"));
+    assert!(required.contains(&"executable"));
+    assert!(required.contains(&"cwdRelative"));
+    assert!(!required.contains(&"timeoutMs"));
+    assert!(!required.contains(&"stdoutLimitBytes"));
+    assert!(!required.contains(&"stderrLimitBytes"));
+    assert_eq!(
+        schema.pointer("/$defs/InputBindingRequest/required"),
+        Some(&serde_json::json!([
+            "authority",
+            "relativeObject",
+            "expectedDigest",
+            "presentationRelativePath"
+        ]))
+    );
+    assert_eq!(
+        schema.pointer("/$defs/InputBindingRequest/additionalProperties"),
+        Some(&serde_json::json!(false))
+    );
+    let text = serde_json::to_string(&schema).unwrap();
+    assert!(!text.contains("sourcePath"));
+}
+
+#[test]
+fn workspace_exec_bound_binding_forces_contained_local() {
+    let server = Sandbox::new("bound-binding").server();
+    let request = WorkspaceExecBoundRequest {
+        schema_version: 1,
+        client_request_id: "request:bound".to_string(),
+        execution: WorkspaceExecBoundExecution {
+            workspace_id: "workspace:test".to_string(),
+            executable: "/usr/bin/true".to_string(),
+            args: Vec::new(),
+            cwd_relative: ".".to_string(),
+            env: Default::default(),
+            timeout_ms: None,
+            stdout_limit_bytes: None,
+            stderr_limit_bytes: None,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            foreign_references: Vec::new(),
+        },
+        inputs: vec![InputBindingRequest {
+            authority: "finance-prepared".to_string(),
+            relative_object: "bundle/manifest.json".to_string(),
+            expected_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            presentation_relative_path: "finance-lab/bundle/manifest.json".to_string(),
+        }],
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    let (proposal, inputs) = server.state.execution.bind_bound(request);
+    assert_eq!(
+        proposal.execution.execution_profile,
+        ExecutionProfile::ContainedLocal
+    );
+    assert_eq!(proposal.execution.timeout_ms, None);
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].authority, "finance-prepared");
 }
 
 #[test]
@@ -244,6 +332,7 @@ fn tool_effect_annotations_match_runtime_behavior() {
         ("workspace.close", false, true, false, false),
         ("workspace.diff", true, false, true, false),
         ("workspace.exec", false, true, false, true),
+        ("workspace.execBound", false, true, false, false),
         ("workspace.execPlan", false, true, false, true),
         ("workspace.get", true, false, true, false),
         ("workspace.list", true, false, true, false),
@@ -317,6 +406,7 @@ fn tool_catalog_uses_transactional_job_contract() {
             "workspace.close",
             "workspace.diff",
             "workspace.exec",
+            "workspace.execBound",
             "workspace.execPlan",
             "workspace.get",
             "workspace.list",
@@ -802,7 +892,7 @@ fn every_public_tool_publishes_structured_output_contract() {
     let sandbox = Sandbox::new("all-output-schemas");
     let server = sandbox.server();
     let tools = server.tool_router.list_all();
-    assert_eq!(tools.len(), 15);
+    assert_eq!(tools.len(), 16);
     for tool in tools {
         let schema = tool
             .output_schema

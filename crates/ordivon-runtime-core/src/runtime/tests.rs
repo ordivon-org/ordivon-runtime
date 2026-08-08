@@ -1347,6 +1347,72 @@ fn input_bound_identity_is_order_independent_but_binding_sensitive() {
 }
 
 #[test]
+fn input_bound_proposal_identity_preserves_proposal_and_binding_semantics() {
+    let request = input_bound_task_request("workspace:test", "request:input-proposal-identity");
+    let proposal = TaskRunProposal {
+        schema_version: request.schema_version,
+        client_request_id: request.client_request_id.clone(),
+        principal: request.principal.clone(),
+        global_limit: request.global_limit,
+        execution: ExecutionProposal {
+            workspace_id: request.execution.workspace_id.clone(),
+            executable: request.execution.executable.clone(),
+            args: request.execution.args.clone(),
+            cwd_relative: request.execution.cwd_relative.clone(),
+            env: request.execution.env.clone(),
+            timeout_ms: None,
+            stdout_limit_bytes: None,
+            stderr_limit_bytes: None,
+            steps: Vec::new(),
+            budget: request.execution.budget.clone(),
+            execution_profile: ExecutionProfile::ContainedLocal,
+            foreign_references: Vec::new(),
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    let inputs = vec![
+        InputBindingRequest {
+            authority: "finance-prepared".to_string(),
+            relative_object: "bundle/manifest.json".to_string(),
+            expected_digest: digest(b"manifest"),
+            presentation_relative_path: "finance-lab/bundle/manifest.json".to_string(),
+        },
+        InputBindingRequest {
+            authority: "finance-prepared".to_string(),
+            relative_object: "bundle/cuts/rates.parquet".to_string(),
+            expected_digest: digest(b"rates"),
+            presentation_relative_path: "finance-lab/bundle/cuts/rates.parquet".to_string(),
+        },
+    ];
+    let first = input_bound_proposal_request_identity_digest(&proposal, &inputs).unwrap();
+    assert!(first.starts_with("runtime-request-input-v2:"));
+    assert_eq!(
+        input_bound_proposal_request_identity_digest(
+            &proposal,
+            &[inputs[1].clone(), inputs[0].clone()]
+        )
+        .unwrap(),
+        first
+    );
+
+    let mut changed_input = inputs.clone();
+    changed_input[0].expected_digest = digest(b"different");
+    assert_ne!(
+        input_bound_proposal_request_identity_digest(&proposal, &changed_input).unwrap(),
+        first
+    );
+
+    let mut explicit_limit = proposal.clone();
+    explicit_limit.execution.timeout_ms = Some(60_000);
+    assert_ne!(
+        input_bound_proposal_request_identity_digest(&explicit_limit, &inputs).unwrap(),
+        first
+    );
+}
+
+#[test]
 fn immutable_inputs_reject_trusted_local_before_workspace_resolution() {
     let sandbox = Sandbox::new("input-trusted-reject", 5000);
     let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
@@ -1872,6 +1938,25 @@ fn request_identity_replays_across_world_change_but_operation_identity_binds_wor
     ));
     let error = sandbox.registry.submit(&changed_request).unwrap_err();
     assert_eq!(error.code, RuntimeErrorCode::IdempotencyConflict);
+}
+
+#[test]
+fn registry_accepts_input_bound_proposal_identity_without_changing_legacy_prefixes() {
+    for (index, prefix) in [
+        REQUEST_IDENTITY_PREFIX,
+        PROPOSAL_IDENTITY_PREFIX,
+        INPUT_BOUND_IDENTITY_PREFIX,
+        INPUT_BOUND_PROPOSAL_IDENTITY_PREFIX,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sandbox = Sandbox::new(&format!("request-identity-prefix-{index}"), 5000);
+        let mut submission = request(&sandbox, "request:identity-prefix", 4);
+        submission.request_identity_digest = Some(format!("{}sha256:{}", prefix, "a".repeat(64)));
+        let admitted = sandbox.registry.submit(&submission).unwrap();
+        assert!(matches!(admitted, AdmissionOutcome::Created(_)), "{prefix}");
+    }
 }
 
 #[test]

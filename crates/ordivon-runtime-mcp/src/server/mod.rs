@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -9,16 +10,16 @@ use ordivon_runtime_core::{
     ArtifactReadRequest, ArtifactReadResult, CompactWorkspaceDiffResult,
     CompactWorkspaceOpenResult, DurableWorkspacePatchRequest, DurableWorkspacePatchResult,
     ExecutionBudget, ExecutionProfile, ExecutionProposal, ExecutionStepProposal, ForeignReference,
-    GitWorkspaceCreateRequest, Runtime, RuntimeCapacity, RuntimeConfig, RuntimeError,
-    RuntimeJobListRequest, RuntimeJobListResult, RuntimeWorkspaceGetRequest,
-    RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
-    TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunProposal, TaskRunRequest,
-    UniversalExecError, UniversalExecutionRequest, UniversalExecutionStep, UniversalExecutorConfig,
-    WorkspaceCloseRequest, WorkspaceCloseResult, WorkspaceDiffRequest as ExecWorkspaceDiffRequest,
-    WorkspaceFilePatch, WorkspaceMutateRequest, WorkspaceMutateResult,
-    WorkspacePatchOperationStatus, WorkspacePatchRequest, WorkspacePatchStatusRequest,
-    WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
-    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
+    GitWorkspaceCreateRequest, InputAuthority, InputBindingRequest, Runtime, RuntimeCapacity,
+    RuntimeConfig, RuntimeError, RuntimeJobListRequest, RuntimeJobListResult,
+    RuntimeWorkspaceGetRequest, RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult,
+    RuntimeWorkspaceSummary, TaskCancelRequest, TaskObservation, TaskObserveRequest,
+    TaskRunProposal, TaskRunRequest, UniversalExecError, UniversalExecutionRequest,
+    UniversalExecutionStep, UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
+    WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceFilePatch, WorkspaceMutateRequest,
+    WorkspaceMutateResult, WorkspacePatchOperationStatus, WorkspacePatchRequest,
+    WorkspacePatchStatusRequest, WorkspaceReadRequest as ExecWorkspaceReadRequest,
+    WorkspaceReadSliceRequest, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{IntoCallToolResult, ToolCallContext};
@@ -132,6 +133,55 @@ pub struct WorkspaceExecRequest {
     pub schema_version: u32,
     pub client_request_id: String,
     pub execution: ExecutionProposal,
+    #[serde(default = "default_exec_wait_ms")]
+    #[schemars(range(max = MAX_TASK_WAIT_MS))]
+    pub wait_ms: u64,
+    #[serde(default = "default_exec_tail_bytes")]
+    #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
+    pub stdout_tail_bytes: u64,
+    #[serde(default = "default_exec_tail_bytes")]
+    #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
+    pub stderr_tail_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceExecBoundExecution {
+    pub workspace_id: String,
+    /// Absolute host path to the executable; PATH lookup is intentionally not performed.
+    pub executable: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Working directory relative to the Workspace root.
+    pub cwd_relative: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub stdout_limit_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub stderr_limit_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<ExecutionStepProposal>,
+    #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
+    pub budget: ExecutionBudget,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreign_references: Vec<ForeignReference>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceExecBoundRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    pub schema_version: u32,
+    pub client_request_id: String,
+    pub execution: WorkspaceExecBoundExecution,
+    #[schemars(length(min = 1))]
+    pub inputs: Vec<InputBindingRequest>,
     #[serde(default = "default_exec_wait_ms")]
     #[schemars(range(max = MAX_TASK_WAIT_MS))]
     pub wait_ms: u64,
@@ -289,6 +339,39 @@ impl ExecutionContext {
         }
     }
 
+    fn bind_bound(
+        &self,
+        request: WorkspaceExecBoundRequest,
+    ) -> (TaskRunProposal, Vec<InputBindingRequest>) {
+        let execution = request.execution;
+        (
+            TaskRunProposal {
+                schema_version: request.schema_version,
+                client_request_id: request.client_request_id,
+                principal: self.principal.clone(),
+                global_limit: self.global_limit,
+                execution: ExecutionProposal {
+                    workspace_id: execution.workspace_id,
+                    executable: execution.executable,
+                    args: execution.args,
+                    cwd_relative: execution.cwd_relative,
+                    env: execution.env,
+                    timeout_ms: execution.timeout_ms,
+                    stdout_limit_bytes: execution.stdout_limit_bytes,
+                    stderr_limit_bytes: execution.stderr_limit_bytes,
+                    steps: execution.steps,
+                    budget: execution.budget,
+                    execution_profile: ExecutionProfile::ContainedLocal,
+                    foreign_references: execution.foreign_references,
+                },
+                wait_ms: request.wait_ms,
+                stdout_tail_bytes: request.stdout_tail_bytes,
+                stderr_tail_bytes: request.stderr_tail_bytes,
+            },
+            request.inputs,
+        )
+    }
+
     fn bind_plan(&self, request: WorkspaceExecPlanRequest) -> Result<BoundTaskRun, ToolError> {
         let first = request.execution.steps.first().cloned().ok_or_else(|| {
             ToolError::invalid("steps must contain at least one item", "execution.steps")
@@ -400,6 +483,7 @@ fn default_exec_tail_bytes() -> u64 {
 #[derive(Clone)]
 pub struct ServerConfig {
     pub runtime: RuntimeConfig,
+    pub input_authorities: Vec<InputAuthority>,
     pub execution: ExecutionContext,
     pub trace_path: Option<PathBuf>,
 }
@@ -422,7 +506,8 @@ impl RuntimeServer {
     pub fn new(config: ServerConfig) -> Result<Self, ToolError> {
         let executor = config.runtime.executor.clone();
         executor.ensure_store().map_err(ToolError::from)?;
-        let runtime = Runtime::new(config.runtime).map_err(ToolError::from)?;
+        let runtime = Runtime::new_with_input_authorities(config.runtime, config.input_authorities)
+            .map_err(ToolError::from)?;
         let state = Arc::new(ServerState {
             runtime,
             executor,
