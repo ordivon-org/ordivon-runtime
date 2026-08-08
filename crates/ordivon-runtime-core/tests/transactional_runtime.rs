@@ -2,15 +2,16 @@
 
 use ordivon_runtime_core::{
     create_git_workspace, remove_git_workspace, write_workspace_text, ArtifactReadRequest,
-    AttemptState, ExecutionBudget, GitWorkspaceCreateRequest, InputAuthority, InputBindingRequest,
-    RegistryConfig, Runtime, RuntimeConfig, RuntimeExecutionPlan, RuntimeJobListRequest,
-    SubmitRequest, TaskCancelRequest, TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest,
-    UniversalExecutionRequest, UniversalExecutorConfig, WorkspaceCloseRequest,
-    WorkspaceMutateRequest, WorkspaceMutation, WorkspaceMutationMode, WorkspaceWriteRequest,
-    RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    AttemptState, ExecutionBudget, ForeignReference, GitWorkspaceCreateRequest, InputAuthority,
+    InputBindingRequest, RegistryConfig, Runtime, RuntimeConfig, RuntimeExecutionPlan,
+    RuntimeJobListRequest, SubmitRequest, TaskCancelRequest, TaskObserveRequest,
+    TaskObserveWaitUntil, TaskRunRequest, UniversalExecutionRequest, UniversalExecutorConfig,
+    WorkspaceCloseRequest, WorkspaceMutateRequest, WorkspaceMutation, WorkspaceMutationMode,
+    WorkspaceWriteRequest, RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -307,15 +308,20 @@ print(json.dumps({"input": path.read_text().strip(), "write": write_result}, sor
     assert_eq!(bindings[0]["presentationRelativePath"], "finance/data.txt");
     assert_eq!(bindings[0]["access"], "read_only");
 
+    let owned_root = context.executor.job_input_path(&final_observation.job_id);
+    assert_eq!(
+        fs::read(owned_root.join("finance/data.txt")).unwrap(),
+        b"S0\n"
+    );
+    assert!(fs::read_dir(context.executor.input_materializations_root())
+        .unwrap()
+        .filter_map(Result::ok)
+        .all(|entry| entry.file_name().to_string_lossy().starts_with('.')));
+
     drop(runtime);
     fs::remove_dir_all(&authority_root).unwrap();
-    let restarted = context.runtime_with_input_authorities(
-        2_000,
-        vec![InputAuthority {
-            name: "finance".to_string(),
-            root: authority_root,
-        }],
-    );
+    // Durable replay must not consult current authority or require it to be configured.
+    let restarted = context.runtime(2_000);
     let replay = restarted.run_task_with_inputs(&request, &inputs).unwrap();
     assert_eq!(replay.job_id, final_observation.job_id);
     assert_eq!(replay.status, "succeeded");
@@ -330,6 +336,128 @@ print(json.dumps({"input": path.read_text().strip(), "write": write_result}, sor
         ordivon_runtime_core::RuntimeErrorCode::IdempotencyConflict
     );
     assert_eq!(restarted.registry().active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_failed_capacity_admission_discards_prepared_state_and_rechecks_current_authority() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("immutable-input-capacity-cleanup");
+    let authority_root = context.root.join("authority");
+    fs::create_dir_all(&authority_root).unwrap();
+    let source = authority_root.join("input.bin");
+    fs::write(&source, b"AUTHORIZED-S0").unwrap();
+    let runtime = context.runtime_with_input_authorities(
+        2_000,
+        vec![InputAuthority {
+            name: "finance-state".to_string(),
+            root: authority_root.clone(),
+        }],
+    );
+    let mut holder = context.request("input-capacity-holder", 0);
+    holder.execution.executable = "/usr/bin/sleep".to_string();
+    holder.execution.args = vec!["5".to_string()];
+    let holder = runtime.run_task(&holder).unwrap();
+    assert!(!holder.execution_terminal);
+    let inputs = vec![InputBindingRequest {
+        authority: "finance-state".to_string(),
+        relative_object: "input.bin".to_string(),
+        expected_digest: file_digest(&source),
+        presentation_relative_path: "state/input.bin".to_string(),
+    }];
+    let mut blocked = context.request("input-capacity-blocked", 0);
+    blocked.client_request_id = format!("request:input-capacity-blocked:{}", Uuid::now_v7());
+    blocked.execution.execution_profile = ordivon_runtime_core::ExecutionProfile::ContainedLocal;
+    blocked.execution.executable = "/usr/bin/true".to_string();
+    blocked.execution.args.clear();
+    let error = runtime.run_task_with_inputs(&blocked, &inputs).unwrap_err();
+    assert_eq!(
+        error.code,
+        ordivon_runtime_core::RuntimeErrorCode::ConcurrencyLimit
+    );
+    assert!(fs::read_dir(context.executor.input_materializations_root())
+        .unwrap()
+        .filter_map(Result::ok)
+        .all(|entry| entry.file_name().to_string_lossy().starts_with('.')));
+    fs::write(&source, b"AUTHORIZED-S1").unwrap();
+    runtime
+        .cancel_task(&TaskCancelRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: holder.job_id.clone(),
+        })
+        .unwrap();
+    runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: holder.job_id,
+            wait_ms: 10_000,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 1024,
+            stderr_tail_bytes: 1024,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    let drift = runtime.run_task_with_inputs(&blocked, &inputs).unwrap_err();
+    assert_eq!(
+        drift.code,
+        ordivon_runtime_core::RuntimeErrorCode::InvalidRequest
+    );
+    assert_eq!(drift.field.as_deref(), Some("inputs[0].expectedDigest"));
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_opened_input_authority_survives_configured_path_replacement() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("immutable-input-authority-capability");
+    let authority_path = context.root.join("authority");
+    let outside = context.root.join("outside");
+    fs::create_dir_all(&authority_path).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(authority_path.join("data.bin"), b"ALLOWED").unwrap();
+    fs::write(outside.join("data.bin"), b"SECRET").unwrap();
+    let runtime = context.runtime_with_input_authorities(
+        2_000,
+        vec![InputAuthority {
+            name: "finance-state".to_string(),
+            root: authority_path.clone(),
+        }],
+    );
+    let original = context.root.join("authority-original");
+    fs::rename(&authority_path, &original).unwrap();
+    std::os::unix::fs::symlink(&outside, &authority_path).unwrap();
+    let mut request = context.request("authority-capability", 30_000);
+    request.client_request_id = format!("request:authority-capability:{}", Uuid::now_v7());
+    request.execution.execution_profile = ordivon_runtime_core::ExecutionProfile::ContainedLocal;
+    request.execution.executable = "/usr/bin/python3.14".to_string();
+    request.execution.args = vec![
+        "-c".to_string(),
+        "from pathlib import Path; import os; print((Path(os.environ['ORDIVON_INPUT_ROOT'])/'data.bin').read_text())".to_string(),
+    ];
+    let inputs = vec![InputBindingRequest {
+        authority: "finance-state".to_string(),
+        relative_object: "data.bin".to_string(),
+        expected_digest: digest(b"ALLOWED"),
+        presentation_relative_path: "data.bin".to_string(),
+    }];
+    let terminal = runtime.run_task_with_inputs(&request, &inputs).unwrap();
+    assert_eq!(terminal.status, "succeeded", "{}", terminal.stderr_tail);
+    assert_eq!(terminal.stdout_tail.trim(), "ALLOWED");
+    assert_eq!(
+        fs::read(
+            context
+                .executor
+                .job_input_path(&terminal.job_id)
+                .join("data.bin")
+        )
+        .unwrap(),
+        b"ALLOWED"
+    );
 }
 
 struct IntegrationContext {
@@ -1907,4 +2035,263 @@ fn runtime_fast_successes_never_race_into_orphaned_capacity() {
         .list_held_orphaned_attempts()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, staged Finance Python environment, and explicit local opt-in"]
+fn runtime_finance_i8_graduation_matches_canonical_semantics_with_job_owned_inputs() {
+    if std::env::var("ORDIVON_FINANCE_GRADUATION").as_deref() != Ok("1") {
+        return;
+    }
+    let runner_path =
+        PathBuf::from(std::env::var("ORDIVON_RUNNER_PATH").expect("ORDIVON_RUNNER_PATH"));
+    let finance_repo =
+        fs::canonicalize(std::env::var("ORDIVON_FINANCE_REPO").expect("ORDIVON_FINANCE_REPO"))
+            .unwrap();
+    let python =
+        fs::canonicalize(std::env::var("ORDIVON_FINANCE_PYTHON").expect("ORDIVON_FINANCE_PYTHON"))
+            .unwrap();
+    let pythonpath = fs::canonicalize(
+        std::env::var("ORDIVON_FINANCE_PYTHONPATH").expect("ORDIVON_FINANCE_PYTHONPATH"),
+    )
+    .unwrap();
+    let environment_root = fs::canonicalize(
+        std::env::var("ORDIVON_FINANCE_ENV_ROOT").expect("ORDIVON_FINANCE_ENV_ROOT"),
+    )
+    .unwrap();
+    let finance_revision = command_output("git", &["rev-parse", "HEAD"], &finance_repo);
+    assert_eq!(finance_revision, "5c35e8dbcc3efbe10df50261f6308ae7babe3eaa");
+    assert!(command_output("git", &["status", "--porcelain"], &finance_repo).is_empty());
+
+    let root = PathBuf::from("/root/.local/share/ordivon-integration")
+        .join(format!("finance-i8-{}", Uuid::now_v7()));
+    let executor = UniversalExecutorConfig {
+        store_root: root.join("store"),
+        workspace_root: None,
+        workspace_uid: None,
+        workspace_gid: None,
+        runner_path,
+        allowed_executable_roots: vec![PathBuf::from("/usr/bin"), environment_root.clone()],
+        max_runtime_ms: 24 * 60 * 60 * 1000,
+        max_output_bytes: 64 * 1024 * 1024,
+    };
+    executor.ensure_store().unwrap();
+    let workspace_id = format!("finance-i8-{}", Uuid::now_v7());
+    create_git_workspace(
+        &executor,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.clone(),
+            source_repo: finance_repo.to_string_lossy().into_owned(),
+            source_revision: finance_revision.clone(),
+        },
+    )
+    .unwrap();
+    let registry = RegistryConfig {
+        db_path: root.join("registry/registry.sqlite3"),
+        store_root: root.join("registry"),
+        busy_timeout_ms: 5000,
+    };
+    let runtime = Runtime::new_with_input_authorities(
+        RuntimeConfig {
+            registry,
+            executor: executor.clone(),
+            startup_grace_ms: 2_000,
+        },
+        vec![InputAuthority {
+            name: "finance-state".to_string(),
+            root: finance_repo.join("state"),
+        }],
+    )
+    .unwrap();
+
+    let state_root = finance_repo.join("state");
+    let mut relative_inputs = vec![
+        PathBuf::from("control/finance.db"),
+        PathBuf::from("control/finance.db-shm"),
+        PathBuf::from("control/finance.db-wal"),
+    ];
+    let holdability = state_root.join("data/fragments/okx/tradfi/holdability");
+    let mut fragments = fs::read_dir(&holdability)
+        .unwrap()
+        .map(|entry| {
+            PathBuf::from("data/fragments/okx/tradfi/holdability").join(entry.unwrap().file_name())
+        })
+        .collect::<Vec<_>>();
+    fragments.sort();
+    assert_eq!(fragments.len(), 3);
+    relative_inputs.extend(fragments);
+    let inputs = relative_inputs
+        .iter()
+        .map(|relative| {
+            let source = state_root.join(relative);
+            assert!(
+                source.is_file(),
+                "missing Finance input {}",
+                source.display()
+            );
+            InputBindingRequest {
+                authority: "finance-state".to_string(),
+                relative_object: relative.to_string_lossy().into_owned(),
+                expected_digest: file_digest(&source),
+                presentation_relative_path: Path::new("finance/state")
+                    .join(relative)
+                    .to_string_lossy()
+                    .into_owned(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut env = BTreeMap::new();
+    env.insert(
+        "PYTHONPATH".to_string(),
+        pythonpath.to_string_lossy().into_owned(),
+    );
+    env.insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
+    let request = TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: format!("request:finance-i8:{}", Uuid::now_v7()),
+        principal: "principal:finance-graduation".to_string(),
+        global_limit: 8,
+        execution: UniversalExecutionRequest {
+            workspace_id: workspace_id.clone(),
+            executable: python.to_string_lossy().into_owned(),
+            args: vec![
+                "scripts/lab-run.py".to_string(),
+                "experiments/carrier-holding-cost-sensitivity.spec.json".to_string(),
+                "--db".to_string(),
+                "/run/ordivon/inputs/finance/state/control/finance.db".to_string(),
+                "--state-root".to_string(),
+                "/run/ordivon/inputs/finance/state".to_string(),
+            ],
+            cwd_relative: ".".to_string(),
+            env,
+            timeout_ms: 60_000,
+            stdout_limit_bytes: 2 * 1024 * 1024,
+            stderr_limit_bytes: 2 * 1024 * 1024,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            execution_profile: ordivon_runtime_core::ExecutionProfile::ContainedLocal,
+            foreign_references: vec![ForeignReference {
+                namespace: "ordivon.finance".to_string(),
+                reference_type: "state_version".to_string(),
+                id: "234:bb27b51397f6add8".to_string(),
+                generation: Some(finance_revision.clone()),
+                digest: None,
+            }],
+        },
+        wait_ms: 30_000,
+        stdout_tail_bytes: 64 * 1024,
+        stderr_tail_bytes: 64 * 1024,
+    };
+
+    let terminal = runtime.run_task_with_inputs(&request, &inputs).unwrap();
+    assert_eq!(terminal.status, "succeeded", "{}", terminal.stderr_tail);
+    let result: serde_json::Value = serde_json::from_str(&terminal.stdout_tail).unwrap();
+    assert_eq!(result["stateVersionBefore"], "234:bb27b51397f6add8");
+    assert_eq!(result["stateVersionAfter"], "234:bb27b51397f6add8");
+    assert_eq!(
+        result["semanticResultDigest"],
+        "sha256:f83c6b54bd7b4ac2826e1d8866690236e4daf93d243e5e33a811542788b668da"
+    );
+    assert_eq!(result["codeBinding"]["revision"], finance_revision);
+    assert_eq!(result["codeBinding"]["dirty"], false);
+    assert_eq!(result["environmentBinding"]["pythonVersion"], "3.12.13");
+    assert_eq!(result["environmentBinding"]["polarsVersion"], "1.42.1");
+    assert_eq!(result["environmentBinding"]["duckdbVersion"], "1.5.5");
+
+    let plan = runtime.registry().execution_plan(&terminal.job_id).unwrap();
+    let owned_root = executor.job_input_path(&terminal.job_id);
+    assert!(plan.input_set_id.is_some());
+    assert_eq!(plan.effective_inputs.len(), inputs.len());
+    assert!(!executor
+        .input_materializations_root()
+        .join(&terminal.job_id)
+        .exists());
+    for binding in &plan.effective_inputs {
+        assert!(owned_root
+            .join(&binding.presentation_relative_path)
+            .is_file());
+    }
+
+    let terminal_evidence = terminal
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "terminal_evidence")
+        .unwrap();
+    let evidence = runtime
+        .read_artifact(&ArtifactReadRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: terminal.job_id.clone(),
+            artifact_id: terminal_evidence.artifact_id.clone(),
+            offset: 0,
+            max_bytes: 256 * 1024,
+        })
+        .unwrap();
+    let evidence: serde_json::Value = serde_json::from_str(&evidence.content).unwrap();
+    assert_eq!(
+        evidence["effectiveInputs"].as_array().unwrap().len(),
+        inputs.len()
+    );
+    assert!(evidence.to_string().contains("234:bb27b51397f6add8"));
+    assert!(!evidence.to_string().contains("job-inputs"));
+    assert!(!evidence.to_string().contains("input-materializations"));
+
+    let workspace_path = executor.store_root.join("workspaces").join(&workspace_id);
+    assert!(command_output("git", &["status", "--porcelain"], &workspace_path).is_empty());
+
+    drop(runtime);
+    let restarted = Runtime::new(RuntimeConfig {
+        registry: RegistryConfig {
+            db_path: root.join("registry/registry.sqlite3"),
+            store_root: root.join("registry"),
+            busy_timeout_ms: 5000,
+        },
+        executor: executor.clone(),
+        startup_grace_ms: 2_000,
+    })
+    .unwrap();
+    let replay = restarted.run_task_with_inputs(&request, &inputs).unwrap();
+    assert_eq!(replay.job_id, terminal.job_id);
+    assert_eq!(replay.status, "succeeded");
+    eprintln!(
+        "FINANCE_I8_RECEIPT={}",
+        serde_json::json!({
+            "financeRevision": finance_revision,
+            "stateVersion": result["stateVersionBefore"],
+            "semanticResultDigest": result["semanticResultDigest"],
+            "runtimeJobId": terminal.job_id,
+            "runtimeAttemptId": terminal.attempt_id,
+            "terminalEvidenceArtifactId": terminal_evidence.artifact_id,
+            "terminalEvidenceDigest": terminal_evidence.digest,
+            "effectiveInputCount": plan.effective_inputs.len(),
+            "physicalInputsOwnedByJob": owned_root.is_dir(),
+            "inputSetId": plan.input_set_id,
+            "replaySameJob": replay.job_id == terminal.job_id,
+            "financeWorkspaceDirty": !command_output("git", &["status", "--porcelain"], &workspace_path).is_empty(),
+            "executionProfile": "contained_local",
+        })
+    );
+    let replay_plan = restarted.registry().execution_plan(&replay.job_id).unwrap();
+    assert_eq!(
+        fs::read(
+            executor
+                .job_input_path(&replay.job_id)
+                .join(&replay_plan.effective_inputs[0].presentation_relative_path)
+        )
+        .unwrap(),
+        fs::read(state_root.join(&relative_inputs[0])).unwrap()
+    );
+
+    drop(restarted);
+    remove_git_workspace(
+        &executor,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id,
+            force: false,
+            expected_source_state_digest: None,
+        },
+    )
+    .unwrap();
+    let _ = fs::remove_dir_all(&root);
 }

@@ -527,6 +527,8 @@ fn runner_rejects_workspace_source_drift_before_spawning_target() {
         workspace_id: workspace_id.to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: Some(committed),
+        input_presentation_root: None,
+        input_commitments: Vec::new(),
         executable: executable.to_string_lossy().into_owned(),
         executable_digest: sha256_file(&executable).unwrap(),
         args: vec!["effect.py".to_string()],
@@ -552,6 +554,134 @@ fn runner_rejects_workspace_source_drift_before_spawning_target() {
         .infrastructure_error
         .as_deref()
         .is_some_and(|message| message.contains("WorkspaceStateMismatch")));
+    assert!(!workspace.join("effect-marker").exists());
+}
+
+#[test]
+fn runner_rejects_immutable_input_drift_before_spawning_target() {
+    let sandbox = Sandbox::new("runner-input-drift");
+    let workspace = sandbox.root.join("workspace-input-drift");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        workspace.join("effect.py"),
+        "from pathlib import Path\nPath('effect-marker').write_text('spawned')\n",
+    )
+    .unwrap();
+    let input_view = sandbox.root.join("input-view");
+    fs::create_dir_all(&input_view).unwrap();
+    let presented = input_view.join("presented-input.bin");
+    fs::write(&presented, b"BADD").unwrap();
+
+    let task_dir = sandbox.root.join("task-input-drift");
+    fs::create_dir_all(&task_dir).unwrap();
+    let executable = real_executable("/usr/bin/python3");
+    let request = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        payload: None,
+        inherit_host_environment: true,
+        task_id: "task-input-drift".to_string(),
+        workspace_id: "workspace-input-drift".to_string(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
+        input_presentation_root: Some(input_view.to_string_lossy().into_owned()),
+        input_commitments: vec![RunnerInputCommitment {
+            presentation_path: presented.to_string_lossy().into_owned(),
+            digest: sha256_bytes(b"GOOD"),
+            byte_length: 4,
+        }],
+        executable: executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&executable).unwrap(),
+        args: vec!["effect.py".to_string()],
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        steps: Vec::new(),
+        timeout_ms: 2_000,
+        stdout_limit_bytes: 1_024,
+        stderr_limit_bytes: 1_024,
+    };
+    write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
+    run_task_runner(&task_dir).unwrap();
+
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result.status, TaskTerminalStatus::Failed);
+    assert!(result.exit_code.is_none());
+    assert_eq!(
+        result.infrastructure_error_code.as_deref(),
+        Some("INPUT_STATE_MISMATCH")
+    );
+    assert!(result
+        .infrastructure_error
+        .as_deref()
+        .is_some_and(|message| message.contains("digest changed after admission")));
+    assert!(!workspace.join("effect-marker").exists());
+}
+
+#[test]
+fn runner_rejects_undeclared_input_directory_before_spawning_target() {
+    let sandbox = Sandbox::new("runner-input-extra-directory");
+    let workspace = sandbox.root.join("workspace-input-extra-directory");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        workspace.join("effect.py"),
+        "from pathlib import Path\nPath('effect-marker').write_text('spawned')\n",
+    )
+    .unwrap();
+    let input_view = sandbox.root.join("input-view-extra-directory");
+    fs::create_dir_all(input_view.join("state")).unwrap();
+    fs::create_dir_all(input_view.join("undeclared-empty")).unwrap();
+    let presented = input_view.join("state/declared.bin");
+    fs::write(&presented, b"GOOD").unwrap();
+
+    let task_dir = sandbox.root.join("task-input-extra-directory");
+    fs::create_dir_all(&task_dir).unwrap();
+    let executable = real_executable("/usr/bin/python3");
+    let request = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        payload: None,
+        inherit_host_environment: true,
+        task_id: "task-input-extra-directory".to_string(),
+        workspace_id: "workspace-input-extra-directory".to_string(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
+        input_presentation_root: Some(input_view.to_string_lossy().into_owned()),
+        input_commitments: vec![RunnerInputCommitment {
+            presentation_path: presented.to_string_lossy().into_owned(),
+            digest: sha256_bytes(b"GOOD"),
+            byte_length: 4,
+        }],
+        executable: executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&executable).unwrap(),
+        args: vec!["effect.py".to_string()],
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        steps: Vec::new(),
+        timeout_ms: 2_000,
+        stdout_limit_bytes: 1_024,
+        stderr_limit_bytes: 1_024,
+    };
+    write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
+    run_task_runner(&task_dir).unwrap();
+
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result.status, TaskTerminalStatus::Failed);
+    assert_eq!(
+        result.infrastructure_error_code.as_deref(),
+        Some("INPUT_STATE_MISMATCH")
+    );
+    assert!(result
+        .infrastructure_error
+        .as_deref()
+        .is_some_and(|message| message.contains("undeclared-empty")));
     assert!(!workspace.join("effect-marker").exists());
 }
 
@@ -1412,6 +1542,8 @@ fn runner_executes_model_authored_script_and_bounds_output() {
         workspace_id: "workspace-runner".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        input_presentation_root: None,
+        input_commitments: Vec::new(),
         executable: executable.to_string_lossy().into_owned(),
         executable_digest: sha256_file(&executable).unwrap(),
         args: vec!["tool.py".to_string()],
@@ -1472,6 +1604,8 @@ fn runner_shared_overall_deadline_is_independent_of_step_timeout_sum() {
         workspace_id: "workspace-shared-overall".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        input_presentation_root: None,
+        input_commitments: Vec::new(),
         executable: true_executable.to_string_lossy().into_owned(),
         executable_digest: sha256_file(&true_executable).unwrap(),
         args: Vec::new(),
@@ -1535,6 +1669,8 @@ fn runner_timeout_is_a_durable_failed_result() {
         workspace_id: "workspace-timeout".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        input_presentation_root: None,
+        input_commitments: Vec::new(),
         executable: executable.to_string_lossy().into_owned(),
         executable_digest: sha256_file(&executable).unwrap(),
         args: vec!["tool.py".to_string()],
@@ -1573,6 +1709,8 @@ fn runner_timeout_terminates_descendant_pipe_holders_before_result() {
         workspace_id: "workspace-timeout-descendants".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        input_presentation_root: None,
+        input_commitments: Vec::new(),
         executable: executable.to_string_lossy().into_owned(),
         executable_digest: sha256_file(&executable).unwrap(),
         args: vec!["-lc".to_string(), "sleep 5 & wait".to_string()],

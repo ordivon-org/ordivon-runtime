@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -42,6 +43,7 @@ pub fn run_task_runner(task_dir: &Path) -> Result<(), UniversalExecError> {
             &request,
             observed_workspace_source_digest.as_deref(),
         )?;
+        validate_input_commitments(&request)?;
         execute_request(&task_dir, &request, started_unix_ms)
     });
     let result = execution.unwrap_or_else(|error| {
@@ -116,6 +118,203 @@ fn validate_workspace_source_commitment(
             "Workspace source observation is inconsistent with the Runner request",
         )),
     }
+}
+
+fn validate_input_tree_exact(
+    root: &Path,
+    commitments: &[super::RunnerInputCommitment],
+) -> Result<(), UniversalExecError> {
+    let metadata = fs::symlink_metadata(root).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::InputStateMismatch,
+            format!("immutable input presentation root is unavailable: {error}"),
+            Some("inputPresentationRoot"),
+            false,
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::InputStateMismatch,
+            "immutable input presentation root is not a non-symlink directory",
+            Some("inputPresentationRoot"),
+            false,
+        ));
+    }
+
+    let expected_files = commitments
+        .iter()
+        .map(|input| {
+            Path::new(&input.presentation_path)
+                .strip_prefix(root)
+                .map(Path::to_path_buf)
+                .map_err(|_| {
+                    UniversalExecError::new(
+                        UniversalExecErrorCode::InputStateMismatch,
+                        format!(
+                            "immutable input {} is outside presentation root {}",
+                            input.presentation_path,
+                            root.display()
+                        ),
+                        Some("inputPresentationRoot"),
+                        false,
+                    )
+                })
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut expected_directories = BTreeSet::new();
+    for file in &expected_files {
+        let mut parent = file.parent();
+        while let Some(directory) = parent {
+            if directory.as_os_str().is_empty() {
+                break;
+            }
+            expected_directories.insert(directory.to_path_buf());
+            parent = directory.parent();
+        }
+    }
+    let mut observed_files = BTreeSet::new();
+    let mut observed_directories = BTreeSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).map_err(|error| {
+            UniversalExecError::new(
+                UniversalExecErrorCode::InputStateMismatch,
+                format!(
+                    "cannot enumerate immutable input presentation tree {}: {error}",
+                    directory.display()
+                ),
+                Some("inputPresentationRoot"),
+                false,
+            )
+        })? {
+            let entry = entry.map_err(|error| {
+                UniversalExecError::new(
+                    UniversalExecErrorCode::InputStateMismatch,
+                    format!("cannot read immutable input tree entry: {error}"),
+                    Some("inputPresentationRoot"),
+                    false,
+                )
+            })?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                UniversalExecError::new(
+                    UniversalExecErrorCode::InputStateMismatch,
+                    format!("cannot inspect immutable input tree entry: {error}"),
+                    Some("inputPresentationRoot"),
+                    false,
+                )
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(UniversalExecError::new(
+                    UniversalExecErrorCode::InputStateMismatch,
+                    format!("immutable input tree contains symlink {}", path.display()),
+                    Some("inputPresentationRoot"),
+                    false,
+                ));
+            }
+            if metadata.is_dir() {
+                observed_directories.insert(path.strip_prefix(root).unwrap().to_path_buf());
+                pending.push(path);
+            } else if metadata.is_file() {
+                observed_files.insert(path.strip_prefix(root).unwrap().to_path_buf());
+            } else {
+                return Err(UniversalExecError::new(
+                    UniversalExecErrorCode::InputStateMismatch,
+                    format!(
+                        "immutable input tree contains unsupported filesystem object {}",
+                        path.display()
+                    ),
+                    Some("inputPresentationRoot"),
+                    false,
+                ));
+            }
+        }
+    }
+    if observed_files != expected_files || observed_directories != expected_directories {
+        let unexpected_files = observed_files
+            .difference(&expected_files)
+            .cloned()
+            .collect::<Vec<_>>();
+        let missing_files = expected_files
+            .difference(&observed_files)
+            .cloned()
+            .collect::<Vec<_>>();
+        let unexpected_directories = observed_directories
+            .difference(&expected_directories)
+            .cloned()
+            .collect::<Vec<_>>();
+        let missing_directories = expected_directories
+            .difference(&observed_directories)
+            .cloned()
+            .collect::<Vec<_>>();
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::InputStateMismatch,
+            format!(
+                "immutable input presentation tree differs from committed closure: unexpectedFiles={unexpected_files:?}, missingFiles={missing_files:?}, unexpectedDirectories={unexpected_directories:?}, missingDirectories={missing_directories:?}"
+            ),
+            Some("inputPresentationRoot"),
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_input_commitments(request: &RunnerTaskRequest) -> Result<(), UniversalExecError> {
+    if let Some(root) = request.input_presentation_root.as_deref() {
+        validate_input_tree_exact(Path::new(root), &request.input_commitments)?;
+    }
+    for (index, input) in request.input_commitments.iter().enumerate() {
+        let path = Path::new(&input.presentation_path);
+        let presentation_field = format!("inputCommitments[{index}].presentationPath");
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            UniversalExecError::new(
+                UniversalExecErrorCode::InputStateMismatch,
+                format!(
+                    "immutable input {} is unavailable at target-spawn boundary: {error}",
+                    input.presentation_path
+                ),
+                Some(&presentation_field),
+                false,
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::InputStateMismatch,
+                format!(
+                    "immutable input {} is not a regular non-symlink file",
+                    input.presentation_path
+                ),
+                Some(&presentation_field),
+                false,
+            ));
+        }
+        if metadata.len() != input.byte_length {
+            let length_field = format!("inputCommitments[{index}].byteLength");
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::InputStateMismatch,
+                format!(
+                    "immutable input {} byte length changed after admission: expected {}, observed {}",
+                    input.presentation_path, input.byte_length, metadata.len()
+                ),
+                Some(&length_field),
+                false,
+            ));
+        }
+        let observed = sha256_file(path)?;
+        if observed != input.digest {
+            let digest_field = format!("inputCommitments[{index}].digest");
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::InputStateMismatch,
+                format!(
+                    "immutable input {} digest changed after admission: expected {}, observed {}",
+                    input.presentation_path, input.digest, observed
+                ),
+                Some(&digest_field),
+                false,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn execute_request(
@@ -694,6 +893,44 @@ fn validate_request_identity(request: &RunnerTaskRequest) -> Result<(), Universa
     super::validate_id(&request.task_id, "taskId")?;
     super::validate_id(&request.workspace_id, "workspaceId")?;
     super::validate_exec_payload(&request.args, &request.env, "execution")?;
+    match (
+        request.input_presentation_root.as_deref(),
+        request.input_commitments.is_empty(),
+    ) {
+        (None, true) => {}
+        (Some(root), false) if Path::new(root).is_absolute() && !root.as_bytes().contains(&0) => {}
+        _ => {
+            return Err(runner_error(
+                "inputPresentationRoot must be an absolute NUL-free path exactly when input commitments exist",
+            ));
+        }
+    }
+    for (index, input) in request.input_commitments.iter().enumerate() {
+        if !Path::new(&input.presentation_path).is_absolute()
+            || input.presentation_path.as_bytes().contains(&0)
+        {
+            return Err(runner_error(format!(
+                "inputCommitments[{index}].presentationPath must be an absolute NUL-free path"
+            )));
+        }
+        if let Some(root) = request.input_presentation_root.as_deref() {
+            if !Path::new(&input.presentation_path).starts_with(root) {
+                return Err(runner_error(format!(
+                    "inputCommitments[{index}].presentationPath must remain inside inputPresentationRoot"
+                )));
+            }
+        }
+        let Some(hex) = input.digest.strip_prefix("sha256:") else {
+            return Err(runner_error(format!(
+                "inputCommitments[{index}].digest must use sha256:<hex>"
+            )));
+        };
+        if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(runner_error(format!(
+                "inputCommitments[{index}].digest must be 32-byte SHA-256 hex"
+            )));
+        }
+    }
     if let Some(payload) = &request.payload {
         if payload.uid == 0 || payload.gid == 0 {
             return Err(runner_error("payload identity must be non-root"));

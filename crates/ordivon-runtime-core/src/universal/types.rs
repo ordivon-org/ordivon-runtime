@@ -603,6 +603,14 @@ pub(crate) struct RunnerExecutionStep {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RunnerInputCommitment {
+    pub presentation_path: String,
+    pub digest: String,
+    pub byte_length: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RunnerTaskRequest {
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -622,6 +630,10 @@ pub(crate) struct RunnerTaskRequest {
     pub workspace_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_source_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_presentation_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_commitments: Vec<RunnerInputCommitment>,
     pub executable: String,
     pub executable_digest: String,
     pub args: Vec<String>,

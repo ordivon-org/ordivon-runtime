@@ -70,6 +70,13 @@ pub(crate) struct JobSnapshot {
     pub projection: JobProjection,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct PreallocatedAdmissionIds {
+    pub job_id: String,
+    pub attempt_id: String,
+    pub reservation_id: String,
+}
+
 impl RegistryConfig {
     pub fn validate(&self) -> RuntimeResult<()> {
         if !self.db_path.is_absolute() {
@@ -474,6 +481,23 @@ impl Registry {
     }
 
     pub fn submit(&self, request: &SubmitRequest) -> RuntimeResult<AdmissionOutcome> {
+        let ids = self.preallocate_admission_ids();
+        self.submit_preallocated(request, &ids)
+    }
+
+    pub(super) fn preallocate_admission_ids(&self) -> PreallocatedAdmissionIds {
+        PreallocatedAdmissionIds {
+            job_id: format!("job-{}", Uuid::now_v7()),
+            attempt_id: format!("attempt-{}", Uuid::now_v7()),
+            reservation_id: format!("reservation-{}", Uuid::now_v7()),
+        }
+    }
+
+    pub(super) fn submit_preallocated(
+        &self,
+        request: &SubmitRequest,
+        ids: &PreallocatedAdmissionIds,
+    ) -> RuntimeResult<AdmissionOutcome> {
         validate_submit(request)?;
         let created_at_ms = now_ms()?;
         let plan_json = serde_json::to_string(&request.plan).map_err(|error| {
@@ -508,9 +532,9 @@ impl Registry {
         let operation_digest = sha256_bytes(
             format!("runtime-operation-v3\0{request_digest}\0{plan_digest}").as_bytes(),
         );
-        let job_id = format!("job-{}", Uuid::now_v7());
-        let attempt_id = format!("attempt-{}", Uuid::now_v7());
-        let reservation_id = format!("reservation-{}", Uuid::now_v7());
+        let job_id = ids.job_id.clone();
+        let attempt_id = ids.attempt_id.clone();
+        let reservation_id = ids.reservation_id.clone();
         let launch_token =
             sha256_bytes(format!("runtime-launch-v1\0{attempt_id}\0{operation_digest}").as_bytes());
         let launch_token_digest = sha256_bytes(launch_token.as_bytes());

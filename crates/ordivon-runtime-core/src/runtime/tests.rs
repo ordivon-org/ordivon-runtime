@@ -10,7 +10,8 @@ use proptest::prelude::*;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -208,6 +209,282 @@ fn created(outcome: AdmissionOutcome) -> CreatedAdmission {
         AdmissionOutcome::Created(created) => *created,
         AdmissionOutcome::Existing { .. } => panic!("expected newly created admission"),
     }
+}
+
+fn input_bound_submit_for_job(
+    sandbox: &Sandbox,
+    client_request_id: &str,
+    bytes: &[u8],
+) -> SubmitRequest {
+    let mut submit = request(sandbox, client_request_id, 8);
+    submit.plan.execution_profile = ExecutionProfile::ContainedLocal;
+    submit.plan.input_set_id = Some("a".repeat(64));
+    submit.plan.effective_inputs = vec![EffectiveInputBinding {
+        authority: "finance-state".to_string(),
+        relative_object: "input.bin".to_string(),
+        digest: digest(bytes),
+        byte_length: bytes.len() as u64,
+        presentation_relative_path: "state/input.bin".to_string(),
+        access: InputAccessMode::ReadOnly,
+    }];
+    submit
+}
+
+#[test]
+fn committed_prepared_input_is_adopted_by_replacement_runtime_startup() {
+    let sandbox = Sandbox::new("input-ownership-restart", 5_000);
+    let config = runtime_config(&sandbox);
+    let executor = config.executor.clone();
+    let runtime = Runtime::new(config).unwrap();
+    let ids = runtime.registry().preallocate_admission_ids();
+    let bytes = b"FROZEN-S0";
+    let submit = input_bound_submit_for_job(&sandbox, "request:input-ownership-restart", bytes);
+    let prepared_root = executor.input_materializations_root().join(&ids.job_id);
+    fs::create_dir_all(prepared_root.join("state")).unwrap();
+    fs::write(prepared_root.join("state/input.bin"), bytes).unwrap();
+    let created = created(
+        runtime
+            .registry()
+            .submit_preallocated(&submit, &ids)
+            .unwrap(),
+    );
+    drop(runtime);
+
+    let replacement = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let owned_root = executor.job_input_path(&created.job.job_id);
+    assert!(!prepared_root.exists());
+    assert_eq!(fs::read(owned_root.join("state/input.bin")).unwrap(), bytes);
+    let plan = replacement
+        .registry()
+        .execution_plan(&created.job.job_id)
+        .unwrap();
+    assert_eq!(
+        plan.input_set_id.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+    assert_eq!(plan.effective_inputs[0].digest, digest(bytes));
+}
+
+#[test]
+fn concurrent_replacement_runtimes_converge_one_committed_input_adoption() {
+    let sandbox = Sandbox::new("input-ownership-race", 5_000);
+    let config = runtime_config(&sandbox);
+    let executor = config.executor.clone();
+    let runtime = Runtime::new(config.clone()).unwrap();
+    let ids = runtime.registry().preallocate_admission_ids();
+    let bytes = b"FROZEN-RACE";
+    let submit = input_bound_submit_for_job(&sandbox, "request:input-ownership-race", bytes);
+    let prepared_root = executor.input_materializations_root().join(&ids.job_id);
+    fs::create_dir_all(prepared_root.join("state")).unwrap();
+    fs::write(prepared_root.join("state/input.bin"), bytes).unwrap();
+    let created = created(
+        runtime
+            .registry()
+            .submit_preallocated(&submit, &ids)
+            .unwrap(),
+    );
+    drop(runtime);
+
+    let barrier = Arc::new(Barrier::new(3));
+    let launch = |config: RuntimeConfig| {
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            barrier.wait();
+            Runtime::new(config)
+        })
+    };
+    let a = launch(config.clone());
+    let b = launch(config);
+    barrier.wait();
+    let runtime_a = a.join().unwrap().unwrap();
+    let runtime_b = b.join().unwrap().unwrap();
+    let owned_root = executor.job_input_path(&created.job.job_id);
+    assert!(!prepared_root.exists());
+    assert_eq!(fs::read(owned_root.join("state/input.bin")).unwrap(), bytes);
+    assert_eq!(
+        runtime_a
+            .registry()
+            .get_job(&created.job.job_id)
+            .unwrap()
+            .job_id,
+        runtime_b
+            .registry()
+            .get_job(&created.job.job_id)
+            .unwrap()
+            .job_id
+    );
+}
+
+#[test]
+fn unowned_prepared_input_is_retained_during_grace_then_collectable() {
+    let sandbox = Sandbox::new("input-prepared-gc", 5_000);
+    let config = runtime_config(&sandbox);
+    let executor = config.executor.clone();
+    let runtime = Runtime::new(config).unwrap();
+    let orphan = executor
+        .input_materializations_root()
+        .join(format!("job-{}", Uuid::now_v7()));
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("input.bin"), b"NO-OWNER").unwrap();
+
+    runtime.reconcile_prepared_input_sets(u64::MAX).unwrap();
+    assert!(orphan.exists());
+    runtime.reconcile_prepared_input_sets(0).unwrap();
+    assert!(!orphan.exists());
+}
+
+#[test]
+fn staging_lease_prevents_live_cleanup_and_crash_release_allows_collection() {
+    let sandbox = Sandbox::new("input-staging-lease", 5_000);
+    let config = runtime_config(&sandbox);
+    let executor = config.executor.clone();
+    let runtime = Runtime::new(config).unwrap();
+    let job_id = format!("job-{}", Uuid::now_v7());
+    let root = executor.input_materializations_root();
+    let lease_path = root.join(format!(".{job_id}.lease"));
+    let staging = root.join(format!(".{job_id}.staging-{}", Uuid::now_v7()));
+    let lease = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lease_path)
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(staging.join("partial.bin"), b"PARTIAL").unwrap();
+
+    runtime.reconcile_prepared_input_sets(0).unwrap();
+    assert!(lease_path.exists());
+    assert!(staging.exists());
+    drop(lease);
+    runtime.reconcile_prepared_input_sets(0).unwrap();
+    assert!(!lease_path.exists());
+    assert!(!staging.exists());
+}
+
+#[test]
+fn corrupt_committed_prepared_input_does_not_block_runtime_startup_and_fails_its_job() {
+    let sandbox = Sandbox::new("input-corrupt-prepared-isolation", 5_000);
+    let config = runtime_config(&sandbox);
+    let executor = config.executor.clone();
+    let runtime = Runtime::new(config).unwrap();
+    let ids = runtime.registry().preallocate_admission_ids();
+    let submit =
+        input_bound_submit_for_job(&sandbox, "request:input-corrupt-prepared", b"EXPECTED");
+    let prepared_root = executor.input_materializations_root().join(&ids.job_id);
+    fs::create_dir_all(prepared_root.join("state")).unwrap();
+    fs::write(prepared_root.join("state/input.bin"), b"CORRUPT!").unwrap();
+    let created = created(
+        runtime
+            .registry()
+            .submit_preallocated(&submit, &ids)
+            .unwrap(),
+    );
+    drop(runtime);
+
+    let replacement = Runtime::new(runtime_config(&sandbox)).unwrap();
+    assert!(prepared_root.exists());
+    replacement.reconcile_all().unwrap();
+    let attempt = replacement
+        .registry()
+        .get_attempt(&created.attempt.attempt_id)
+        .unwrap();
+    assert_eq!(attempt.state, AttemptState::Failed);
+    assert!(!executor.job_input_path(&created.job.job_id).exists());
+}
+
+#[test]
+fn committed_job_owned_input_drift_fails_before_dispatch() {
+    let sandbox = Sandbox::new("input-owned-drift", 5_000);
+    let config = runtime_config(&sandbox);
+    let executor = config.executor.clone();
+    let runtime = Runtime::new(config).unwrap();
+    let ids = runtime.registry().preallocate_admission_ids();
+    let submit = input_bound_submit_for_job(&sandbox, "request:input-owned-drift", b"EXPECTED");
+    let owned_root = executor.job_input_path(&ids.job_id);
+    fs::create_dir_all(owned_root.join("state")).unwrap();
+    fs::write(owned_root.join("state/input.bin"), b"CORRUPT!").unwrap();
+    let created = created(
+        runtime
+            .registry()
+            .submit_preallocated(&submit, &ids)
+            .unwrap(),
+    );
+
+    runtime.reconcile_all().unwrap();
+    let attempt = runtime
+        .registry()
+        .get_attempt(&created.attempt.attempt_id)
+        .unwrap();
+    assert_eq!(attempt.state, AttemptState::Failed);
+    let observation = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: created.job.job_id,
+            wait_ms: 0,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 0,
+            stderr_tail_bytes: 0,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert_eq!(
+        observation.execution_reason_code.as_deref(),
+        Some("INPUT_PRECONDITION_DRIFT")
+    );
+}
+
+#[test]
+fn committed_input_loss_fails_closed_without_reopening_authority() {
+    let sandbox = Sandbox::new("input-loss-terminal", 5_000);
+    let config = runtime_config(&sandbox);
+    let executor = config.executor.clone();
+    let runtime = Runtime::new(config).unwrap();
+    let ids = runtime.registry().preallocate_admission_ids();
+    let submit = input_bound_submit_for_job(&sandbox, "request:input-loss-terminal", b"MISSING");
+    let created = created(
+        runtime
+            .registry()
+            .submit_preallocated(&submit, &ids)
+            .unwrap(),
+    );
+    assert!(!executor
+        .input_materializations_root()
+        .join(&created.job.job_id)
+        .exists());
+    assert!(!executor.job_input_path(&created.job.job_id).exists());
+
+    runtime.reconcile_all().unwrap();
+    let attempt = runtime
+        .registry()
+        .get_attempt(&created.attempt.attempt_id)
+        .unwrap();
+    assert_eq!(attempt.state, AttemptState::Failed);
+    let observation = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: created.job.job_id,
+            wait_ms: 0,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 0,
+            stderr_tail_bytes: 0,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert_eq!(observation.status, "failed");
+    assert_eq!(
+        observation.execution_reason_code.as_deref(),
+        Some("INPUT_PRECONDITION_DRIFT")
+    );
+    assert!(observation
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.kind == "terminal_evidence"));
 }
 
 fn git_output(directory: &Path, args: &[&str]) -> String {

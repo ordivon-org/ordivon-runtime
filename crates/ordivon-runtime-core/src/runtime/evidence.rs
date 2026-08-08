@@ -62,6 +62,11 @@ pub(crate) fn prepare_runner_terminal_from_bundle(
         {
             (AttemptState::Failed, "WORKSPACE_SOURCE_PRECONDITION_DRIFT")
         }
+        TaskTerminalStatus::Failed
+            if result.infrastructure_error_code.as_deref() == Some("INPUT_STATE_MISMATCH") =>
+        {
+            (AttemptState::Failed, "INPUT_PRECONDITION_DRIFT")
+        }
         TaskTerminalStatus::Failed if result.infrastructure_error_code.is_some() => {
             (AttemptState::Failed, "RUNNER_INFRASTRUCTURE_FAILURE")
         }

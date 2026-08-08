@@ -48,8 +48,9 @@ pub(crate) use fsutil::{
     linux_exec_payload_limit_bytes, linux_exec_string_limit_bytes, validate_args,
 };
 pub(crate) use types::{
-    CapturedOutput, RunnerExecutionStep, RunnerPayloadConfig, RunnerStartEvidence,
-    RunnerStepResult, RunnerTaskProgress, RunnerTaskRequest, RunnerTaskResult, TaskTerminalStatus,
+    CapturedOutput, RunnerExecutionStep, RunnerInputCommitment, RunnerPayloadConfig,
+    RunnerStartEvidence, RunnerStepResult, RunnerTaskProgress, RunnerTaskRequest, RunnerTaskResult,
+    TaskTerminalStatus,
 };
 #[cfg(feature = "transactional-runtime")]
 pub(crate) use workspace::resolve_workspace_cwd;

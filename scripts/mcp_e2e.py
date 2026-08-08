@@ -61,6 +61,31 @@ def free_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def live_docker_socket(
+    candidates: tuple[Path, ...] = (Path("/run/docker.sock"), Path("/var/run/docker.sock")),
+) -> Path | None:
+    """Return a Docker socket only after a real _ping succeeds.
+
+    A stale Unix socket inode is not host Docker capability and must not make the
+    trusted-local acceptance path fail spuriously.
+    """
+    for path in candidates:
+        if not path.exists():
+            continue
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(1.0)
+        try:
+            client.connect(str(path))
+            client.sendall(b"GET /_ping HTTP/1.0\r\n\r\n")
+            if b"OK" in client.recv(4096):
+                return path
+        except OSError:
+            pass
+        finally:
+            client.close()
+    return None
+
+
 def host_network_probe() -> tuple[int, threading.Thread]:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
@@ -861,10 +886,7 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         )
 
         probe_port, probe_thread = host_network_probe()
-        docker_socket = next(
-            (path for path in (Path("/run/docker.sock"), Path("/var/run/docker.sock")) if path.exists()),
-            None,
-        )
+        docker_socket = live_docker_socket()
         probe_script = "\n".join(
             [
                 "import json, os, pathlib, socket, subprocess",
@@ -876,10 +898,14 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
                 "if docker_path:",
                 "    docker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
                 "    docker.settimeout(3)",
-                "    docker.connect(docker_path)",
-                r"    docker.sendall(b'GET /_ping HTTP/1.0\r\n\r\n')",
-                "    docker_ping = b'OK' in docker.recv(4096)",
-                "    docker.close()",
+                "    try:",
+                "        docker.connect(docker_path)",
+                r"        docker.sendall(b'GET /_ping HTTP/1.0\r\n\r\n')",
+                "        docker_ping = b'OK' in docker.recv(4096)",
+                "    except OSError:",
+                "        docker_ping = False",
+                "    finally:",
+                "        docker.close()",
                 "systemd = subprocess.run(['/usr/bin/systemctl', 'show', '--property=Version', '--value'], text=True, capture_output=True)",
                 r"pathlib.Path('job-created.txt').write_text('created-by-trusted-job\n')",
                 "print(json.dumps({",

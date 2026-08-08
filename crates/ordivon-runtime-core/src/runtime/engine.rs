@@ -4,7 +4,6 @@ use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -45,10 +44,11 @@ use crate::universal::{
     workspace_git_common_dir_at, workspace_head_revision, workspace_is_dirty,
     workspace_source_state_digest, write_bytes_atomic, write_json_atomic,
     CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
-    RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskProgress, RunnerTaskRequest,
-    RunnerTaskResult, UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
-    WorkspaceDiffRequest, WorkspaceMutateRequest, WorkspaceMutateResult, WorkspacePatchPlanState,
-    WorkspacePatchRequest, WorkspacePatchResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    RunnerInputCommitment, RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskProgress,
+    RunnerTaskRequest, RunnerTaskResult, UniversalExecutorConfig, WorkspaceCloseRequest,
+    WorkspaceCloseResult, WorkspaceDiffRequest, WorkspaceMutateRequest, WorkspaceMutateResult,
+    WorkspacePatchPlanState, WorkspacePatchRequest, WorkspacePatchResult,
+    UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
 const RUNNER_REQUEST_FILE: &str = "request.json";
@@ -67,6 +67,7 @@ const INTERACTIVE_RECONCILIATION_LIMIT: u32 = 32;
 const ADAPTIVE_POLL_DELAYS_MS: [u64; 5] = [2, 5, 10, 20, 50];
 const DEFAULT_EXECUTION_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const DEFAULT_EXECUTION_HOME: &str = "/root";
+const STALE_PREPARED_INPUT_AGE_MS: u64 = 60_000;
 const CONTAINED_RUNTIME_ENVIRONMENT: [&str; 15] = [
     "HOME",
     "TMPDIR",
@@ -108,13 +109,25 @@ pub struct RuntimeConfig {
 }
 
 #[derive(Clone, Debug)]
+struct OpenedInputAuthority {
+    root: Arc<File>,
+}
+
+#[derive(Debug)]
+struct PreparedInputSet {
+    input_set_id: String,
+    prepared_root: PathBuf,
+    effective_inputs: Vec<EffectiveInputBinding>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Runtime {
     registry: Registry,
     executor: UniversalExecutorConfig,
     startup_grace_ms: u64,
     execution_path: String,
     execution_home: String,
-    input_authorities: BTreeMap<String, PathBuf>,
+    input_authorities: BTreeMap<String, OpenedInputAuthority>,
     lifecycle_lock: Arc<Mutex<()>>,
 }
 
@@ -306,8 +319,27 @@ impl Runtime {
                     "inputAuthorities.root",
                 ));
             }
+            let root = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                .open(&authority.root)
+                .map_err(|error| io_error("open input authority root", error))?;
+            let metadata = root
+                .metadata()
+                .map_err(|error| io_error("inspect input authority root", error))?;
+            if !metadata.is_dir() {
+                return Err(RuntimeError::invalid(
+                    "input authority root must be a directory",
+                    "inputAuthorities.root",
+                ));
+            }
             if configured_input_authorities
-                .insert(authority.name, authority.root)
+                .insert(
+                    authority.name,
+                    OpenedInputAuthority {
+                        root: Arc::new(root),
+                    },
+                )
                 .is_some()
             {
                 return Err(RuntimeError::invalid(
@@ -387,10 +419,15 @@ impl Runtime {
                 self.reconcile_recoverable_orphans()?;
                 let _ = self.reconcile_workspace(&request.execution.workspace_id)?;
                 let mut plan = self.resolve_plan(request)?;
-                let (input_set_id, effective_inputs) =
-                    self.materialize_input_bindings(request, &request_identity_digest, &inputs)?;
-                plan.input_set_id = Some(input_set_id);
-                plan.effective_inputs = effective_inputs;
+                let admission_ids = self.registry.preallocate_admission_ids();
+                let prepared = self.materialize_input_bindings(
+                    request,
+                    &request_identity_digest,
+                    &admission_ids.job_id,
+                    &inputs,
+                )?;
+                plan.input_set_id = Some(prepared.input_set_id.clone());
+                plan.effective_inputs = prepared.effective_inputs.clone();
                 plan.env.insert(
                     "ORDIVON_INPUT_ROOT".to_string(),
                     CONTAINED_INPUT_ROOT.to_string(),
@@ -408,14 +445,23 @@ impl Runtime {
                     plan,
                     global_limit: request.global_limit,
                 };
-                match self.registry.submit(&submit)? {
-                    AdmissionOutcome::Created(created) => {
+                match self.registry.submit_preallocated(&submit, &admission_ids) {
+                    Ok(AdmissionOutcome::Created(created)) => {
                         let job_id = created.job.job_id.clone();
+                        self.ensure_job_input_ownership(&job_id)
+                            .map_err(|error| error.with_operation_id(job_id.clone()))?;
                         self.ensure_attempt_dispatched(&created.attempt)
                             .map_err(|error| error.with_operation_id(job_id.clone()))?;
                         job_id
                     }
-                    AdmissionOutcome::Existing { job } => job.job_id,
+                    Ok(AdmissionOutcome::Existing { job }) => {
+                        self.discard_prepared_input_set(&prepared.prepared_root)?;
+                        job.job_id
+                    }
+                    Err(error) => {
+                        self.discard_prepared_input_set(&prepared.prepared_root)?;
+                        return Err(error);
+                    }
                 }
             }
         };
@@ -1074,8 +1120,9 @@ impl Runtime {
         &self,
         request: &TaskRunRequest,
         request_identity_digest: &str,
+        job_id: &str,
         inputs: &[InputBindingRequest],
-    ) -> RuntimeResult<(String, Vec<EffectiveInputBinding>)> {
+    ) -> RuntimeResult<PreparedInputSet> {
         let set_digest = sha256_bytes(
             format!(
                 "{}\0{}\0{}",
@@ -1087,36 +1134,51 @@ impl Runtime {
             .strip_prefix("sha256:")
             .unwrap_or(&set_digest)
             .to_string();
-        let final_root = self.executor.input_materialization_path(&input_set_id);
-        if final_root.exists() {
-            let effective = verify_effective_input_set(&final_root, inputs)?;
-            return Ok((input_set_id, effective));
-        }
-
         let materialization_root = self.executor.input_materializations_root();
         fs::create_dir_all(&materialization_root)
             .map_err(|error| io_error("create input materialization root", error))?;
-        let staging =
-            materialization_root.join(format!(".{input_set_id}.staging-{}", Uuid::now_v7()));
-        fs::create_dir(&staging)
-            .map_err(|error| io_error("create input staging directory", error))?;
-        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
-            .map_err(|error| io_error("protect input staging directory", error))?;
+        let prepared_root = materialization_root.join(job_id);
+        let owned_root = self.executor.job_input_path(job_id);
+        if prepared_root.exists() || owned_root.exists() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "preallocated immutable input identity already has physical state",
+                Some("jobId"),
+                false,
+            ));
+        }
 
+        let lease_path = materialization_root.join(format!(".{job_id}.lease"));
+        let lease = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&lease_path)
+            .map_err(|error| io_error("create input staging lease", error))?;
+        if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            let _ = fs::remove_file(&lease_path);
+            return Err(io_error("lock input staging lease", error));
+        }
+        let staging = materialization_root.join(format!(".{job_id}.staging-{}", Uuid::now_v7()));
         let result = (|| {
+            fs::create_dir(&staging)
+                .map_err(|error| io_error("create input staging directory", error))?;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                .map_err(|error| io_error("protect input staging directory", error))?;
             for (index, input) in inputs.iter().enumerate() {
-                let configured_root =
-                    self.input_authorities
-                        .get(&input.authority)
-                        .ok_or_else(|| {
-                            RuntimeError::invalid(
-                                format!("unknown input authority {}", input.authority),
-                                &format!("inputs[{index}].authority"),
-                            )
-                        })?;
-                let authority_root = canonical_directory(configured_root, "inputAuthority.root")
-                    .map_err(map_universal_error)?;
-                let source = open_authority_file(&authority_root, &input.relative_object, index)?;
+                let authority = self
+                    .input_authorities
+                    .get(&input.authority)
+                    .ok_or_else(|| {
+                        RuntimeError::invalid(
+                            format!("unknown input authority {}", input.authority),
+                            &format!("inputs[{index}].authority"),
+                        )
+                    })?;
+                let source =
+                    open_authority_file(authority.root.as_ref(), &input.relative_object, index)?;
                 let target = staging.join(&input.presentation_relative_path);
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent)
@@ -1136,22 +1198,122 @@ impl Runtime {
                     .map_err(|error| io_error("protect materialized input", error))?;
             }
             sync_directory(&staging)?;
-            publish_directory_noreplace(&staging, &final_root)?;
+            fs::rename(&staging, &prepared_root)
+                .map_err(|error| io_error("publish prepared immutable input set", error))?;
             sync_directory(&materialization_root)?;
-            verify_effective_input_set(&final_root, inputs)
+            let effective_inputs = verify_effective_input_set(&prepared_root, inputs)?;
+            Ok(PreparedInputSet {
+                input_set_id,
+                prepared_root: prepared_root.clone(),
+                effective_inputs,
+            })
         })();
         if result.is_err() {
             let _ = fs::remove_dir_all(&staging);
+            let _ = fs::remove_dir_all(&prepared_root);
         }
-        result.map(|effective| (input_set_id, effective))
+        drop(lease);
+        let _ = fs::remove_file(&lease_path);
+        let _ = sync_directory(&materialization_root);
+        result
+    }
+
+    fn discard_prepared_input_set(&self, prepared_root: &Path) -> RuntimeResult<()> {
+        if !prepared_root.exists() {
+            return Ok(());
+        }
+        fs::remove_dir_all(prepared_root)
+            .map_err(|error| io_error("remove unowned prepared input set", error))?;
+        if let Some(parent) = prepared_root.parent() {
+            sync_directory(parent)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_job_input_ownership(&self, job_id: &str) -> RuntimeResult<()> {
+        let plan = self.registry.execution_plan(job_id)?;
+        if plan.effective_inputs.is_empty() {
+            if plan.input_set_id.is_some() {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "inputSetId exists without effective immutable inputs",
+                    Some("executionPlan"),
+                    false,
+                ));
+            }
+            return Ok(());
+        }
+        if plan.input_set_id.is_none() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "effective immutable inputs have no committed inputSetId",
+                Some("executionPlan"),
+                false,
+            ));
+        }
+        let requests = effective_input_requests_from_plan(&plan)?;
+        let owned_root = self.executor.job_input_path(job_id);
+        let prepared_root = self.executor.input_materializations_root().join(job_id);
+        fs::create_dir_all(self.executor.job_inputs_root())
+            .map_err(|error| io_error("create Job input ownership root", error))?;
+        if owned_root.exists() {
+            verify_effective_input_set(&owned_root, &requests)?;
+            if prepared_root.exists() {
+                self.discard_prepared_input_set(&prepared_root)?;
+            }
+            return Ok(());
+        }
+        if !prepared_root.exists() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ReconciliationRequired,
+                "committed Job immutable inputs are missing both prepared and Job-owned bytes",
+                Some("executionPlan.inputSetId"),
+                true,
+            ));
+        }
+        verify_effective_input_set(&prepared_root, &requests)?;
+        match fs::rename(&prepared_root, &owned_root) {
+            Ok(()) => sync_directory(&self.executor.job_inputs_root())?,
+            Err(error) if owned_root.exists() => {
+                let _ = error;
+            }
+            Err(error) => return Err(io_error("adopt prepared immutable inputs for Job", error)),
+        }
+        verify_effective_input_set(&owned_root, &requests)?;
+        Ok(())
     }
 
     fn ensure_attempt_dispatched(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
-        let attempt = if attempt.bundle_digest.is_none() {
-            self.materialize_bundle(attempt)?
-        } else {
-            attempt.clone()
-        };
+        if let Err(error) = self.ensure_job_input_ownership(&attempt.job_id) {
+            if matches!(
+                error.code,
+                RuntimeErrorCode::ReconciliationRequired | RuntimeErrorCode::WorkspaceStateMismatch
+            ) {
+                self.commit_control_terminal(
+                    attempt,
+                    AttemptState::Failed,
+                    "INPUT_PRECONDITION_DRIFT",
+                    Some(error.to_string()),
+                )?;
+                return Ok(());
+            }
+            return Err(error);
+        }
+        let mut attempt = attempt.clone();
+        if attempt.bundle_digest.is_none() {
+            attempt = match self.materialize_bundle(&attempt) {
+                Ok(current) => current,
+                Err(error) if error.code == RuntimeErrorCode::AttemptStateConflict => {
+                    let current = self.registry.get_attempt(&attempt.attempt_id)?;
+                    if current.bundle_digest.is_none() && current.state == AttemptState::Accepted {
+                        self.materialize_bundle(&current)?
+                    } else {
+                        current
+                    }
+                }
+                Err(error) => return Err(error),
+            };
+        }
         match attempt.state {
             AttemptState::Accepted => match self.dispatch_attempt(&attempt) {
                 Ok(()) => Ok(()),
@@ -1346,6 +1508,23 @@ impl Runtime {
             workspace_id: plan.workspace_id.clone(),
             workspace_path: plan.workspace_path.clone(),
             workspace_source_digest: plan.workspace_source_digest.clone(),
+            input_presentation_root: if plan.effective_inputs.is_empty() {
+                None
+            } else {
+                Some(CONTAINED_INPUT_ROOT.to_string())
+            },
+            input_commitments: plan
+                .effective_inputs
+                .iter()
+                .map(|input| RunnerInputCommitment {
+                    presentation_path: Path::new(CONTAINED_INPUT_ROOT)
+                        .join(&input.presentation_relative_path)
+                        .to_string_lossy()
+                        .into_owned(),
+                    digest: input.digest.clone(),
+                    byte_length: input.byte_length,
+                })
+                .collect(),
             executable: plan.executable.clone(),
             executable_digest: plan.executable_digest.clone(),
             args: plan.args.clone(),
@@ -1465,8 +1644,9 @@ impl Runtime {
         let bundle_path = canonical_directory(Path::new(&starting.bundle_path), "bundlePath")
             .map_err(map_universal_error)?;
         let runner = validate_runner(&self.executor.runner_path)?;
-        let input_set_path = if let Some(input_set_id) = plan.input_set_id.as_deref() {
-            let path = self.executor.input_materialization_path(input_set_id);
+        let input_set_path = if plan.input_set_id.is_some() {
+            self.ensure_job_input_ownership(&starting.job_id)?;
+            let path = self.executor.job_input_path(&starting.job_id);
             let requests = effective_input_requests_from_plan(&plan)?;
             verify_effective_input_set(&path, &requests)?;
             Some(path)
@@ -1976,8 +2156,129 @@ impl Runtime {
         &self,
         report: &mut ReconciliationReport,
     ) -> RuntimeResult<()> {
+        self.reconcile_prepared_input_sets(STALE_PREPARED_INPUT_AGE_MS)?;
         let attempts = self.registry.list_held_orphaned_attempts()?;
         self.reconcile_candidates_into(attempts, report)
+    }
+
+    pub(super) fn reconcile_prepared_input_sets(&self, stale_age_ms: u64) -> RuntimeResult<()> {
+        let root = self.executor.input_materializations_root();
+        fs::create_dir_all(&root)
+            .map_err(|error| io_error("create input materialization root", error))?;
+        let now = SystemTime::now();
+        for entry in
+            fs::read_dir(&root).map_err(|error| io_error("enumerate prepared input sets", error))?
+        {
+            let entry = entry.map_err(|error| io_error("read prepared input set entry", error))?;
+            let metadata = entry
+                .metadata()
+                .map_err(|error| io_error("inspect prepared input set", error))?;
+            if !metadata.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(job_id) = name.to_str() else {
+                continue;
+            };
+            if !job_id.starts_with("job-") {
+                continue;
+            }
+            match self.registry.get_job(job_id) {
+                Ok(job) => {
+                    let plan: RuntimeExecutionPlan = serde_json::from_str(&job.execution_plan_json)
+                        .map_err(|error| {
+                            RuntimeError::new(
+                                RuntimeErrorCode::RegistryCorrupt,
+                                format!("stored execution plan is invalid: {error}"),
+                                Some("executionPlan"),
+                                false,
+                            )
+                        })?;
+                    if plan.effective_inputs.is_empty() || plan.input_set_id.is_none() {
+                        continue;
+                    }
+                    if self.ensure_job_input_ownership(job_id).is_err() {
+                        // One corrupt Job must not block Runtime startup. Its Attempt owns
+                        // deterministic failure/quarantine; never reopen current source authority.
+                        continue;
+                    }
+                }
+                Err(error) if error.code == RuntimeErrorCode::JobNotFound => {
+                    let old_enough = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|modified| now.duration_since(modified).ok())
+                        .is_some_and(|age| age.as_millis() >= u128::from(stale_age_ms));
+                    if old_enough {
+                        self.discard_prepared_input_set(&entry.path())?;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        // Copy-in-progress state is guarded by a process-held flock. A hard crash releases
+        // the lock automatically, allowing stale staging state to be collected without
+        // guessing how long a valid large copy may take.
+        for entry in fs::read_dir(&root)
+            .map_err(|error| io_error("enumerate input staging leases", error))?
+        {
+            let entry = entry.map_err(|error| io_error("read input staging lease entry", error))?;
+            let name = entry.file_name();
+            let Some(job_id) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix('.'))
+                .and_then(|name| name.strip_suffix(".lease"))
+                .filter(|job_id| job_id.starts_with("job-"))
+            else {
+                continue;
+            };
+            let metadata = fs::symlink_metadata(entry.path())
+                .map_err(|error| io_error("inspect input staging lease", error))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                continue;
+            }
+            let old_enough = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age.as_millis() >= u128::from(stale_age_ms));
+            if !old_enough {
+                continue;
+            }
+            let lease = match OpenOptions::new().read(true).write(true).open(entry.path()) {
+                Ok(lease) => lease,
+                Err(_) => continue,
+            };
+            if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                continue;
+            }
+            let prefix = format!(".{job_id}.staging-");
+            for staging in fs::read_dir(&root)
+                .map_err(|error| io_error("enumerate abandoned input staging directories", error))?
+            {
+                let staging = staging
+                    .map_err(|error| io_error("read abandoned input staging entry", error))?;
+                let staging_name = staging.file_name();
+                if staging_name
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(&prefix))
+                    && staging
+                        .file_type()
+                        .map(|kind| kind.is_dir())
+                        .unwrap_or(false)
+                {
+                    fs::remove_dir_all(staging.path()).map_err(|error| {
+                        io_error("remove abandoned input staging directory", error)
+                    })?;
+                }
+            }
+            fs::remove_file(entry.path())
+                .map_err(|error| io_error("remove abandoned input staging lease", error))?;
+            drop(lease);
+            sync_directory(&root)?;
+        }
+        Ok(())
     }
 
     fn reconcile_candidates_into(
@@ -3107,12 +3408,7 @@ struct OpenHow {
     resolve: u64,
 }
 
-fn open_authority_file(root: &Path, relative: &str, index: usize) -> RuntimeResult<File> {
-    let root_file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open(root)
-        .map_err(|error| io_error("open input authority root", error))?;
+fn open_authority_file(root_file: &File, relative: &str, index: usize) -> RuntimeResult<File> {
     let relative = CString::new(relative).map_err(|_| {
         RuntimeError::invalid(
             "input relativeObject contains NUL",
@@ -3168,32 +3464,6 @@ fn copy_input_and_digest(mut source: File, target: &Path) -> RuntimeResult<Strin
     sha256_file(target).map_err(map_universal_error)
 }
 
-fn publish_directory_noreplace(staging: &Path, final_root: &Path) -> RuntimeResult<()> {
-    let staging_c = CString::new(staging.as_os_str().as_bytes())
-        .map_err(|_| RuntimeError::invalid("input staging path contains NUL", "inputs"))?;
-    let final_c = CString::new(final_root.as_os_str().as_bytes())
-        .map_err(|_| RuntimeError::invalid("input materialization path contains NUL", "inputs"))?;
-    let rc = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            staging_c.as_ptr(),
-            libc::AT_FDCWD,
-            final_c.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if rc == 0 {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::EEXIST) {
-        fs::remove_dir_all(staging)
-            .map_err(|cleanup| io_error("remove losing input staging directory", cleanup))?;
-        return Ok(());
-    }
-    Err(io_error("publish immutable input set", error))
-}
-
 fn collect_materialized_files(
     root: &Path,
     current: &Path,
@@ -3208,7 +3478,7 @@ fn collect_materialized_files(
             .map_err(|error| io_error("inspect materialized input entry", error))?;
         if metadata.file_type().is_symlink() {
             return Err(RuntimeError::new(
-                RuntimeErrorCode::RegistryCorrupt,
+                RuntimeErrorCode::WorkspaceStateMismatch,
                 "materialized input set contains a symlink",
                 Some("effectiveInputs"),
                 false,
@@ -3219,7 +3489,7 @@ fn collect_materialized_files(
         } else if metadata.is_file() {
             let relative = path.strip_prefix(root).map_err(|_| {
                 RuntimeError::new(
-                    RuntimeErrorCode::RegistryCorrupt,
+                    RuntimeErrorCode::WorkspaceStateMismatch,
                     "materialized input escaped its set root",
                     Some("effectiveInputs"),
                     false,
@@ -3228,7 +3498,7 @@ fn collect_materialized_files(
             files.insert(relative.to_path_buf());
         } else {
             return Err(RuntimeError::new(
-                RuntimeErrorCode::RegistryCorrupt,
+                RuntimeErrorCode::WorkspaceStateMismatch,
                 "materialized input set contains a non-file entry",
                 Some("effectiveInputs"),
                 false,
@@ -3246,7 +3516,7 @@ fn verify_effective_input_set(
         .map_err(|error| io_error("inspect materialized input set", error))?;
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
         return Err(RuntimeError::new(
-            RuntimeErrorCode::RegistryCorrupt,
+            RuntimeErrorCode::WorkspaceStateMismatch,
             "materialized input set root is not a non-symlink directory",
             Some("effectiveInputs"),
             false,
@@ -3260,7 +3530,7 @@ fn verify_effective_input_set(
     collect_materialized_files(root, root, &mut observed)?;
     if observed != expected {
         return Err(RuntimeError::new(
-            RuntimeErrorCode::RegistryCorrupt,
+            RuntimeErrorCode::WorkspaceStateMismatch,
             "materialized input set file inventory differs from the committed binding set",
             Some("effectiveInputs"),
             false,
@@ -3275,7 +3545,7 @@ fn verify_effective_input_set(
         if digest != input.expected_digest {
             let field = format!("effectiveInputs[{index}].digest");
             return Err(RuntimeError::new(
-                RuntimeErrorCode::RegistryCorrupt,
+                RuntimeErrorCode::WorkspaceStateMismatch,
                 format!(
                     "materialized input digest mismatch: expected {}, observed {digest}",
                     input.expected_digest
@@ -4008,7 +4278,9 @@ pub(crate) fn map_universal_error(error: crate::UniversalExecError) -> RuntimeEr
         UniversalCode::WorkspacePathDenied => RuntimeErrorCode::WorkspacePathDenied,
         UniversalCode::RevisionNotFound => RuntimeErrorCode::RevisionNotFound,
         UniversalCode::RevisionMismatch => RuntimeErrorCode::RevisionMismatch,
-        UniversalCode::WorkspaceStateMismatch => RuntimeErrorCode::WorkspaceStateMismatch,
+        UniversalCode::WorkspaceStateMismatch | UniversalCode::InputStateMismatch => {
+            RuntimeErrorCode::WorkspaceStateMismatch
+        }
         UniversalCode::WorkspaceMutationIncomplete => RuntimeErrorCode::ReconciliationRequired,
         UniversalCode::TaskExists => RuntimeErrorCode::IdempotencyConflict,
         UniversalCode::TaskNotFound => RuntimeErrorCode::JobNotFound,
@@ -4096,7 +4368,7 @@ mod trusted_systemd_command_tests {
     }
 
     #[test]
-    fn concurrent_materialization_publishes_one_verified_input_set() {
+    fn concurrent_materialization_keeps_physical_prepared_state_job_scoped() {
         let root = std::env::temp_dir().join(format!(
             "ordivon-input-publish-race-{}-{}",
             std::process::id(),
@@ -4178,22 +4450,20 @@ mod trusted_systemd_command_tests {
                 )
                 .unwrap();
                 barrier.wait();
+                let job_id = format!("job-{}", Uuid::now_v7());
                 runtime
-                    .materialize_input_bindings(&request, &identity, &inputs)
+                    .materialize_input_bindings(&request, &identity, &job_id, &inputs)
                     .unwrap()
             }));
         }
         let left = handles.remove(0).join().unwrap();
         let right = handles.remove(0).join().unwrap();
-        assert_eq!(left, right);
-        assert_eq!(left.1.len(), 1);
-        assert_eq!(left.1[0].digest, expected_digest);
-        let materialization_root = root.join("runtime/input-materializations");
-        let entries = fs::read_dir(&materialization_root)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(entries, vec![left.0]);
+        assert_eq!(left.input_set_id, right.input_set_id);
+        assert_eq!(left.effective_inputs, right.effective_inputs);
+        assert_ne!(left.prepared_root, right.prepared_root);
+        assert!(left.prepared_root.is_dir());
+        assert!(right.prepared_root.is_dir());
+        assert_eq!(left.effective_inputs[0].digest, expected_digest);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4221,13 +4491,13 @@ mod trusted_systemd_command_tests {
 
         fs::write(root.join("data/input.bin"), b"S1").unwrap();
         let error = verify_effective_input_set(&root, std::slice::from_ref(&request)).unwrap_err();
-        assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt);
+        assert_eq!(error.code, RuntimeErrorCode::WorkspaceStateMismatch);
         assert!(error.message.contains("digest mismatch"));
 
         fs::write(root.join("data/input.bin"), b"S0").unwrap();
         fs::write(root.join("unexpected.bin"), b"extra").unwrap();
         let error = verify_effective_input_set(&root, &[request]).unwrap_err();
-        assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt);
+        assert_eq!(error.code, RuntimeErrorCode::WorkspaceStateMismatch);
         assert!(error.message.contains("file inventory differs"));
         fs::remove_dir_all(root).unwrap();
     }
