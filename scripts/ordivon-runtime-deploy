@@ -187,10 +187,14 @@ def required_tools(args: argparse.Namespace) -> tuple[str, ...]:
 
 
 def run(
-    command: list[str], *, check: bool = True, cwd: Path | None = None
+    command: list[str],
+    *,
+    check: bool = True,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
-        command, text=True, capture_output=True, check=False, cwd=cwd
+        command, text=True, capture_output=True, check=False, cwd=cwd, env=env
     )
     if check and result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
@@ -249,10 +253,7 @@ def executable_identity(path: Path) -> dict[str, object]:
 def build_toolchain_identity(cargo: Path) -> dict[str, object]:
     rustc = cargo.with_name("rustc")
     if not rustc.is_file() or not os.access(rustc, os.X_OK):
-        discovered = shutil.which("rustc")
-        if discovered is None:
-            raise RuntimeError("rustc is unavailable beside Cargo and not present on PATH")
-        rustc = Path(discovered)
+        raise RuntimeError("release Cargo must have an executable sibling rustc")
     cargo_identity = executable_identity(cargo)
     rustc_identity = executable_identity(rustc)
     host = None
@@ -430,6 +431,14 @@ def prepare_candidate(args: argparse.Namespace) -> dict[str, object]:
     binary_names = binaries(args)
     if args.candidate_dir.name != "release":
         raise RuntimeError("candidate-dir must be the release directory under one Cargo target root")
+    toolchain = build_toolchain_identity(args.cargo)
+    rustc = Path(str(toolchain["rustc"]["resolvedPath"]))
+    build_env = os.environ.copy()
+    build_env["RUSTC"] = str(rustc)
+    rustdoc = args.cargo.with_name("rustdoc")
+    if rustdoc.is_file() and os.access(rustdoc, os.X_OK):
+        build_env["RUSTDOC"] = str(rustdoc.resolve())
+    build_env["PATH"] = str(args.cargo.parent) + os.pathsep + build_env.get("PATH", "")
     with exact_source_checkout(args.source_repo, args.commit) as build_source:
         stage_operator_artifacts(args, build_source)
         run(
@@ -443,6 +452,7 @@ def prepare_candidate(args: argparse.Namespace) -> dict[str, object]:
                 str(args.candidate_dir.parent),
             ],
             cwd=build_source,
+            env=build_env,
         )
         post_build_status = git_text(
             Path("/usr/bin/git"),
@@ -461,7 +471,7 @@ def prepare_candidate(args: argparse.Namespace) -> dict[str, object]:
         "candidateDir": str(args.candidate_dir.resolve()),
         "builtAtMs": int(time.time() * 1000),
         "cargo": str(args.cargo),
-        "toolchain": build_toolchain_identity(args.cargo),
+        "toolchain": toolchain,
         "artifacts": candidate,
         "binaries": [item for item in candidate if str(item["name"]) in binary_set],
     }

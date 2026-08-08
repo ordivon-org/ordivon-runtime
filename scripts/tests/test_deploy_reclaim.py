@@ -680,6 +680,8 @@ class DeployReclaimTests(unittest.TestCase):
                 '  if [ "$1" = --target-dir ]; then target=$2; shift 2; else shift; fi\n'
                 "done\n"
                 'mkdir -p "$target/release"\n'
+                "printf '%s\\n' \"$RUSTC\" > \"$target/release/RUSTC_USED\"\n"
+                "printf '%s\\n' \"${PATH%%:*}\" > \"$target/release/PATH_HEAD\"\n"
                 "printf 'built-from-commit\\n' > \"$target/release/runtime\"\n"
                 'chmod 755 "$target/release/runtime"\n',
             )
@@ -710,6 +712,8 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual(report["commit"], commit)
             self.assertEqual(report["binaries"][0]["name"], "runtime")
             self.assertEqual(report["toolchain"]["host"], "x86_64-unknown-linux-gnu")
+            self.assertEqual((candidate / "RUSTC_USED").read_text().strip(), str(root / "rustc"))
+            self.assertEqual((candidate / "PATH_HEAD").read_text().strip(), str(root))
             stored = json.loads(manifest.read_text())
             self.assertEqual(stored["commit"], commit)
             self.assertEqual(stored["toolchain"]["cargo"]["version"], "cargo 1.95.0 (test)")
