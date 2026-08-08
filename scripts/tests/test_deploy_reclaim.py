@@ -718,6 +718,66 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual(stored["commit"], commit)
             self.assertEqual(stored["toolchain"]["cargo"]["version"], "cargo 1.95.0 (test)")
 
+    def test_deploy_prepare_preserves_rustup_proxy_invocation_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            commit = initialize_git_repository(repo, remote=False)
+            candidate = root / "target/release"
+            manifest = root / "candidate-manifest.json"
+            proxy = root / "rustup"
+            write_executable(
+                proxy,
+                "#!/bin/sh\n"
+                "tool=${0##*/}\n"
+                'if [ "$tool" = rustc ]; then printf "rustc 1.95.0 (test)\\nbinary: rustc\\nhost: x86_64-unknown-linux-gnu\\n"; exit 0; fi\n'
+                'if [ "$tool" = cargo ] && [ "${1:-}" = --version ]; then printf "cargo 1.95.0 (test)\\nrelease: 1.95.0\\n"; exit 0; fi\n'
+                'if [ "$tool" != cargo ]; then exit 2; fi\n'
+                "target=''\n"
+                "while [ $# -gt 0 ]; do\n"
+                '  if [ "$1" = --target-dir ]; then target=$2; shift 2; else shift; fi\n'
+                "done\n"
+                'mkdir -p "$target/release"\n'
+                'printf "%s\\n" "$RUSTC" > "$target/release/RUSTC_USED"\n'
+                'printf "%s\\n" "$RUSTDOC" > "$target/release/RUSTDOC_USED"\n'
+                'printf "built-from-proxy\\n" > "$target/release/runtime"\n'
+                'chmod 755 "$target/release/runtime"\n',
+            )
+            cargo = root / "cargo"
+            rustc = root / "rustc"
+            rustdoc = root / "rustdoc"
+            cargo.symlink_to(proxy)
+            rustc.symlink_to(proxy)
+            rustdoc.symlink_to(proxy)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-deploy",
+                    "prepare",
+                    "--source-repo",
+                    str(repo),
+                    "--commit",
+                    commit,
+                    "--candidate-dir",
+                    str(candidate),
+                    "--candidate-manifest",
+                    str(manifest),
+                    "--cargo",
+                    str(cargo),
+                    "--binary",
+                    "runtime",
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(result.stdout)
+            self.assertEqual(report["toolchain"]["cargo"]["resolvedPath"], str(proxy))
+            self.assertEqual(report["toolchain"]["rustc"]["resolvedPath"], str(proxy))
+            self.assertEqual((candidate / "RUSTC_USED").read_text().strip(), str(rustc))
+            self.assertEqual((candidate / "RUSTDOC_USED").read_text().strip(), str(rustdoc))
+
     def test_prepare_ignores_hidden_mutable_checkout_drift_and_builds_exact_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

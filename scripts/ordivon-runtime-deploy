@@ -432,12 +432,15 @@ def prepare_candidate(args: argparse.Namespace) -> dict[str, object]:
     if args.candidate_dir.name != "release":
         raise RuntimeError("candidate-dir must be the release directory under one Cargo target root")
     toolchain = build_toolchain_identity(args.cargo)
-    rustc = Path(str(toolchain["rustc"]["resolvedPath"]))
+    # Preserve the invocation path for rustup-style proxy symlinks. The resolved
+    # path remains digest-bound in the manifest, but invoking that resolved
+    # binary directly would lose the proxy basename (rustc/rustdoc) semantics.
+    rustc = Path(str(toolchain["rustc"]["path"]))
     build_env = os.environ.copy()
     build_env["RUSTC"] = str(rustc)
     rustdoc = args.cargo.with_name("rustdoc")
     if rustdoc.is_file() and os.access(rustdoc, os.X_OK):
-        build_env["RUSTDOC"] = str(rustdoc.resolve())
+        build_env["RUSTDOC"] = str(rustdoc)
     build_env["PATH"] = str(args.cargo.parent) + os.pathsep + build_env.get("PATH", "")
     with exact_source_checkout(args.source_repo, args.commit) as build_source:
         stage_operator_artifacts(args, build_source)
