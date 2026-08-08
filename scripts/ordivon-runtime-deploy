@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Transactional local deployment and rollback for Ordivon Runtime binaries."""
+"""Transactional local deployment and rollback for one Ordivon Runtime release artifact set."""
 
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import closing, contextmanager
 from pathlib import Path
@@ -21,13 +23,28 @@ from urllib.parse import quote
 
 from mcp_probe import probe_catalog
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
 DEFAULT_BINARIES = (
     "ordivon-runtime",
     "ordivon-runtime-runner",
     "ordivon-runtime-doctor",
     "ordivon-runtime-inspect",
     "ordivon-runtime-repair",
+)
+DEFAULT_OPERATOR_ARTIFACTS = (
+    ("ordivon-runtime-deploy", "scripts/ordivon-runtime-deploy", 0o755, "operator"),
+    ("ordivon-runtime-lifecycle", "scripts/ordivon-runtime-lifecycle", 0o755, "operator"),
+    ("ordivon-runtime-reclaim", "scripts/ordivon-runtime-reclaim", 0o755, "operator"),
+    ("ordivon-runtime-cache", "scripts/ordivon-runtime-cache", 0o755, "operator"),
+    ("ordivon-runtime-status", "scripts/ordivon-runtime-status", 0o755, "operator"),
+    (
+        "ordivon-runtime-capacity-acceptance",
+        "scripts/ordivon-runtime-capacity-acceptance",
+        0o755,
+        "operator",
+    ),
+    ("mcp_probe.py", "scripts/mcp_probe.py", 0o644, "support"),
 )
 DEFAULT_REQUIRED_TOOLS = (
     "workspace.execPlan",
@@ -62,7 +79,9 @@ def parse_args() -> argparse.Namespace:
     apply = subparsers.add_parser("apply", help="atomically install, restart, probe, and receipt")
     add_deployment_arguments(apply, require_confirmation=True)
 
-    rollback = subparsers.add_parser("rollback", help="restore binaries retained by one deployment receipt")
+    rollback = subparsers.add_parser(
+        "rollback", help="restore release artifacts retained by one deployment receipt"
+    )
     rollback.add_argument("--receipt", type=absolute_path, required=True)
     rollback.add_argument("--install-dir", type=absolute_path, required=True)
     rollback.add_argument("--service", default="ordivon-runtime.service")
@@ -133,6 +152,33 @@ def binaries(args: argparse.Namespace) -> tuple[str, ...]:
     return values
 
 
+def release_artifact_specs(args: argparse.Namespace) -> tuple[dict[str, object], ...]:
+    specs: list[dict[str, object]] = [
+        {"name": name, "kind": "binary", "mode": 0o755} for name in binaries(args)
+    ]
+    # An explicit --binary list is an intentional subset mode used by tests and
+    # exceptional maintenance. The default production release is the complete
+    # Runtime executable/support artifact set.
+    if args.binaries is None:
+        specs.extend(
+            {"name": name, "source": source, "mode": mode, "kind": kind}
+            for name, source, mode, kind in DEFAULT_OPERATOR_ARTIFACTS
+        )
+    names = [str(spec["name"]) for spec in specs]
+    if len(names) != len(set(names)):
+        raise RuntimeError("release artifact names must be unique")
+    return tuple(specs)
+
+
+def stage_operator_artifacts(args: argparse.Namespace, source_root: Path) -> None:
+    if args.binaries is not None:
+        return
+    for name, relative_source, mode, _kind in DEFAULT_OPERATOR_ARTIFACTS:
+        source = source_root / relative_source
+        if source.is_symlink() or not source.is_file():
+            raise RuntimeError(f"release operator artifact is missing or unsafe: {source}")
+        atomic_copy(source, args.candidate_dir / name, mode=mode)
+
 def required_tools(args: argparse.Namespace) -> tuple[str, ...]:
     values = tuple(args.required_tools or DEFAULT_REQUIRED_TOOLS)
     if len(values) != len(set(values)) or any(not value.strip() for value in values):
@@ -154,6 +200,34 @@ def run(
 
 def git_text(git: Path, repo: Path, arguments: list[str]) -> str:
     return run([str(git), "-C", str(repo), *arguments]).stdout.strip()
+
+
+@contextmanager
+def exact_source_checkout(source_repo: Path, commit: str):
+    git = Path("/usr/bin/git")
+    with tempfile.TemporaryDirectory(prefix="ordivon-runtime-release-source-") as temporary:
+        checkout = Path(temporary) / "source"
+        run(
+            [
+                str(git),
+                "clone",
+                "--quiet",
+                "--shared",
+                "--no-checkout",
+                str(source_repo),
+                str(checkout),
+            ]
+        )
+        run([str(git), "-C", str(checkout), "checkout", "--quiet", "--detach", commit])
+        head = git_text(git, checkout, ["rev-parse", "HEAD"])
+        if head != commit:
+            raise RuntimeError(
+                f"detached release source resolved to {head} instead of requested commit {commit}"
+            )
+        status = git_text(git, checkout, ["status", "--porcelain", "--untracked-files=all"])
+        if status:
+            raise RuntimeError("detached release source is not clean after exact checkout")
+        yield checkout
 
 
 def executable_identity(path: Path) -> dict[str, object]:
@@ -257,58 +331,142 @@ def sha256(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def binary_description(path: Path, name: str) -> dict[str, object]:
-    if path.is_symlink() or not path.is_file() or not os.access(path, os.X_OK):
-        raise RuntimeError(f"candidate binary is missing or not executable: {path}")
+def release_artifact_fingerprint(records: object) -> dict[str, tuple[str, int]] | None:
+    if not isinstance(records, list) or not records:
+        return None
+    fingerprint: dict[str, tuple[str, int]] = {}
+    for item in records:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        digest = item.get("digest")
+        mode = item.get("mode")
+        kind = item.get("kind") if isinstance(item.get("kind"), str) else "binary"
+        if not isinstance(name, str) or not isinstance(digest, str):
+            return None
+        if mode is None and kind == "binary":
+            mode = 0o755
+        if not isinstance(mode, int) or name in fingerprint:
+            return None
+        fingerprint[name] = (digest, mode)
+    return fingerprint
+
+
+def matching_release_commit(
+    deployment_root: Path, installed_records: object
+) -> str | None:
+    target = release_artifact_fingerprint(installed_records)
+    if target is None or not deployment_root.is_dir():
+        return None
+    candidates: list[tuple[int, str]] = []
+    for pattern, valid_status in (
+        ("*/result.json", "deployed"),
+        ("*/rollback-result.json", "restored_previous"),
+    ):
+        for path in deployment_root.glob(pattern):
+            try:
+                event = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(event, dict) or event.get("status") != valid_status:
+                continue
+            commit = event.get("commit")
+            finished = event.get("finishedAtMs")
+            if (
+                not isinstance(commit, str)
+                or not COMMIT_PATTERN.fullmatch(commit)
+                or not isinstance(finished, int)
+                or finished < 0
+            ):
+                continue
+            if release_artifact_fingerprint(event.get("installed")) == target:
+                candidates.append((finished, commit))
+    return max(candidates)[1] if candidates else None
+
+
+def artifact_description(
+    path: Path,
+    spec: dict[str, object],
+    *,
+    enforce_mode: bool = True,
+) -> dict[str, object]:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"release artifact is missing or unsafe: {path}")
+    name = str(spec["name"])
+    kind = str(spec.get("kind", "binary"))
+    expected_mode = int(spec.get("mode", 0o755))
+    observed_mode = stat.S_IMODE(path.stat().st_mode)
+    if enforce_mode and observed_mode != expected_mode:
+        raise RuntimeError(
+            f"release artifact mode mismatch for {name}: "
+            f"expected {expected_mode:#05o}, observed {observed_mode:#05o}"
+        )
+    if enforce_mode and expected_mode & 0o111 and not os.access(path, os.X_OK):
+        raise RuntimeError(f"release artifact is not executable: {path}")
     return {
         "name": name,
+        "kind": kind,
+        "mode": observed_mode,
         "path": str(path),
         "bytes": path.stat().st_size,
         "digest": sha256(path),
     }
 
 
+def binary_description(path: Path, name: str) -> dict[str, object]:
+    # Compatibility helper for focused binary-only tests and older callers.
+    return artifact_description(
+        path, {"name": name, "kind": "binary", "mode": 0o755}, enforce_mode=True
+    )
+
+
+def candidate_artifacts(args: argparse.Namespace) -> list[dict[str, object]]:
+    return [
+        artifact_description(args.candidate_dir / str(spec["name"]), spec)
+        for spec in release_artifact_specs(args)
+    ]
+
 def prepare_candidate(args: argparse.Namespace) -> dict[str, object]:
-    names = binaries(args)
-    head = git_text(Path("/usr/bin/git"), args.source_repo, ["rev-parse", "HEAD"])
-    status = git_text(Path("/usr/bin/git"), args.source_repo, ["status", "--porcelain"])
-    if head != args.commit:
-        raise RuntimeError(f"source HEAD {head} does not equal requested commit {args.commit}")
-    if status:
-        raise RuntimeError("candidate source repository is dirty")
+    binary_names = binaries(args)
     if args.candidate_dir.name != "release":
         raise RuntimeError("candidate-dir must be the release directory under one Cargo target root")
-    run(
-        [
-            str(args.cargo),
-            "build",
-            "--release",
-            "--workspace",
-            "--all-features",
-            "--target-dir",
-            str(args.candidate_dir.parent),
-        ],
-        cwd=args.source_repo,
-    )
-    post_build_status = git_text(
-        Path("/usr/bin/git"), args.source_repo, ["status", "--porcelain"]
-    )
-    if post_build_status:
-        raise RuntimeError("candidate build changed the source repository")
-    candidate = [binary_description(args.candidate_dir / name, name) for name in names]
+    with exact_source_checkout(args.source_repo, args.commit) as build_source:
+        stage_operator_artifacts(args, build_source)
+        run(
+            [
+                str(args.cargo),
+                "build",
+                "--release",
+                "--workspace",
+                "--all-features",
+                "--target-dir",
+                str(args.candidate_dir.parent),
+            ],
+            cwd=build_source,
+        )
+        post_build_status = git_text(
+            Path("/usr/bin/git"),
+            build_source,
+            ["status", "--porcelain", "--untracked-files=all"],
+        )
+        if post_build_status:
+            raise RuntimeError("candidate build changed the detached release source")
+    candidate = candidate_artifacts(args)
+    binary_set = set(binary_names)
     manifest = {
         "schemaVersion": SCHEMA_VERSION,
         "commit": args.commit,
         "sourceRepo": str(args.source_repo.resolve()),
+        "sourceMaterialization": "detached_git_checkout",
         "candidateDir": str(args.candidate_dir.resolve()),
         "builtAtMs": int(time.time() * 1000),
         "cargo": str(args.cargo),
         "toolchain": build_toolchain_identity(args.cargo),
-        "binaries": candidate,
+        "artifacts": candidate,
+        "binaries": [item for item in candidate if str(item["name"]) in binary_set],
     }
     write_json_atomic(args.candidate_manifest, manifest)
     return {**manifest, "candidateManifest": str(args.candidate_manifest.resolve())}
-
 
 def validate_candidate_manifest(
     args: argparse.Namespace, candidate: list[dict[str, object]]
@@ -323,6 +481,8 @@ def validate_candidate_manifest(
         blockers.append("candidate manifest source repository does not match source-repo")
     if Path(str(manifest.get("candidateDir"))).resolve() != args.candidate_dir.resolve():
         blockers.append("candidate manifest directory does not match candidate-dir")
+    if manifest.get("sourceMaterialization") != "detached_git_checkout":
+        blockers.append("candidate manifest source materialization is unsupported")
     toolchain = manifest.get("toolchain")
     if not isinstance(toolchain, dict):
         blockers.append("candidate manifest lacks build toolchain identity")
@@ -341,67 +501,86 @@ def validate_candidate_manifest(
             blockers.append("candidate manifest lacks Rust host target")
     manifest_by_name = {
         str(item.get("name")): item
-        for item in manifest.get("binaries", [])
+        for item in manifest.get("artifacts", [])
         if isinstance(item, dict)
     }
     for item in candidate:
-        recorded = manifest_by_name.get(str(item["name"]))
+        name = str(item["name"])
+        recorded = manifest_by_name.get(name)
         if recorded is None:
-            blockers.append(f"candidate manifest lacks binary {item['name']}")
+            blockers.append(f"candidate manifest lacks release artifact {name}")
             continue
-        if recorded.get("digest") != item["digest"] or recorded.get("bytes") != item["bytes"]:
-            blockers.append(f"candidate binary does not match manifest: {item['name']}")
-    if set(manifest_by_name) != {str(item["name"]) for item in candidate}:
-        blockers.append("candidate manifest binary set does not match requested binary set")
+        for field in ("digest", "bytes", "mode", "kind"):
+            if recorded.get(field) != item.get(field):
+                blockers.append(f"candidate release artifact does not match manifest: {name}")
+                break
+    candidate_names = {str(item["name"]) for item in candidate}
+    if set(manifest_by_name) != candidate_names:
+        blockers.append("candidate manifest artifact set does not match requested release set")
+    manifest_binary_names = {
+        str(item.get("name"))
+        for item in manifest.get("binaries", [])
+        if isinstance(item, dict)
+    }
+    expected_binary_names = {
+        str(item["name"]) for item in candidate if item.get("kind") == "binary"
+    }
+    if manifest_binary_names != expected_binary_names:
+        blockers.append("candidate manifest binary subset does not match release artifacts")
     summary = {
         "path": str(args.candidate_manifest.resolve()),
         "digest": sha256(args.candidate_manifest),
         "commit": manifest.get("commit"),
         "sourceRepo": manifest.get("sourceRepo"),
         "candidateDir": manifest.get("candidateDir"),
+        "sourceMaterialization": manifest.get("sourceMaterialization"),
         "builtAtMs": manifest.get("builtAtMs"),
         "toolchain": toolchain,
+        "artifactCount": len(manifest_by_name),
     }
     return summary, blockers
 
-
 def deployment_plan(args: argparse.Namespace) -> dict[str, object]:
-    names = binaries(args)
+    specs = release_artifact_specs(args)
     head = git_text(args.git, args.source_repo, ["rev-parse", "HEAD"])
     status = git_text(args.git, args.source_repo, ["status", "--porcelain"])
     required_ref = git_text(args.git, args.source_repo, ["rev-parse", args.require_ref])
     jobs, ignored_current_job_id = active_job_ids(args.database)
-    candidate = [binary_description(args.candidate_dir / name, name) for name in names]
+    candidate = candidate_artifacts(args)
     candidate_manifest, manifest_blockers = validate_candidate_manifest(args, candidate)
     installed: list[dict[str, object]] = []
-    for name in names:
+    for spec in specs:
+        name = str(spec["name"])
         path = args.install_dir / name
-        present = path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)
+        present = path.is_file() and not path.is_symlink()
+        observed_mode = stat.S_IMODE(path.stat().st_mode) if present else None
+        executable_required = bool(int(spec["mode"]) & 0o111)
+        executable_ok = present and (not executable_required or os.access(path, os.X_OK))
         installed.append(
             {
                 "name": name,
+                "kind": str(spec["kind"]),
                 "path": str(path),
                 "present": present,
+                "usable": executable_ok,
+                "mode": observed_mode,
                 "digest": sha256(path) if present else None,
                 "bytes": path.stat().st_size if present else None,
             }
         )
     blockers: list[str] = list(manifest_blockers)
-    if head != args.commit:
-        blockers.append(f"source HEAD {head} does not equal requested commit {args.commit}")
     if required_ref != args.commit:
         blockers.append(f"required ref {args.require_ref} resolves to {required_ref}")
-    if status:
-        blockers.append("source repository is dirty")
     if jobs:
         blockers.append("active or held Jobs exist other than the deployment Job")
-    if any(not item["present"] for item in installed):
-        blockers.append("one or more installed binaries are missing")
+    if any(not item["present"] or not item["usable"] for item in installed):
+        blockers.append("one or more installed release artifacts are missing or unusable")
     return {
         "schemaVersion": SCHEMA_VERSION,
         "commit": args.commit,
         "sourceRepo": str(args.source_repo),
         "sourceHead": head,
+        "sourceHeadMatchesCommit": head == args.commit,
         "requiredRef": args.require_ref,
         "requiredRefCommit": required_ref,
         "sourceClean": not bool(status),
@@ -414,7 +593,6 @@ def deployment_plan(args: argparse.Namespace) -> dict[str, object]:
         "eligible": not blockers,
         "blockers": blockers,
     }
-
 
 def load_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
@@ -515,21 +693,37 @@ def receipt_path(root: Path, commit: str) -> Path:
     return candidate
 
 
+def receipt_record_mode(record: dict[str, object]) -> int:
+    mode = record.get("mode")
+    if mode is None:
+        # v1 receipts contained binaries only and installed them as 0755.
+        return 0o755
+    if not isinstance(mode, int) or not 0 <= mode <= 0o777:
+        raise RuntimeError("deployment receipt contains an invalid artifact mode")
+    return mode
+
+
 def restore_previous(
     previous: Path,
     install_dir: Path,
-    names: tuple[str, ...],
+    records: list[dict[str, object]],
     systemctl: Path,
     service: str,
     env_file: Path,
     wait_seconds: float,
 ) -> dict[str, object]:
     run([str(systemctl), "stop", service], check=False)
-    for name in names:
+    for record in records:
+        name = str(record.get("name", ""))
+        if not name or name in {".", ".."} or "/" in name:
+            raise RuntimeError("rollback receipt contains an invalid artifact name")
         source = previous / name
         if source.is_symlink() or not source.is_file():
-            raise RuntimeError(f"rollback binary is missing or unsafe: {source}")
-        atomic_copy(source, install_dir / name)
+            raise RuntimeError(f"rollback artifact is missing or unsafe: {source}")
+        expected = record.get("digest")
+        if isinstance(expected, str) and sha256(source) != expected:
+            raise RuntimeError(f"rollback artifact digest does not match receipt: {name}")
+        atomic_copy(source, install_dir / name, mode=receipt_record_mode(record))
     run([str(systemctl), "start", service])
     wait_service_active(systemctl, service, wait_seconds)
     probe = probe_mcp(
@@ -541,7 +735,6 @@ def restore_previous(
         allow_legacy_fallback=True,
     )
     return {"serviceActive": True, "probe": probe}
-
 
 def prune_candidate_artifacts(
     candidate_dir: Path,
@@ -604,28 +797,59 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
         plan = deployment_plan(args)
         if not plan["eligible"]:
             raise RuntimeError("deployment is not eligible: " + "; ".join(plan["blockers"]))
-        names = binaries(args)
+        specs = release_artifact_specs(args)
         receipt = receipt_path(args.receipt_root, args.commit)
         previous = receipt / "previous"
         previous.mkdir(parents=True)
         write_json_atomic(receipt / "plan.json", plan)
+        installed_by_name = {str(item["name"]): item for item in plan["installed"]}
+        previous_commit = matching_release_commit(args.receipt_root, plan["installed"])
+        previous_records: list[dict[str, object]] = []
         commit_started = False
         stopped = False
         try:
-            for name in names:
-                atomic_copy(args.install_dir / name, previous / name)
-                atomic_copy(args.install_dir / name, args.install_dir / f"{name}.previous")
-                atomic_copy(args.candidate_dir / name, args.install_dir / f"{name}.next")
+            for spec in specs:
+                name = str(spec["name"])
+                installed = installed_by_name[name]
+                previous_mode = installed.get("mode")
+                if not isinstance(previous_mode, int):
+                    raise RuntimeError(f"installed release artifact has no mode: {name}")
+                atomic_copy(args.install_dir / name, previous / name, mode=previous_mode)
+                atomic_copy(
+                    args.install_dir / name,
+                    args.install_dir / f"{name}.previous",
+                    mode=previous_mode,
+                )
+                atomic_copy(
+                    args.candidate_dir / name,
+                    args.install_dir / f"{name}.next",
+                    mode=int(spec["mode"]),
+                )
+                previous_records.append(
+                    artifact_description(
+                        previous / name,
+                        {"name": name, "kind": spec["kind"], "mode": previous_mode},
+                    )
+                )
             write_json_atomic(
                 receipt / "manifest.json",
                 {
                     "schemaVersion": SCHEMA_VERSION,
                     "commit": args.commit,
                     "service": args.service,
-                    "binaries": list(names),
+                    "artifacts": [
+                        {
+                            "name": str(spec["name"]),
+                            "kind": str(spec["kind"]),
+                            "mode": int(spec["mode"]),
+                        }
+                        for spec in specs
+                    ],
+                    "binaries": list(binaries(args)),
+                    "previousCommit": previous_commit,
                     "installDir": str(args.install_dir),
                     "envFile": str(args.env_file),
-                    "previous": [binary_description(previous / name, name) for name in names],
+                    "previous": previous_records,
                     "candidate": plan["candidate"],
                 },
             )
@@ -638,7 +862,8 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                     + ", ".join(race_jobs)
                 )
             commit_started = True
-            for name in names:
+            for spec in specs:
+                name = str(spec["name"])
                 os.replace(args.install_dir / f"{name}.next", args.install_dir / name)
             run([str(args.systemctl), "start", args.service])
             wait_service_active(args.systemctl, args.service, args.wait_seconds)
@@ -650,6 +875,10 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                 require_modern=True,
                 allow_legacy_fallback=False,
             )
+            installed = [
+                artifact_description(args.install_dir / str(spec["name"]), spec)
+                for spec in specs
+            ]
             candidate_prune = prune_candidate_artifacts(
                 args.candidate_dir,
                 args.receipt_root,
@@ -662,14 +891,15 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                 "finishedAtMs": int(time.time() * 1000),
                 "serviceActive": True,
                 "probe": probe,
-                "installed": [binary_description(args.install_dir / name, name) for name in names],
+                "installed": installed,
                 "candidatePrune": candidate_prune,
                 "receipt": str(receipt),
             }
             write_json_atomic(receipt / "result.json", result)
             return result
         except Exception as deployment_error:
-            for name in names:
+            for spec in specs:
+                name = str(spec["name"])
                 (args.install_dir / f"{name}.next").unlink(missing_ok=True)
             rollback_error: Exception | None = None
             if commit_started:
@@ -677,7 +907,7 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                     rollback = restore_previous(
                         previous,
                         args.install_dir,
-                        names,
+                        previous_records,
                         args.systemctl,
                         args.service,
                         args.env_file,
@@ -730,41 +960,65 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                 + (f"; rollback: {rollback_error}" if rollback_error else "")
             ) from deployment_error
 
-
 def rollback_deployment(args: argparse.Namespace) -> dict[str, object]:
     receipt = args.receipt.resolve()
     if args.confirm_receipt.resolve() != receipt:
         raise RuntimeError("confirm-receipt must exactly equal receipt")
     manifest = json.loads((receipt / "manifest.json").read_text(encoding="utf-8"))
-    names = tuple(str(name) for name in manifest.get("binaries", []))
-    if not names:
-        raise RuntimeError("deployment receipt has no binaries")
+    version = manifest.get("schemaVersion")
+    if version not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
+        raise RuntimeError("deployment receipt schemaVersion is unsupported")
+    if version == SCHEMA_VERSION:
+        raw_artifacts = manifest.get("artifacts")
+        if not isinstance(raw_artifacts, list) or not raw_artifacts:
+            raise RuntimeError("deployment receipt has no release artifacts")
+        names = tuple(
+            str(item.get("name")) for item in raw_artifacts if isinstance(item, dict)
+        )
+    else:
+        names = tuple(str(name) for name in manifest.get("binaries", []))
+    if not names or len(names) != len(set(names)):
+        raise RuntimeError("deployment receipt has an invalid artifact set")
     if manifest.get("installDir") != str(args.install_dir):
         raise RuntimeError("install-dir does not match the deployment receipt")
     if manifest.get("service") != args.service:
         raise RuntimeError("service does not match the deployment receipt")
     if manifest.get("envFile") != str(args.env_file):
         raise RuntimeError("env-file does not match the deployment receipt")
-    previous_by_name = {
-        str(item.get("name")): item
-        for item in manifest.get("previous", [])
-        if isinstance(item, dict)
-    }
+    previous_records = [
+        item for item in manifest.get("previous", []) if isinstance(item, dict)
+    ]
+    previous_by_name = {str(item.get("name")): item for item in previous_records}
+    if set(previous_by_name) != set(names):
+        raise RuntimeError("deployment receipt previous-artifact set is incomplete")
     for name in names:
         previous = receipt / "previous" / name
-        expected = previous_by_name.get(name, {}).get("digest")
+        expected = previous_by_name[name].get("digest")
         if not isinstance(expected, str) or sha256(previous) != expected:
-            raise RuntimeError(f"previous binary digest does not match receipt: {name}")
+            raise RuntimeError(f"previous artifact digest does not match receipt: {name}")
+        receipt_record_mode(previous_by_name[name])
     with exclusive_lock(args.lock_file):
         current = receipt / f"rollback-current-{int(time.time() * 1000)}"
         current.mkdir()
+        current_records: list[dict[str, object]] = []
         for name in names:
-            atomic_copy(args.install_dir / name, current / name)
+            path = args.install_dir / name
+            if path.is_symlink() or not path.is_file():
+                raise RuntimeError(f"current release artifact is missing or unsafe: {path}")
+            mode = stat.S_IMODE(path.stat().st_mode)
+            kind = str(previous_by_name[name].get("kind", "binary"))
+            atomic_copy(path, current / name, mode=mode)
+            current_records.append(
+                artifact_description(
+                    current / name,
+                    {"name": name, "kind": kind, "mode": mode},
+                )
+            )
         try:
             outcome = restore_previous(
                 receipt / "previous",
                 args.install_dir,
-                names,
+                previous_records,
                 args.systemctl,
                 args.service,
                 args.env_file,
@@ -776,7 +1030,7 @@ def rollback_deployment(args: argparse.Namespace) -> dict[str, object]:
                 current_outcome = restore_previous(
                     current,
                     args.install_dir,
-                    names,
+                    current_records,
                     args.systemctl,
                     args.service,
                     args.env_file,
@@ -808,17 +1062,34 @@ def rollback_deployment(args: argparse.Namespace) -> dict[str, object]:
                     else "; current deployment was restored"
                 )
             ) from rollback_error
+        restored_records = [
+            artifact_description(
+                args.install_dir / name,
+                {
+                    "name": name,
+                    "kind": str(previous_by_name[name].get("kind", "binary")),
+                    "mode": receipt_record_mode(previous_by_name[name]),
+                },
+            )
+            for name in names
+        ]
+        previous_commit = manifest.get("previousCommit")
+        if not isinstance(previous_commit, str) or not COMMIT_PATTERN.fullmatch(previous_commit):
+            previous_commit = None
         result = {
             "schemaVersion": SCHEMA_VERSION,
             "status": "restored_previous",
+            "releaseDisposition": "rollback",
+            "commit": previous_commit,
+            "commitKnown": previous_commit is not None,
             "receipt": str(receipt),
             "finishedAtMs": int(time.time() * 1000),
             "currentBackup": str(current),
+            "installed": restored_records,
             **outcome,
         }
         write_json_atomic(receipt / "rollback-result.json", result)
         return result
-
 
 def main() -> int:
     try:

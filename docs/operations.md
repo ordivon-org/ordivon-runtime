@@ -96,10 +96,10 @@ Do not add a Runtime wrapper or MCP projection merely to rename one of these com
 `scripts/ordivon-runtime-deploy` replaces the ad hoc deployment shell used during development. It has four commands:
 
 ```text
-prepare   build one exact clean Commit and write a digest-bound candidate manifest
-plan      read-only eligibility and digest report
-apply     lock, retain previous binaries, install, restart, probe, receipt
-rollback  restore the exact previous binaries from one receipt
+prepare   materialize one exact Commit and write a digest-bound release manifest
+plan      read-only eligibility and installed-artifact report
+apply     lock, retain previous artifacts, install, restart, probe, receipt
+rollback  restore the exact previous artifact set from one receipt
 ```
 
 A normal production deployment is:
@@ -143,19 +143,22 @@ scripts/ordivon-runtime-deploy apply \
   --expected-tool-count 15
 ```
 
+The default production release has one artifact authority rather than separate binary and operator-script installations. It contains five Rust binaries, the six installed Runtime operator executables (`deploy`, `lifecycle`, `reclaim`, `cache`, `status`, and `capacity-acceptance`), and their shared `mcp_probe.py` support module. Every artifact is bound by name, kind, byte length, SHA-256 digest, and canonical mode (`0755` for executable artifacts and `0644` for `mcp_probe.py`). Passing explicit `--binary` values intentionally selects a binary-only subset for focused testing or exceptional maintenance; it is not the canonical production release set.
+
 Eligibility requires:
 
-- the source repository `HEAD` and `origin/main` equal the exact requested commit;
-- the source repository is clean;
-- `prepare` proves the source is clean both before and after the build;
-- the candidate manifest binds the exact source repository, Commit, candidate directory, binary set, sizes, and digests;
+- the exact requested Commit can be materialized from the source repository;
+- `prepare` constructs a temporary detached Git checkout of that exact Commit and both builds binaries and stages operator/support artifacts from that checkout, so mutable checkout state, including Git index flags such as `assume-unchanged`, cannot enter the candidate;
+- the detached release source remains clean after the build;
+- the explicit required ref (by default `origin/main`) resolves to the requested Commit; local `HEAD` and dirty state remain visible in the plan as diagnostics but do not become release authority;
+- the candidate manifest binds the exact source repository, Commit, `sourceMaterialization=detached_git_checkout`, candidate directory, complete release artifact set, modes, sizes, and digests;
 - the candidate manifest binds the resolved Cargo and rustc executables, their SHA-256 digests, version output, and Rust host target;
 - `plan` verifies the complete candidate-manifest digest before installation eligibility is reported;
-- every candidate and currently installed binary is a regular executable file;
+- every candidate artifact and currently installed artifact is a regular file and every executable-mode artifact is executable;
 - no active or held Job exists, except the deployment Job itself when the tool can prove its own Attempt identity from cgroup and Registry state;
 - the confirmation commit exactly matches the requested commit.
 
-The tool stages `.next` files, retains both receipt-local previous binaries and installed `.previous` binaries, stops admission, rechecks that no other active or held Job appeared, installs the candidate, waits for `active`, requires a 2026 `server/discover` lifecycle, verifies the exact tool catalog, and records the candidate-manifest digest, build toolchain identity, protocol lifecycle, supported versions, `toolCatalogDigest`, candidate digests, and installed digests. After a successful standard-layout deployment it keeps the current and immediately previous candidate build trees and removes older exact-commit candidate directories; rollback remains receipt-owned and does not depend on those build trees. A newly installed candidate may not pass through the legacy fallback. Recovery of an uncommitted replacement and explicit rollback probe modern discovery first but may use the previous service's 2025 `initialize` Session lifecycle, preserving old-binary rollback. If the post-stop race check fails before replacement, the original service is restarted and the receipt is `not_committed`; a failure after replacement automatically restores the receipt-local previous binaries. There is no general active-Job override in the normal deployment contract.
+The tool stages `.next` files for the complete release artifact set, retains both receipt-local previous artifacts and installed `.previous` artifacts with their observed modes, stops admission, rechecks that no other active or held Job appeared, atomically replaces the set, waits for `active`, requires a 2026 `server/discover` lifecycle, verifies the exact tool catalog, and records the candidate-manifest digest, build toolchain identity, protocol lifecycle, supported versions, `toolCatalogDigest`, and candidate/installed artifact digests and modes. After a successful standard-layout deployment it keeps the current and immediately previous candidate build trees and removes older exact-commit candidate directories; rollback remains receipt-owned and does not depend on those build trees. A newly installed candidate may not pass through the legacy fallback. Recovery of an uncommitted replacement and explicit rollback probe modern discovery first but may use the previous service's 2025 `initialize` Session lifecycle. If the post-stop race check fails before replacement, the original service is restarted and the receipt is `not_committed`; a failure after replacement automatically restores the receipt-local previous artifact set. There is no general active-Job override in the normal deployment contract.
 
 Rollback is explicit and receipt-bound:
 
@@ -169,11 +172,11 @@ scripts/ordivon-runtime-deploy rollback \
   --env-file /etc/ordivon/ordivon-runtime.env
 ```
 
-Rollback validates the receipt-bound install directory, service, environment file, binary set, and previous digests. It preserves the displaced current binaries inside the same receipt before restoring the previous set. If restoring the previous set fails, it attempts to restore the displaced current set and receipts both outcomes. Its MCP probe accepts either the modern lifecycle or the prior legacy Session lifecycle, because rollback must be able to prove a genuinely old binary rather than require it to implement the new protocol. Additive query indexes and the isolated Workspace Patch receipt table are maintained outside `schema_migrations`; neither changes existing Job, Attempt, or repair semantics. This preserves previous-binary rollback compatibility while allowing the newer Runtime to recreate missing derived indexes and Patch storage idempotently.
+Rollback validates the receipt-bound install directory, service, environment file, artifact set, previous digests, and recorded modes. It preserves the displaced current artifacts inside the same receipt before restoring the previous set. If restoring the previous set fails, it attempts to restore the displaced current set and receipts both outcomes. A successful `rollback-result.json` is itself a later release-state event: `ordivon-runtime-status` verifies the restored artifact set against it instead of continuing to compare physical state with the superseded forward deployment. At apply time the deployer records `previousCommit` only when the complete pre-deployment artifact fingerprint exactly matches an earlier receipted release event. A later rollback may therefore recover that exact commit; when the restored bytes predate unified release authority, their artifact truth remains exact but `commitKnown=false`, and status reports `DEPLOYMENT_COMMIT_UNKNOWN` rather than inventing revision identity. Release schema v2 owns the complete artifact set; the deployer deliberately retains rollback support for schema-v1 binary-only receipts, whose historical `0755` install mode is explicit compatibility knowledge. Its MCP probe accepts either the modern lifecycle or the prior legacy Session lifecycle, because rollback must be able to prove a genuinely old Runtime rather than require it to implement the new protocol. Additive query indexes and the isolated Workspace Patch receipt table are maintained outside `schema_migrations`; neither changes existing Job, Attempt, or repair semantics.
 
 ### MCP probe module placement
 
-`scripts/ordivon-runtime-deploy`, `scripts/ordivon-runtime-reclaim`, and `scripts/ordivon-runtime-capacity-acceptance` share `scripts/mcp_probe.py`; they no longer embed separate protocol clients. Run them from the repository as shown above, or install/copy all three files into the same directory. Installing either executable script without its sibling module is unsupported and fails before any mutation. Candidate deployment requires modern discovery; reclaim uses modern discovery first and falls back to legacy initialization only so that an installed previous Runtime can still release a Workspace through its own `workspace.close` contract.
+`ordivon-runtime-deploy`, `ordivon-runtime-reclaim`, and `ordivon-runtime-capacity-acceptance` share `mcp_probe.py`; they do not embed separate protocol clients. Repository execution remains useful during development and bootstrap, but canonical production installation is the receipt-bound release artifact set above: the three consumers and `mcp_probe.py` are installed and rolled back together with the Runtime binaries. A manually copied executable or support module is therefore outside canonical deployment truth until a normal release brings its digest and mode under the latest receipt. Candidate deployment requires modern discovery; reclaim uses modern discovery first and falls back to legacy initialization only so that an installed previous Runtime can still release a Workspace through its own `workspace.close` contract.
 
 ## Workspace lifecycle and reclaim
 
@@ -328,7 +331,7 @@ The command is parameterized rather than hard-coded to eight. The Runtime capaci
 
 ## Secret-free status
 
-`scripts/ordivon-runtime-status` separates operational health from bounded maintenance diagnosis. The default and `--health` path verifies the latest successful deployment receipt, installed binary digests, systemd state, allowlisted numeric Runtime configuration, and Registry/recovery consistency. It deliberately skips Git Workspace scans, recursive storage measurement, lifecycle receipts, and protocol-history analysis. `--diagnose` adds the receipted MCP lifecycle, selected and supported protocol versions, `toolCatalogDigest`, bounded current-plus-rotated protocol observations, the immediately previous rollback protocol, Workspace consistency, cache/Registry/deployment/candidate byte measurements, stale dirty Workspace counts, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.
+`scripts/ordivon-runtime-status` separates operational health from bounded maintenance diagnosis. The default and `--health` path verifies the latest successful deployment receipt, the complete installed release-artifact digests and modes, systemd state, allowlisted numeric Runtime configuration, and Registry/recovery consistency. It deliberately skips Git Workspace scans, recursive storage measurement, lifecycle receipts, and protocol-history analysis. `--diagnose` adds the receipted MCP lifecycle, selected and supported protocol versions, `toolCatalogDigest`, bounded current-plus-rotated protocol observations, the immediately previous rollback protocol, Workspace consistency, cache/Registry/deployment/candidate byte measurements, stale dirty Workspace counts, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.
 
 ```bash
 # Fast health path; this is the default and is suitable for frequent automation.
@@ -341,7 +344,7 @@ scripts/ordivon-runtime-status --diagnose --json \
   --expected-commit "$(git rev-parse HEAD)"
 ```
 
-The JSON schema reports separate `health` and `maintenance` states. Exit code `1` is reserved for operational health failures such as service, deployment, Registry, recovery, or exact-binary inconsistency. Maintenance findings such as a stale dirty Workspace produce top-level `status=attention` but retain exit code `0`; automation must inspect `maintenanceAction` when maintenance policy should gate a workflow. Compatibility observations remain advisory deletion evidence: an unreadable or truncated trace, unknown rollback protocol, or incomplete observation window blocks deletion but does not create a health incident. Exit code `2` remains reserved for an invalid invocation or unreadable mandatory input.
+The JSON schema reports separate `health` and `maintenance` states. The deployment projection names the current `releaseEvent` and `releaseDisposition`; a successful explicit rollback supersedes the forward deployment for installed-artifact truth. Exit code `1` is reserved for operational health failures such as service, deployment, Registry, recovery, exact release-artifact inconsistency, or a rollback whose restored artifact set is known but whose coherent source Commit cannot be proven. Maintenance findings such as a stale dirty Workspace produce top-level `status=attention` but retain exit code `0`; automation must inspect `maintenanceAction` when maintenance policy should gate a workflow. Compatibility observations remain advisory deletion evidence: an unreadable or truncated trace, unknown rollback protocol, or incomplete observation window blocks deletion but does not create a health incident. Exit code `2` remains reserved for an invalid invocation or unreadable mandatory input.
 
 ## Real-system release acceptance
 

@@ -39,7 +39,7 @@ This document states the stable public maturity, supported environment, known li
 
 ## Errors
 
-This page is not live state. It must not be used to infer active Jobs, installed binary digests, current storage size, service health, or semantic Task completion.
+This page is not live state. It must not be used to infer active Jobs, installed release-artifact digests and modes, current storage size, service health, or semantic Task completion.
 
 ## Compatibility
 

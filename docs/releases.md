@@ -92,7 +92,7 @@ A releasable commit must have:
 5. a clean source tree and fixed Rust toolchain;
 6. a deployment candidate manifest binding toolchain identity and binary digests;
 7. a successful deployment plan;
-8. after deployment, a receipt binding installed binary digests, protocol lifecycle, supported versions, and Tool catalog digest;
+8. after deployment, a receipt binding the complete installed release-artifact digests and modes, protocol lifecycle, supported versions, and Tool catalog digest;
 9. a verified previous-binary rollback path while that rollback window remains supported.
 
 Documentation-only changes do not require redeploying identical binaries, but public canonical documents must pass the documentation contract and identify when production behavior remains on an earlier code-equivalent commit.

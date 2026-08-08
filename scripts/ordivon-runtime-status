@@ -104,57 +104,59 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def latest_deployment(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any] | None]:
+def release_events(root: Path) -> list[tuple[int, Path, dict[str, Any]]]:
     if not root.is_dir():
-        raise StatusError("deployment receipt root is missing")
+        return []
     candidates: list[tuple[int, Path, dict[str, Any]]] = []
-    for result_path in root.glob("*/result.json"):
-        try:
-            result = load_json(result_path)
-        except StatusError:
-            continue
-        if result.get("status") != "deployed":
-            continue
-        finished = result.get("finishedAtMs")
-        if not isinstance(finished, int) or finished < 0:
-            continue
-        candidates.append((finished, result_path, result))
+    for pattern, valid_status in (
+        ("*/result.json", "deployed"),
+        ("*/rollback-result.json", "restored_previous"),
+    ):
+        for path in root.glob(pattern):
+            try:
+                result = load_json(path)
+            except StatusError:
+                continue
+            if result.get("status") != valid_status:
+                continue
+            finished = result.get("finishedAtMs")
+            if not isinstance(finished, int) or finished < 0:
+                continue
+            candidates.append((finished, path, result))
+    return candidates
+
+
+def latest_deployment(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any] | None]:
+    candidates = release_events(root)
     if not candidates:
-        raise StatusError("no successful deployment receipt exists")
-    _, result_path, result = max(candidates, key=lambda item: (item[0], item[1].parent.name))
+        raise StatusError("no successful deployment or rollback release event exists")
+    _, result_path, result = max(candidates, key=lambda item: (item[0], item[1].parent.name, item[1].name))
     plan_path = result_path.with_name("plan.json")
-    plan = load_json(plan_path) if plan_path.is_file() else None
+    plan = (
+        load_json(plan_path)
+        if result_path.name == "result.json" and plan_path.is_file()
+        else None
+    )
     return result_path, result, plan
 
-
 def previous_deployment_protocol(root: Path, current_finished_at_ms: int | None) -> dict[str, Any] | None:
-    if not root.is_dir() or current_finished_at_ms is None:
+    if current_finished_at_ms is None:
         return None
     candidates: list[tuple[int, Path, str]] = []
-    for result_path in root.glob("*/result.json"):
-        try:
-            result = load_json(result_path)
-        except StatusError:
-            continue
-        finished = result.get("finishedAtMs")
+    for finished, path, result in release_events(root):
         probe = result.get("probe") if isinstance(result.get("probe"), dict) else {}
         version = probe.get("protocolVersion")
-        if (
-            result.get("status") == "deployed"
-            and isinstance(finished, int)
-            and 0 <= finished < current_finished_at_ms
-            and isinstance(version, str)
-        ):
-            candidates.append((finished, result_path, version))
+        if finished < current_finished_at_ms and isinstance(version, str):
+            candidates.append((finished, path, version))
     if not candidates:
         return None
-    finished, path, version = max(candidates, key=lambda item: (item[0], item[1].parent.name))
+    finished, path, version = max(candidates, key=lambda item: (item[0], item[1].parent.name, item[1].name))
     return {
         "receiptId": path.parent.name,
+        "event": path.name,
         "finishedAtMs": finished,
         "protocolVersion": version,
     }
-
 
 def configured_trace_path(env_file: Path, database: Path) -> Path:
     try:
@@ -276,8 +278,17 @@ def compatibility_status(
     )
     previous_binary_available = False
     try:
-        result_path, _, _ = latest_deployment(deployment_root)
-        previous_binary_available = (result_path.parent / "previous" / "ordivon-runtime").is_file()
+        result_path, release_event, _ = latest_deployment(deployment_root)
+        if result_path.name == "rollback-result.json":
+            backup = release_event.get("currentBackup")
+            previous_binary_available = (
+                isinstance(backup, str)
+                and (Path(backup) / "ordivon-runtime").is_file()
+            )
+        else:
+            previous_binary_available = (
+                result_path.parent / "previous" / "ordivon-runtime"
+            ).is_file()
     except StatusError:
         pass
 
@@ -368,13 +379,23 @@ def deployment_status(
             "toolCatalogDigest": None,
             "serverVersion": None,
             "toolCount": None,
+            "artifacts": [],
             "binaries": [],
             "available": False,
         }
 
+    release_disposition = (
+        result.get("releaseDisposition")
+        if isinstance(result.get("releaseDisposition"), str)
+        else "deployment"
+    )
     commit = result.get("commit")
     if not isinstance(commit, str) or not COMMIT_PATTERN.fullmatch(commit):
-        reasons.append("DEPLOYMENT_COMMIT_INVALID")
+        reasons.append(
+            "DEPLOYMENT_COMMIT_UNKNOWN"
+            if release_disposition == "rollback" and commit is None
+            else "DEPLOYMENT_COMMIT_INVALID"
+        )
         commit = None
     if expected_commit is not None and commit != expected_commit:
         reasons.append("EXPECTED_COMMIT_MISMATCH")
@@ -385,43 +406,68 @@ def deployment_status(
         if isinstance(manifest, dict) and isinstance(manifest.get("builtAtMs"), int):
             built_at = manifest["builtAtMs"]
 
+    artifacts: list[dict[str, Any]] = []
     binaries: list[dict[str, Any]] = []
     installed = result.get("installed")
     if not isinstance(installed, list) or not installed:
-        reasons.append("DEPLOYMENT_BINARY_SET_INVALID")
+        reasons.append("DEPLOYMENT_ARTIFACT_SET_INVALID")
         installed = []
     seen: set[str] = set()
     for item in installed:
         if not isinstance(item, dict):
-            reasons.append("DEPLOYMENT_BINARY_RECORD_INVALID")
+            reasons.append("DEPLOYMENT_ARTIFACT_RECORD_INVALID")
             continue
         name = item.get("name")
         expected_digest = item.get("digest")
-        if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name or name in seen:
-            reasons.append("DEPLOYMENT_BINARY_NAME_INVALID")
+        kind = item.get("kind") if isinstance(item.get("kind"), str) else "binary"
+        expected_mode = item.get("mode") if isinstance(item.get("mode"), int) else None
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in {".", ".."}
+            or "/" in name
+            or name in seen
+        ):
+            reasons.append("DEPLOYMENT_ARTIFACT_NAME_INVALID")
             continue
         seen.add(name)
         path = install_dir / name
-        present = path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)
+        present = path.is_file() and not path.is_symlink()
+        observed_mode = (path.stat().st_mode & 0o777) if present else None
+        executable_required = (expected_mode & 0o111 != 0) if expected_mode is not None else kind == "binary"
+        executable_ok = present and (not executable_required or os.access(path, os.X_OK))
         observed_digest = sha256(path) if present else None
-        matches = isinstance(expected_digest, str) and observed_digest == expected_digest
+        digest_matches = isinstance(expected_digest, str) and observed_digest == expected_digest
+        mode_matches = expected_mode is None or observed_mode == expected_mode
+        matches = present and executable_ok and digest_matches and mode_matches
+        legacy_binary = kind == "binary"
         if not present:
-            reasons.append(f"BINARY_MISSING:{name}")
-        elif not matches:
-            reasons.append(f"BINARY_DIGEST_MISMATCH:{name}")
-        binaries.append(
-            {
-                "name": name,
-                "bytes": path.stat().st_size if present else None,
-                "expectedDigest": expected_digest if isinstance(expected_digest, str) else None,
-                "observedDigest": observed_digest,
-                "matches": matches,
-            }
-        )
+            reasons.append(("BINARY_MISSING:" if legacy_binary else "ARTIFACT_MISSING:") + name)
+        elif not executable_ok:
+            reasons.append(("BINARY_NOT_EXECUTABLE:" if legacy_binary else "ARTIFACT_NOT_EXECUTABLE:") + name)
+        elif not digest_matches:
+            reasons.append(("BINARY_DIGEST_MISMATCH:" if legacy_binary else "ARTIFACT_DIGEST_MISMATCH:") + name)
+        elif not mode_matches:
+            reasons.append(("BINARY_MODE_MISMATCH:" if legacy_binary else "ARTIFACT_MODE_MISMATCH:") + name)
+        projection = {
+            "name": name,
+            "kind": kind,
+            "bytes": path.stat().st_size if present else None,
+            "expectedDigest": expected_digest if isinstance(expected_digest, str) else None,
+            "observedDigest": observed_digest,
+            "expectedMode": expected_mode,
+            "observedMode": observed_mode,
+            "matches": matches,
+        }
+        artifacts.append(projection)
+        if legacy_binary:
+            binaries.append(projection)
     probe = result.get("probe") if isinstance(result.get("probe"), dict) else {}
     server_info = probe.get("serverInfo") if isinstance(probe.get("serverInfo"), dict) else {}
     return {
         "receiptId": result_path.parent.name,
+        "releaseEvent": result_path.name,
+        "releaseDisposition": release_disposition,
         "commit": commit,
         "builtAtMs": built_at,
         "deployedAtMs": result.get("finishedAtMs") if isinstance(result.get("finishedAtMs"), int) else None,
@@ -438,9 +484,9 @@ def deployment_status(
         else None,
         "serverVersion": server_info.get("version") if isinstance(server_info.get("version"), str) else None,
         "toolCount": probe.get("toolCount") if isinstance(probe.get("toolCount"), int) else None,
+        "artifacts": artifacts,
         "binaries": binaries,
     }
-
 
 def service_status(systemctl: Path, service: str, reasons: list[str]) -> dict[str, Any]:
     command = [

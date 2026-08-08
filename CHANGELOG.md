@@ -35,6 +35,9 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - Agent-first law ownership is explicit: physical/truth invariants remain hard Runtime rules, resource and retention choices remain operator policy, and bounded projections must expose completeness instead of turning transport budgets into hidden facts;
 - deployment wait policy, lifecycle/reclaim retention inputs, diagnostic scan/retention inputs, cache watermarks, and capacity-acceptance parameters no longer impose legacy round-number maxima when the underlying platform or Runtime type can represent the requested value;
 - explicit Workspace UID/GID `0` is no longer rejected as a Core value judgment; ownership transfer succeeds or fails according to the operator's actual OS authority, while UID/GID pair consistency remains enforced.
+- Runtime deployment now has one release authority for five Rust binaries, six installed operator executables, and `mcp_probe.py`; candidate and deployment receipts bind each artifact's kind, bytes, digest, and mode, status verifies the same installed set, and rollback restores the complete previous set while remaining compatible with v1 binary-only receipts;
+- release preparation materializes the requested Git Commit in a temporary detached checkout before building or staging operator artifacts, so mutable checkout dirt and `assume-unchanged`/similar index flags cannot contaminate a candidate that claims another source revision; local checkout HEAD and dirt are diagnostics, while the explicit required ref remains the release-selection gate.
+- successful explicit rollback is now a first-class release-state event for status and protocol compatibility; the restored artifact set is verified from `rollback-result.json`, and the prior Commit is preserved only when the complete pre-deployment artifact fingerprint proves it, otherwise revision identity remains explicitly unknown.
 
 ### Fixed
 

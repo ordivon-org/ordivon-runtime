@@ -232,6 +232,116 @@ def command(paths: dict[str, Path], *extra: str) -> list[str]:
 
 
 class RuntimeStatusTests(unittest.TestCase):
+    def test_successful_rollback_result_becomes_current_release_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            receipt = paths["deployments"] / "deploy-1"
+            deployed = json.loads((receipt / "result.json").read_text())
+            rollback = {
+                "schemaVersion": 2,
+                "status": "restored_previous",
+                "releaseDisposition": "rollback",
+                "commit": COMMIT,
+                "commitKnown": True,
+                "finishedAtMs": int(deployed["finishedAtMs"]) + 1,
+                "installed": deployed["installed"],
+                "probe": deployed["probe"],
+                "currentBackup": str(receipt / "rollback-current-test"),
+            }
+            (receipt / "rollback-result.json").write_text(
+                json.dumps(rollback), encoding="utf-8"
+            )
+            completed = subprocess.run(
+                raw_command(paths, "--health", "--json", "--expected-commit", COMMIT),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["deployment"]["releaseEvent"], "rollback-result.json")
+            self.assertEqual(report["deployment"]["releaseDisposition"], "rollback")
+            self.assertEqual(report["deployment"]["commit"], COMMIT)
+            self.assertTrue(all(item["matches"] for item in report["deployment"]["artifacts"]))
+
+    def test_rollback_with_unknown_previous_commit_preserves_artifact_truth_but_fails_health(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            receipt = paths["deployments"] / "deploy-1"
+            deployed = json.loads((receipt / "result.json").read_text())
+            rollback = {
+                "schemaVersion": 2,
+                "status": "restored_previous",
+                "releaseDisposition": "rollback",
+                "commit": None,
+                "commitKnown": False,
+                "finishedAtMs": int(deployed["finishedAtMs"]) + 1,
+                "installed": deployed["installed"],
+                "probe": deployed["probe"],
+                "currentBackup": str(receipt / "rollback-current-test"),
+            }
+            (receipt / "rollback-result.json").write_text(
+                json.dumps(rollback), encoding="utf-8"
+            )
+            completed = subprocess.run(
+                raw_command(paths, "--health", "--json"),
+                cwd=REPO,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(completed.returncode, 1)
+            report = json.loads(completed.stdout)
+            self.assertIn("DEPLOYMENT_COMMIT_UNKNOWN", report["operatorAction"]["reasons"])
+            self.assertTrue(all(item["matches"] for item in report["deployment"]["artifacts"]))
+
+    def test_operator_artifact_drift_is_deployment_health_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            operator = paths["install"] / "ordivon-runtime-status"
+            executable(operator, "operator-v1\n")
+            result_path = paths["deployments"] / "deploy-1" / "result.json"
+            result = json.loads(result_path.read_text())
+            result["installed"].append(
+                {
+                    "name": "ordivon-runtime-status",
+                    "kind": "operator",
+                    "mode": 0o755,
+                    "digest": digest(operator),
+                    "bytes": operator.stat().st_size,
+                    "path": "/private/install/ordivon-runtime-status",
+                }
+            )
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            healthy = subprocess.run(
+                raw_command(paths, "--health", "--json"),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            healthy_report = json.loads(healthy.stdout)
+            artifact = next(
+                item
+                for item in healthy_report["deployment"]["artifacts"]
+                if item["name"] == "ordivon-runtime-status"
+            )
+            self.assertTrue(artifact["matches"])
+            operator.write_text("operator-drift\n", encoding="utf-8")
+            drifted = subprocess.run(
+                raw_command(paths, "--health", "--json"),
+                cwd=REPO,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(drifted.returncode, 1)
+            report = json.loads(drifted.stdout)
+            self.assertIn(
+                "ARTIFACT_DIGEST_MISMATCH:ordivon-runtime-status",
+                report["operatorAction"]["reasons"],
+            )
+
     def test_diagnostic_policy_inputs_have_no_legacy_round_maxima(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             paths = fixture(Path(temporary))
