@@ -1582,6 +1582,228 @@ fn list_is_bounded_and_cursor_stable() {
 }
 
 #[test]
+fn workspace_close_preserves_git_authority_owned_by_an_open_child() {
+    let (sandbox, runtime, executor) = durable_patch_fixture(
+        "workspace-dependent-git-authority",
+        "workspace-dependent-parent",
+    );
+    let parent_id = "workspace-dependent-parent";
+    let child_id = "workspace-dependent-child";
+    let child_source = executor.workspace_tmp_path(parent_id).join("child-source");
+    fs::create_dir_all(&child_source).unwrap();
+    fs::write(child_source.join("child.txt"), "child\n").unwrap();
+    run_git_command(&child_source, &["init", "-q"]);
+    run_git_command(
+        &child_source,
+        &["config", "user.email", "runtime-tests@ordivon.local"],
+    );
+    run_git_command(
+        &child_source,
+        &["config", "user.name", "Ordivon Runtime Tests"],
+    );
+    run_git_command(&child_source, &["add", "."]);
+    run_git_command(&child_source, &["commit", "-qm", "child source"]);
+    runtime
+        .open_workspace(&crate::GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: child_id.to_string(),
+            source_repo: child_source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        })
+        .unwrap();
+    let child_workspace = executor.workspace_path(child_id);
+    let child_head = git_output(&child_workspace, &["rev-parse", "HEAD"]);
+
+    let blocked = runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: parent_id.to_string(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap_err();
+    assert_eq!(blocked.code, RuntimeErrorCode::WorkspaceBusy);
+    assert!(blocked.message.contains(child_id));
+    assert!(child_source.exists());
+    assert_eq!(
+        git_output(&child_workspace, &["rev-parse", "HEAD"]),
+        child_head
+    );
+
+    runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: child_id.to_string(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap();
+    runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: parent_id.to_string(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap();
+    assert!(!executor.workspace_tmp_path(parent_id).exists());
+    drop(sandbox);
+}
+
+#[test]
+fn workspace_close_tracks_git_authority_not_source_path_text() {
+    let (_sandbox, runtime, executor) = durable_patch_fixture(
+        "workspace-dependent-authority-not-path",
+        "workspace-authority-parent",
+    );
+    let parent_id = "workspace-authority-parent";
+    let child_id = "workspace-authority-child";
+    let parent_workspace = executor.workspace_path(parent_id);
+    runtime
+        .open_workspace(&crate::GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: child_id.to_string(),
+            source_repo: parent_workspace.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        })
+        .unwrap();
+    let child_workspace = executor.workspace_path(child_id);
+    let child_head = git_output(&child_workspace, &["rev-parse", "HEAD"]);
+    let parent_close = runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: parent_id.to_string(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap();
+    assert!(parent_close.removed);
+    assert_eq!(
+        git_output(&child_workspace, &["rev-parse", "HEAD"]),
+        child_head
+    );
+    runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: child_id.to_string(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap();
+}
+
+#[test]
+fn concurrent_workspace_open_and_parent_close_never_create_a_broken_child() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let (sandbox, runtime, executor) =
+        durable_patch_fixture("workspace-dependent-race", "workspace-race-bootstrap");
+    runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-race-bootstrap".to_string(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap();
+    let stable_source = sandbox.root.join("patch-source");
+
+    for index in 0..12 {
+        let parent_id = format!("workspace-race-parent-{index}");
+        let child_id = format!("workspace-race-child-{index}");
+        runtime
+            .open_workspace(&crate::GitWorkspaceCreateRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: parent_id.clone(),
+                source_repo: stable_source.to_string_lossy().into_owned(),
+                source_revision: "HEAD".to_string(),
+            })
+            .unwrap();
+        let child_source = executor.workspace_tmp_path(&parent_id).join("child-source");
+        fs::create_dir_all(&child_source).unwrap();
+        fs::write(child_source.join("child.txt"), format!("child {index}\n")).unwrap();
+        run_git_command(&child_source, &["init", "-q"]);
+        run_git_command(
+            &child_source,
+            &["config", "user.email", "runtime-tests@ordivon.local"],
+        );
+        run_git_command(
+            &child_source,
+            &["config", "user.name", "Ordivon Runtime Tests"],
+        );
+        run_git_command(&child_source, &["add", "."]);
+        run_git_command(&child_source, &["commit", "-qm", "child source"]);
+
+        let barrier = Arc::new(Barrier::new(3));
+        let close_runtime = runtime.clone();
+        let close_barrier = barrier.clone();
+        let close_parent_id = parent_id.clone();
+        let close_thread = thread::spawn(move || {
+            close_barrier.wait();
+            close_runtime.close_workspace(&WorkspaceCloseRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: close_parent_id,
+                force: true,
+                expected_source_state_digest: None,
+            })
+        });
+        let open_runtime = runtime.clone();
+        let open_barrier = barrier.clone();
+        let open_child_id = child_id.clone();
+        let open_source = child_source.clone();
+        let open_thread = thread::spawn(move || {
+            open_barrier.wait();
+            open_runtime.open_workspace(&crate::GitWorkspaceCreateRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: open_child_id,
+                source_repo: open_source.to_string_lossy().into_owned(),
+                source_revision: "HEAD".to_string(),
+            })
+        });
+        barrier.wait();
+        let close_result = close_thread.join().unwrap();
+        let open_result = open_thread.join().unwrap();
+
+        match (close_result, open_result) {
+            (Err(close_error), Ok(_)) => {
+                assert_eq!(close_error.code, RuntimeErrorCode::WorkspaceBusy);
+                assert!(close_error.message.contains(&child_id));
+                assert!(git_output(&executor.workspace_path(&child_id), &["rev-parse", "HEAD"])
+                    .len()
+                    >= 40);
+                runtime
+                    .close_workspace(&WorkspaceCloseRequest {
+                        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                        workspace_id: child_id.clone(),
+                        force: true,
+                        expected_source_state_digest: None,
+                    })
+                    .unwrap();
+                runtime
+                    .close_workspace(&WorkspaceCloseRequest {
+                        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                        workspace_id: parent_id.clone(),
+                        force: true,
+                        expected_source_state_digest: None,
+                    })
+                    .unwrap();
+            }
+            (Ok(_), Err(_)) => {
+                assert!(!executor.workspace_path(&parent_id).exists());
+                assert!(!executor.workspace_path(&child_id).exists());
+            }
+            (Ok(_), Ok(_)) => panic!(
+                "parent close and dependent child open both succeeded; lifecycle lock failed"
+            ),
+            (Err(close_error), Err(open_error)) => panic!(
+                "both serialized lifecycle operations failed: close={close_error}; open={open_error}"
+            ),
+        }
+    }
+}
+
+#[test]
 fn workspace_get_distinguishes_opening_revision_from_current_head() {
     let (sandbox, runtime, executor) =
         durable_patch_fixture("workspace-get-source-repo", "workspace-get-source-repo");

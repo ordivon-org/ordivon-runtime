@@ -41,6 +41,7 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - multi-field Job projections are assembled from one Registry read snapshot so execution, recovery, Artifact, and terminal-reason facts cannot drift across concurrent reads;
 - post-admission execution errors now carry the durable Job identity and report `commitState=committed` with `retryClass=reconcile_first` instead of incorrectly claiming that a Runtime operation was not committed;
 - Doctor capacity-holder projection now reports `capacityHoldersTruncated` instead of silently presenting the first 50 holders as complete, and terminal control evidence no longer silently drops error detail after 4096 characters.
+- `workspace.close` now preserves cross-Workspace Git authority: while holding the existing lifecycle lock it rejects closure with `WORKSPACE_BUSY` when another open Workspace's Git common directory lives under the Workspace or disposable cache paths that would be removed. This prevents a parent Workspace from deleting the Git authority of an already-open child Workspace without adding a dependency database.
 
 ## 0.1.0 — Operational baseline
 

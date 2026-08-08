@@ -346,6 +346,55 @@ pub(crate) fn list_workspace_record_inventory(
     Ok(WorkspaceRecordInventory { records, issues })
 }
 
+pub(crate) fn workspace_cleanup_dependents(
+    config: &UniversalExecutorConfig,
+    workspace_id: &str,
+) -> Result<Vec<String>, UniversalExecError> {
+    super::validate_id(workspace_id, "workspaceId")?;
+    config.ensure_store()?;
+    let destructive_roots = [
+        config.workspace_path(workspace_id),
+        config.workspace_cache_path(workspace_id),
+        config.workspace_build_cache_path(workspace_id),
+        config.workspace_tmp_path(workspace_id),
+    ];
+    let records_root = config.workspace_records_root();
+    let mut dependents = Vec::new();
+    for entry in
+        fs::read_dir(&records_root).map_err(|error| io_error(&records_root, "list", error))?
+    {
+        let entry =
+            entry.map_err(|error| io_error(&records_root, "read directory entry", error))?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(candidate_id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if candidate_id == workspace_id {
+            continue;
+        }
+        let record = match load_workspace_record_metadata(config, candidate_id) {
+            Ok(record) => record,
+            Err(error) if error.code == UniversalExecErrorCode::WorkspaceNotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let workspace_path = Path::new(&record.workspace_path);
+        let authority = workspace_git_common_dir_at(workspace_path)
+            .unwrap_or_else(|_| PathBuf::from(&record.source_repo));
+        if destructive_roots
+            .iter()
+            .any(|root| authority.starts_with(root))
+        {
+            dependents.push(record.workspace_id);
+        }
+    }
+    dependents.sort();
+    dependents.dedup();
+    Ok(dependents)
+}
+
 pub fn list_workspace_records(
     config: &UniversalExecutorConfig,
     limit: u32,

@@ -28,7 +28,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.close",
-        description = "Close one Workspace. By default, reject tracked or untracked changes; force=true may remove dirty files. expectedSourceStateDigest compare-and-closes only the exact committed source state and remains replayable through the closed tombstone. closureDisposition distinguishes removed, already_closed, already_absent, and recovered_missing; removed only says whether this call performed physical removal. Active or held Jobs block closure without being reconciled or dispatched by this call.",
+        description = "Close one Workspace. By default, reject tracked or untracked changes; force=true may remove dirty files. expectedSourceStateDigest compare-and-closes only the exact committed source state and remains replayable through the closed tombstone. closureDisposition distinguishes removed, already_closed, already_absent, and recovered_missing; removed only says whether this call performed physical removal. Active or held Jobs and open Workspaces whose Git authority lives under paths this close would remove block closure without reconciliation or dispatch.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<WorkspaceCloseResult>>(),
         annotations(
             title = "Close workspace",

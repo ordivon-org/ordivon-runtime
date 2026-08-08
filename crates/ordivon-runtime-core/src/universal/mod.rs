@@ -55,8 +55,9 @@ pub(crate) use types::{
 pub(crate) use workspace::resolve_workspace_cwd;
 pub(crate) use workspace::{
     list_workspace_record_inventory, preflight_workspace_write_path, remove_workspace_file,
-    resolve_existing_workspace_path, workspace_change_projection_at, workspace_diff_paths,
-    workspace_git_common_dir_at, workspace_head_revision_at, workspace_source_state_digest_at,
+    resolve_existing_workspace_path, workspace_change_projection_at, workspace_cleanup_dependents,
+    workspace_diff_paths, workspace_git_common_dir_at, workspace_head_revision_at,
+    workspace_source_state_digest_at,
 };
 
 #[cfg(test)]

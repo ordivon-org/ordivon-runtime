@@ -36,9 +36,10 @@ use crate::universal::{
     canonical_directory, create_git_workspace_compact, inspect_workspace_patch_plan,
     list_workspace_record_inventory, load_workspace_record, mutate_workspace, patch_workspace,
     plan_workspace_patch, remove_git_workspace, resolve_workspace_cwd,
-    result_from_workspace_patch_plan, sha256_bytes, sha256_file, workspace_git_common_dir_at,
-    workspace_head_revision, workspace_is_dirty, workspace_source_state_digest, write_bytes_atomic,
-    write_json_atomic, CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
+    result_from_workspace_patch_plan, sha256_bytes, sha256_file, workspace_cleanup_dependents,
+    workspace_git_common_dir_at, workspace_head_revision, workspace_is_dirty,
+    workspace_source_state_digest, write_bytes_atomic, write_json_atomic,
+    CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
     RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskProgress, RunnerTaskRequest,
     RunnerTaskResult, UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
     WorkspaceDiffRequest, WorkspaceMutateRequest, WorkspaceMutateResult, WorkspacePatchPlanState,
@@ -709,6 +710,19 @@ impl Runtime {
             return Err(RuntimeError::new(
                 RuntimeErrorCode::WorkspaceBusy,
                 format!("workspace has active or held Jobs: {}", active.join(", ")),
+                Some("workspaceId"),
+                true,
+            ));
+        }
+        let dependents = workspace_cleanup_dependents(&self.executor, &request.workspace_id)
+            .map_err(map_universal_error)?;
+        if !dependents.is_empty() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::WorkspaceBusy,
+                format!(
+                    "workspace owns paths required as Git authority by open Workspaces: {}",
+                    dependents.join(", ")
+                ),
                 Some("workspaceId"),
                 true,
             ));
