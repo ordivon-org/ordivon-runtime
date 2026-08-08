@@ -99,6 +99,8 @@ pub struct RuntimeCapacity {
     pub holder_job_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holder_workspace_ids: Vec<String>,
+    /// True when holder identities are a bounded prefix rather than the complete active set.
+    pub holders_truncated: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

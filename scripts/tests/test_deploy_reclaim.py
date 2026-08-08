@@ -284,6 +284,24 @@ def fake_systemctl(root: Path) -> Path:
 
 
 class DeployReclaimTests(unittest.TestCase):
+    def test_deploy_wait_policy_has_no_legacy_five_minute_ceiling(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
+        self.assertEqual(module["positive_float"]("301"), 301.0)
+        self.assertEqual(module["positive_float"]("3600"), 3600.0)
+        for invalid in ("0", "-1", "inf", "nan"):
+            with self.assertRaises(Exception):
+                module["positive_float"](invalid)
+
+    def test_reclaim_numeric_bounds_follow_sqlite_and_finite_policy_values(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-reclaim"))
+        self.assertEqual(module["positive_timeout"]("60001"), 60_001)
+        self.assertEqual(module["positive_timeout"]("2147483647"), 2_147_483_647)
+        with self.assertRaises(Exception):
+            module["positive_timeout"]("2147483648")
+        self.assertEqual(module["nonnegative_float"]("87601"), 87_601.0)
+        with self.assertRaises(Exception):
+            module["nonnegative_float"]("nan")
+
     def test_deploy_prepare_binds_binaries_to_exact_clean_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

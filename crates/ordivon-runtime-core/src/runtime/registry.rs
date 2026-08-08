@@ -629,6 +629,7 @@ impl Registry {
                     workspace_id: Some(request.plan.workspace_id.clone()),
                     holder_job_ids,
                     holder_workspace_ids,
+                    holders_truncated: workspace_active > WORKSPACE_EXECUTION_LIMIT,
                 },
             ));
         }
@@ -657,6 +658,7 @@ impl Registry {
                     workspace_id: None,
                     holder_job_ids,
                     holder_workspace_ids,
+                    holders_truncated: global_active > holder_limit,
                 },
             ));
         }

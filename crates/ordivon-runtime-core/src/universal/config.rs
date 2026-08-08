@@ -36,9 +36,6 @@ impl UniversalExecutorConfig {
                 "workspaceUid",
             ));
         }
-        if self.workspace_uid == Some(0) || self.workspace_gid == Some(0) {
-            return Err(invalid("workspace owner must be non-root", "workspaceUid"));
-        }
         if !self.runner_path.is_absolute() {
             return Err(invalid("runner path must be absolute", "runnerPath"));
         }

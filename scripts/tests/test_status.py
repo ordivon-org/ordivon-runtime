@@ -232,6 +232,30 @@ def command(paths: dict[str, Path], *extra: str) -> list[str]:
 
 
 class RuntimeStatusTests(unittest.TestCase):
+    def test_diagnostic_policy_inputs_have_no_legacy_round_maxima(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            completed = subprocess.run(
+                command(
+                    paths,
+                    "--json",
+                    "--max-workspaces",
+                    "10001",
+                    "--protocol-retention-hours",
+                    "87601",
+                    "--stale-dirty-hours",
+                    "87601",
+                ),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["compatibility"]["retentionHours"], 87_601)
+            self.assertEqual(report["workspaces"]["staleDirtyHours"], 87_601)
+            self.assertFalse(report["workspaces"]["scanTruncated"])
+
     def test_healthy_json_is_secret_free_and_path_free(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             paths = fixture(Path(temporary))

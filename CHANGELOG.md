@@ -32,6 +32,9 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - execution and mutation contracts no longer reject work because of bootstrap-era argv, environment, step, foreign-reference, mutation, Patch-file, Patch-edit, or cgroup-budget cardinality ceilings; Linux `execve` string and aggregate argv/environment representability, durable identity, atomicity, isolation, and configured resource ceilings remain enforced;
 - runtime duration, retained output, reconciliation cadence/batch size, startup grace, and SQLite busy timeout are operator policy rather than hard-coded product maxima; `ORDIVON_MAX_OUTPUT_BYTES` now makes the retained-output ceiling explicit alongside `ORDIVON_MAX_RUNTIME_MS`;
 - Workspace diff path classification and active-Job identity projections remain complete instead of imposing hidden path/identity count caps; response-sized projections retain explicit continuation or truncation signals.
+- Agent-first law ownership is explicit: physical/truth invariants remain hard Runtime rules, resource and retention choices remain operator policy, and bounded projections must expose completeness instead of turning transport budgets into hidden facts;
+- deployment wait policy, lifecycle/reclaim retention inputs, diagnostic scan/retention inputs, cache watermarks, and capacity-acceptance parameters no longer impose legacy round-number maxima when the underlying platform or Runtime type can represent the requested value;
+- explicit Workspace UID/GID `0` is no longer rejected as a Core value judgment; ownership transfer succeeds or fails according to the operator's actual OS authority, while UID/GID pair consistency remains enforced.
 
 ### Fixed
 
@@ -41,6 +44,7 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - multi-field Job projections are assembled from one Registry read snapshot so execution, recovery, Artifact, and terminal-reason facts cannot drift across concurrent reads;
 - post-admission execution errors now carry the durable Job identity and report `commitState=committed` with `retryClass=reconcile_first` instead of incorrectly claiming that a Runtime operation was not committed;
 - Doctor capacity-holder projection now reports `capacityHoldersTruncated` instead of silently presenting the first 50 holders as complete, and terminal control evidence no longer silently drops error detail after 4096 characters.
+- Runtime `CONCURRENCY_LIMIT` errors now report `holdersTruncated`, so a bounded 16-identity holder projection cannot be mistaken for the complete active set when global capacity is configured above that projection size.
 - `workspace.close` now preserves cross-Workspace Git authority: while holding the existing lifecycle lock it rejects closure with `WORKSPACE_BUSY` when another open Workspace's Git common directory lives under the Workspace or disposable cache paths that would be removed. This prevents a parent Workspace from deleting the Git authority of an already-open child Workspace without adding a dependency database.
 
 ## 0.1.0 — Operational baseline

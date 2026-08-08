@@ -4245,6 +4245,7 @@ fn workspace_execution_is_serialized_with_retry_guidance() {
     assert_eq!(capacity.workspace_id.as_deref(), Some("workspace:test"));
     assert_eq!(capacity.holder_job_ids.len(), 1);
     assert_eq!(capacity.holder_workspace_ids, vec!["workspace:test"]);
+    assert!(!capacity.holders_truncated);
 
     let mut other = request(&sandbox, "request:workspace:other", 4);
     other.plan.workspace_id = "workspace:other".to_string();
@@ -4273,6 +4274,33 @@ fn global_execution_capacity_reports_cross_workspace_usage() {
     assert_eq!(capacity.workspace_id, None);
     assert_eq!(capacity.holder_job_ids.len(), 1);
     assert_eq!(capacity.holder_workspace_ids, vec!["workspace:test"]);
+    assert!(!capacity.holders_truncated);
+}
+
+#[test]
+fn global_capacity_marks_bounded_holder_projection_incomplete() {
+    let sandbox = Sandbox::new("global-capacity-truncated", 5000);
+    for index in 0..17 {
+        let mut admitted = request(&sandbox, &format!("request:global:holder:{index}"), 17);
+        admitted.plan.workspace_id = format!("workspace:holder:{index}");
+        assert!(matches!(
+            sandbox.registry.submit(&admitted).unwrap(),
+            AdmissionOutcome::Created(_)
+        ));
+    }
+
+    let mut rejected = request(&sandbox, "request:global:rejected", 17);
+    rejected.plan.workspace_id = "workspace:rejected".to_string();
+    let error = sandbox.registry.submit(&rejected).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::ConcurrencyLimit);
+    assert_eq!(error.field.as_deref(), Some("globalLimit"));
+    let capacity = error.capacity.unwrap();
+    assert_eq!(capacity.scope, "global");
+    assert_eq!(capacity.active, 17);
+    assert_eq!(capacity.limit, 17);
+    assert_eq!(capacity.holder_job_ids.len(), 16);
+    assert_eq!(capacity.holder_workspace_ids.len(), 16);
+    assert!(capacity.holders_truncated);
 }
 
 #[test]

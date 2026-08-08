@@ -28,6 +28,7 @@ class CapacityAcceptanceTests(unittest.TestCase):
                     "limit": 2,
                     "holderJobIds": ["job-2", "job-1"],
                     "holderWorkspaceIds": ["workspace-2", "workspace-1"],
+                    "holdersTruncated": False,
                 },
             },
             terminal=[
@@ -42,8 +43,41 @@ class CapacityAcceptanceTests(unittest.TestCase):
         )
         self.assertTrue(all(checks.values()))
         bad = dict(checks)
-        bad["allHolderJobsReported"] = False
+        bad["holderProjectionConsistent"] = False
         self.assertFalse(all(bad.values()))
+
+    def test_capacity_checks_accept_honest_bounded_holder_projection(self) -> None:
+        jobs = [f"job-{index}" for index in range(17)]
+        workspaces = [f"workspace-{index}" for index in range(18)]
+        checks = self.module["capacity_checks"](
+            limit=17,
+            job_ids=jobs,
+            workspace_ids=workspaces,
+            rejection={
+                "code": "CONCURRENCY_LIMIT",
+                "capacity": {
+                    "scope": "global",
+                    "active": 17,
+                    "limit": 17,
+                    "holderJobIds": jobs[:16],
+                    "holderWorkspaceIds": workspaces[:16],
+                    "holdersTruncated": True,
+                },
+            },
+            terminal=[{"jobId": job, "status": "succeeded"} for job in jobs],
+            close_results=[
+                {"workspaceId": workspace, "closed": True, "removed": True}
+                for workspace in workspaces
+            ],
+        )
+        self.assertTrue(all(checks.values()))
+
+    def test_capacity_cli_bounds_follow_runtime_types_not_legacy_sixteen(self) -> None:
+        self.assertEqual(self.module["positive_limit"]("17"), 17)
+        self.assertEqual(self.module["positive_limit"]("4294967295"), 4_294_967_295)
+        with self.assertRaises(Exception):
+            self.module["positive_limit"]("4294967296")
+        self.assertEqual(self.module["positive_seconds"]("61"), 61.0)
 
     def test_atomic_receipt_is_private_and_integrity_is_stable(self) -> None:
         report = {"schemaVersion": 1, "checks": {"ok": True}}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import sqlite3
 import subprocess
 import sys
@@ -68,6 +69,22 @@ def init_repository(path: Path) -> str:
 
 
 class LifecycleTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-lifecycle"))
+
+    def test_policy_numbers_follow_real_representation_not_legacy_round_limits(self) -> None:
+        self.assertEqual(cls_timeout := self.module["positive_timeout"]("60001"), 60_001)
+        self.assertEqual(cls_timeout, 60_001)
+        self.assertEqual(self.module["positive_timeout"]("2147483647"), 2_147_483_647)
+        with self.assertRaises(Exception):
+            self.module["positive_timeout"]("2147483648")
+        self.assertEqual(self.module["nonnegative_float"]("87601"), 87_601.0)
+        with self.assertRaises(Exception):
+            self.module["nonnegative_float"]("inf")
+        with self.assertRaises(Exception):
+            self.module["nonnegative_float"]("-1")
+
     def test_inspect_applies_retention_class_and_last_activity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

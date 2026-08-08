@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import math
+
 import argparse
 from datetime import datetime, timezone
 import hashlib
@@ -38,15 +40,15 @@ def absolute_path(value: str) -> Path:
 
 def positive_limit(value: str) -> int:
     parsed = int(value)
-    if not 1 <= parsed <= 16:
-        raise argparse.ArgumentTypeError("limit must be in 1..=16")
+    if not 1 <= parsed <= 4_294_967_295:
+        raise argparse.ArgumentTypeError("limit must fit Runtime's positive u32 concurrency range")
     return parsed
 
 
 def positive_seconds(value: str) -> float:
     parsed = float(value)
-    if not 1.0 <= parsed <= 60.0:
-        raise argparse.ArgumentTypeError("seconds must be in 1..=60")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("seconds must be finite and positive")
     return parsed
 
 
@@ -134,14 +136,29 @@ def capacity_checks(
     holder_jobs = holder_jobs if isinstance(holder_jobs, list) else []
     holder_workspaces = capacity.get("holderWorkspaceIds")
     holder_workspaces = holder_workspaces if isinstance(holder_workspaces, list) else []
+    holders_truncated = capacity.get("holdersTruncated")
+    if holders_truncated is True:
+        holder_projection_consistent = (
+            0 < len(holder_jobs) < limit
+            and set(holder_jobs).issubset(job_ids)
+            and set(holder_workspaces).issubset(workspace_ids[:limit])
+        )
+    elif holders_truncated is False:
+        holder_projection_consistent = (
+            set(holder_jobs) == set(job_ids)
+            and len(holder_jobs) == limit
+            and set(holder_workspaces) == set(workspace_ids[:limit])
+            and len(holder_workspaces) == limit
+        )
+    else:
+        holder_projection_consistent = False
     return {
         "exactJobsAdmitted": len(job_ids) == limit and len(set(job_ids)) == limit,
         "nextJobRejected": isinstance(rejection, dict) and rejection.get("code") == "CONCURRENCY_LIMIT",
         "globalScopeReported": capacity.get("scope") == "global",
         "activeLimitReported": capacity.get("active") == limit and capacity.get("limit") == limit,
-        "allHolderJobsReported": set(holder_jobs) == set(job_ids) and len(holder_jobs) == limit,
-        "allHolderWorkspacesReported": set(holder_workspaces) == set(workspace_ids[:limit])
-        and len(holder_workspaces) == limit,
+        "holderCompletenessReported": isinstance(holders_truncated, bool),
+        "holderProjectionConsistent": holder_projection_consistent,
         "allJobsSucceeded": len(terminal) == limit
         and all(item.get("status") == "succeeded" for item in terminal),
         "allWorkspacesClosed": len(close_results) == limit + 1

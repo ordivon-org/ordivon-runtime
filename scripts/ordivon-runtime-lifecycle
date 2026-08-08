@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import argparse
 import fcntl
 import hashlib
@@ -43,15 +44,17 @@ def absolute_path(value: str) -> Path:
 
 def nonnegative_float(value: str) -> float:
     parsed = float(value)
-    if not 0 <= parsed <= 24 * 3650:
-        raise argparse.ArgumentTypeError("hours must be in 0..=87600")
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("hours must be finite and non-negative")
     return parsed
 
 
 def positive_timeout(value: str) -> int:
     parsed = int(value)
-    if not 1 <= parsed <= 60_000:
-        raise argparse.ArgumentTypeError("timeout must be in 1..=60000")
+    if not 1 <= parsed <= 2_147_483_647:
+        raise argparse.ArgumentTypeError(
+            "timeout must fit SQLite's signed 32-bit millisecond busy-timeout range"
+        )
     return parsed
 
 

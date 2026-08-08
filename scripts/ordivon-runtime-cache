@@ -42,8 +42,8 @@ def absolute_path(value: str) -> Path:
 
 def positive_bytes(value: str) -> int:
     parsed = int(value)
-    if not 1 <= parsed <= 16 * 1024 * 1024 * 1024 * 1024:
-        raise argparse.ArgumentTypeError("bytes must be in 1..=16TiB")
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("bytes must be positive")
     return parsed
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import runpy
 import sqlite3
 import subprocess
 import sys
@@ -50,6 +51,15 @@ def record(runtime: Path, workspace_id: str, source_repo: Path) -> None:
 
 
 class CacheMigrationTests(unittest.TestCase):
+    def test_cache_watermark_has_no_legacy_sixteen_tib_ceiling(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
+        beyond = 16 * 1024 * 1024 * 1024 * 1024 + 1
+        self.assertEqual(module["positive_bytes"](str(beyond)), beyond)
+        with self.assertRaises(Exception):
+            module["positive_bytes"]("0")
+        with self.assertRaises(Exception):
+            module["positive_bytes"]("-1")
+
     def test_migrate_promotes_largest_inactive_cache_and_keeps_fallbacks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

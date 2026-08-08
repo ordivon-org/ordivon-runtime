@@ -45,6 +45,15 @@ impl Drop for Sandbox {
 }
 
 #[test]
+fn explicit_root_workspace_identity_is_not_forbidden_by_policy() {
+    let sandbox = Sandbox::new("explicit-root-workspace-owner");
+    let mut config = sandbox.config();
+    config.workspace_uid = Some(0);
+    config.workspace_gid = Some(0);
+    config.validate().unwrap();
+}
+
+#[test]
 fn public_requests_reject_unknown_fields_and_path_escape() {
     let forged = serde_json::json!({
         "schemaVersion": 1,

@@ -520,6 +520,7 @@ fn capacity_failure_preserves_retry_and_scope_metadata() {
             workspace_id: None,
             holder_job_ids: vec!["job-holder".to_string()],
             holder_workspace_ids: vec!["workspace-holder".to_string()],
+            holders_truncated: false,
         },
     );
     let tool_error = ToolError::from(error);
@@ -551,6 +552,12 @@ fn capacity_failure_preserves_retry_and_scope_metadata() {
             .pointer("/capacity/holderWorkspaceIds/0")
             .and_then(Value::as_str),
         Some("workspace-holder")
+    );
+    assert_eq!(
+        value
+            .pointer("/capacity/holdersTruncated")
+            .and_then(Value::as_bool),
+        Some(false)
     );
     assert_eq!(
         value.pointer("/origin").and_then(Value::as_str),

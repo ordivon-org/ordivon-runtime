@@ -241,6 +241,8 @@ scripts/ordivon-runtime-lifecycle sweep \
 
 The packaged timer runs this sweep daily with a randomized delay. It can only select policy-expired `closable` and `stale_record` entries; dirty, active, pinned, unknown, and orphan-directory cases remain excluded. The subordinate reclaim receipt is linked from the lifecycle receipt.
 
+The `--confirm-policy` / `--confirm-quarantine` phrases on these root-operated maintenance CLIs are human/operator anti-mistake ceremony, not semantic authority. The actual protection comes from classification, exact Workspace identity, active-Job checks, locks, before/after receipts, and preserved bytes. Future Agent-facing control surfaces should express deliberate intent and affected identities structurally rather than asking an Agent to echo a magic phrase.
+
 Repository renames can leave a healthy worktree registered in the new Git repository while its `.git` file and Runtime record still name the old path. The repair command accepts exact `sourceRepoAliases`, verifies the recorded commit in the mapped repository, runs `git worktree repair`, rechecks the exact HEAD, and updates only the record's source repository. Unrepairable data may be moved atomically to a quarantine directory and replaced by a valid closed tombstone only with a second explicit confirmation; bytes are preserved rather than deleted.
 
 ```bash
@@ -305,7 +307,7 @@ scripts/ordivon-runtime-cache prune \
 
 ## Capacity acceptance
 
-`scripts/ordivon-runtime-capacity-acceptance` is the repeatable public-surface proof for global admission. It opens `N+1` isolated Workspaces, admits exactly `N` bounded sleep Jobs, requires the next Job to fail with `CONCURRENCY_LIMIT`, verifies the complete holder Job and Workspace sets, waits for every admitted Job to succeed, and closes every acceptance Workspace. It emits a digest-bound JSON receipt and never reads the Registry directly.
+`scripts/ordivon-runtime-capacity-acceptance` is the repeatable public-surface proof for global admission. It opens `N+1` isolated Workspaces, admits exactly `N` bounded sleep Jobs, requires the next Job to fail with `CONCURRENCY_LIMIT`, verifies exact `active`/`limit` truth plus an explicit `holdersTruncated` completeness signal, checks that the holder identities are either complete or an honest bounded subset, waits for every admitted Job to succeed, and closes every acceptance Workspace. It emits a digest-bound JSON receipt and never reads the Registry directly.
 
 Run it from a host shell or independent systemd unit, not from a Runtime Job: a Runtime Job would itself consume one of the slots being measured.
 
@@ -322,7 +324,7 @@ scripts/ordivon-runtime-capacity-acceptance \
   --pretty
 ```
 
-The command is parameterized rather than hard-coded to eight. Exact holder-set validation is bounded to `1..=16`, matching the bounded capacity error envelope.
+The command is parameterized rather than hard-coded to eight. The Runtime capacity value follows its positive `u32` representation; the holder-identity projection may remain bounded, but incompleteness is explicit through `holdersTruncated` rather than being silently presented as the full active set.
 
 ## Secret-free status
 

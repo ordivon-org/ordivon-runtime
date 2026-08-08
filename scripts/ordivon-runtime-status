@@ -780,12 +780,12 @@ def lifecycle_status(store_root: Path) -> dict[str, Any]:
 
 
 def build_status(args: argparse.Namespace) -> dict[str, Any]:
-    if args.max_workspaces < 1 or args.max_workspaces > 10_000:
-        raise StatusError("max-workspaces must be in 1..=10000")
-    if args.protocol_retention_hours < 1 or args.protocol_retention_hours > 87_600:
-        raise StatusError("protocol-retention-hours must be in 1..=87600")
-    if args.stale_dirty_hours < 1 or args.stale_dirty_hours > 87_600:
-        raise StatusError("stale-dirty-hours must be in 1..=87600")
+    if args.max_workspaces < 1:
+        raise StatusError("max-workspaces must be positive")
+    if args.protocol_retention_hours < 1:
+        raise StatusError("protocol-retention-hours must be positive")
+    if args.stale_dirty_hours < 1:
+        raise StatusError("stale-dirty-hours must be positive")
     started = time.perf_counter()
     generated_at_ms = int(time.time() * 1000)
     health_reasons: list[str] = []
