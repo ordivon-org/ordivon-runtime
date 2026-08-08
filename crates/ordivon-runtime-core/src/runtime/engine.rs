@@ -8,6 +8,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 use super::evidence::prepare_runner_terminal_from_bundle;
 use super::patch::{
@@ -962,7 +963,21 @@ impl Runtime {
             attempt.clone()
         };
         match attempt.state {
-            AttemptState::Accepted => self.dispatch_attempt(&attempt),
+            AttemptState::Accepted => match self.dispatch_attempt(&attempt) {
+                Ok(()) => Ok(()),
+                Err(error) if error.code == RuntimeErrorCode::AttemptStateConflict => {
+                    let current = self.registry.get_attempt(&attempt.attempt_id)?;
+                    match current.state {
+                        AttemptState::Starting
+                        | AttemptState::Running
+                        | AttemptState::Stopping
+                        | AttemptState::Recovering => self.reconcile_attempt(&current.attempt_id),
+                        state if state.is_terminal() => Ok(()),
+                        _ => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            },
             AttemptState::Starting
             | AttemptState::Running
             | AttemptState::Stopping
@@ -1198,41 +1213,56 @@ impl Runtime {
             )
         })?;
         fs::create_dir_all(parent).map_err(|error| io_error("create attempts root", error))?;
-        let staging_prefix = format!(".{}.staging-", attempt.attempt_id);
-        for entry in
-            fs::read_dir(parent).map_err(|error| io_error("scan Attempt staging bundles", error))?
-        {
-            let entry = entry.map_err(|error| io_error("read Attempt staging entry", error))?;
-            if entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(&staging_prefix))
-            {
-                fs::remove_dir_all(entry.path())
-                    .map_err(|error| io_error("remove stale staging bundle", error))?;
-            }
-        }
-        let staging = parent.join(format!("{staging_prefix}{}", std::process::id()));
         if final_path.exists() {
-            fs::remove_dir_all(&final_path)
-                .map_err(|error| io_error("remove uncommitted bundle", error))?;
+            verify_published_bundle(&final_path, &request_bytes, &plan_bytes, &manifest_bytes)?;
+        } else {
+            let staging = parent.join(format!(
+                ".{}.staging-{}",
+                attempt.attempt_id,
+                Uuid::now_v7()
+            ));
+            fs::create_dir(&staging).map_err(|error| io_error("create staging bundle", error))?;
+            let publish = (|| {
+                fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                    .map_err(|error| io_error("protect staging bundle", error))?;
+                write_bytes_synced(&staging.join(RUNNER_REQUEST_FILE), &request_bytes)?;
+                write_bytes_synced(&staging.join(PLAN_FILE), &plan_bytes)?;
+                write_bytes_synced(&staging.join(BUNDLE_MANIFEST_FILE), &manifest_bytes)?;
+                sync_directory(&staging)?;
+                match fs::rename(&staging, &final_path) {
+                    Ok(()) => sync_directory(parent)?,
+                    Err(error) if final_path.is_dir() => {
+                        let _ = error;
+                        fs::remove_dir_all(&staging).map_err(|cleanup_error| {
+                            io_error("remove losing bundle staging directory", cleanup_error)
+                        })?;
+                    }
+                    Err(error) => return Err(io_error("commit Attempt bundle", error)),
+                }
+                verify_published_bundle(&final_path, &request_bytes, &plan_bytes, &manifest_bytes)
+            })();
+            if publish.is_err() {
+                let _ = fs::remove_dir_all(&staging);
+            }
+            publish?;
         }
-        fs::create_dir(&staging).map_err(|error| io_error("create staging bundle", error))?;
-        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
-            .map_err(|error| io_error("protect staging bundle", error))?;
-        write_bytes_synced(&staging.join(RUNNER_REQUEST_FILE), &request_bytes)?;
-        write_bytes_synced(&staging.join(PLAN_FILE), &plan_bytes)?;
-        write_bytes_synced(&staging.join(BUNDLE_MANIFEST_FILE), &manifest_bytes)?;
-        sync_directory(&staging)?;
-        fs::rename(&staging, &final_path)
-            .map_err(|error| io_error("commit Attempt bundle", error))?;
-        sync_directory(parent)?;
-        self.registry.mark_bundle_ready(
+        match self.registry.mark_bundle_ready(
             &attempt.attempt_id,
             attempt.row_version,
             &bundle_digest,
             now_ms()?,
-        )
+        ) {
+            Ok(current) => Ok(current),
+            Err(error) if error.code == RuntimeErrorCode::AttemptStateConflict => {
+                let current = self.registry.get_attempt(&attempt.attempt_id)?;
+                if current.bundle_digest.as_deref() == Some(bundle_digest.as_str()) {
+                    Ok(current)
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn dispatch_attempt(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
@@ -2706,6 +2736,52 @@ fn workspace_record_page(
         workspace_id: last.workspace_id.clone(),
     };
     (page, Some(next_cursor))
+}
+
+fn verify_published_bundle(
+    final_path: &Path,
+    request_bytes: &[u8],
+    plan_bytes: &[u8],
+    manifest_bytes: &[u8],
+) -> RuntimeResult<()> {
+    let metadata = fs::symlink_metadata(final_path)
+        .map_err(|error| io_error("inspect published Attempt bundle", error))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
+            "published Attempt bundle is not a non-symlink directory",
+            Some("bundlePath"),
+            false,
+        ));
+    }
+    for (name, expected) in [
+        (RUNNER_REQUEST_FILE, request_bytes),
+        (PLAN_FILE, plan_bytes),
+        (BUNDLE_MANIFEST_FILE, manifest_bytes),
+    ] {
+        let path = final_path.join(name);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| io_error("inspect published Attempt bundle file", error))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "published Attempt bundle contains a non-regular file",
+                Some("bundlePath"),
+                false,
+            ));
+        }
+        let observed = fs::read(&path)
+            .map_err(|error| io_error("read published Attempt bundle file", error))?;
+        if observed != expected {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "published Attempt bundle bytes do not match deterministic Attempt identity",
+                Some("bundlePath"),
+                false,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_run_request_structure(request: &TaskRunRequest) -> RuntimeResult<()> {

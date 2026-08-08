@@ -15,6 +15,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -345,6 +346,62 @@ impl Drop for IntegrationContext {
         }
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_two_observers_do_not_race_dispatch_of_one_accepted_attempt() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("cross-runtime-observe-race");
+    let seed = context.runtime(2_000);
+    let created = created_admission(
+        seed.registry()
+            .submit(&context.direct_submit("request:cross-runtime-observe-race", 8))
+            .unwrap(),
+    );
+    assert_eq!(created.attempt.state, AttemptState::Accepted);
+    drop(seed);
+
+    let runtime_a = context.runtime(2_000);
+    let runtime_b = context.runtime(2_000);
+    let barrier = Arc::new(Barrier::new(3));
+    let request = TaskObserveRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        job_id: created.job.job_id.clone(),
+        wait_ms: 0,
+        wait_until: TaskObserveWaitUntil::Terminal,
+        stdout_tail_bytes: 4096,
+        stderr_tail_bytes: 4096,
+        stdout_offset: None,
+        stderr_offset: None,
+    };
+    let spawn = |runtime: Runtime| {
+        let barrier = Arc::clone(&barrier);
+        let request = request.clone();
+        thread::spawn(move || {
+            barrier.wait();
+            runtime.observe_task(&request)
+        })
+    };
+    let observer_a = spawn(runtime_a);
+    let observer_b = spawn(runtime_b);
+    barrier.wait();
+    let result_a = observer_a.join().unwrap();
+    let result_b = observer_b.join().unwrap();
+
+    assert!(result_a.is_ok(), "observer A failed: {result_a:?}");
+    assert!(result_b.is_ok(), "observer B failed: {result_b:?}");
+    let latest = context
+        .runtime(2_000)
+        .registry()
+        .get_attempt(&created.attempt.attempt_id)
+        .unwrap();
+    assert!(matches!(
+        latest.state,
+        AttemptState::Starting | AttemptState::Running | AttemptState::Succeeded
+    ));
 }
 
 #[test]
@@ -1542,7 +1599,17 @@ fn runtime_reconciler_rebuilds_bundle_after_admission_commit() {
         })
         .unwrap();
     assert_eq!(completed.status, "succeeded");
-    assert!(!stale.exists());
+    // Unknown staging may belong to another Runtime instance. Recovery must converge
+    // the durable Attempt without guessing staging ownership or deleting it.
+    assert_eq!(fs::read(stale.join("partial")).unwrap(), b"partial bundle");
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&completed.job_id)
+        .unwrap()
+        .unwrap();
+    assert!(Path::new(&attempt.bundle_path)
+        .join("bundle-manifest.json")
+        .is_file());
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }
 
