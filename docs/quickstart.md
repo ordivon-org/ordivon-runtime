@@ -97,12 +97,13 @@ Copy and edit the example outside the repository:
 sudo install -d -m 0700 /etc/ordivon
 sudo install -m 0600 packaging/systemd/ordivon-runtime.env.example \
   /etc/ordivon/ordivon-runtime.env
+sudo sh -c 'umask 077; head -c 48 /dev/urandom | base64 > /etc/ordivon/runtime-mcp.token'
 sudo editor /etc/ordivon/ordivon-runtime.env
 ```
 
 At minimum:
 
-- replace `ORDIVON_BEARER_TOKEN` with at least 32 random characters;
+- keep `ORDIVON_BEARER_TOKEN_FILE` pointed at a private regular file containing at least 32 non-whitespace characters; the legacy inline `ORDIVON_BEARER_TOKEN` remains migration-only, and configuring both fails closed;
 - keep `ORDIVON_BIND` on loopback;
 - confirm `ORDIVON_EXEC_PATH` and `ORDIVON_EXEC_HOME` expose only intended trusted toolchains;
 - set host policy explicitly, including `ORDIVON_GLOBAL_MAX_CONCURRENCY`, `ORDIVON_MAX_RUNTIME_MS`, `ORDIVON_MAX_OUTPUT_BYTES`, reconciliation cadence/batch size, and cache limits;

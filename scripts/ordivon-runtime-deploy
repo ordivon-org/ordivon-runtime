@@ -21,7 +21,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from mcp_probe import probe_catalog
+from mcp_probe import load_bearer_token, probe_catalog
 
 SCHEMA_VERSION = 2
 LEGACY_SCHEMA_VERSION = 1
@@ -618,11 +618,9 @@ def probe_mcp(
 ) -> dict[str, object]:
     environment = load_env_file(env_file)
     bind = environment.get("ORDIVON_BIND")
-    token = environment.get("ORDIVON_BEARER_TOKEN")
-    if not bind or not token:
-        raise RuntimeError(
-            "environment file must define ORDIVON_BIND and ORDIVON_BEARER_TOKEN"
-        )
+    if not bind:
+        raise RuntimeError("environment file must define ORDIVON_BIND")
+    token = load_bearer_token(environment)
     return probe_catalog(
         f"http://{bind}/mcp",
         token,

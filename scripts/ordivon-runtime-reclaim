@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from mcp_probe import connect_compatible
+from mcp_probe import connect_compatible, load_bearer_token
 
 SCHEMA_VERSION = 1
 MAX_DIRTY_PATHS = 20
@@ -422,11 +422,9 @@ def load_env_file(path: Path) -> dict[str, str]:
 def close_workspace(env_file: Path, workspace_id: str) -> dict[str, object]:
     environment = load_env_file(env_file)
     bind = environment.get("ORDIVON_BIND")
-    token = environment.get("ORDIVON_BEARER_TOKEN")
-    if not bind or not token:
-        raise RuntimeError(
-            "environment file must define ORDIVON_BIND and ORDIVON_BEARER_TOKEN"
-        )
+    if not bind:
+        raise RuntimeError("environment file must define ORDIVON_BIND")
+    token = load_bearer_token(environment)
     client = connect_compatible(
         f"http://{bind}/mcp",
         token,

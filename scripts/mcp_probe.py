@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import stat
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 MODERN_PROTOCOL_VERSION = "2026-07-28"
@@ -15,6 +17,39 @@ LEGACY_PROTOCOL_VERSION = "2025-06-18"
 
 class McpProbeError(RuntimeError):
     pass
+
+
+def load_bearer_token(environment: dict[str, str]) -> str:
+    """Resolve one local Runtime Bearer credential without coupling callers to service layout."""
+    inline = environment.get("ORDIVON_BEARER_TOKEN")
+    token_file = environment.get("ORDIVON_BEARER_TOKEN_FILE")
+    if inline is not None and token_file is not None:
+        raise McpProbeError(
+            "environment must define exactly one of ORDIVON_BEARER_TOKEN or ORDIVON_BEARER_TOKEN_FILE"
+        )
+    if inline is not None:
+        token = inline.strip()
+    elif token_file is not None:
+        path = Path(token_file)
+        if not path.is_absolute():
+            raise McpProbeError("ORDIVON_BEARER_TOKEN_FILE must be absolute")
+        metadata = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+            raise McpProbeError("Runtime Bearer token path must be a regular file")
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise McpProbeError(
+                "Runtime Bearer token file must not be accessible by group or others"
+            )
+        if metadata.st_size > 16_384:
+            raise McpProbeError("Runtime Bearer token file exceeds the configured bound")
+        token = path.read_text(encoding="utf-8").strip()
+    else:
+        raise McpProbeError(
+            "environment must define one of ORDIVON_BEARER_TOKEN or ORDIVON_BEARER_TOKEN_FILE"
+        )
+    if not token or any(character.isspace() for character in token):
+        raise McpProbeError("Runtime Bearer token must contain one non-whitespace token")
+    return token
 
 
 def parse_mcp_response(content_type: str, body: bytes) -> dict[str, Any]:

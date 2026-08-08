@@ -1,5 +1,7 @@
+use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -268,9 +270,9 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     let bind: SocketAddr = std::env::var("ORDIVON_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8897".to_string())
         .parse()?;
-    let token = required_env("ORDIVON_BEARER_TOKEN")?;
+    let token = load_bearer_token()?;
     if token.len() < 32 {
-        return Err("ORDIVON_BEARER_TOKEN must be at least 32 characters".into());
+        return Err("Runtime Bearer token must be at least 32 characters".into());
     }
     let store_root = PathBuf::from(required_env("ORDIVON_STORE_ROOT")?);
     let registry_root = PathBuf::from(required_env("ORDIVON_REGISTRY_ROOT")?);
@@ -392,6 +394,53 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     })
 }
 
+const MAX_BEARER_TOKEN_FILE_BYTES: u64 = 16_384;
+
+fn load_bearer_token() -> Result<String, Box<dyn std::error::Error>> {
+    let inline = optional_env("ORDIVON_BEARER_TOKEN")?;
+    let token_file = optional_env("ORDIVON_BEARER_TOKEN_FILE")?;
+    match (inline, token_file) {
+        (Some(_), Some(_)) => {
+            Err("configure exactly one of ORDIVON_BEARER_TOKEN or ORDIVON_BEARER_TOKEN_FILE".into())
+        }
+        (Some(token), None) => Ok(token),
+        (None, Some(path)) => read_private_token_file(Path::new(&path)),
+        (None, None) => {
+            Err("one of ORDIVON_BEARER_TOKEN or ORDIVON_BEARER_TOKEN_FILE is required".into())
+        }
+    }
+}
+
+fn read_private_token_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    if !path.is_absolute() {
+        return Err("ORDIVON_BEARER_TOKEN_FILE must be absolute".into());
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err("Runtime Bearer token path must be a regular file".into());
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err("Runtime Bearer token file must not be accessible by group or others".into());
+    }
+    if metadata.len() > MAX_BEARER_TOKEN_FILE_BYTES {
+        return Err("Runtime Bearer token file exceeds the configured bound".into());
+    }
+    let raw = fs::read_to_string(path)?;
+    let token = raw.trim();
+    if token.is_empty() || token.chars().any(char::is_whitespace) {
+        return Err("Runtime Bearer token file must contain one non-whitespace token".into());
+    }
+    Ok(token.to_owned())
+}
+
+fn optional_env(name: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("{name} is invalid: {error}").into()),
+    }
+}
+
 fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
     std::env::var(name).map_err(|error| format!("{name} is required: {error}").into())
 }
@@ -453,8 +502,12 @@ fn unix_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{request_is_authorized, validate_loopback_bind, HttpState};
+    use super::{
+        read_private_token_file, request_is_authorized, validate_loopback_bind, HttpState,
+    };
     use axum::http::{header, HeaderMap, HeaderValue};
+    use std::fs;
+    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::sync::Arc;
 
     fn auth_state(trust_cf_access: bool) -> HttpState {
@@ -471,6 +524,36 @@ mod tests {
         assert!(validate_loopback_bind("127.0.0.1:8897".parse().unwrap()).is_ok());
         assert!(validate_loopback_bind("[::1]:8897".parse().unwrap()).is_ok());
         assert!(validate_loopback_bind("0.0.0.0:8897".parse().unwrap()).is_err());
+    }
+
+    #[test]
+    fn private_token_file_contract_is_strict() {
+        let root =
+            std::env::temp_dir().join(format!("ordivon-runtime-token-file-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let token_path = root.join("runtime-mcp.token");
+        fs::write(&token_path, "local-secret-token-value-1234567890\n").unwrap();
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_private_token_file(&token_path).unwrap(),
+            "local-secret-token-value-1234567890"
+        );
+
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(read_private_token_file(&token_path)
+            .unwrap_err()
+            .to_string()
+            .contains("group or others"));
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let link_path = root.join("runtime-mcp-link.token");
+        symlink(&token_path, &link_path).unwrap();
+        assert!(read_private_token_file(&link_path)
+            .unwrap_err()
+            .to_string()
+            .contains("regular file"));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
