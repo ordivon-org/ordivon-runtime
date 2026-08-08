@@ -317,7 +317,16 @@ def wait_for_server(process: subprocess.Popen[str], endpoint: str, token: str, l
     raise RuntimeError(f"ordivon-runtime did not become ready: {last_error}")
 
 
-def start_server(repo: Path, target_dir: Path, root: Path, port: int, token: str) -> ServerProcess:
+def start_server(
+    repo: Path,
+    target_dir: Path,
+    root: Path,
+    port: int,
+    token: str,
+    *,
+    max_runtime_ms: int | None = None,
+    max_output_bytes: int | None = None,
+) -> ServerProcess:
     log_path = root / "server.log"
     log_handle = log_path.open("a", encoding="utf-8")
     env = os.environ.copy()
@@ -332,6 +341,10 @@ def start_server(repo: Path, target_dir: Path, root: Path, port: int, token: str
             "ORDIVON_TRACE_PATH": str(root / "registry/runtime-trace.jsonl"),
         }
     )
+    if max_runtime_ms is not None:
+        env["ORDIVON_MAX_RUNTIME_MS"] = str(max_runtime_ms)
+    if max_output_bytes is not None:
+        env["ORDIVON_MAX_OUTPUT_BYTES"] = str(max_output_bytes)
     process = subprocess.Popen(
         [str(target_dir / "debug/ordivon-runtime")],
         cwd=repo,
@@ -725,6 +738,41 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         check("workspace-diff", "hello durable" in diff.get("diff", ""), diff)
         check("workspace-untracked", "generated.txt" in diff.get("untrackedPaths", []), diff)
 
+        proposal_request_id = f"request:{uuid.uuid4()}"
+        proposal_execution = {
+            "workspaceId": workspace_id,
+            "executable": "/usr/bin/python3",
+            "args": ["-c", "print('PROPOSAL_DEFAULTS', flush=True)"],
+            "cwdRelative": ".",
+            "env": {},
+        }
+        proposal_submitted = client.tool(
+            "workspace.exec",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "clientRequestId": proposal_request_id,
+                "execution": proposal_execution,
+                "waitMs": 30_000,
+                "stdoutTailBytes": 4096,
+                "stderrTailBytes": 4096,
+            },
+        )
+        proposal_job_id = str(proposal_submitted["jobId"])
+        proposal_attempt_id = str(proposal_submitted["attemptId"])
+        attempt_ids.append(proposal_attempt_id)
+        check(
+            "proposal-default-resolution",
+            proposal_submitted.get("status") == "succeeded"
+            and proposal_submitted.get("stdoutTail") == "PROPOSAL_DEFAULTS\n"
+            and proposal_submitted.get("effectiveLimits")
+            == {
+                "timeoutMs": 900_000,
+                "stdoutLimitBytes": 16 * 1024 * 1024,
+                "stderrLimitBytes": 16 * 1024 * 1024,
+            },
+            proposal_submitted,
+        )
+
         expected_stdout = "MCP_E2E_🙂\n"
         execution_request_id = f"request:{uuid.uuid4()}"
         execution = {
@@ -1013,7 +1061,15 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         check("task-cancel", cancelled.get("status") == "cancelled", cancelled)
 
         server.stop()
-        server = start_server(repo, target_dir, root, port, token)
+        server = start_server(
+            repo,
+            target_dir,
+            root,
+            port,
+            token,
+            max_runtime_ms=5_000,
+            max_output_bytes=4_096,
+        )
         restarted_executable = Path(f"/proc/{server.process.pid}/exe").resolve()
         restarted_digest = digest_bytes(restarted_executable.read_bytes())
         check(
@@ -1043,6 +1099,61 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             },
         )
         check("restart-observe", after_restart.get("status") == "succeeded", after_restart)
+
+        proposal_replay = client.tool(
+            "workspace.exec",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "clientRequestId": proposal_request_id,
+                "execution": proposal_execution,
+                "waitMs": 0,
+                "stdoutTailBytes": 4096,
+                "stderrTailBytes": 4096,
+            },
+        )
+        check(
+            "proposal-replay-ignores-current-policy",
+            proposal_replay.get("jobId") == proposal_job_id
+            and proposal_replay.get("status") == "succeeded"
+            and proposal_replay.get("effectiveLimits")
+            == {
+                "timeoutMs": 900_000,
+                "stdoutLimitBytes": 16 * 1024 * 1024,
+                "stderrLimitBytes": 16 * 1024 * 1024,
+            },
+            proposal_replay,
+        )
+
+        current_policy_proposal = client.tool(
+            "workspace.exec",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "clientRequestId": f"request:{uuid.uuid4()}",
+                "execution": {
+                    "workspaceId": workspace_id,
+                    "executable": "/usr/bin/true",
+                    "args": [],
+                    "cwdRelative": ".",
+                    "env": {},
+                },
+                "waitMs": 30_000,
+                "stdoutTailBytes": 4096,
+                "stderrTailBytes": 4096,
+            },
+        )
+        attempt_ids.append(str(current_policy_proposal["attemptId"]))
+        check(
+            "proposal-new-admission-uses-current-policy",
+            current_policy_proposal.get("status") == "succeeded"
+            and current_policy_proposal.get("effectiveLimits")
+            == {
+                "timeoutMs": 5_000,
+                "stdoutLimitBytes": 4_096,
+                "stderrLimitBytes": 4_096,
+            },
+            current_policy_proposal,
+        )
+
         dirty_close = client.tool_result(
             "workspace.close",
             {"schemaVersion": SCHEMA_VERSION, "workspaceId": workspace_id},

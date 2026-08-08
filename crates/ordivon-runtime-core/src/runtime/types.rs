@@ -329,6 +329,27 @@ pub struct UniversalExecutionStep {
     pub continue_on_error: bool,
 }
 
+/// Agent-authored execution step before Runtime resolves omitted mechanical limits.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionStepProposal {
+    pub id: String,
+    /// Absolute host path to the executable; PATH lookup is intentionally not performed.
+    pub executable: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Working directory relative to the Workspace root.
+    pub cwd_relative: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Optional step-local upper bound. Omission delegates only this mechanical limit to Runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub continue_on_error: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeExecutionStep {
@@ -392,6 +413,7 @@ pub struct SubmitRequest {
 }
 
 pub(crate) const REQUEST_IDENTITY_PREFIX: &str = "runtime-request-v1:";
+pub(crate) const PROPOSAL_IDENTITY_PREFIX: &str = "runtime-request-v2:";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -408,6 +430,30 @@ struct OperationRequestIdentity {
     stderr_limit_bytes: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     steps: Vec<UniversalExecutionStep>,
+    budget: ExecutionBudget,
+    execution_profile: ExecutionProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    foreign_references: Vec<ForeignReference>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProposalRequestIdentity {
+    schema_version: u32,
+    principal: String,
+    workspace_id: String,
+    executable: String,
+    args: Vec<String>,
+    cwd_relative: String,
+    env: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stdout_limit_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stderr_limit_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    steps: Vec<ExecutionStepProposal>,
     budget: ExecutionBudget,
     execution_profile: ExecutionProfile,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -431,6 +477,52 @@ pub(crate) fn operation_request_identity_digest(request: &TaskRunRequest) -> Run
         execution_profile: request.execution.execution_profile,
         foreign_references: request.execution.foreign_references.clone(),
     })
+}
+
+pub(crate) fn proposal_request_identity_digest(
+    proposal: &TaskRunProposal,
+) -> RuntimeResult<String> {
+    let identity = ProposalRequestIdentity {
+        schema_version: proposal.schema_version,
+        principal: proposal.principal.clone(),
+        workspace_id: proposal.execution.workspace_id.clone(),
+        executable: normalize_path_text(&proposal.execution.executable),
+        args: proposal.execution.args.clone(),
+        cwd_relative: normalize_relative_path_text(&proposal.execution.cwd_relative),
+        env: proposal.execution.env.clone(),
+        timeout_ms: proposal.execution.timeout_ms,
+        stdout_limit_bytes: proposal.execution.stdout_limit_bytes,
+        stderr_limit_bytes: proposal.execution.stderr_limit_bytes,
+        steps: proposal
+            .execution
+            .steps
+            .iter()
+            .map(|step| ExecutionStepProposal {
+                id: step.id.clone(),
+                executable: normalize_path_text(&step.executable),
+                args: step.args.clone(),
+                cwd_relative: normalize_relative_path_text(&step.cwd_relative),
+                env: step.env.clone(),
+                timeout_ms: step.timeout_ms,
+                continue_on_error: step.continue_on_error,
+            })
+            .collect(),
+        budget: proposal.execution.budget.clone(),
+        execution_profile: proposal.execution.execution_profile,
+        foreign_references: proposal.execution.foreign_references.clone(),
+    };
+    let bytes = serde_json::to_vec(&identity).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::InvalidRequest,
+            format!("cannot serialize execution proposal identity: {error}"),
+            None,
+            false,
+        )
+    })?;
+    Ok(format!(
+        "{PROPOSAL_IDENTITY_PREFIX}{}",
+        crate::universal::sha256_bytes(&bytes)
+    ))
 }
 
 pub(crate) fn operation_request_identity_digest_from_plan(
@@ -938,6 +1030,59 @@ pub(crate) fn default_runtime_list_limit() -> u32 {
     20
 }
 
+/// Agent-authored execution proposal. Action fields are concrete; only proven mechanical
+/// execution limits may be omitted and resolved by Runtime at new admission.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionProposal {
+    pub workspace_id: String,
+    /// Absolute host path to the executable; PATH lookup is intentionally not performed.
+    pub executable: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Working directory relative to the Workspace root.
+    pub cwd_relative: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub stdout_limit_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub stderr_limit_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<ExecutionStepProposal>,
+    #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
+    pub budget: ExecutionBudget,
+    #[serde(default)]
+    pub execution_profile: ExecutionProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreign_references: Vec<ForeignReference>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskRunProposal {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    pub schema_version: u32,
+    pub client_request_id: String,
+    pub principal: String,
+    pub global_limit: u32,
+    pub execution: ExecutionProposal,
+    #[serde(default = "default_task_wait_ms")]
+    #[schemars(range(max = MAX_TASK_WAIT_MS))]
+    pub wait_ms: u64,
+    #[serde(default = "default_task_tail_bytes")]
+    #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
+    pub stdout_tail_bytes: u64,
+    #[serde(default = "default_task_tail_bytes")]
+    #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
+    pub stderr_tail_bytes: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UniversalExecutionRequest {
@@ -1025,6 +1170,23 @@ pub struct TaskCancelRequest {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EffectiveStepTimeout {
+    pub id: String,
+    pub timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EffectiveExecutionLimits {
+    pub timeout_ms: u64,
+    pub stdout_limit_bytes: u64,
+    pub stderr_limit_bytes: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub step_timeouts: Vec<EffectiveStepTimeout>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskObservation {
     pub job_id: String,
     /// Compatibility summary only. Use the explicit semantic fields below for control decisions.
@@ -1051,6 +1213,8 @@ pub struct TaskObservation {
     pub execution_reason_code: Option<String>,
     /// Runtime certainty/reconciliation class for the physical result.
     pub delivery_disposition: RuntimeDeliveryDisposition,
+    /// Durable effective execution limits frozen into this Job at admission.
+    pub effective_limits: EffectiveExecutionLimits,
     /// True when Runtime requires mechanical recovery/reconciliation for this Job.
     pub recovery_required: bool,
     /// Always false: Runtime does not judge Task/domain semantic completion.

@@ -203,6 +203,14 @@ struct TerminalProcessEvidence {
     observed_at_ms: u64,
 }
 
+#[derive(Clone, Copy)]
+struct ObservationOutputRequest {
+    stdout_tail_bytes: u64,
+    stderr_tail_bytes: u64,
+    stdout_offset: Option<u64>,
+    stderr_offset: Option<u64>,
+}
+
 impl Runtime {
     pub fn new(config: RuntimeConfig) -> RuntimeResult<Self> {
         config.executor.validate().map_err(map_universal_error)?;
@@ -252,21 +260,54 @@ impl Runtime {
     }
 
     pub fn run_task(&self, request: &TaskRunRequest) -> RuntimeResult<TaskObservation> {
-        validate_run_request(
-            request,
-            self.executor.max_runtime_ms,
-            self.executor.max_output_bytes,
-        )?;
+        validate_run_request_structure(request)?;
+        let request_identity_digest = super::operation_request_identity_digest(request)?;
+        self.run_concrete_task(request, request_identity_digest)
+    }
+
+    /// Admit an Agent-authored proposal whose proven mechanical execution limits may be omitted.
+    /// Proposal identity is resolved before current operator policy so replay returns historical
+    /// Runtime truth instead of re-adjudicating an already committed Job.
+    pub fn run_task_proposal(
+        &self,
+        proposal: &super::TaskRunProposal,
+    ) -> RuntimeResult<TaskObservation> {
+        validate_run_proposal_structure(proposal)?;
+        let request_identity_digest = super::proposal_request_identity_digest(proposal)?;
         let job_id = {
-            let _guard = self.lifecycle_lock.lock().map_err(|_| {
-                RuntimeError::new(
-                    RuntimeErrorCode::RegistryUnavailable,
-                    "Workspace lifecycle lock is poisoned",
-                    None,
-                    true,
-                )
-            })?;
-            let request_identity_digest = super::operation_request_identity_digest(request)?;
+            let _guard = self.lock_lifecycle()?;
+            if let Some(existing) = self.registry.find_idempotent_job(
+                &proposal.principal,
+                &proposal.client_request_id,
+                &request_identity_digest,
+            )? {
+                existing.job_id
+            } else {
+                let request = self.resolve_proposal(proposal);
+                validate_run_request_structure(&request)?;
+                validate_new_admission_policy(
+                    &request,
+                    self.executor.max_runtime_ms,
+                    self.executor.max_output_bytes,
+                )?;
+                self.admit_new_task(&request, request_identity_digest)?
+            }
+        };
+        self.observe_admitted_task(
+            &job_id,
+            proposal.wait_ms,
+            proposal.stdout_tail_bytes,
+            proposal.stderr_tail_bytes,
+        )
+    }
+
+    fn run_concrete_task(
+        &self,
+        request: &TaskRunRequest,
+        request_identity_digest: String,
+    ) -> RuntimeResult<TaskObservation> {
+        let job_id = {
+            let _guard = self.lock_lifecycle()?;
             if let Some(existing) = self.registry.find_idempotent_job(
                 &request.principal,
                 &request.client_request_id,
@@ -274,38 +315,115 @@ impl Runtime {
             )? {
                 existing.job_id
             } else {
-                self.reconcile_recoverable_orphans()?;
-                let _ = self.reconcile_workspace(&request.execution.workspace_id)?;
-                let plan = self.resolve_plan(request)?;
-                let submit = SubmitRequest {
-                    schema_version: RUNTIME_SCHEMA_VERSION,
-                    client_request_id: request.client_request_id.clone(),
-                    request_identity_digest: Some(request_identity_digest),
-                    plan,
-                    global_limit: request.global_limit,
-                };
-                match self.registry.submit(&submit)? {
-                    AdmissionOutcome::Created(created) => {
-                        let job_id = created.job.job_id.clone();
-                        self.ensure_attempt_dispatched(&created.attempt)
-                            .map_err(|error| error.with_operation_id(job_id.clone()))?;
-                        job_id
-                    }
-                    AdmissionOutcome::Existing { job } => job.job_id.clone(),
-                }
+                validate_new_admission_policy(
+                    request,
+                    self.executor.max_runtime_ms,
+                    self.executor.max_output_bytes,
+                )?;
+                self.admit_new_task(request, request_identity_digest)?
             }
         };
+        self.observe_admitted_task(
+            &job_id,
+            request.wait_ms,
+            request.stdout_tail_bytes,
+            request.stderr_tail_bytes,
+        )
+    }
+
+    fn admit_new_task(
+        &self,
+        request: &TaskRunRequest,
+        request_identity_digest: String,
+    ) -> RuntimeResult<String> {
+        self.reconcile_recoverable_orphans()?;
+        let _ = self.reconcile_workspace(&request.execution.workspace_id)?;
+        let plan = self.resolve_plan(request)?;
+        let submit = SubmitRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            client_request_id: request.client_request_id.clone(),
+            request_identity_digest: Some(request_identity_digest),
+            plan,
+            global_limit: request.global_limit,
+        };
+        match self.registry.submit(&submit)? {
+            AdmissionOutcome::Created(created) => {
+                let job_id = created.job.job_id.clone();
+                self.ensure_attempt_dispatched(&created.attempt)
+                    .map_err(|error| error.with_operation_id(job_id.clone()))?;
+                Ok(job_id)
+            }
+            AdmissionOutcome::Existing { job } => Ok(job.job_id),
+        }
+    }
+
+    fn observe_admitted_task(
+        &self,
+        job_id: &str,
+        wait_ms: u64,
+        stdout_tail_bytes: u64,
+        stderr_tail_bytes: u64,
+    ) -> RuntimeResult<TaskObservation> {
         self.observe_task(&TaskObserveRequest {
             schema_version: RUNTIME_SCHEMA_VERSION,
-            job_id: job_id.clone(),
-            wait_ms: request.wait_ms,
+            job_id: job_id.to_string(),
+            wait_ms,
             wait_until: TaskObserveWaitUntil::Terminal,
-            stdout_tail_bytes: request.stdout_tail_bytes,
-            stderr_tail_bytes: request.stderr_tail_bytes,
+            stdout_tail_bytes,
+            stderr_tail_bytes,
             stdout_offset: None,
             stderr_offset: None,
         })
-        .map_err(|error| error.with_operation_id(job_id))
+        .map_err(|error| error.with_operation_id(job_id.to_string()))
+    }
+
+    fn resolve_proposal(&self, proposal: &super::TaskRunProposal) -> TaskRunRequest {
+        let timeout_ms = proposal
+            .execution
+            .timeout_ms
+            .unwrap_or(self.executor.max_runtime_ms);
+        TaskRunRequest {
+            schema_version: proposal.schema_version,
+            client_request_id: proposal.client_request_id.clone(),
+            principal: proposal.principal.clone(),
+            global_limit: proposal.global_limit,
+            execution: super::UniversalExecutionRequest {
+                workspace_id: proposal.execution.workspace_id.clone(),
+                executable: proposal.execution.executable.clone(),
+                args: proposal.execution.args.clone(),
+                cwd_relative: proposal.execution.cwd_relative.clone(),
+                env: proposal.execution.env.clone(),
+                timeout_ms,
+                stdout_limit_bytes: proposal
+                    .execution
+                    .stdout_limit_bytes
+                    .unwrap_or(self.executor.max_output_bytes),
+                stderr_limit_bytes: proposal
+                    .execution
+                    .stderr_limit_bytes
+                    .unwrap_or(self.executor.max_output_bytes),
+                steps: proposal
+                    .execution
+                    .steps
+                    .iter()
+                    .map(|step| super::UniversalExecutionStep {
+                        id: step.id.clone(),
+                        executable: step.executable.clone(),
+                        args: step.args.clone(),
+                        cwd_relative: step.cwd_relative.clone(),
+                        env: step.env.clone(),
+                        timeout_ms: step.timeout_ms.unwrap_or(timeout_ms),
+                        continue_on_error: step.continue_on_error,
+                    })
+                    .collect(),
+                budget: proposal.execution.budget.clone(),
+                execution_profile: proposal.execution.execution_profile,
+                foreign_references: proposal.execution.foreign_references.clone(),
+            },
+            wait_ms: proposal.wait_ms,
+            stdout_tail_bytes: proposal.stdout_tail_bytes,
+            stderr_tail_bytes: proposal.stderr_tail_bytes,
+        }
     }
 
     pub fn open_workspace(
@@ -1266,17 +1384,10 @@ impl Runtime {
             let mut terminal = self.prepare_runner_terminal(&current)?;
             self.append_terminal_evidence(&current, &mut terminal)?;
             match self.registry.commit_terminal(&terminal) {
-                Ok(projection) => {
+                Ok(_) => {
                     release_terminal_unit(&current.unit_name);
                     self.cleanup_payload_view(&current.attempt_id)?;
-                    return self.observation_from_parts(
-                        projection,
-                        Some(current),
-                        4096,
-                        4096,
-                        None,
-                        None,
-                    );
+                    return self.observation_from_registry(&current.job_id, 4096, 4096);
                 }
                 Err(error)
                     if retry == 0 && error.code == RuntimeErrorCode::AttemptStateConflict =>
@@ -1327,13 +1438,17 @@ impl Runtime {
         stderr_tail_bytes: u64,
     ) -> RuntimeResult<TaskObservation> {
         let snapshot = self.registry.job_snapshot(job_id)?;
+        let effective_limits = effective_limits_from_plan_json(&snapshot.job.execution_plan_json)?;
         self.observation_from_parts(
             snapshot.projection,
             snapshot.attempt,
-            stdout_tail_bytes,
-            stderr_tail_bytes,
-            None,
-            None,
+            effective_limits,
+            ObservationOutputRequest {
+                stdout_tail_bytes,
+                stderr_tail_bytes,
+                stdout_offset: None,
+                stderr_offset: None,
+            },
         )
     }
 
@@ -1342,13 +1457,17 @@ impl Runtime {
         snapshot: JobSnapshot,
         request: &TaskObserveRequest,
     ) -> RuntimeResult<TaskObservation> {
+        let effective_limits = effective_limits_from_plan_json(&snapshot.job.execution_plan_json)?;
         self.observation_from_parts(
             snapshot.projection,
             snapshot.attempt,
-            request.stdout_tail_bytes,
-            request.stderr_tail_bytes,
-            request.stdout_offset,
-            request.stderr_offset,
+            effective_limits,
+            ObservationOutputRequest {
+                stdout_tail_bytes: request.stdout_tail_bytes,
+                stderr_tail_bytes: request.stderr_tail_bytes,
+                stdout_offset: request.stdout_offset,
+                stderr_offset: request.stderr_offset,
+            },
         )
     }
 
@@ -1356,10 +1475,8 @@ impl Runtime {
         &self,
         projection: super::JobProjection,
         attempt: Option<AttemptRecord>,
-        stdout_tail_bytes: u64,
-        stderr_tail_bytes: u64,
-        stdout_offset: Option<u64>,
-        stderr_offset: Option<u64>,
+        effective_limits: super::EffectiveExecutionLimits,
+        output_request: ObservationOutputRequest,
     ) -> RuntimeResult<TaskObservation> {
         let job_id = projection.job_id.clone();
         let terminal = projection.result_available;
@@ -1401,16 +1518,16 @@ impl Runtime {
         ) = if let Some(attempt) = &attempt {
             let stdout_view = read_output_text(
                 &Path::new(&attempt.bundle_path).join(STDOUT_FILE),
-                stdout_offset,
-                stdout_tail_bytes,
+                output_request.stdout_offset,
+                output_request.stdout_tail_bytes,
                 terminal,
                 "stdoutOffset",
                 "stdoutTailBytes",
             )?;
             let stderr_view = read_output_text(
                 &Path::new(&attempt.bundle_path).join(STDERR_FILE),
-                stderr_offset,
-                stderr_tail_bytes,
+                output_request.stderr_offset,
+                output_request.stderr_tail_bytes,
                 terminal,
                 "stderrOffset",
                 "stderrTailBytes",
@@ -1443,8 +1560,8 @@ impl Runtime {
             )
         } else {
             (
-                OutputView::empty(stdout_offset, terminal),
-                OutputView::empty(stderr_offset, terminal),
+                OutputView::empty(output_request.stdout_offset, terminal),
+                OutputView::empty(output_request.stderr_offset, terminal),
                 false,
                 false,
                 Vec::new(),
@@ -1464,6 +1581,7 @@ impl Runtime {
             execution_disposition: projection.execution_disposition,
             execution_reason_code: projection.execution_reason_code,
             delivery_disposition: projection.delivery_disposition,
+            effective_limits,
             recovery_required: projection.recovery_required,
             semantic_completion_evaluated: projection.semantic_completion_evaluated,
             result_available: projection.result_available,
@@ -2017,12 +2135,12 @@ impl Runtime {
             reason_code: reason_code.to_string(),
         };
         self.append_terminal_evidence(&current, &mut terminal)?;
-        let projection = self.registry.commit_terminal(&terminal)?;
+        let _ = self.registry.commit_terminal(&terminal)?;
         if state != AttemptState::Orphaned {
             release_terminal_unit(&current.unit_name);
             self.cleanup_payload_view(&current.attempt_id)?;
         }
-        self.observation_from_parts(projection, Some(current), 4096, 4096, None, None)
+        self.observation_from_registry(&current.job_id, 4096, 4096)
     }
 
     pub(crate) fn append_terminal_evidence(
@@ -2507,11 +2625,7 @@ fn workspace_record_page(
     (page, Some(next_cursor))
 }
 
-fn validate_run_request(
-    request: &TaskRunRequest,
-    max_runtime_ms: u64,
-    max_output_bytes: u64,
-) -> RuntimeResult<()> {
+fn validate_run_request_structure(request: &TaskRunRequest) -> RuntimeResult<()> {
     if request.schema_version != RUNTIME_SCHEMA_VERSION {
         return Err(RuntimeError::invalid(
             "unsupported runtime schema version",
@@ -2570,24 +2684,6 @@ fn validate_run_request(
             "execution",
         ));
     }
-    if request.execution.timeout_ms > max_runtime_ms {
-        return Err(RuntimeError::invalid(
-            format!("timeoutMs exceeds configured maximum {max_runtime_ms}"),
-            "execution.timeoutMs",
-        ));
-    }
-    if request.execution.stdout_limit_bytes > max_output_bytes {
-        return Err(RuntimeError::invalid(
-            format!("stdoutLimitBytes exceeds configured maximum {max_output_bytes}"),
-            "execution.stdoutLimitBytes",
-        ));
-    }
-    if request.execution.stderr_limit_bytes > max_output_bytes {
-        return Err(RuntimeError::invalid(
-            format!("stderrLimitBytes exceeds configured maximum {max_output_bytes}"),
-            "execution.stderrLimitBytes",
-        ));
-    }
     validate_execution_budget(&request.execution.budget, "execution.budget")?;
     crate::universal::validate_exec_payload(
         &request.execution.args,
@@ -2635,7 +2731,6 @@ fn validate_run_request(
         validate_contained_environment(&request.execution.env, "execution.env")?;
     }
     let mut step_ids = std::collections::BTreeSet::new();
-    let mut total_timeout = 0_u64;
     for (index, step) in request.execution.steps.iter().enumerate() {
         validate_text_id(&step.id, &format!("execution.steps[{index}].id"))?;
         if !step_ids.insert(&step.id) {
@@ -2670,17 +2765,101 @@ fn validate_run_request(
         if request.execution.execution_profile == super::ExecutionProfile::ContainedLocal {
             validate_contained_environment(&step.env, &format!("execution.steps[{index}].env"))?;
         }
-        total_timeout = total_timeout.checked_add(step.timeout_ms).ok_or_else(|| {
-            RuntimeError::invalid("step timeout sum overflowed", "execution.steps")
-        })?;
     }
-    if !request.execution.steps.is_empty() && total_timeout > request.execution.timeout_ms {
+    Ok(())
+}
+
+fn validate_run_proposal_structure(proposal: &super::TaskRunProposal) -> RuntimeResult<()> {
+    let validation_request = TaskRunRequest {
+        schema_version: proposal.schema_version,
+        client_request_id: proposal.client_request_id.clone(),
+        principal: proposal.principal.clone(),
+        global_limit: proposal.global_limit,
+        execution: super::UniversalExecutionRequest {
+            workspace_id: proposal.execution.workspace_id.clone(),
+            executable: proposal.execution.executable.clone(),
+            args: proposal.execution.args.clone(),
+            cwd_relative: proposal.execution.cwd_relative.clone(),
+            env: proposal.execution.env.clone(),
+            timeout_ms: proposal.execution.timeout_ms.unwrap_or(1),
+            stdout_limit_bytes: proposal.execution.stdout_limit_bytes.unwrap_or(1),
+            stderr_limit_bytes: proposal.execution.stderr_limit_bytes.unwrap_or(1),
+            steps: proposal
+                .execution
+                .steps
+                .iter()
+                .map(|step| super::UniversalExecutionStep {
+                    id: step.id.clone(),
+                    executable: step.executable.clone(),
+                    args: step.args.clone(),
+                    cwd_relative: step.cwd_relative.clone(),
+                    env: step.env.clone(),
+                    timeout_ms: step.timeout_ms.unwrap_or(1),
+                    continue_on_error: step.continue_on_error,
+                })
+                .collect(),
+            budget: proposal.execution.budget.clone(),
+            execution_profile: proposal.execution.execution_profile,
+            foreign_references: proposal.execution.foreign_references.clone(),
+        },
+        wait_ms: proposal.wait_ms,
+        stdout_tail_bytes: proposal.stdout_tail_bytes,
+        stderr_tail_bytes: proposal.stderr_tail_bytes,
+    };
+    validate_run_request_structure(&validation_request)
+}
+
+fn validate_new_admission_policy(
+    request: &TaskRunRequest,
+    max_runtime_ms: u64,
+    max_output_bytes: u64,
+) -> RuntimeResult<()> {
+    if request.execution.timeout_ms > max_runtime_ms {
         return Err(RuntimeError::invalid(
-            "sum of step timeoutMs values exceeds execution.timeoutMs",
+            format!("timeoutMs exceeds configured maximum {max_runtime_ms}"),
             "execution.timeoutMs",
         ));
     }
+    if request.execution.stdout_limit_bytes > max_output_bytes {
+        return Err(RuntimeError::invalid(
+            format!("stdoutLimitBytes exceeds configured maximum {max_output_bytes}"),
+            "execution.stdoutLimitBytes",
+        ));
+    }
+    if request.execution.stderr_limit_bytes > max_output_bytes {
+        return Err(RuntimeError::invalid(
+            format!("stderrLimitBytes exceeds configured maximum {max_output_bytes}"),
+            "execution.stderrLimitBytes",
+        ));
+    }
     Ok(())
+}
+
+fn effective_limits_from_plan_json(
+    execution_plan_json: &str,
+) -> RuntimeResult<super::EffectiveExecutionLimits> {
+    let plan: RuntimeExecutionPlan =
+        serde_json::from_str(execution_plan_json).map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                format!("stored execution plan is invalid: {error}"),
+                Some("executionPlan"),
+                false,
+            )
+        })?;
+    Ok(super::EffectiveExecutionLimits {
+        timeout_ms: plan.timeout_ms,
+        stdout_limit_bytes: plan.stdout_limit_bytes,
+        stderr_limit_bytes: plan.stderr_limit_bytes,
+        step_timeouts: plan
+            .steps
+            .into_iter()
+            .map(|step| super::EffectiveStepTimeout {
+                id: step.id,
+                timeout_ms: step.timeout_ms,
+            })
+            .collect(),
+    })
 }
 
 fn validate_execution_budget(
@@ -3180,7 +3359,10 @@ fn tool_error(context: &str, error: std::io::Error) -> RuntimeError {
 #[cfg(test)]
 mod trusted_systemd_command_tests {
     use super::*;
-    use crate::UniversalExecutionRequest;
+    use crate::{
+        ExecutionBudget, ExecutionProfile, ExecutionProposal, ExecutionStepProposal,
+        TaskRunProposal, UniversalExecutionRequest,
+    };
     use proptest::prelude::*;
 
     proptest! {
@@ -3223,6 +3405,145 @@ mod trusted_systemd_command_tests {
             prop_assert_eq!(offset, fs::metadata(&path).unwrap().len());
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    fn proposal_runtime(label: &str, max_runtime_ms: u64, max_output_bytes: u64) -> Runtime {
+        let root = std::env::temp_dir().join(format!(
+            "ordivon-proposal-resolution-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = root.join("store");
+        let registry = super::RegistryConfig {
+            db_path: store.join("registry.sqlite3"),
+            store_root: store.clone(),
+            busy_timeout_ms: 5_000,
+        };
+        Runtime::new(super::RuntimeConfig {
+            registry,
+            executor: UniversalExecutorConfig {
+                store_root: root.join("runtime"),
+                workspace_root: None,
+                workspace_uid: None,
+                workspace_gid: None,
+                runner_path: PathBuf::from("/usr/bin/true"),
+                allowed_executable_roots: vec![PathBuf::from("/")],
+                max_runtime_ms,
+                max_output_bytes,
+            },
+            startup_grace_ms: 2_000,
+        })
+        .unwrap()
+    }
+
+    fn proposal(step_timeouts: &[Option<u64>]) -> TaskRunProposal {
+        TaskRunProposal {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            client_request_id: "request:proposal-resolution".to_string(),
+            principal: "principal:test".to_string(),
+            global_limit: 4,
+            execution: ExecutionProposal {
+                workspace_id: "workspace:test".to_string(),
+                executable: "/usr/bin/true".to_string(),
+                args: Vec::new(),
+                cwd_relative: ".".to_string(),
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                stdout_limit_bytes: None,
+                stderr_limit_bytes: None,
+                steps: step_timeouts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, timeout_ms)| ExecutionStepProposal {
+                        id: format!("step-{index}"),
+                        executable: "/usr/bin/true".to_string(),
+                        args: Vec::new(),
+                        cwd_relative: ".".to_string(),
+                        env: BTreeMap::new(),
+                        timeout_ms: *timeout_ms,
+                        continue_on_error: false,
+                    })
+                    .collect(),
+                budget: ExecutionBudget::default(),
+                execution_profile: ExecutionProfile::TrustedLocal,
+                foreign_references: Vec::new(),
+            },
+            wait_ms: 0,
+            stdout_tail_bytes: 0,
+            stderr_tail_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn proposal_resolution_only_fills_omitted_limits_and_preserves_explicit_constraints() {
+        let runtime = proposal_runtime("limits", 10_000, 1_048_576);
+        let omitted = proposal(&[]);
+        let resolved = runtime.resolve_proposal(&omitted);
+        assert_eq!(resolved.execution.timeout_ms, 10_000);
+        assert_eq!(resolved.execution.stdout_limit_bytes, 1_048_576);
+        assert_eq!(resolved.execution.stderr_limit_bytes, 1_048_576);
+
+        let mut explicit = omitted;
+        explicit.execution.timeout_ms = Some(2_000);
+        explicit.execution.stdout_limit_bytes = Some(4_096);
+        explicit.execution.stderr_limit_bytes = Some(8_192);
+        let resolved = runtime.resolve_proposal(&explicit);
+        assert_eq!(resolved.execution.timeout_ms, 2_000);
+        assert_eq!(resolved.execution.stdout_limit_bytes, 4_096);
+        assert_eq!(resolved.execution.stderr_limit_bytes, 8_192);
+
+        explicit.execution.timeout_ms = Some(99_000);
+        let resolved = runtime.resolve_proposal(&explicit);
+        assert_eq!(resolved.execution.timeout_ms, 99_000);
+        let error = validate_new_admission_policy(&resolved, 10_000, 1_048_576).unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("execution.timeoutMs"));
+    }
+
+    #[test]
+    fn proposal_plan_uses_shared_overall_deadline_without_rewriting_explicit_step_limits() {
+        let runtime = proposal_runtime("plan", 10_000, 1_048_576);
+        let fully_explicit = proposal(&[Some(2_000), Some(3_000)]);
+        let resolved = runtime.resolve_proposal(&fully_explicit);
+        assert_eq!(resolved.execution.timeout_ms, 10_000);
+        assert_eq!(
+            resolved
+                .execution
+                .steps
+                .iter()
+                .map(|step| step.timeout_ms)
+                .collect::<Vec<_>>(),
+            vec![2_000, 3_000]
+        );
+
+        let mixed = proposal(&[Some(2_000), None]);
+        let resolved = runtime.resolve_proposal(&mixed);
+        assert_eq!(resolved.execution.timeout_ms, 10_000);
+        assert_eq!(
+            resolved
+                .execution
+                .steps
+                .iter()
+                .map(|step| step.timeout_ms)
+                .collect::<Vec<_>>(),
+            vec![2_000, 10_000]
+        );
+
+        let over_sum = proposal(&[Some(8_000), Some(8_000)]);
+        let resolved = runtime.resolve_proposal(&over_sum);
+        assert_eq!(resolved.execution.timeout_ms, 10_000);
+        assert_eq!(
+            resolved
+                .execution
+                .steps
+                .iter()
+                .map(|step| step.timeout_ms)
+                .collect::<Vec<_>>(),
+            vec![8_000, 8_000]
+        );
+        validate_run_request_structure(&resolved).unwrap();
     }
 
     #[test]
@@ -3311,7 +3632,8 @@ mod trusted_systemd_command_tests {
             stdout_tail_bytes: 0,
             stderr_tail_bytes: 0,
         };
-        let error = validate_run_request(&request, 60_000, 1_024).unwrap_err();
+        validate_run_request_structure(&request).unwrap();
+        let error = validate_new_admission_policy(&request, 60_000, 1_024).unwrap_err();
         assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
         assert_eq!(error.field.as_deref(), Some("execution.stdoutLimitBytes"));
     }
@@ -3341,7 +3663,7 @@ mod trusted_systemd_command_tests {
             stdout_tail_bytes: 0,
             stderr_tail_bytes: 0,
         };
-        let error = validate_run_request(&request, 60_000, 1_024).unwrap_err();
+        let error = validate_run_request_structure(&request).unwrap_err();
         assert_eq!(
             error.field.as_deref(),
             Some("execution.env.CARGO_TARGET_DIR")
@@ -3357,7 +3679,7 @@ mod trusted_systemd_command_tests {
             timeout_ms: 1_000,
             continue_on_error: false,
         });
-        let error = validate_run_request(&request, 60_000, 1_024).unwrap_err();
+        let error = validate_run_request_structure(&request).unwrap_err();
         assert_eq!(error.field.as_deref(), Some("execution.steps[0].env.HOME"));
     }
 

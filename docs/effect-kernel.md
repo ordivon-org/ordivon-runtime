@@ -88,15 +88,15 @@ Model output, a tool-call draft, or an Agent plan is only a candidate action. A 
 
 ### 2. Stable operation identity
 
-The committed operation identity must bind every fact whose change would create a materially different action. Today this includes the authenticated principal, client request identity, Git Workspace source-state digest, executable identity, arguments, explicit request environment, working directory, limits, and budget.
+The committed operation identity must bind every fact whose change would create a materially different action. Today this includes the authenticated principal, client request identity, Git Workspace source-state digest, executable identity, arguments, explicit request environment, working directory, physical budgets, and execution-limit intent. For supported mechanical limits, an explicit value and an omitted/delegated value are different request facts: omission is not rewritten into the current operator value before request identity is formed.
 
-Future facts may enter this identity only when they have enforceable semantics, not because they are useful metadata.
+On first admission, Runtime resolves any delegated mechanical limits into one concrete Execution Plan and binds that plan to the physical world snapshot. The durable plan therefore records what actually governed execution even when the Agent intentionally left a limit to Runtime. Future facts may enter identity only when they have enforceable semantics, not because they are useful metadata.
 
 ### 3. Request replay does not reinterpret the world
 
-`clientRequestId` identifies the Agent's operation request, not the current Workspace state. A replay of the same request returns the originally committed Job even when that Job or later work has changed or closed the Workspace. Changing arguments, explicit request environment, limits, budget, executable request, or Workspace identity under the same `clientRequestId` is a conflict. Observation preferences and the server's current concurrency policy are not part of the operation request.
+`clientRequestId` identifies the Agent's operation request, not the current Workspace state. A replay of the same request returns the originally committed Job even when that Job or later work has changed or closed the Workspace. Changing arguments, explicit request environment, budget, executable request, Workspace identity, an explicit limit value, or whether a supported limit was delegated under the same `clientRequestId` is a conflict. Observation preferences, concurrency policy, and the operator values later used to resolve delegated limits are not part of the Agent's proposal identity.
 
-The first admission separately captures the world precondition and combines it with request identity to form the Operation identity. This separation is required for response-loss recovery: an effect must not make its own request unreplayable.
+Existing-Job lookup precedes current new-admission policy. A later operator-policy change therefore cannot make an already committed request unreplayable or silently recompute its effective plan. The first admission separately resolves delegated mechanical limits, captures the world precondition, and combines the concrete plan with request identity to form the Operation identity. This separation is required for response-loss recovery: an effect must not make its own request unreplayable.
 
 ### 4. At-most-once physical dispatch per Attempt
 

@@ -45,20 +45,21 @@ pub use repair::{
 };
 pub(crate) use types::{
     operation_request_identity_digest, operation_request_identity_digest_from_plan,
-    REQUEST_IDENTITY_PREFIX,
+    proposal_request_identity_digest, PROPOSAL_IDENTITY_PREFIX, REQUEST_IDENTITY_PREFIX,
 };
 pub use types::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,
-    CreatedAdmission, ExecutionBudget, ExecutionProfile, ForeignReference, JobDesiredState,
+    CreatedAdmission, EffectiveExecutionLimits, EffectiveStepTimeout, ExecutionBudget,
+    ExecutionProfile, ExecutionProposal, ExecutionStepProposal, ForeignReference, JobDesiredState,
     JobProjection, JobResolution, ReservationRecord, ReservationState, RunnerIdentity,
     RuntimeArtifactRecord, RuntimeDeliveryDisposition, RuntimeExecutionPlan, RuntimeExecutionStep,
     RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult,
     RuntimeJobRecord, RuntimeJobSummary, RuntimeWorkspaceGetRequest, RuntimeWorkspaceIssue,
     RuntimeWorkspaceIssueStage, RuntimeWorkspaceListCursor, RuntimeWorkspaceListRequest,
     RuntimeWorkspaceListResult, RuntimeWorkspaceSummary, SubmitRequest, TaskCancelRequest,
-    TaskObservation, TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest, TerminalCommit,
-    UniversalExecutionRequest, UniversalExecutionStep, MAX_ARTIFACT_READ_BYTES,
+    TaskObservation, TaskObserveRequest, TaskObserveWaitUntil, TaskRunProposal, TaskRunRequest,
+    TerminalCommit, UniversalExecutionRequest, UniversalExecutionStep, MAX_ARTIFACT_READ_BYTES,
     MAX_RUNTIME_LIST_LIMIT, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
 };
 

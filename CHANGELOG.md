@@ -17,6 +17,7 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - Workspace-bounded Runtime Job reattachment through `task.list(workspaceId=...)`, backed by a recreatable query index rather than a new state owner;
 - stable cursor pagination for `workspace.list`, so bounded Workspace inventory no longer silently stops at the first page;
 - exact `currentHeadRevision` on Workspace projections and a projection-only `ordivon-runtime-inspect workspace` view over Git state, active Jobs, recent Attempts, progress, output activity, and Artifact counts.
+- typed Agent-authored execution proposals for `workspace.exec` and `workspace.execPlan`: Job/output/step mechanical limits may be omitted, Core preserves omission in v2 request identity, resolves only omitted values at first admission, and projects the frozen concrete plan as `effectiveLimits`.
 
 ### Changed
 
@@ -38,6 +39,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - Runtime deployment now has one release authority for five Rust binaries, six installed operator executables, and `mcp_probe.py`; candidate and deployment receipts bind each artifact's kind, bytes, digest, and mode, status verifies the same installed set, and rollback restores the complete previous set while remaining compatible with v1 binary-only receipts;
 - release preparation materializes the requested Git Commit in a temporary detached checkout before building or staging operator artifacts, so mutable checkout dirt and `assume-unchanged`/similar index flags cannot contaminate a candidate that claims another source revision; local checkout HEAD and dirt are diagnostics, while the explicit required ref remains the release-selection gate.
 - successful explicit rollback is now a first-class release-state event for status and protocol compatibility; the restored artifact set is verified from `rollback-result.json`, and the prior Commit is preserved only when the complete pre-deployment artifact fingerprint proves it, otherwise revision identity remains explicitly unknown.
+- idempotent execution replay now resolves an existing Job before applying current runtime/output policy, so operator-policy drift cannot invalidate or recompute an already committed request; new admissions still use current policy, and explicit Agent limits are rejected rather than silently clamped when they exceed it.
+- fully explicit legacy execution requests retain the v1 request-identity path, while requests that use optional proposal semantics enter the v2 identity path owned by Runtime Core rather than MCP transport logic.
 
 ### Fixed
 
@@ -45,6 +48,7 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 - `artifactsAvailable` now reflects registered Artifact existence rather than merely the presence of an Attempt result digest;
 - recovery-bearing states such as `orphaned` explicitly project reconciliation requirements instead of appearing mechanically complete;
 - multi-field Job projections are assembled from one Registry read snapshot so execution, recovery, Artifact, and terminal-reason facts cannot drift across concurrent reads;
+- the bootstrap rule requiring `sum(step.timeoutMs) <= execution.timeoutMs` has been removed: the Job timeout is a shared overall deadline and step timeouts are independent local upper bounds, matching Runner behavior;
 - post-admission execution errors now carry the durable Job identity and report `commitState=committed` with `retryClass=reconcile_first` instead of incorrectly claiming that a Runtime operation was not committed;
 - Doctor capacity-holder projection now reports `capacityHoldersTruncated` instead of silently presenting the first 50 holders as complete, and terminal control evidence no longer silently drops error detail after 4096 characters.
 - Runtime `CONCURRENCY_LIMIT` errors now report `holdersTruncated`, so a bounded 16-identity holder projection cannot be mistaken for the complete active set when global capacity is configured above that projection size.

@@ -8,16 +8,17 @@ use ordivon_runtime_core::{
     read_workspace_slice_compact, read_workspace_text_compact, workspace_diff_compact,
     ArtifactReadRequest, ArtifactReadResult, CompactWorkspaceDiffResult,
     CompactWorkspaceOpenResult, DurableWorkspacePatchRequest, DurableWorkspacePatchResult,
-    ExecutionBudget, ExecutionProfile, ForeignReference, GitWorkspaceCreateRequest, Runtime,
-    RuntimeCapacity, RuntimeConfig, RuntimeError, RuntimeJobListRequest, RuntimeJobListResult,
-    RuntimeWorkspaceGetRequest, RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult,
-    RuntimeWorkspaceSummary, TaskCancelRequest, TaskObservation, TaskObserveRequest,
-    TaskRunRequest, UniversalExecError, UniversalExecutionRequest, UniversalExecutionStep,
-    UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
-    WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceFilePatch, WorkspaceMutateRequest,
-    WorkspaceMutateResult, WorkspacePatchOperationStatus, WorkspacePatchRequest,
-    WorkspacePatchStatusRequest, WorkspaceReadRequest as ExecWorkspaceReadRequest,
-    WorkspaceReadSliceRequest, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
+    ExecutionBudget, ExecutionProfile, ExecutionProposal, ExecutionStepProposal, ForeignReference,
+    GitWorkspaceCreateRequest, Runtime, RuntimeCapacity, RuntimeConfig, RuntimeError,
+    RuntimeJobListRequest, RuntimeJobListResult, RuntimeWorkspaceGetRequest,
+    RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
+    TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunProposal, TaskRunRequest,
+    UniversalExecError, UniversalExecutionRequest, UniversalExecutionStep, UniversalExecutorConfig,
+    WorkspaceCloseRequest, WorkspaceCloseResult, WorkspaceDiffRequest as ExecWorkspaceDiffRequest,
+    WorkspaceFilePatch, WorkspaceMutateRequest, WorkspaceMutateResult,
+    WorkspacePatchOperationStatus, WorkspacePatchRequest, WorkspacePatchStatusRequest,
+    WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
+    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{IntoCallToolResult, ToolCallContext};
@@ -130,7 +131,7 @@ pub struct WorkspaceExecRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
     pub client_request_id: String,
-    pub execution: UniversalExecutionRequest,
+    pub execution: ExecutionProposal,
     #[serde(default = "default_exec_wait_ms")]
     #[schemars(range(max = MAX_TASK_WAIT_MS))]
     pub wait_ms: u64,
@@ -147,9 +148,18 @@ pub struct WorkspaceExecRequest {
 pub struct WorkspaceExecPlanInput {
     pub workspace_id: String,
     #[schemars(length(min = 1))]
-    pub steps: Vec<UniversalExecutionStep>,
-    pub stdout_limit_bytes: u64,
-    pub stderr_limit_bytes: u64,
+    pub steps: Vec<ExecutionStepProposal>,
+    /// Optional Job-wide deadline. The fully explicit legacy request shape preserves its
+    /// historical step-sum identity; every proposal-shaped omission delegates to Runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub stdout_limit_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub stderr_limit_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
     pub budget: ExecutionBudget,
     #[serde(default)]
@@ -174,6 +184,11 @@ pub struct WorkspaceExecPlanRequest {
     #[serde(default = "default_exec_tail_bytes")]
     #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stderr_tail_bytes: u64,
+}
+
+enum BoundTaskRun {
+    Legacy(TaskRunRequest),
+    Proposal(TaskRunProposal),
 }
 
 #[derive(Clone)]
@@ -208,41 +223,154 @@ impl ExecutionContext {
         }
     }
 
-    fn bind(&self, request: WorkspaceExecRequest) -> TaskRunRequest {
-        TaskRunRequest {
-            schema_version: request.schema_version,
-            client_request_id: request.client_request_id,
-            principal: self.principal.clone(),
-            global_limit: self.global_limit,
-            execution: request.execution,
-            wait_ms: request.wait_ms,
-            stdout_tail_bytes: request.stdout_tail_bytes,
-            stderr_tail_bytes: request.stderr_tail_bytes,
+    fn bind(&self, request: WorkspaceExecRequest) -> BoundTaskRun {
+        let legacy_compatible = request.execution.timeout_ms.is_some()
+            && request.execution.stdout_limit_bytes.is_some()
+            && request.execution.stderr_limit_bytes.is_some()
+            && request
+                .execution
+                .steps
+                .iter()
+                .all(|step| step.timeout_ms.is_some());
+        if legacy_compatible {
+            BoundTaskRun::Legacy(TaskRunRequest {
+                schema_version: request.schema_version,
+                client_request_id: request.client_request_id,
+                principal: self.principal.clone(),
+                global_limit: self.global_limit,
+                execution: UniversalExecutionRequest {
+                    workspace_id: request.execution.workspace_id,
+                    executable: request.execution.executable,
+                    args: request.execution.args,
+                    cwd_relative: request.execution.cwd_relative,
+                    env: request.execution.env,
+                    timeout_ms: request.execution.timeout_ms.expect("checked explicit"),
+                    stdout_limit_bytes: request
+                        .execution
+                        .stdout_limit_bytes
+                        .expect("checked explicit"),
+                    stderr_limit_bytes: request
+                        .execution
+                        .stderr_limit_bytes
+                        .expect("checked explicit"),
+                    steps: request
+                        .execution
+                        .steps
+                        .into_iter()
+                        .map(|step| UniversalExecutionStep {
+                            id: step.id,
+                            executable: step.executable,
+                            args: step.args,
+                            cwd_relative: step.cwd_relative,
+                            env: step.env,
+                            timeout_ms: step.timeout_ms.expect("checked explicit"),
+                            continue_on_error: step.continue_on_error,
+                        })
+                        .collect(),
+                    budget: request.execution.budget,
+                    execution_profile: request.execution.execution_profile,
+                    foreign_references: request.execution.foreign_references,
+                },
+                wait_ms: request.wait_ms,
+                stdout_tail_bytes: request.stdout_tail_bytes,
+                stderr_tail_bytes: request.stderr_tail_bytes,
+            })
+        } else {
+            BoundTaskRun::Proposal(TaskRunProposal {
+                schema_version: request.schema_version,
+                client_request_id: request.client_request_id,
+                principal: self.principal.clone(),
+                global_limit: self.global_limit,
+                execution: request.execution,
+                wait_ms: request.wait_ms,
+                stdout_tail_bytes: request.stdout_tail_bytes,
+                stderr_tail_bytes: request.stderr_tail_bytes,
+            })
         }
     }
 
-    fn bind_plan(&self, request: WorkspaceExecPlanRequest) -> Result<TaskRunRequest, ToolError> {
-        let first = request.execution.steps.first().ok_or_else(|| {
+    fn bind_plan(&self, request: WorkspaceExecPlanRequest) -> Result<BoundTaskRun, ToolError> {
+        let first = request.execution.steps.first().cloned().ok_or_else(|| {
             ToolError::invalid("steps must contain at least one item", "execution.steps")
         })?;
-        let timeout_ms = request
+        let all_step_timeouts_explicit = request
             .execution
             .steps
             .iter()
-            .try_fold(0_u64, |total, step| total.checked_add(step.timeout_ms))
-            .ok_or_else(|| ToolError::invalid("step timeout sum overflowed", "execution.steps"))?;
-        Ok(TaskRunRequest {
+            .all(|step| step.timeout_ms.is_some());
+        let legacy_compatible = request.execution.timeout_ms.is_none()
+            && all_step_timeouts_explicit
+            && request.execution.stdout_limit_bytes.is_some()
+            && request.execution.stderr_limit_bytes.is_some();
+        if legacy_compatible {
+            // Compatibility only: v1 execPlan identity historically derived its overall timeout
+            // from the explicit step sum. This arithmetic is not a Runtime execution law.
+            let timeout_ms = request
+                .execution
+                .steps
+                .iter()
+                .try_fold(0_u64, |total, step| {
+                    total.checked_add(step.timeout_ms.expect("checked explicit"))
+                })
+                .ok_or_else(|| {
+                    ToolError::invalid("step timeout sum overflowed", "execution.steps")
+                })?;
+            return Ok(BoundTaskRun::Legacy(TaskRunRequest {
+                schema_version: request.schema_version,
+                client_request_id: request.client_request_id,
+                principal: self.principal.clone(),
+                global_limit: self.global_limit,
+                execution: UniversalExecutionRequest {
+                    workspace_id: request.execution.workspace_id,
+                    executable: first.executable.clone(),
+                    args: first.args.clone(),
+                    cwd_relative: first.cwd_relative.clone(),
+                    env: first.env.clone(),
+                    timeout_ms,
+                    stdout_limit_bytes: request
+                        .execution
+                        .stdout_limit_bytes
+                        .expect("checked explicit"),
+                    stderr_limit_bytes: request
+                        .execution
+                        .stderr_limit_bytes
+                        .expect("checked explicit"),
+                    steps: request
+                        .execution
+                        .steps
+                        .into_iter()
+                        .map(|step| UniversalExecutionStep {
+                            id: step.id,
+                            executable: step.executable,
+                            args: step.args,
+                            cwd_relative: step.cwd_relative,
+                            env: step.env,
+                            timeout_ms: step.timeout_ms.expect("checked explicit"),
+                            continue_on_error: step.continue_on_error,
+                        })
+                        .collect(),
+                    budget: request.execution.budget,
+                    execution_profile: request.execution.execution_profile,
+                    foreign_references: request.execution.foreign_references,
+                },
+                wait_ms: request.wait_ms,
+                stdout_tail_bytes: request.stdout_tail_bytes,
+                stderr_tail_bytes: request.stderr_tail_bytes,
+            }));
+        }
+
+        Ok(BoundTaskRun::Proposal(TaskRunProposal {
             schema_version: request.schema_version,
             client_request_id: request.client_request_id,
             principal: self.principal.clone(),
             global_limit: self.global_limit,
-            execution: UniversalExecutionRequest {
+            execution: ExecutionProposal {
                 workspace_id: request.execution.workspace_id,
-                executable: first.executable.clone(),
-                args: first.args.clone(),
-                cwd_relative: first.cwd_relative.clone(),
-                env: first.env.clone(),
-                timeout_ms,
+                executable: first.executable,
+                args: first.args,
+                cwd_relative: first.cwd_relative,
+                env: first.env,
+                timeout_ms: request.execution.timeout_ms,
                 stdout_limit_bytes: request.execution.stdout_limit_bytes,
                 stderr_limit_bytes: request.execution.stderr_limit_bytes,
                 steps: request.execution.steps,
@@ -253,7 +381,7 @@ impl ExecutionContext {
             wait_ms: request.wait_ms,
             stdout_tail_bytes: request.stdout_tail_bytes,
             stderr_tail_bytes: request.stderr_tail_bytes,
-        })
+        }))
     }
 }
 

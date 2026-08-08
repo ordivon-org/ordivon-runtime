@@ -65,6 +65,164 @@ impl Drop for Sandbox {
     }
 }
 
+fn exec_tool_request(
+    timeout_ms: Option<u64>,
+    stdout_limit_bytes: Option<u64>,
+    stderr_limit_bytes: Option<u64>,
+) -> WorkspaceExecRequest {
+    WorkspaceExecRequest {
+        schema_version: 1,
+        client_request_id: "request:mcp-proposal".to_string(),
+        execution: ExecutionProposal {
+            workspace_id: "workspace:test".to_string(),
+            executable: "/usr/bin/true".to_string(),
+            args: Vec::new(),
+            cwd_relative: ".".to_string(),
+            env: Default::default(),
+            timeout_ms,
+            stdout_limit_bytes,
+            stderr_limit_bytes,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            execution_profile: ExecutionProfile::TrustedLocal,
+            foreign_references: Vec::new(),
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    }
+}
+
+fn plan_step(id: &str, timeout_ms: Option<u64>) -> ExecutionStepProposal {
+    ExecutionStepProposal {
+        id: id.to_string(),
+        executable: "/usr/bin/true".to_string(),
+        args: Vec::new(),
+        cwd_relative: ".".to_string(),
+        env: Default::default(),
+        timeout_ms,
+        continue_on_error: false,
+    }
+}
+
+#[test]
+fn workspace_exec_schema_exposes_mechanical_limits_as_optional() {
+    let server = Sandbox::new("proposal-schema").server();
+    let tools = server.tool_router.list_all();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "workspace.exec")
+        .expect("workspace.exec");
+    let schema = serde_json::to_value(&tool.input_schema).unwrap();
+    let required = schema
+        .pointer("/$defs/ExecutionProposal/required")
+        .and_then(Value::as_array)
+        .expect("ExecutionProposal required array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(required.contains(&"workspaceId"));
+    assert!(required.contains(&"executable"));
+    assert!(required.contains(&"cwdRelative"));
+    assert!(!required.contains(&"timeoutMs"));
+    assert!(!required.contains(&"stdoutLimitBytes"));
+    assert!(!required.contains(&"stderrLimitBytes"));
+}
+
+#[test]
+fn workspace_exec_preserves_legacy_v1_only_for_fully_explicit_requests() {
+    let server = Sandbox::new("proposal-bind").server();
+    match server
+        .state
+        .execution
+        .bind(exec_tool_request(Some(2_000), Some(4_096), Some(8_192)))
+    {
+        BoundTaskRun::Legacy(request) => {
+            assert_eq!(request.execution.timeout_ms, 2_000);
+            assert_eq!(request.execution.stdout_limit_bytes, 4_096);
+            assert_eq!(request.execution.stderr_limit_bytes, 8_192);
+        }
+        BoundTaskRun::Proposal(_) => panic!("fully explicit legacy request changed identity mode"),
+    }
+
+    match server
+        .state
+        .execution
+        .bind(exec_tool_request(Some(2_000), None, None))
+    {
+        BoundTaskRun::Proposal(proposal) => {
+            assert_eq!(proposal.execution.timeout_ms, Some(2_000));
+            assert_eq!(proposal.execution.stdout_limit_bytes, None);
+            assert_eq!(proposal.execution.stderr_limit_bytes, None);
+        }
+        BoundTaskRun::Legacy(_) => panic!("optional request must be a Core proposal"),
+    }
+}
+
+#[test]
+fn workspace_exec_plan_keeps_legacy_sum_only_for_legacy_shape() {
+    let server = Sandbox::new("proposal-plan-bind").server();
+    let legacy = WorkspaceExecPlanRequest {
+        schema_version: 1,
+        client_request_id: "request:mcp-plan-legacy".to_string(),
+        execution: WorkspaceExecPlanInput {
+            workspace_id: "workspace:test".to_string(),
+            steps: vec![plan_step("one", Some(2_000)), plan_step("two", Some(3_000))],
+            timeout_ms: None,
+            stdout_limit_bytes: Some(4_096),
+            stderr_limit_bytes: Some(8_192),
+            budget: ExecutionBudget::default(),
+            execution_profile: ExecutionProfile::TrustedLocal,
+            foreign_references: Vec::new(),
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    match server.state.execution.bind_plan(legacy).unwrap() {
+        BoundTaskRun::Legacy(request) => {
+            assert_eq!(request.execution.timeout_ms, 5_000);
+            assert_eq!(
+                request
+                    .execution
+                    .steps
+                    .iter()
+                    .map(|step| step.timeout_ms)
+                    .collect::<Vec<_>>(),
+                vec![2_000, 3_000]
+            );
+        }
+        BoundTaskRun::Proposal(_) => panic!("legacy plan changed identity mode"),
+    }
+
+    let optional = WorkspaceExecPlanRequest {
+        schema_version: 1,
+        client_request_id: "request:mcp-plan-proposal".to_string(),
+        execution: WorkspaceExecPlanInput {
+            workspace_id: "workspace:test".to_string(),
+            steps: vec![plan_step("one", Some(2_000)), plan_step("two", None)],
+            timeout_ms: None,
+            stdout_limit_bytes: None,
+            stderr_limit_bytes: None,
+            budget: ExecutionBudget::default(),
+            execution_profile: ExecutionProfile::TrustedLocal,
+            foreign_references: Vec::new(),
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    match server.state.execution.bind_plan(optional).unwrap() {
+        BoundTaskRun::Proposal(proposal) => {
+            assert_eq!(proposal.execution.timeout_ms, None);
+            assert_eq!(proposal.execution.steps[0].timeout_ms, Some(2_000));
+            assert_eq!(proposal.execution.steps[1].timeout_ms, None);
+            assert_eq!(proposal.execution.stdout_limit_bytes, None);
+        }
+        BoundTaskRun::Legacy(_) => panic!("optional plan must be a Core proposal"),
+    }
+}
+
 #[test]
 fn server_clones_share_one_runtime_state() {
     let sandbox = Sandbox::new("shared-state");
@@ -210,15 +368,15 @@ fn tool_catalog_uses_transactional_job_contract() {
     assert!(!schema.contains("taskId"));
     let exec_schema = serde_json::to_value(&exec.input_schema).unwrap();
     assert!(exec_schema
-        .pointer("/$defs/UniversalExecutionRequest/properties/executable/description")
+        .pointer("/$defs/ExecutionProposal/properties/executable/description")
         .and_then(Value::as_str)
         .is_some_and(|description| description.contains("Absolute host path")));
     assert!(exec_schema
-        .pointer("/$defs/UniversalExecutionRequest/properties/cwdRelative/description")
+        .pointer("/$defs/ExecutionProposal/properties/cwdRelative/description")
         .and_then(Value::as_str)
         .is_some_and(|description| description.contains("relative to the Workspace root")));
     assert_eq!(
-        exec_schema.pointer("/$defs/UniversalExecutionRequest/properties/executionProfile/default"),
+        exec_schema.pointer("/$defs/ExecutionProposal/properties/executionProfile/default"),
         Some(&serde_json::json!("trusted_local"))
     );
     assert_eq!(
@@ -226,11 +384,10 @@ fn tool_catalog_uses_transactional_job_contract() {
         Some(&serde_json::json!(["trusted_local", "contained_local"]))
     );
     assert!(exec_schema
-        .pointer("/$defs/UniversalExecutionRequest/properties/foreignReferences/maxItems")
+        .pointer("/$defs/ExecutionProposal/properties/foreignReferences/maxItems")
         .is_none());
     assert_eq!(
-        exec_schema
-            .pointer("/$defs/UniversalExecutionRequest/properties/foreignReferences/items/$ref"),
+        exec_schema.pointer("/$defs/ExecutionProposal/properties/foreignReferences/items/$ref"),
         Some(&serde_json::json!("#/$defs/ForeignReference"))
     );
     assert_eq!(
@@ -393,6 +550,15 @@ fn task_observation_serializes_discoverable_artifacts() {
         execution_disposition: Some(ordivon_runtime_core::JobResolution::Succeeded),
         execution_reason_code: Some("PROCESS_EXIT_ZERO".to_string()),
         delivery_disposition: RuntimeDeliveryDisposition::Committed,
+        effective_limits: ordivon_runtime_core::EffectiveExecutionLimits {
+            timeout_ms: 10_000,
+            stdout_limit_bytes: 65_536,
+            stderr_limit_bytes: 8_192,
+            step_timeouts: vec![ordivon_runtime_core::EffectiveStepTimeout {
+                id: "step-a".to_string(),
+                timeout_ms: 2_000,
+            }],
+        },
         recovery_required: false,
         semantic_completion_evaluated: false,
         result_available: true,
@@ -442,6 +608,18 @@ fn task_observation_serializes_discoverable_artifacts() {
             .pointer("/artifacts/0/droppedBytes")
             .and_then(Value::as_u64),
         Some(0)
+    );
+    assert_eq!(
+        value
+            .pointer("/effectiveLimits/timeoutMs")
+            .and_then(Value::as_u64),
+        Some(10_000)
+    );
+    assert_eq!(
+        value
+            .pointer("/effectiveLimits/stepTimeouts/0/timeoutMs")
+            .and_then(Value::as_u64),
+        Some(2_000)
     );
     assert_eq!(
         value.pointer("/desiredState").and_then(Value::as_str),

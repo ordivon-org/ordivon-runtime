@@ -1443,6 +1443,78 @@ fn runner_executes_model_authored_script_and_bounds_output() {
 }
 
 #[test]
+fn runner_shared_overall_deadline_is_independent_of_step_timeout_sum() {
+    let sandbox = Sandbox::new("runner-shared-overall");
+    let workspace = sandbox.root.join("workspace");
+    let fast_dir = sandbox.root.join("fast");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&fast_dir).unwrap();
+    let true_executable = real_executable("/usr/bin/true");
+    let step = |id: &str| RunnerExecutionStep {
+        id: id.to_string(),
+        executable: true_executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&true_executable).unwrap(),
+        args: Vec::new(),
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        timeout_ms: 500,
+        continue_on_error: false,
+    };
+    let fast = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        payload: None,
+        inherit_host_environment: true,
+        task_id: "task-shared-overall-fast".to_string(),
+        workspace_id: "workspace-shared-overall".to_string(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
+        executable: true_executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&true_executable).unwrap(),
+        args: Vec::new(),
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        steps: vec![step("one"), step("two")],
+        timeout_ms: 500,
+        stdout_limit_bytes: 1024,
+        stderr_limit_bytes: 1024,
+    };
+    assert!(fast.steps.iter().map(|step| step.timeout_ms).sum::<u64>() > fast.timeout_ms);
+    write_json_atomic(&fast_dir.join("request.json"), &fast).unwrap();
+    run_task_runner(&fast_dir).unwrap();
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(fast_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result.status, TaskTerminalStatus::Completed);
+
+    let slow_dir = sandbox.root.join("slow");
+    fs::create_dir_all(&slow_dir).unwrap();
+    let sleep_executable = real_executable("/usr/bin/sleep");
+    let mut slow = fast;
+    slow.task_id = "task-shared-overall-slow".to_string();
+    slow.timeout_ms = 250;
+    slow.steps[1] = RunnerExecutionStep {
+        id: "two".to_string(),
+        executable: sleep_executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&sleep_executable).unwrap(),
+        args: vec!["1".to_string()],
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        timeout_ms: 1_000,
+        continue_on_error: false,
+    };
+    write_json_atomic(&slow_dir.join("request.json"), &slow).unwrap();
+    run_task_runner(&slow_dir).unwrap();
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(slow_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result.status, TaskTerminalStatus::Failed);
+    assert!(result.timed_out);
+    assert_eq!(result.failed_step_id.as_deref(), Some("two"));
+}
+
+#[test]
 fn runner_timeout_is_a_durable_failed_result() {
     let sandbox = Sandbox::new("timeout");
     let workspace = sandbox.root.join("workspace");

@@ -1408,6 +1408,90 @@ fn request_identity_replays_across_world_change_but_operation_identity_binds_wor
 }
 
 #[test]
+fn proposal_identity_preserves_omission_and_normalizes_equivalent_paths() {
+    let base = TaskRunProposal {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: "request:proposal-identity".to_string(),
+        principal: "principal:test".to_string(),
+        global_limit: 4,
+        execution: ExecutionProposal {
+            workspace_id: "workspace:test".to_string(),
+            executable: "/usr/bin/../bin/true".to_string(),
+            args: vec!["argument".to_string()],
+            cwd_relative: "subdir/../subdir".to_string(),
+            env: BTreeMap::from([("KEY".to_string(), "VALUE".to_string())]),
+            timeout_ms: None,
+            stdout_limit_bytes: None,
+            stderr_limit_bytes: None,
+            steps: vec![ExecutionStepProposal {
+                id: "step".to_string(),
+                executable: "/usr/bin/../bin/true".to_string(),
+                args: Vec::new(),
+                cwd_relative: "subdir/../subdir".to_string(),
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                continue_on_error: false,
+            }],
+            budget: ExecutionBudget::default(),
+            execution_profile: ExecutionProfile::TrustedLocal,
+            foreign_references: Vec::new(),
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    let digest = proposal_request_identity_digest(&base).unwrap();
+    assert!(digest.starts_with(PROPOSAL_IDENTITY_PREFIX));
+
+    let mut equivalent = base.clone();
+    equivalent.execution.executable = "/usr/bin/true".to_string();
+    equivalent.execution.cwd_relative = "subdir".to_string();
+    equivalent.execution.steps[0].executable = "/usr/bin/true".to_string();
+    equivalent.execution.steps[0].cwd_relative = "subdir".to_string();
+    assert_eq!(
+        proposal_request_identity_digest(&equivalent).unwrap(),
+        digest
+    );
+
+    let mut explicit = equivalent;
+    explicit.execution.timeout_ms = Some(10_000);
+    assert_ne!(proposal_request_identity_digest(&explicit).unwrap(), digest);
+}
+
+#[test]
+fn proposal_identity_replays_original_effective_plan() {
+    let sandbox = Sandbox::new("proposal-replay", 5000);
+    let mut first = request(&sandbox, "request:proposal-replay", 4);
+    let proposal = format!("{}sha256:{}", PROPOSAL_IDENTITY_PREFIX, "a".repeat(64));
+    first.request_identity_digest = Some(proposal.clone());
+    first.plan.timeout_ms = 60_000;
+    first.plan.stdout_limit_bytes = 1_048_576;
+    first.plan.stderr_limit_bytes = 1_048_576;
+    let created = created(sandbox.registry.submit(&first).unwrap());
+    let original_plan = created.job.execution_plan_json.clone();
+
+    let mut same_proposal_different_effective_plan = first.clone();
+    same_proposal_different_effective_plan.plan.timeout_ms = 3_000;
+    same_proposal_different_effective_plan
+        .plan
+        .stdout_limit_bytes = 65_536;
+    same_proposal_different_effective_plan
+        .plan
+        .stderr_limit_bytes = 65_536;
+    let replay = sandbox
+        .registry
+        .submit(&same_proposal_different_effective_plan)
+        .unwrap();
+    let existing = match replay {
+        AdmissionOutcome::Existing { job } => job,
+        AdmissionOutcome::Created(_) => panic!("same proposal identity must replay existing Job"),
+    };
+    assert_eq!(existing.job_id, created.job.job_id);
+    assert_eq!(existing.request_digest, proposal);
+    assert_eq!(existing.execution_plan_json, original_plan);
+}
+
+#[test]
 fn legacy_job_request_identity_is_derived_from_stored_plan() {
     let sandbox = Sandbox::new("legacy-request-identity", 5000);
     let legacy = request(&sandbox, "request:legacy-request-identity", 4);
