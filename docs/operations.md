@@ -107,21 +107,22 @@ A normal production deployment is:
 ```bash
 repo=$(git rev-parse --show-toplevel)
 commit=$(git -C "$repo" rev-parse HEAD)
-manifest="$repo/target/release/ordivon-deployment-manifest.json"
+candidate="$repo/target/ordivon-release-candidates/$commit/release"
+manifest="$candidate/ordivon-deployment-manifest.json"
 cargo=$(command -v cargo)
 test -x "$cargo"
 
 scripts/ordivon-runtime-deploy prepare \
   --source-repo "$repo" \
   --commit "$commit" \
-  --candidate-dir "$repo/target/release" \
+  --candidate-dir "$candidate" \
   --candidate-manifest "$manifest" \
   --cargo "$cargo"
 
 scripts/ordivon-runtime-deploy plan \
   --source-repo "$repo" \
   --commit "$commit" \
-  --candidate-dir "$repo/target/release" \
+  --candidate-dir "$candidate" \
   --candidate-manifest "$manifest" \
   --install-dir /usr/local/libexec/ordivon \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
@@ -134,7 +135,7 @@ scripts/ordivon-runtime-deploy apply \
   --source-repo "$repo" \
   --commit "$commit" \
   --confirm-commit "$commit" \
-  --candidate-dir "$repo/target/release" \
+  --candidate-dir "$candidate" \
   --candidate-manifest "$manifest" \
   --install-dir /usr/local/libexec/ordivon \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
@@ -152,7 +153,7 @@ Eligibility requires:
 - the detached release source remains clean after the build;
 - the explicit required ref (by default `origin/main`) resolves to the requested Commit; local `HEAD` and dirty state remain visible in the plan as diagnostics but do not become release authority;
 - the candidate manifest binds the exact source repository, Commit, `sourceMaterialization=detached_git_checkout`, candidate directory, complete release artifact set, modes, sizes, and digests;
-- the candidate manifest binds the resolved Cargo and rustc executables, their SHA-256 digests, version output, and Rust host target;
+- the candidate manifest binds the Cargo/rustc invocation paths, their resolved launcher SHA-256 digests, version output, and Rust host target; proxy invocation paths such as rustup's `cargo`/`rustc` symlinks are preserved during the build;
 - `plan` verifies the complete candidate-manifest digest before installation eligibility is reported;
 - every candidate artifact and currently installed artifact is a regular file and every executable-mode artifact is executable;
 - no active or held Job exists, except the deployment Job itself when the tool can prove its own Attempt identity from cgroup and Registry state;

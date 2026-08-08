@@ -116,13 +116,14 @@ Do not copy binaries manually. Build, plan, apply, and verify through the canoni
 ```bash
 repo=$(git rev-parse --show-toplevel)
 commit=$(git rev-parse HEAD)
-manifest="$repo/target/release/ordivon-deployment-manifest.json"
+candidate="$repo/target/ordivon-release-candidates/$commit/release"
+manifest="$candidate/ordivon-deployment-manifest.json"
 cargo=$(command -v cargo)
 
 scripts/ordivon-runtime-deploy prepare \
   --source-repo "$repo" \
   --commit "$commit" \
-  --candidate-dir "$repo/target/release" \
+  --candidate-dir "$candidate" \
   --candidate-manifest "$manifest" \
   --cargo "$cargo"
 ```
