@@ -315,11 +315,8 @@ scripts/ordivon-runtime-cache prune \
 Run it from a host shell or independent systemd unit, not from a Runtime Job: a Runtime Job would itself consume one of the slots being measured.
 
 ```bash
-set -a
-source /etc/ordivon/ordivon-mcp.env
-set +a
-
 scripts/ordivon-runtime-capacity-acceptance \
+  --env-file /etc/ordivon/ordivon-runtime.env \
   --source-repo /root/projects/ordivon-runtime \
   --source-revision "$(git -C /root/projects/ordivon-runtime rev-parse HEAD)" \
   --limit 8 \
@@ -327,7 +324,7 @@ scripts/ordivon-runtime-capacity-acceptance \
   --pretty
 ```
 
-The command is parameterized rather than hard-coded to eight. The Runtime capacity value follows its positive `u32` representation; the holder-identity projection may remain bounded, but incompleteness is explicit through `holdersTruncated` rather than being silently presented as the full active set.
+The command resolves the same private Runtime credential source as deploy/reclaim through the shared `mcp_probe.py`; `--token-env` is retained only as an explicit legacy override and is not the production default. The command is parameterized rather than hard-coded to eight. The Runtime capacity value follows its positive `u32` representation; the holder-identity projection may remain bounded, but incompleteness is explicit through `holdersTruncated` rather than being silently presented as the full active set.
 
 ## Secret-free status
 

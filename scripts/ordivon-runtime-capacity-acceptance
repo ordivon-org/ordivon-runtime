@@ -21,7 +21,13 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
-from mcp_probe import McpClient, McpProbeError, connect_compatible
+from mcp_probe import (
+    McpClient,
+    McpProbeError,
+    connect_compatible,
+    load_bearer_token,
+    load_environment_file,
+)
 
 SCHEMA_VERSION = 1
 TERMINAL_STATUSES = {"succeeded", "failed", "timed_out", "cancelled", "lost", "orphaned"}
@@ -55,7 +61,16 @@ def positive_seconds(value: str) -> float:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="ordivon-runtime-capacity-acceptance", description=__doc__)
     result.add_argument("--endpoint", default="http://127.0.0.1:8897/mcp")
-    result.add_argument("--token-env", default="ORDIVON_BEARER_TOKEN")
+    result.add_argument(
+        "--env-file",
+        type=absolute_path,
+        default=Path("/etc/ordivon/ordivon-runtime.env"),
+        help="Runtime EnvironmentFile containing exactly one supported Bearer credential source",
+    )
+    result.add_argument(
+        "--token-env",
+        help="legacy explicit process-environment token override; omitted by default",
+    )
     result.add_argument("--source-repo", type=absolute_path, required=True)
     result.add_argument("--source-revision", required=True)
     result.add_argument("--limit", type=positive_limit, default=8)
@@ -169,10 +184,20 @@ def capacity_checks(
     }
 
 
+def resolve_bearer_token(args: argparse.Namespace) -> str:
+    if args.token_env is not None:
+        token = os.environ.get(args.token_env)
+        if not token:
+            raise AcceptanceError(f"environment variable {args.token_env} is missing")
+        return token
+    try:
+        return load_bearer_token(load_environment_file(args.env_file))
+    except (OSError, McpProbeError) as error:
+        raise AcceptanceError(f"cannot resolve Runtime Bearer credential: {error}") from error
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    token = os.environ.get(args.token_env)
-    if not token:
-        raise AcceptanceError(f"environment variable {args.token_env} is missing")
+    token = resolve_bearer_token(args)
     if not args.source_repo.is_dir():
         raise AcceptanceError("source-repo must be an existing directory")
     client = connect_compatible(

@@ -21,7 +21,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from mcp_probe import load_bearer_token, probe_catalog
+from mcp_probe import load_bearer_token, load_environment_file, probe_catalog
 
 SCHEMA_VERSION = 2
 LEGACY_SCHEMA_VERSION = 1
@@ -604,19 +604,6 @@ def deployment_plan(args: argparse.Namespace) -> dict[str, object]:
         "blockers": blockers,
     }
 
-def load_env_file(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            raise RuntimeError(f"invalid environment line in {path}: {raw_line}")
-        key, value = line.split("=", 1)
-        values[key] = value.strip().strip('"').strip("'")
-    return values
-
-
 def probe_mcp(
     env_file: Path,
     *,
@@ -626,7 +613,7 @@ def probe_mcp(
     require_modern: bool,
     allow_legacy_fallback: bool,
 ) -> dict[str, object]:
-    environment = load_env_file(env_file)
+    environment = load_environment_file(env_file)
     bind = environment.get("ORDIVON_BIND")
     if not bind:
         raise RuntimeError("environment file must define ORDIVON_BIND")

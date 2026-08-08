@@ -19,6 +19,23 @@ class McpProbeError(RuntimeError):
     pass
 
 
+def load_environment_file(path: Path) -> dict[str, str]:
+    """Read the bounded key=value subset used by Runtime's systemd EnvironmentFile."""
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise McpProbeError(f"invalid environment line in {path}: {raw_line}")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise McpProbeError(f"empty environment key in {path}")
+        values[key] = value.strip().strip('"').strip("'")
+    return values
+
+
 def load_bearer_token(environment: dict[str, str]) -> str:
     """Resolve one local Runtime Bearer credential without coupling callers to service layout."""
     inline = environment.get("ORDIVON_BEARER_TOKEN")

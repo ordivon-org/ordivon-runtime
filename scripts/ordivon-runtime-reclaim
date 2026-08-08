@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from mcp_probe import connect_compatible, load_bearer_token
+from mcp_probe import connect_compatible, load_bearer_token, load_environment_file
 
 SCHEMA_VERSION = 1
 MAX_DIRTY_PATHS = 20
@@ -406,21 +406,8 @@ def candidate(
     return result
 
 
-def load_env_file(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            raise RuntimeError(f"invalid environment line in {path}: {raw_line}")
-        key, value = line.split("=", 1)
-        values[key] = value.strip().strip('"').strip("'")
-    return values
-
-
 def close_workspace(env_file: Path, workspace_id: str) -> dict[str, object]:
-    environment = load_env_file(env_file)
+    environment = load_environment_file(env_file)
     bind = environment.get("ORDIVON_BIND")
     if not bind:
         raise RuntimeError("environment file must define ORDIVON_BIND")
