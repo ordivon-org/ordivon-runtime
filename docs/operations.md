@@ -270,14 +270,14 @@ The one-time pre-release installation hygiene pass is complete and remains avail
 Runtime separates source isolation from reusable toolchain state:
 
 ```text
-cache/shared/                    global package-download caches
-cache/build/sources/<sha256>/    trusted-local build cache per canonical source repository
-cache/build/<workspaceId>/       contained-local or legacy Workspace build cache
+cache/shared/                    global trusted-local package-download caches
+cache/build/<workspaceId>/       Workspace-scoped compiled build targets for both profiles
+cache/build/sources/<sha256>/    legacy source-scoped build caches retained for migration/reclaim only
 cache/workspaces/<workspaceId>/  Workspace generic cache and contained-local home/tooling
 cache/tmp/<workspaceId>/         Workspace temporary files
 ```
 
-The committed execution environment sets explicit paths for Cargo, uv, pip, npm, pnpm/Corepack, Bun, and Go. Trusted-local Jobs from different detached Workspaces of one source repository receive the same `CARGO_TARGET_DIR`; different repositories receive different directories. Package-download caches are global in trusted-local. Contained-local remains Workspace-scoped.
+The committed execution environment sets explicit paths for Cargo, uv, pip, npm, pnpm/Corepack, Bun, and Go. Every Workspace receives its own `CARGO_TARGET_DIR`, including trusted-local Jobs. Package-download caches remain global in trusted-local, while contained-local keeps its tooling/package cache Workspace-scoped. This prevents two detached source states from overwriting one another's Cargo metadata or compiled path-package artifacts; compiler-output sharing should use a content-addressed compiler cache rather than a shared mutable target directory.
 
 Inspect legacy build caches without mutation:
 

@@ -150,6 +150,8 @@ class OperationalScriptTests(unittest.TestCase):
     def test_local_acceptance_resolves_external_cargo_target_directory(self) -> None:
         local_acceptance = (REPO / "scripts/local-acceptance").read_text(encoding="utf-8")
         mcp_e2e = (REPO / "scripts/mcp_e2e.py").read_text(encoding="utf-8")
+        self.assertIn("ordivon-local-acceptance-target", local_acceptance)
+        self.assertIn('export CARGO_TARGET_DIR="$acceptance_target_dir"', local_acceptance)
         self.assertIn("cargo metadata --no-deps --format-version 1", local_acceptance)
         self.assertIn('["target_directory"]', local_acceptance)
         self.assertNotIn('$repo/target/debug/ordivon-runtime-runner', local_acceptance)

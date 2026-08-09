@@ -1423,16 +1423,12 @@ impl Runtime {
     ) -> RuntimeResult<BTreeMap<String, String>> {
         let workspace_cache = self.executor.workspace_cache_path(&record.workspace_id);
         let workspace_tmp = self.executor.workspace_tmp_path(&record.workspace_id);
-        let (build_cache, package_cache) = match execution_profile {
-            super::ExecutionProfile::TrustedLocal => (
-                self.executor.source_build_cache_path(&record.source_repo),
-                self.executor.shared_caches_root(),
-            ),
-            super::ExecutionProfile::ContainedLocal => (
-                self.executor
-                    .workspace_build_cache_path(&record.workspace_id),
-                workspace_cache.join("tooling"),
-            ),
+        let build_cache = self
+            .executor
+            .workspace_build_cache_path(&record.workspace_id);
+        let package_cache = match execution_profile {
+            super::ExecutionProfile::TrustedLocal => self.executor.shared_caches_root(),
+            super::ExecutionProfile::ContainedLocal => workspace_cache.join("tooling"),
         };
         for path in [
             &workspace_cache,
@@ -5096,7 +5092,7 @@ mod trusted_systemd_command_tests {
             environment.get("HOME").map(String::as_str),
             Some(runtime.execution_home.as_str())
         );
-        assert_eq!(
+        assert_ne!(
             environment.get("CARGO_TARGET_DIR"),
             peer_environment.get("CARGO_TARGET_DIR")
         );
@@ -5119,13 +5115,15 @@ mod trusted_systemd_command_tests {
                 .starts_with(root.join("runtime/cache/shared")));
         }
         let workspace_root = root.join("runtime/workspaces/workspace-env");
-        for name in ["XDG_CACHE_HOME", "CARGO_TARGET_DIR", "TMPDIR"] {
+        for name in ["XDG_CACHE_HOME", "TMPDIR"] {
             let value = Path::new(environment.get(name).unwrap());
             assert!(value.starts_with(root.join("runtime/cache")));
             assert!(!value.starts_with(&workspace_root));
         }
         assert!(Path::new(environment.get("CARGO_TARGET_DIR").unwrap())
-            .starts_with(root.join("runtime/cache/build/sources")));
+            .starts_with(root.join("runtime/cache/build/workspace-env")));
+        assert!(Path::new(peer_environment.get("CARGO_TARGET_DIR").unwrap())
+            .starts_with(root.join("runtime/cache/build/workspace-peer")));
         assert!(Path::new(environment.get("XDG_CACHE_HOME").unwrap()).is_dir());
         assert!(Path::new(environment.get("TMPDIR").unwrap()).is_dir());
 

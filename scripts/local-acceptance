@@ -45,6 +45,9 @@ case "$mode" in
     test -f /sys/fs/cgroup/cgroup.controllers
     cd "$repo"
     python3 scripts/check_docs.py
+    acceptance_target_dir=$(mktemp -d "${TMPDIR:-/tmp}/ordivon-local-acceptance-target.XXXXXX")
+    trap 'rm -rf "$acceptance_target_dir"' EXIT
+    export CARGO_TARGET_DIR="$acceptance_target_dir"
     cargo build -p ordivon-runtime-core --bin ordivon-runtime-runner
     target_dir=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
     export ORDIVON_RUN_SYSTEMD_SPIKE=1

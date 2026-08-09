@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{invalid, io_error, sha256_bytes, UniversalExecError, UniversalExecErrorCode};
+use super::{invalid, io_error, UniversalExecError, UniversalExecErrorCode};
 
 pub const UNIVERSAL_EXEC_SCHEMA_VERSION: u32 = 1;
 pub const MAX_WORKSPACE_IO_BYTES: u64 = 4 * 1024 * 1024;
@@ -153,12 +153,6 @@ impl UniversalExecutorConfig {
 
     pub(crate) fn workspace_build_cache_path(&self, workspace_id: &str) -> PathBuf {
         self.build_caches_root().join(workspace_id)
-    }
-
-    pub(crate) fn source_build_cache_path(&self, source_repo: &str) -> PathBuf {
-        let digest = sha256_bytes(source_repo.as_bytes());
-        let key = digest.strip_prefix("sha256:").unwrap_or(&digest);
-        self.source_build_caches_root().join(key)
     }
 
     pub(crate) fn workspace_tmp_path(&self, workspace_id: &str) -> PathBuf {
