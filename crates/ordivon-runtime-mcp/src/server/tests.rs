@@ -360,6 +360,7 @@ fn tool_effect_annotations_match_runtime_behavior() {
         ("task.observe", false, true, true, true),
         ("workspace.close", false, true, true, false),
         ("workspace.changes", true, false, true, false),
+        ("workspace.content", true, false, true, false),
         ("workspace.diff", true, false, true, false),
         ("workspace.exec", false, true, false, true),
         ("workspace.execBound", false, true, false, false),
@@ -436,6 +437,7 @@ fn tool_catalog_uses_transactional_job_contract() {
             "task.observe",
             "workspace.changes",
             "workspace.close",
+            "workspace.content",
             "workspace.diff",
             "workspace.exec",
             "workspace.execBound",
@@ -786,6 +788,76 @@ fn task_observation_serializes_discoverable_artifacts() {
 }
 
 #[test]
+fn workspace_content_projects_native_image_with_digest_bound_structured_metadata() {
+    let png = b"\x89PNG\r\n\x1a\nmodel-view".to_vec();
+    let metadata = WorkspaceContentMetadata {
+        workspace_id: "workspace:model-view".to_string(),
+        relative_path: "out/contact-sheet.png".to_string(),
+        digest: format!("sha256:{}", "a".repeat(64)),
+        media_type: "image/png".to_string(),
+        byte_length: png.len() as u64,
+    };
+    let response = workspace_content_call_result(ToolOutcome::Success(
+        ordivon_runtime_core::WorkspaceContentReadResult {
+            metadata: metadata.clone(),
+            bytes: png.clone(),
+        },
+    ))
+    .unwrap();
+    assert_eq!(response.is_error, Some(false));
+    assert_eq!(response.content.len(), 1);
+    let encoded = serde_json::to_value(&response.content[0]).unwrap();
+    assert_eq!(
+        encoded.pointer("/type").and_then(Value::as_str),
+        Some("image")
+    );
+    assert_eq!(
+        encoded.pointer("/mimeType").and_then(Value::as_str),
+        Some("image/png")
+    );
+    let data = encoded.pointer("/data").and_then(Value::as_str).unwrap();
+    assert_eq!(BASE64_STANDARD.decode(data.as_bytes()).unwrap(), png);
+    assert_eq!(
+        response
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("digest"))
+            .and_then(Value::as_str),
+        Some(metadata.digest.as_str())
+    );
+    assert_eq!(
+        response
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("mediaType"))
+            .and_then(Value::as_str),
+        Some("image/png")
+    );
+}
+
+#[test]
+fn workspace_content_schema_requires_exact_digest_binding() {
+    let server = Sandbox::new("content-schema").server();
+    let tools = server.tool_router.list_all();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "workspace.content")
+        .expect("workspace.content");
+    let schema = serde_json::to_value(&tool.input_schema).unwrap();
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(required.contains(&"workspaceId"));
+    assert!(required.contains(&"relativePath"));
+    assert!(required.contains(&"expectedDigest"));
+    assert!(required.contains(&"maxBytes"));
+}
+
+#[test]
 fn structured_failure_is_a_tool_error_not_protocol_failure() {
     let outcome = ToolOutcome::<String>::Error(ToolError::invalid(
         "idempotency mismatch",
@@ -924,7 +996,7 @@ fn every_public_tool_publishes_structured_output_contract() {
     let sandbox = Sandbox::new("all-output-schemas");
     let server = sandbox.server();
     let tools = server.tool_router.list_all();
-    assert_eq!(tools.len(), 18);
+    assert_eq!(tools.len(), 19);
     for tool in tools {
         let schema = tool
             .output_schema

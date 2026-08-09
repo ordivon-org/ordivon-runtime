@@ -13,7 +13,8 @@ use super::{
     UniversalExecError, UniversalExecErrorCode, UniversalExecutorConfig, WorkspaceChangeCursor,
     WorkspaceChangeEntry, WorkspaceChangeKind, WorkspaceChangePageRequest,
     WorkspaceChangePageResult, WorkspaceCloseRequest, WorkspaceCloseResult,
-    WorkspaceClosureDisposition, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceReadRequest,
+    WorkspaceClosureDisposition, WorkspaceContentMetadata, WorkspaceContentReadResult,
+    WorkspaceContentRequest, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceReadRequest,
     WorkspaceReadResult, WorkspaceRecord, WorkspaceRenamedPath, WorkspaceWriteRequest,
     WorkspaceWriteResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
@@ -527,6 +528,88 @@ pub fn read_workspace_text(
         content,
         digest,
         byte_length,
+    })
+}
+
+fn verified_workspace_image_media_type(
+    relative_path: &str,
+    bytes: &[u8],
+) -> Result<&'static str, UniversalExecError> {
+    let extension = Path::new(relative_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("png") if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => Ok("image/png"),
+        Some("jpg" | "jpeg") if bytes.starts_with(&[0xff, 0xd8, 0xff]) => Ok("image/jpeg"),
+        Some("png" | "jpg" | "jpeg") => Err(UniversalExecError::new(
+            UniversalExecErrorCode::InvalidRequest,
+            "workspace image bytes do not match the file extension",
+            Some("relativePath"),
+            false,
+        )),
+        _ => Err(UniversalExecError::new(
+            UniversalExecErrorCode::InvalidRequest,
+            "workspace.content currently supports only verified .png, .jpg, and .jpeg images",
+            Some("relativePath"),
+            false,
+        )),
+    }
+}
+
+pub fn read_workspace_content(
+    config: &UniversalExecutorConfig,
+    request: &WorkspaceContentRequest,
+) -> Result<WorkspaceContentReadResult, UniversalExecError> {
+    request.validate_shape()?;
+    let record = load_workspace_record(config, &request.workspace_id)?;
+    let path = resolve_existing_workspace_path(&record, &request.relative_path, false)?;
+    let metadata = fs::metadata(&path).map_err(|error| io_error(&path, "inspect", error))?;
+    if !metadata.is_file() {
+        return Err(invalid(
+            "relativePath must resolve to a file",
+            "relativePath",
+        ));
+    }
+    if metadata.len() > request.max_bytes {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::OutputLimitExceeded,
+            format!("file exceeds maxBytes {}", request.max_bytes),
+            Some("maxBytes"),
+            false,
+        ));
+    }
+    let bytes = fs::read(&path).map_err(|error| io_error(&path, "read", error))?;
+    if bytes.len() as u64 > request.max_bytes {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::OutputLimitExceeded,
+            format!("file exceeds maxBytes {}", request.max_bytes),
+            Some("maxBytes"),
+            false,
+        ));
+    }
+    let digest = sha256_bytes(&bytes);
+    if digest != request.expected_digest {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::RevisionMismatch,
+            format!(
+                "workspace content digest changed: expected {}, observed {digest}",
+                request.expected_digest
+            ),
+            Some("expectedDigest"),
+            false,
+        ));
+    }
+    let media_type = verified_workspace_image_media_type(&request.relative_path, &bytes)?;
+    Ok(WorkspaceContentReadResult {
+        metadata: WorkspaceContentMetadata {
+            workspace_id: request.workspace_id.clone(),
+            relative_path: request.relative_path.clone(),
+            digest,
+            media_type: media_type.to_string(),
+            byte_length: bytes.len() as u64,
+        },
+        bytes,
     })
 }
 

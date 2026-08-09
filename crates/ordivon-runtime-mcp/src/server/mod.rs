@@ -5,24 +5,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use ordivon_runtime_core::{
-    read_workspace_slice_compact, read_workspace_text_compact, workspace_changes_page,
-    workspace_diff_compact, ArtifactReadRequest, ArtifactReadResult, CompactWorkspaceDiffResult,
-    CompactWorkspaceOpenResult, DurableWorkspacePatchRequest, DurableWorkspacePatchResult,
-    ExecutionBudget, ExecutionProfile, ExecutionProposal, ExecutionStepProposal, ForeignReference,
-    GitWorkspaceCreateRequest, InputAuthority, InputBindingRequest, Runtime, RuntimeCapacity,
-    RuntimeConfig, RuntimeError, RuntimeJobInspection, RuntimeJobListRequest, RuntimeJobListResult,
-    RuntimeWorkspaceGetRequest, RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult,
-    RuntimeWorkspaceSummary, TaskCancelRequest, TaskObservation, TaskObserveRequest,
-    TaskRunProposal, TaskRunRequest, UniversalExecError, UniversalExecutionRequest,
-    UniversalExecutionStep, UniversalExecutorConfig, WorkspaceChangeCursor,
-    WorkspaceChangePageRequest as ExecWorkspaceChangePageRequest, WorkspaceChangePageResult,
-    WorkspaceCloseRequest, WorkspaceCloseResult, WorkspaceDiffRequest as ExecWorkspaceDiffRequest,
-    WorkspaceFilePatch, WorkspaceMutateRequest, WorkspaceMutateResult,
-    WorkspacePatchOperationStatus, WorkspacePatchRequest, WorkspacePatchStatusRequest,
-    WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
-    DEFAULT_INSPECTION_EVENT_LIMIT, MAX_INSPECTION_EVENT_LIMIT, MAX_TASK_TAIL_BYTES,
-    MAX_TASK_WAIT_MS, MAX_WORKSPACE_CHANGE_PAGE_ENTRIES, MAX_WORKSPACE_IO_BYTES,
+    read_workspace_content, read_workspace_slice_compact, read_workspace_text_compact,
+    workspace_changes_page, workspace_diff_compact, ArtifactReadRequest, ArtifactReadResult,
+    CompactWorkspaceDiffResult, CompactWorkspaceOpenResult, DurableWorkspacePatchRequest,
+    DurableWorkspacePatchResult, ExecutionBudget, ExecutionProfile, ExecutionProposal,
+    ExecutionStepProposal, ForeignReference, GitWorkspaceCreateRequest, InputAuthority,
+    InputBindingRequest, Runtime, RuntimeCapacity, RuntimeConfig, RuntimeError,
+    RuntimeJobInspection, RuntimeJobListRequest, RuntimeJobListResult, RuntimeWorkspaceGetRequest,
+    RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
+    TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunProposal, TaskRunRequest,
+    UniversalExecError, UniversalExecutionRequest, UniversalExecutionStep, UniversalExecutorConfig,
+    WorkspaceChangeCursor, WorkspaceChangePageRequest as ExecWorkspaceChangePageRequest,
+    WorkspaceChangePageResult, WorkspaceCloseRequest, WorkspaceCloseResult,
+    WorkspaceContentMetadata, WorkspaceContentRequest,
+    WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceFilePatch, WorkspaceMutateRequest,
+    WorkspaceMutateResult, WorkspacePatchOperationStatus, WorkspacePatchRequest,
+    WorkspacePatchStatusRequest, WorkspaceReadRequest as ExecWorkspaceReadRequest,
+    WorkspaceReadSliceRequest, DEFAULT_INSPECTION_EVENT_LIMIT, MAX_INSPECTION_EVENT_LIMIT,
+    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_CHANGE_PAGE_ENTRIES,
+    MAX_WORKSPACE_IO_BYTES,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{IntoCallToolResult, ToolCallContext};
@@ -855,10 +858,39 @@ where
     }
 }
 
+fn workspace_content_call_result(
+    outcome: ToolOutcome<ordivon_runtime_core::WorkspaceContentReadResult>,
+) -> Result<CallToolResult, McpError> {
+    match outcome {
+        ToolOutcome::Success(result) => {
+            let structured = serde_json::to_value(&result.metadata).map_err(|error| {
+                McpError::internal_error(
+                    format!("cannot serialize workspace content metadata: {error}"),
+                    None,
+                )
+            })?;
+            let block = ContentBlock::image(
+                BASE64_STANDARD.encode(&result.bytes),
+                result.metadata.media_type.clone(),
+            );
+            let mut response = CallToolResult::success(vec![block]);
+            response.structured_content = Some(structured);
+            Ok(response)
+        }
+        ToolOutcome::Error(error) => {
+            let message = error.message.clone();
+            let structured = json!({ "error": error });
+            let mut response = CallToolResult::error(vec![ContentBlock::text(message)]);
+            response.structured_content = Some(structured);
+            Ok(response)
+        }
+    }
+}
+
 impl RuntimeServer {
     async fn run_core<T, F>(&self, tool: &'static str, operation: F) -> ToolOutcome<T>
     where
-        T: Serialize + JsonSchema + Send + 'static,
+        T: Send + 'static,
         F: FnOnce() -> Result<T, ToolError> + Send + 'static,
     {
         let trace_id = next_trace_id("core");

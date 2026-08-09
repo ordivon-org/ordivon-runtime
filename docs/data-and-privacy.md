@@ -51,6 +51,8 @@ Runtime data belongs to the operator and the users whose work it executes. Runti
 
 Runtime does **not** automatically redact command arguments, environment values supplied to target processes, source content, immutable input materializations, stdout, stderr, Artifacts, paths, client identifiers, or foreign references. Treat the entire Runtime state root and every backup or receipt as potentially sensitive.
 
+`workspace.content` creates no additional retained media store. It reads one already-existing Workspace PNG/JPEG under the same Workspace path authority, verifies the caller-supplied SHA-256 digest, and projects those exact bytes through the MCP response. The source image keeps the Workspace's existing lifecycle; Agent observation does not register a second Artifact or persist another image copy.
+
 ## Data inventory
 
 | Data | Typical location | Purpose | Default lifecycle |

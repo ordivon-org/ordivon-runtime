@@ -228,6 +228,101 @@ fn workspace_round_trip_is_isolated_and_digest_guarded() {
 }
 
 #[test]
+fn workspace_content_reads_exact_verified_png_bytes() {
+    let sandbox = Sandbox::new("workspace-content-png");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-content-png".to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path("workspace-content-png");
+    fs::create_dir_all(workspace.join("out")).unwrap();
+    let png = b"\x89PNG\r\n\x1a\nverified-pixels";
+    fs::write(workspace.join("out/view.png"), png).unwrap();
+    let expected_digest = sha256_bytes(png);
+
+    let read = read_workspace_content(
+        &config,
+        &WorkspaceContentRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-content-png".to_string(),
+            relative_path: "out/view.png".to_string(),
+            expected_digest: expected_digest.clone(),
+            max_bytes: 1024,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(read.bytes, png);
+    assert_eq!(read.metadata.digest, expected_digest);
+    assert_eq!(read.metadata.media_type, "image/png");
+    assert_eq!(read.metadata.byte_length, png.len() as u64);
+}
+
+#[test]
+fn workspace_content_fails_closed_on_digest_drift_and_forged_image_type() {
+    let sandbox = Sandbox::new("workspace-content-drift");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-content-drift".to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path("workspace-content-drift");
+    fs::create_dir_all(workspace.join("out")).unwrap();
+    let original = b"\x89PNG\r\n\x1a\nfirst";
+    let path = workspace.join("out/view.png");
+    fs::write(&path, original).unwrap();
+    let expected_digest = sha256_bytes(original);
+    fs::write(&path, b"\x89PNG\r\n\x1a\nsecond").unwrap();
+
+    let drift = read_workspace_content(
+        &config,
+        &WorkspaceContentRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-content-drift".to_string(),
+            relative_path: "out/view.png".to_string(),
+            expected_digest,
+            max_bytes: 1024,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(drift.code, UniversalExecErrorCode::RevisionMismatch);
+    assert_eq!(drift.field.as_deref(), Some("expectedDigest"));
+
+    fs::write(&path, b"not-a-png").unwrap();
+    let forged_bytes = fs::read(&path).unwrap();
+    let forged = read_workspace_content(
+        &config,
+        &WorkspaceContentRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-content-drift".to_string(),
+            relative_path: "out/view.png".to_string(),
+            expected_digest: sha256_bytes(&forged_bytes),
+            max_bytes: 1024,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(forged.code, UniversalExecErrorCode::InvalidRequest);
+    assert_eq!(forged.field.as_deref(), Some("relativePath"));
+}
+
+#[test]
 fn workspace_diff_includes_staged_changes_and_workspace_listing_recovers_open_handles() {
     let sandbox = Sandbox::new("workspace-list");
     let source = sandbox.root.join("source");

@@ -20,6 +20,8 @@ Its `compatibility` section combines the current deployment receipt, a bounded t
 
 `LocalSessionManager` and legacy `initialize` handling exist only for the two compatibility lifecycles. Modern continuity remains Workspace, Job, Attempt, cancellation, reconciliation, and Artifact truth in Runtime Core.
 
+`workspace.content` is an additive Tool-catalog capability rather than a replacement for `workspace.read` or `artifact.read`. Older clients keep their UTF-8 read semantics and can ignore the new Tool; clients that need native media must refresh discovery and bind the new catalog digest before calling it. No persisted Job/request identity or Registry migration is introduced by this capability.
+
 ## Persisted Runtime state
 
 | Contract | Current consumer | Protected failure | Deletion trigger |

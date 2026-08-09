@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -34,6 +35,7 @@ EXPECTED_TOOLS = {
     "task.observe",
     "workspace.changes",
     "workspace.close",
+    "workspace.content",
     "workspace.diff",
     "workspace.exec",
     "workspace.execBound",
@@ -47,6 +49,9 @@ EXPECTED_TOOLS = {
     "workspace.read",
 }
 TERMINAL = {"succeeded", "failed", "timed_out", "cancelled", "lost", "orphaned"}
+PNG_FIXTURE = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def digest_bytes(value: bytes) -> str:
@@ -397,6 +402,7 @@ def create_source_repo(root: Path) -> tuple[Path, str]:
     command("git", "config", "user.email", "acceptance@ordivon.invalid", cwd=source)
     (source / "README.md").write_text("hello\n", encoding="utf-8")
     (source / "append.txt").write_text("first\n", encoding="utf-8")
+    (source / "pixel.png").write_bytes(PNG_FIXTURE)
     command("git", "add", ".", cwd=source)
     command("git", "commit", "-q", "-m", "acceptance source", cwd=source)
     return source, command("git", "rev-parse", "HEAD", cwd=source)
@@ -689,6 +695,62 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             },
         )
         check("workspace-read-full", full.get("content") == "hello\n", full)
+
+        content_request = {
+            "schemaVersion": SCHEMA_VERSION,
+            "workspaceId": workspace_id,
+            "relativePath": "pixel.png",
+            "expectedDigest": digest_bytes(PNG_FIXTURE),
+            "maxBytes": 4096,
+        }
+        native_content = client.tool_result("workspace.content", content_request)
+        native_structured = native_content.get("structuredContent")
+        native_blocks = native_content.get("content")
+        native_block = (
+            native_blocks[0]
+            if isinstance(native_blocks, list) and len(native_blocks) == 1 and isinstance(native_blocks[0], dict)
+            else {}
+        )
+        native_data = native_block.get("data")
+        decoded_native = (
+            base64.b64decode(native_data, validate=True) if isinstance(native_data, str) else b""
+        )
+        check(
+            "workspace-content-native-image",
+            native_content.get("isError") is False
+            and isinstance(native_structured, dict)
+            and native_structured.get("workspaceId") == workspace_id
+            and native_structured.get("relativePath") == "pixel.png"
+            and native_structured.get("digest") == digest_bytes(PNG_FIXTURE)
+            and native_structured.get("mediaType") == "image/png"
+            and native_structured.get("byteLength") == len(PNG_FIXTURE)
+            and native_block.get("type") == "image"
+            and native_block.get("mimeType") == "image/png"
+            and decoded_native == PNG_FIXTURE,
+            {
+                "structuredContent": native_structured,
+                "blockType": native_block.get("type"),
+                "mimeType": native_block.get("mimeType"),
+                "decodedDigest": digest_bytes(decoded_native),
+            },
+        )
+
+        stale_content_request = dict(content_request)
+        stale_content_request["expectedDigest"] = "sha256:" + "0" * 64
+        stale_content = client.tool_result("workspace.content", stale_content_request)
+        stale_structured = stale_content.get("structuredContent")
+        stale_error = (
+            stale_structured.get("error") if isinstance(stale_structured, dict) else None
+        )
+        check(
+            "workspace-content-digest-binding",
+            stale_content.get("isError") is True
+            and isinstance(stale_error, dict)
+            and stale_error.get("code") == "REVISION_MISMATCH"
+            and stale_error.get("field") == "expectedDigest",
+            stale_content,
+        )
+
         sliced = client.tool(
             "workspace.read",
             {

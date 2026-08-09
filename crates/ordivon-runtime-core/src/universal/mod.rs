@@ -26,7 +26,8 @@ pub use types::{
     CompactWorkspaceSliceResult, GitWorkspaceCreateRequest, WorkspaceChangeCursor,
     WorkspaceChangeEntry, WorkspaceChangeKind, WorkspaceChangePageRequest,
     WorkspaceChangePageResult, WorkspaceCloseRequest, WorkspaceCloseResult,
-    WorkspaceClosureDisposition, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceFilePatch,
+    WorkspaceClosureDisposition, WorkspaceContentMetadata, WorkspaceContentReadResult,
+    WorkspaceContentRequest, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceFilePatch,
     WorkspaceMutateRequest, WorkspaceMutateResult, WorkspaceMutation, WorkspaceMutationMode,
     WorkspaceMutationResult, WorkspacePatchRequest, WorkspacePatchResult, WorkspacePatchedFile,
     WorkspaceReadRequest, WorkspaceReadResult, WorkspaceReadSliceRequest, WorkspaceReadSliceResult,
@@ -35,8 +36,9 @@ pub use types::{
     MAX_WORKSPACE_CHANGE_PAGE_ENTRIES,
 };
 pub use workspace::{
-    create_git_workspace, list_workspace_records, load_workspace_record, read_workspace_text,
-    remove_git_workspace, workspace_changes_page, workspace_diff, write_workspace_text,
+    create_git_workspace, list_workspace_records, load_workspace_record, read_workspace_content,
+    read_workspace_text, remove_git_workspace, workspace_changes_page, workspace_diff,
+    write_workspace_text,
 };
 #[cfg(any(feature = "transactional-runtime", test))]
 pub use workspace::{workspace_head_revision, workspace_is_dirty, workspace_source_state_digest};

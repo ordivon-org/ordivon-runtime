@@ -161,6 +161,31 @@ impl RuntimeServer {
     }
 
     #[tool(
+        name = "workspace.content",
+        description = "Project one exact digest-bound Workspace image as native MCP image content. Runtime verifies the current file bytes against expectedDigest and validates PNG/JPEG signatures before transport; a changed file fails closed instead of silently changing the Agent's perceptual input.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<WorkspaceContentMetadata>>(),
+        annotations(
+            title = "Read verified workspace media content",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_content(
+        &self,
+        Parameters(request): Parameters<WorkspaceContentRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let config = self.state.executor.clone();
+        let outcome = self
+            .run_core("workspace.content", move || {
+                read_workspace_content(&config, &request).map_err(ToolError::from)
+            })
+            .await;
+        workspace_content_call_result(outcome)
+    }
+
+    #[tool(
         name = "workspace.mutate",
         description = "Apply one atomic validated batch. mode must be exactly WRITE, APPEND, or REPLACE_EXACT; REPLACE_EXACT requires expectedText. expectedDigest is required when a target already exists and protects the complete file version. Active or held Jobs block mutation without being reconciled or dispatched by this call. This tool has no durable clientRequestId replay receipt: after an uncertain response, inspect current Workspace state before retrying. Prefer workspace.patch when response-loss reconciliation is required.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<WorkspaceMutateResult>>(),
