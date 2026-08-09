@@ -117,6 +117,7 @@ This document does not copy current production counts, binary digests, active Jo
 
 ```bash
 scripts/ordivon-runtime-status --health --json
+scripts/ordivon-runtime-status --dashboard
 scripts/ordivon-runtime-status --diagnose --json
 ordivon-runtime-doctor inspect --database <registry> --pretty
 ```

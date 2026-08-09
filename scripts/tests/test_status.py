@@ -32,12 +32,19 @@ def fixture(root: Path) -> dict[str, Path]:
             """
             CREATE TABLE schema_migrations(version INTEGER);
             INSERT INTO schema_migrations VALUES (4);
-            CREATE TABLE jobs(job_id TEXT PRIMARY KEY, workspace_id TEXT, resolution TEXT);
-            CREATE TABLE attempts(attempt_id TEXT PRIMARY KEY, job_id TEXT, state TEXT);
+            CREATE TABLE jobs(
+              job_id TEXT PRIMARY KEY, workspace_id TEXT, resolution TEXT,
+              client_request_id TEXT, execution_plan_json TEXT, created_at_ms INTEGER,
+              current_attempt_id TEXT
+            );
+            CREATE TABLE attempts(
+              attempt_id TEXT PRIMARY KEY, job_id TEXT, attempt_number INTEGER, state TEXT,
+              started_at_ms INTEGER, finished_at_ms INTEGER, exit_code INTEGER, bundle_path TEXT
+            );
             CREATE TABLE concurrency_reservations(attempt_id TEXT, state TEXT);
             CREATE TABLE attempt_conditions(attempt_id TEXT, condition_type TEXT, status TEXT);
-            INSERT INTO jobs VALUES ('job-1','workspace-1','succeeded');
-            INSERT INTO attempts VALUES ('attempt-1','job-1','succeeded');
+            INSERT INTO jobs(job_id,workspace_id,resolution,created_at_ms) VALUES ('job-1','workspace-1','succeeded',1);
+            INSERT INTO attempts(attempt_id,job_id,attempt_number,state,started_at_ms,finished_at_ms,exit_code) VALUES ('attempt-1','job-1',1,'succeeded',1,2,0);
             INSERT INTO concurrency_reservations VALUES ('attempt-1','released');
             INSERT INTO attempt_conditions VALUES ('attempt-1','recovery_required','false');
             """
@@ -227,7 +234,7 @@ def raw_command(paths: dict[str, Path], *extra: str) -> list[str]:
 
 
 def command(paths: dict[str, Path], *extra: str) -> list[str]:
-    mode = [] if any(value in {"--health", "--diagnose"} for value in extra) else ["--diagnose"]
+    mode = [] if any(value in {"--health", "--diagnose", "--dashboard"} for value in extra) else ["--diagnose"]
     return raw_command(paths, *mode, *extra)
 
 
@@ -584,6 +591,161 @@ class RuntimeStatusTests(unittest.TestCase):
             self.assertNotIn("storage", report)
             self.assertNotIn("compatibility", report)
             self.assertNotIn("lifecycle", report)
+
+    def test_dashboard_is_fast_bounded_projection_with_real_attempt_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = fixture(root)
+            bundle = root / "attempt-active"
+            bundle.mkdir()
+            (bundle / "stdout.log").write_text("active output\n", encoding="utf-8")
+            (bundle / "stderr.log").write_text("", encoding="utf-8")
+            now = int(time.time() * 1000)
+            (bundle / "progress.json").write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "taskId": "attempt-active",
+                        "revision": 7,
+                        "status": "working",
+                        "completedSteps": 1,
+                        "totalSteps": 3,
+                        "currentStepId": "test",
+                        "currentStepIndex": 1,
+                        "currentStepStartedUnixMs": now - 2_000,
+                        "updatedUnixMs": now - 500,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            connection = sqlite3.connect(paths["database"])
+            try:
+                connection.execute(
+                    "INSERT INTO jobs(job_id,workspace_id,resolution,client_request_id,execution_plan_json,created_at_ms,current_attempt_id) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        "job-active-abcdef123456",
+                        "workspace-1",
+                        None,
+                        "request:test",
+                        json.dumps({"executable": "/usr/bin/python3"}),
+                        now - 3_000,
+                        "attempt-active",
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO attempts(attempt_id,job_id,attempt_number,state,started_at_ms,bundle_path) VALUES (?,?,?,?,?,?)",
+                    ("attempt-active", "job-active-abcdef123456", 1, "running", now - 2_500, str(bundle)),
+                )
+                connection.execute("INSERT INTO concurrency_reservations VALUES ('attempt-active','active')")
+                connection.execute("INSERT INTO attempt_conditions VALUES ('attempt-active','recovery_required','false')")
+                # A terminal Job deliberately has current_attempt_id cleared; dashboard must recover its latest Attempt.
+                terminal_bundle = root / "attempt-terminal"
+                terminal_bundle.mkdir()
+                connection.execute(
+                    "INSERT INTO jobs(job_id,workspace_id,resolution,client_request_id,execution_plan_json,created_at_ms,current_attempt_id) VALUES (?,?,?,?,?,?,NULL)",
+                    (
+                        "job-terminal-fedcba654321",
+                        "workspace-1",
+                        "failed",
+                        "request:terminal",
+                        json.dumps({"executable": "/usr/bin/bash"}),
+                        now - 10_000,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO attempts(attempt_id,job_id,attempt_number,state,started_at_ms,finished_at_ms,exit_code,bundle_path) VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        "attempt-terminal",
+                        "job-terminal-fedcba654321",
+                        2,
+                        "failed",
+                        now - 9_000,
+                        now - 8_000,
+                        17,
+                        str(terminal_bundle),
+                    ),
+                )
+                connection.execute("INSERT INTO concurrency_reservations VALUES ('attempt-terminal','released')")
+                connection.execute("INSERT INTO attempt_conditions VALUES ('attempt-terminal','recovery_required','false')")
+                connection.commit()
+            finally:
+                connection.close()
+            source_repo = paths["store"] / "workspaces" / "workspace-1"
+            completed = subprocess.run(
+                raw_command(
+                    paths,
+                    "--dashboard",
+                    "--json",
+                    "--dashboard-jobs",
+                    "3",
+                    "--source-repo",
+                    str(source_repo),
+                ),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["mode"], "dashboard")
+            self.assertEqual(report["maintenance"]["status"], "not_checked")
+            self.assertNotIn("storage", report)
+            self.assertNotIn("compatibility", report)
+            self.assertTrue(report["dashboard"]["jobs"]["available"])
+            active = report["dashboard"]["jobs"]["active"][0]
+            self.assertEqual(active["jobId"], "job-active-abcdef123456")
+            self.assertEqual(active["attemptId"], "attempt-active")
+            self.assertEqual(active["executableName"], "python3")
+            self.assertEqual(active["progress"]["currentStepId"], "test")
+            self.assertIsNotNone(active["outputIdleMs"])
+            recent = report["dashboard"]["jobs"]["recent"]
+            terminal = next(item for item in recent if item["jobId"] == "job-terminal-fedcba654321")
+            self.assertEqual(terminal["attemptId"], "attempt-terminal")
+            self.assertEqual(terminal["attemptState"], "failed")
+            self.assertEqual(terminal["exitCode"], 17)
+            self.assertEqual(terminal["durationMs"], 1_000)
+            self.assertTrue(report["dashboard"]["source"]["available"])
+            self.assertNotIn(str(root), completed.stdout)
+
+    def test_dashboard_human_output_respects_common_terminal_widths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            for width in (80, 120, 160):
+                completed = subprocess.run(
+                    raw_command(paths, "--dashboard", "--width", str(width)),
+                    cwd=REPO,
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                )
+                lines = completed.stdout.splitlines()
+                self.assertGreaterEqual(len(lines), 10)
+                self.assertTrue(all(len(line) <= width for line in lines))
+                self.assertIn("ORDIVON RUNTIME", completed.stdout)
+                self.assertIn("CAPACITY", completed.stdout)
+                self.assertIn("ACTIVE JOBS", completed.stdout)
+                self.assertIn("RECENT TERMINAL", completed.stdout)
+
+    def test_dashboard_does_not_change_default_compact_health_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            compact = subprocess.run(
+                raw_command(paths, "--health"),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(len(compact.stdout.splitlines()), 1)
+            self.assertIn("HEALTHY mode=health", compact.stdout)
+            dashboard = subprocess.run(
+                raw_command(paths, "--dashboard", "--width", "80"),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertGreater(len(dashboard.stdout.splitlines()), 1)
 
     def test_human_output_is_one_compact_line(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

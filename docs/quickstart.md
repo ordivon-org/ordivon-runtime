@@ -138,11 +138,13 @@ Verification combines the portable contract, the explicit real-system acceptance
 
 ```bash
 scripts/ordivon-runtime-status --health --json
+scripts/ordivon-runtime-status --dashboard \
+  --source-repo "$(git rev-parse --show-toplevel)"
 scripts/ordivon-runtime-status --diagnose --json \
   --expected-commit "$(git rev-parse HEAD)"
 ```
 
-Health answers whether the current deployment is safe to operate. Diagnose adds bounded maintenance, storage, Workspace, and protocol-compatibility evidence.
+Health answers whether the current deployment is safe to operate. Dashboard is the fast human cockpit for release identity, capacity/recovery, Workspace inventory, and bounded Job freshness. Diagnose adds the slower maintenance, storage, Workspace Git, and protocol-compatibility evidence.
 
 ## 7. Use the public Tool surface
 

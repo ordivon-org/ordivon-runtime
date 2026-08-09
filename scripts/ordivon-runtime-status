@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -68,8 +69,15 @@ def parser() -> argparse.ArgumentParser:
         const="diagnose",
         help="run health plus bounded maintenance diagnostics",
     )
+    mode.add_argument(
+        "--dashboard",
+        dest="mode",
+        action="store_const",
+        const="dashboard",
+        help="run fast health plus a bounded read-only operator cockpit",
+    )
     result.set_defaults(mode="health")
-    result.add_argument("--json", action="store_true", help="emit stable JSON instead of one compact line")
+    result.add_argument("--json", action="store_true", help="emit stable JSON instead of human output")
     result.add_argument("--database", type=absolute_path, default=DEFAULT_DATABASE)
     result.add_argument("--runtime-store-root", type=absolute_path, default=DEFAULT_STORE_ROOT)
     result.add_argument("--deployment-root", type=absolute_path, default=DEFAULT_DEPLOYMENT_ROOT)
@@ -83,6 +91,22 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--systemctl", type=absolute_path, default=DEFAULT_SYSTEMCTL)
     result.add_argument("--expected-commit", type=exact_commit)
     result.add_argument("--max-workspaces", type=int, default=MAX_WORKSPACE_SCAN)
+    result.add_argument(
+        "--source-repo",
+        type=absolute_path,
+        help="optional local Git checkout used only to project source/deployment relation in dashboard mode",
+    )
+    result.add_argument(
+        "--dashboard-jobs",
+        type=int,
+        default=5,
+        help="maximum active and recent Jobs projected by dashboard mode",
+    )
+    result.add_argument(
+        "--width",
+        type=int,
+        help="dashboard output width; defaults to current terminal width",
+    )
     return result
 
 
@@ -580,6 +604,9 @@ def registry_status(database: Path, reasons: list[str]) -> tuple[dict[str, Any],
     try:
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA trusted_schema=OFF")
+        # One explicit read transaction prevents false divergence when a Job transitions
+        # between otherwise independent SELECT snapshots.
+        connection.execute("BEGIN")
         required = {
             "schema_migrations": {"version"},
             "jobs": {"job_id", "workspace_id", "resolution"},
@@ -641,6 +668,430 @@ def registry_status(database: Path, reasons: list[str]) -> tuple[dict[str, Any],
         "heldReservations": int(held_reservations),
         "recoveryRequired": int(recovery_required),
     }, held_workspaces
+
+
+def _run_git(source_repo: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            ["/usr/bin/git", "-C", str(source_repo), *args],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def source_status(source_repo: Path | None, deployment_commit: str | None) -> dict[str, Any]:
+    if source_repo is None:
+        return {"available": False}
+    head_result = _run_git(source_repo, "rev-parse", "HEAD")
+    if head_result is None or head_result.returncode != 0:
+        return {"available": False, "reason": "SOURCE_REPO_UNREADABLE"}
+    head = head_result.stdout.strip()
+    origin_result = _run_git(source_repo, "rev-parse", "refs/remotes/origin/main")
+    origin = (
+        origin_result.stdout.strip()
+        if origin_result is not None and origin_result.returncode == 0
+        else None
+    )
+    dirty_result = _run_git(source_repo, "status", "--porcelain=v1", "--untracked-files=normal")
+    dirty = None if dirty_result is None or dirty_result.returncode != 0 else bool(dirty_result.stdout)
+    relation = "unknown"
+    if isinstance(deployment_commit, str) and COMMIT_PATTERN.fullmatch(deployment_commit):
+        if head == deployment_commit:
+            relation = "same"
+        else:
+            source_ahead = _run_git(source_repo, "merge-base", "--is-ancestor", deployment_commit, head)
+            deployment_ahead = _run_git(source_repo, "merge-base", "--is-ancestor", head, deployment_commit)
+            if source_ahead is not None and source_ahead.returncode == 0:
+                relation = "source_ahead"
+            elif deployment_ahead is not None and deployment_ahead.returncode == 0:
+                relation = "deployment_ahead"
+            elif (
+                source_ahead is not None
+                and deployment_ahead is not None
+                and source_ahead.returncode == 1
+                and deployment_ahead.returncode == 1
+            ):
+                relation = "diverged"
+    return {
+        "available": True,
+        "head": head,
+        "originMain": origin,
+        "dirty": dirty,
+        "relationToDeployment": relation,
+        "headMatchesOriginMain": None if origin is None else head == origin,
+    }
+
+
+def fast_workspace_status(
+    store_root: Path,
+    leased: set[str],
+    maximum: int = 4_096,
+) -> dict[str, Any]:
+    records_root = store_root / "workspace-records"
+    workspaces_root = store_root / "workspaces"
+    counts = {"open": 0, "closed": 0, "invalid": 0}
+    record_scanned = 0
+    record_truncated = False
+    if records_root.is_dir():
+        for path in records_root.glob("*.json"):
+            if record_scanned >= maximum:
+                record_truncated = True
+                break
+            record_scanned += 1
+            try:
+                record = load_json(path)
+            except StatusError:
+                counts["invalid"] += 1
+                continue
+            state = record.get("state", "open")
+            if state == "open":
+                counts["open"] += 1
+            elif state == "closed":
+                counts["closed"] += 1
+            else:
+                counts["invalid"] += 1
+
+    physical = 0
+    physical_scanned = 0
+    physical_truncated = False
+    if workspaces_root.is_dir():
+        for path in workspaces_root.iterdir():
+            if physical_scanned >= maximum:
+                physical_truncated = True
+                break
+            physical_scanned += 1
+            if path.is_dir():
+                physical += 1
+
+    exact = not record_truncated and not physical_truncated
+    return {
+        "records": counts,
+        "recordScanCount": record_scanned,
+        "recordScanTruncated": record_truncated,
+        "physicalOpen": physical,
+        "physicalScanCount": physical_scanned,
+        "physicalScanTruncated": physical_truncated,
+        "leasedWorkspaces": len(leased),
+        "recordPhysicalAligned": counts["open"] == physical if exact else None,
+    }
+
+
+def _output_modified_ms(bundle: Path) -> int | None:
+    latest = None
+    for name in ("stdout.log", "stderr.log"):
+        path = bundle / name
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if stat.st_size == 0:
+            continue
+        modified = int(stat.st_mtime * 1000)
+        latest = modified if latest is None else max(latest, modified)
+    return latest
+
+
+def _progress_status(bundle: Path, generated_at_ms: int) -> dict[str, Any] | None:
+    path = bundle / "progress.json"
+    try:
+        value = load_json(path)
+    except StatusError:
+        return None
+    updated = value.get("updatedUnixMs")
+    started = value.get("currentStepStartedUnixMs")
+    return {
+        "revision": value.get("revision") if isinstance(value.get("revision"), int) else None,
+        "status": value.get("status") if isinstance(value.get("status"), str) else None,
+        "completedSteps": value.get("completedSteps") if isinstance(value.get("completedSteps"), int) else None,
+        "totalSteps": value.get("totalSteps") if isinstance(value.get("totalSteps"), int) else None,
+        "currentStepId": value.get("currentStepId") if isinstance(value.get("currentStepId"), str) else None,
+        "currentStepIndex": value.get("currentStepIndex") if isinstance(value.get("currentStepIndex"), int) else None,
+        "currentStepElapsedMs": (
+            max(0, generated_at_ms - started) if isinstance(started, int) else None
+        ),
+        "progressIdleMs": max(0, generated_at_ms - updated) if isinstance(updated, int) else None,
+    }
+
+
+def _job_projection(row: sqlite3.Row, generated_at_ms: int) -> dict[str, Any]:
+    plan: dict[str, Any] = {}
+    raw_plan = row["execution_plan_json"]
+    if isinstance(raw_plan, str):
+        try:
+            decoded = json.loads(raw_plan)
+            if isinstance(decoded, dict):
+                plan = decoded
+        except json.JSONDecodeError:
+            pass
+    executable = plan.get("executable")
+    executable_name = Path(executable).name if isinstance(executable, str) else None
+    bundle_raw = row["bundle_path"]
+    bundle = Path(bundle_raw) if isinstance(bundle_raw, str) and bundle_raw else None
+    output_modified = _output_modified_ms(bundle) if bundle is not None else None
+    progress = _progress_status(bundle, generated_at_ms) if bundle is not None else None
+    started = row["started_at_ms"] if isinstance(row["started_at_ms"], int) else None
+    finished = row["finished_at_ms"] if isinstance(row["finished_at_ms"], int) else None
+    created = row["created_at_ms"] if isinstance(row["created_at_ms"], int) else None
+    duration_origin = started if started is not None else created
+    duration_end = finished if finished is not None else generated_at_ms
+    duration = (
+        max(0, duration_end - duration_origin) if duration_origin is not None else None
+    )
+    return {
+        "jobId": row["job_id"],
+        "workspaceId": row["workspace_id"],
+        "attemptId": row["projected_attempt_id"],
+        "attemptState": row["attempt_state"],
+        "resolution": row["resolution"],
+        "exitCode": row["exit_code"],
+        "executableName": executable_name,
+        "durationMs": duration,
+        "lastOutputAtMs": output_modified,
+        "outputIdleMs": (
+            max(0, generated_at_ms - output_modified) if output_modified is not None else None
+        ),
+        "recoveryRequired": bool(row["recovery_required"]),
+        "progress": progress,
+    }
+
+
+def dashboard_jobs(database: Path, generated_at_ms: int, limit: int) -> dict[str, Any]:
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
+        connection.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return {"available": False, "active": [], "recent": []}
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+        required_jobs = {
+            "job_id", "workspace_id", "resolution", "execution_plan_json", "created_at_ms", "current_attempt_id"
+        }
+        required_attempts = {
+            "attempt_id", "state", "started_at_ms", "finished_at_ms", "exit_code", "bundle_path"
+        }
+        job_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(jobs)")}
+        attempt_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(attempts)")}
+        if not required_jobs.issubset(job_columns) or not required_attempts.issubset(attempt_columns):
+            return {"available": False, "active": [], "recent": []}
+        select = """
+            SELECT j.job_id,j.workspace_id,j.resolution,j.execution_plan_json,j.created_at_ms,
+                   j.current_attempt_id,a.state AS attempt_state,a.started_at_ms,a.finished_at_ms,
+                   a.attempt_id AS projected_attempt_id,a.exit_code,a.bundle_path,
+                   EXISTS(
+                     SELECT 1 FROM attempt_conditions c
+                     WHERE c.attempt_id=j.current_attempt_id
+                       AND c.condition_type='recovery_required' AND c.status='true'
+                   ) AS recovery_required
+            FROM jobs j
+            LEFT JOIN attempts a ON a.attempt_id=COALESCE(
+                j.current_attempt_id,
+                (
+                    SELECT latest.attempt_id
+                    FROM attempts latest
+                    WHERE latest.job_id=j.job_id
+                    ORDER BY latest.attempt_number DESC
+                    LIMIT 1
+                )
+            )
+        """
+        active_rows = connection.execute(
+            select + " WHERE j.resolution IS NULL ORDER BY j.created_at_ms DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        recent_rows = connection.execute(
+            select + " WHERE j.resolution IS NOT NULL ORDER BY j.created_at_ms DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return {
+            "available": True,
+            "active": [_job_projection(row, generated_at_ms) for row in active_rows],
+            "recent": [_job_projection(row, generated_at_ms) for row in recent_rows],
+        }
+    except sqlite3.Error:
+        return {"available": False, "active": [], "recent": []}
+    finally:
+        connection.close()
+
+
+def dashboard_status(
+    database: Path,
+    store_root: Path,
+    held: set[str],
+    generated_at_ms: int,
+    limit: int,
+    source_repo: Path | None,
+    deployment_commit: str | None,
+) -> dict[str, Any]:
+    return {
+        "source": source_status(source_repo, deployment_commit),
+        "workspaces": fast_workspace_status(store_root, held),
+        "jobs": dashboard_jobs(database, generated_at_ms, limit),
+    }
+
+
+def _short(value: Any, length: int = 12) -> str:
+    return value[:length] if isinstance(value, str) and value else "-"
+
+
+def _job_token(value: Any, length: int = 10) -> str:
+    if not isinstance(value, str) or not value:
+        return "-"
+    suffix = value[-length:] if len(value) > length else value
+    return "#" + suffix
+
+
+def _duration(value: Any) -> str:
+    if not isinstance(value, int):
+        return "-"
+    seconds = max(0, value) // 1000
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h{minutes:02d}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d{hours:02d}h"
+
+
+def _clip(value: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(value) <= width:
+        return value
+    if width <= 1:
+        return value[:width]
+    return value[: width - 1] + "…"
+
+
+def _middle(value: Any, width: int) -> str:
+    text = str(value) if value is not None else "-"
+    if len(text) <= width:
+        return text
+    if width < 5:
+        return _clip(text, width)
+    left = (width - 1) // 2
+    right = width - left - 1
+    return text[:left] + "…" + text[-right:]
+
+
+def dashboard_human(report: dict[str, Any], width: int) -> str:
+    width = max(60, width)
+    deployment = report["deployment"]
+    service = report["service"]
+    registry = report["registry"]
+    config = report["config"]
+    dashboard = report.get("dashboard", {})
+    source = dashboard.get("source", {})
+    workspaces = dashboard.get("workspaces", {})
+    jobs = dashboard.get("jobs", {})
+    lines = [
+        _clip(f"ORDIVON RUNTIME  {str(report['status']).upper()}  health={report['health']['status']}", width),
+        _clip(
+            f"RELEASE   {_short(deployment.get('commit'))}  service={service.get('activeState')}/{service.get('subState')}  "
+            f"mcp={deployment.get('protocolLifecycle') or '-'}/{deployment.get('protocolVersion') or '-'}  "
+            f"tools={deployment.get('toolCount', '-')}",
+            width,
+        ),
+    ]
+    if source.get("available"):
+        source_state = "dirty" if source.get("dirty") else ("clean" if source.get("dirty") is False else "state=unknown")
+        origin_match = source.get("headMatchesOriginMain")
+        origin_state = (
+            "origin=aligned" if origin_match is True else ("origin=drift" if origin_match is False else "origin=unknown")
+        )
+        lines.append(
+            _clip(
+                f"SOURCE    {_short(source.get('head'))}  {source_state}  {origin_state}  "
+                f"release={source.get('relationToDeployment', 'unknown')}",
+                width,
+            )
+        )
+    catalog = deployment.get("toolCatalogDigest")
+    lines.append(
+        _clip(
+            f"CATALOG   {_short(catalog, 20)}  registry=v{registry.get('schemaVersion', '-')}  "
+            f"jobs={registry.get('jobsActive', '?')}/{registry.get('jobsTotal', '?')}",
+            width,
+        )
+    )
+    lines.append(
+        _clip(
+            f"CAPACITY  active={registry.get('activeReservations', '?')}  held={registry.get('heldReservations', '?')}  "
+            f"limit={config.get('globalMaxConcurrency', '?')}  recovery={registry.get('recoveryRequired', '?')}",
+            width,
+        )
+    )
+    records = workspaces.get("records", {}) if isinstance(workspaces, dict) else {}
+    record_open = records.get("open", "?")
+    physical_open = workspaces.get("physicalOpen", "?")
+    if workspaces.get("recordScanTruncated"):
+        record_open = f">={record_open}"
+    if workspaces.get("physicalScanTruncated"):
+        physical_open = f">={physical_open}"
+    lines.append(
+        _clip(
+            f"WORKSPACE open={record_open}  physical={physical_open}  "
+            f"leased={workspaces.get('leasedWorkspaces', '?')}  aligned={'yes' if workspaces.get('recordPhysicalAligned') is True else ('no' if workspaces.get('recordPhysicalAligned') is False else '?')}",
+            width,
+        )
+    )
+    if report["operatorAction"]["count"]:
+        lines.append(_clip("ACTION    " + ", ".join(report["operatorAction"]["reasons"]), width))
+
+    active = jobs.get("active", []) if isinstance(jobs, dict) else []
+    lines.append("")
+    lines.append(_clip(f"ACTIVE JOBS  {len(active)}", width))
+    if not jobs.get("available", False):
+        lines.append("  projection unavailable")
+    elif not active:
+        lines.append("  none")
+    else:
+        for job in active:
+            progress = job.get("progress") or {}
+            step = progress.get("currentStepId") or "-"
+            if width < 100:
+                row = (
+                    f"  RUN {_job_token(job.get('jobId'), 8)} {_middle(job.get('workspaceId'), 24)} "
+                    f"{job.get('attemptState') or '-'} {_duration(job.get('durationMs'))} "
+                    f"out={_duration(job.get('outputIdleMs'))} step={step}"
+                )
+            else:
+                workspace_width = 34 if width < 140 else 52
+                row = (
+                    f"  RUN {_job_token(job.get('jobId'), 10)}  {_middle(job.get('workspaceId'), workspace_width)}  "
+                    f"{job.get('executableName') or '-'}  {job.get('attemptState') or '-'}  "
+                    f"age={_duration(job.get('durationMs'))}  out={_duration(job.get('outputIdleMs'))}  "
+                    f"progress={_duration(progress.get('progressIdleMs'))}  step={step}"
+                )
+            if job.get("recoveryRequired"):
+                row += "  RECOVERY"
+            lines.append(_clip(row, width))
+
+    recent = jobs.get("recent", []) if isinstance(jobs, dict) else []
+    lines.append("")
+    lines.append(_clip(f"RECENT TERMINAL  {len(recent)}", width))
+    if not jobs.get("available", False):
+        lines.append("  projection unavailable")
+    elif not recent:
+        lines.append("  none")
+    else:
+        for job in recent:
+            state = job.get("resolution") or job.get("attemptState") or "-"
+            row = (
+                f"  {_short(state.upper(), 9):9} {_job_token(job.get('jobId'), 10):11}  "
+                f"{_middle(job.get('workspaceId'), 36 if width >= 110 else 24)}  "
+                f"{job.get('executableName') or '-'}  {_duration(job.get('durationMs'))}"
+            )
+            lines.append(_clip(row, width))
+    return "\n".join(lines)
 
 
 def workspace_status(
@@ -832,6 +1283,10 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
         raise StatusError("protocol-retention-hours must be positive")
     if args.stale_dirty_hours < 1:
         raise StatusError("stale-dirty-hours must be positive")
+    if args.dashboard_jobs < 1:
+        raise StatusError("dashboard-jobs must be positive")
+    if args.width is not None and args.width < 20:
+        raise StatusError("width must be at least 20 columns")
     started = time.perf_counter()
     generated_at_ms = int(time.time() * 1000)
     health_reasons: list[str] = []
@@ -856,6 +1311,16 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
         "config": config,
         "registry": registry,
     }
+    if args.mode == "dashboard":
+        report["dashboard"] = dashboard_status(
+            args.database,
+            args.runtime_store_root,
+            held,
+            generated_at_ms,
+            args.dashboard_jobs,
+            args.source_repo,
+            deployment.get("commit") if isinstance(deployment.get("commit"), str) else None,
+        )
     if args.mode == "diagnose":
         trace_path = args.trace_path or configured_trace_path(args.env_file, args.database)
         report["compatibility"] = compatibility_status(
@@ -887,13 +1352,13 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
     health_status = "healthy" if not health_reasons else "unhealthy"
     maintenance_status = (
         "not_checked"
-        if args.mode == "health"
+        if args.mode in {"health", "dashboard"}
         else ("healthy" if not maintenance_reasons else "attention")
     )
     overall_status = (
         "unhealthy"
         if health_reasons
-        else ("attention" if maintenance_reasons else "healthy")
+        else ("attention" if args.mode == "diagnose" and maintenance_reasons else "healthy")
     )
     report.update(
         {
@@ -917,7 +1382,10 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
     return report
 
 
-def human(report: dict[str, Any]) -> str:
+def human(report: dict[str, Any], width: int | None = None) -> str:
+    if report.get("mode") == "dashboard":
+        columns = width or shutil.get_terminal_size(fallback=(120, 24)).columns
+        return dashboard_human(report, columns)
     deployment = report["deployment"]
     service = report["service"]
     registry = report["registry"]
@@ -955,7 +1423,7 @@ def main() -> int:
     except StatusError as error:
         print(f"runtime status failed: {error}", file=sys.stderr)
         return 2
-    print(json.dumps(report, indent=2, sort_keys=True) if args.json else human(report))
+    print(json.dumps(report, indent=2, sort_keys=True) if args.json else human(report, args.width))
     return 0 if report["health"]["status"] == "healthy" else 1
 
 

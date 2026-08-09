@@ -96,6 +96,7 @@ Agent-first Runtime work measures the complete Agent path without creating anoth
 
 Use the existing owners for separate facts:
 
+- `ordivon-runtime-status --dashboard` is the fast Bash cockpit above the per-Workspace microscope. It projects installed release/MCP identity, capacity/recovery counts, Workspace inventory, and bounded active/recent Job freshness directly from deployment receipts, systemd, Registry, Workspace records, and existing Attempt files. It never calls `task.observe`, reads output contents, or runs the expensive maintenance probes used by `--diagnose`.
 - `ordivon-runtime-inspect workspace` combines read-only Registry projection with current Git HEAD/status and existing Runner progress/output metadata for one Workspace. It does not call `task.observe`, reconcile, dispatch, or create a second state owner.
 - `ordivon-runtime-inspect summary` derives physical execution, dispatch, recovery, reservation, Artifact, and mechanical-latency facts from the Runtime Registry. These remain execution-authoritative.
 - `runtime-trace.jsonl` is a bounded diagnostic projection of MCP and adapter behavior. It is not Job, Attempt, Workspace, or semantic-completion truth.

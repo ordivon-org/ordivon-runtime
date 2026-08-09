@@ -329,18 +329,25 @@ The command resolves the same private Runtime credential source as deploy/reclai
 
 ## Secret-free status
 
-`scripts/ordivon-runtime-status` separates operational health from bounded maintenance diagnosis. The default and `--health` path verifies the latest successful deployment receipt, the complete installed release-artifact digests and modes, systemd state, allowlisted numeric Runtime configuration, and Registry/recovery consistency. It deliberately skips Git Workspace scans, recursive storage measurement, lifecycle receipts, and protocol-history analysis. `--diagnose` adds the receipted MCP lifecycle, selected and supported protocol versions, `toolCatalogDigest`, bounded current-plus-rotated protocol observations, the immediately previous rollback protocol, Workspace consistency, cache/Registry/deployment/candidate byte measurements, stale dirty Workspace counts, and the latest lifecycle receipt. It never opens the MCP endpoint and never reads or emits the bearer token.
+`scripts/ordivon-runtime-status` separates three read-only operator views. The default and `--health` path is the fast automation contract: it verifies the latest successful deployment receipt, the complete installed release-artifact digests and modes, systemd state, allowlisted numeric Runtime configuration, and Registry/recovery consistency. `--dashboard` adds only cheap cockpit projections: deployment/MCP identity, capacity and recovery counts, open Workspace record/physical counts, bounded active and recent Job summaries, Runner progress freshness, and output freshness. It deliberately does **not** read stdout/stderr contents, reconcile Jobs, run Git status across all Workspaces, measure storage recursively, or scan protocol history. An optional `--source-repo` compares one local checkout with the deployed commit without making source/deployment drift a production-health failure. `--diagnose` remains the deeper maintenance path and adds protocol compatibility history, Workspace Git consistency, recursive storage measurements, stale dirty Workspace counts, and lifecycle receipts. None of the modes opens the MCP endpoint or reads/emits the bearer token.
 
 ```bash
-# Fast health path; this is the default and is suitable for frequent automation.
+# Fast health path; default and suitable for frequent automation.
 scripts/ordivon-runtime-status
 scripts/ordivon-runtime-status --health --json
+
+# Fast human cockpit; ordinary `watch` provides refresh without another state owner.
+scripts/ordivon-runtime-status --dashboard \
+  --source-repo "$(git rev-parse --show-toplevel)"
+watch -n 1 'scripts/ordivon-runtime-status --dashboard --width 120'
 
 # Explicit maintenance and compatibility diagnosis; this may scan large cache trees.
 scripts/ordivon-runtime-status --diagnose --json
 scripts/ordivon-runtime-status --diagnose --json \
   --expected-commit "$(git rev-parse HEAD)"
 ```
+
+The dashboard reports elapsed, output-idle, and progress-idle time as mechanical freshness only. It does not label a silent Job `stuck`, infer semantic completion, or turn display state into Runtime truth. Job tokens use the distinguishing suffix of the durable Job ID because UUIDv7 prefixes are deliberately time-correlated and therefore poor terminal identifiers.
 
 The JSON schema reports separate `health` and `maintenance` states. The deployment projection names the current `releaseEvent` and `releaseDisposition`; a successful explicit rollback supersedes the forward deployment for installed-artifact truth. Exit code `1` is reserved for operational health failures such as service, deployment, Registry, recovery, exact release-artifact inconsistency, or a rollback whose restored artifact set is known but whose coherent source Commit cannot be proven. Maintenance findings such as a stale dirty Workspace produce top-level `status=attention` but retain exit code `0`; automation must inspect `maintenanceAction` when maintenance policy should gate a workflow. Compatibility observations remain advisory deletion evidence: an unreadable or truncated trace, unknown rollback protocol, or incomplete observation window blocks deletion but does not create a health incident. Exit code `2` remains reserved for an invalid invocation or unreadable mandatory input.
 
