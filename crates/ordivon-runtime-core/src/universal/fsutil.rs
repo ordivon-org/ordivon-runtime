@@ -1,11 +1,75 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{UniversalExecError, UniversalExecErrorCode};
+
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+const RESOLVE_BENEATH: u64 = 0x08;
+
+pub(crate) fn open_directory_nofollow(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+pub(crate) fn open_regular_file_beneath(
+    root_file: &File,
+    relative: &Path,
+    deny_parent_symlinks: bool,
+) -> std::io::Result<File> {
+    let relative = CString::new(relative.as_os_str().as_encoded_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "relative path contains NUL",
+        )
+    })?;
+    let mut resolve = RESOLVE_NO_MAGICLINKS | RESOLVE_BENEATH;
+    if deny_parent_symlinks {
+        resolve |= RESOLVE_NO_SYMLINKS;
+    }
+    let how = OpenHow {
+        flags: (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK) as u64,
+        mode: 0,
+        resolve,
+    };
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            root_file.as_raw_fd(),
+            relative.as_ptr(),
+            &how,
+            std::mem::size_of::<OpenHow>(),
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let file = unsafe { File::from_raw_fd(fd as i32) };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "resolved object is not a regular file",
+        ));
+    }
+    Ok(file)
+}
 
 pub(crate) fn validate_id(value: &str, field: &str) -> Result<(), UniversalExecError> {
     let mut chars = value.chars();

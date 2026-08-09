@@ -8,15 +8,16 @@ use std::process::{Child, Command, Stdio};
 use std::thread::{self, JoinHandle};
 
 use super::{
-    canonical_directory, invalid, io_error, now_unix_ms, sha256_bytes, sha256_file,
-    validate_relative_path, write_bytes_atomic, write_json_atomic, GitWorkspaceCreateRequest,
-    UniversalExecError, UniversalExecErrorCode, UniversalExecutorConfig, WorkspaceChangeCursor,
-    WorkspaceChangeEntry, WorkspaceChangeKind, WorkspaceChangePageRequest,
-    WorkspaceChangePageResult, WorkspaceCloseRequest, WorkspaceCloseResult,
-    WorkspaceClosureDisposition, WorkspaceContentMetadata, WorkspaceContentReadResult,
-    WorkspaceContentRequest, WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceReadRequest,
-    WorkspaceReadResult, WorkspaceRecord, WorkspaceRenamedPath, WorkspaceWriteRequest,
-    WorkspaceWriteResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    canonical_directory, invalid, io_error, now_unix_ms, open_directory_nofollow,
+    open_regular_file_beneath, sha256_bytes, sha256_file, validate_relative_path,
+    write_bytes_atomic, write_json_atomic, GitWorkspaceCreateRequest, UniversalExecError,
+    UniversalExecErrorCode, UniversalExecutorConfig, WorkspaceChangeCursor, WorkspaceChangeEntry,
+    WorkspaceChangeKind, WorkspaceChangePageRequest, WorkspaceChangePageResult,
+    WorkspaceCloseRequest, WorkspaceCloseResult, WorkspaceClosureDisposition,
+    WorkspaceContentMetadata, WorkspaceContentReadResult, WorkspaceContentRequest,
+    WorkspaceDiffRequest, WorkspaceDiffResult, WorkspaceReadRequest, WorkspaceReadResult,
+    WorkspaceRecord, WorkspaceRenamedPath, WorkspaceWriteRequest, WorkspaceWriteResult,
+    UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -476,42 +477,83 @@ pub fn list_workspace_records(
     Ok(inventory.records)
 }
 
+fn open_workspace_regular_file(
+    record: &WorkspaceRecord,
+    relative: &str,
+) -> Result<(File, PathBuf), UniversalExecError> {
+    let relative_path = validate_relative_path(relative, "relativePath")?;
+    let workspace_root = Path::new(&record.workspace_path);
+    let logical_path = workspace_root.join(&relative_path);
+    let root = open_directory_nofollow(workspace_root).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::WorkspacePathDenied,
+            format!("cannot open Workspace root without following symlinks: {error}"),
+            Some("workspaceId"),
+            false,
+        )
+    })?;
+    let file = open_regular_file_beneath(&root, &relative_path, false).map_err(|error| {
+        let code = match error.raw_os_error() {
+            Some(libc::ENOENT) => UniversalExecErrorCode::WorkspacePathNotFound,
+            Some(libc::ELOOP) | Some(libc::EXDEV) | Some(libc::ENOTDIR) => {
+                UniversalExecErrorCode::WorkspacePathDenied
+            }
+            Some(libc::ENOSYS) => UniversalExecErrorCode::ToolUnavailable,
+            _ if error.kind() == std::io::ErrorKind::InvalidInput => {
+                UniversalExecErrorCode::WorkspacePathDenied
+            }
+            _ => UniversalExecErrorCode::IoError,
+        };
+        UniversalExecError::new(
+            code,
+            format!("cannot open Workspace file beneath its root: {error}"),
+            Some("relativePath"),
+            false,
+        )
+    })?;
+    Ok((file, logical_path))
+}
+
+fn read_workspace_file_bounded(
+    mut file: File,
+    logical_path: &Path,
+    max_bytes: u64,
+) -> Result<Vec<u8>, UniversalExecError> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| io_error(logical_path, "inspect opened file", error))?;
+    if metadata.len() > max_bytes {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::OutputLimitExceeded,
+            format!("file exceeds maxBytes {max_bytes}"),
+            Some("maxBytes"),
+            false,
+        ));
+    }
+    let mut bytes = Vec::with_capacity((metadata.len().min(max_bytes) + 1) as usize);
+    file.by_ref()
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| io_error(logical_path, "read opened file", error))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::OutputLimitExceeded,
+            format!("file exceeds maxBytes {max_bytes}"),
+            Some("maxBytes"),
+            false,
+        ));
+    }
+    Ok(bytes)
+}
+
 pub fn read_workspace_text(
     config: &UniversalExecutorConfig,
     request: &WorkspaceReadRequest,
 ) -> Result<WorkspaceReadResult, UniversalExecError> {
     request.validate_shape()?;
     let record = load_workspace_record(config, &request.workspace_id)?;
-    let path = resolve_existing_workspace_path(&record, &request.relative_path, false)?;
-    let metadata = fs::metadata(&path).map_err(|error| io_error(&path, "inspect", error))?;
-    if !metadata.is_file() {
-        return Err(invalid(
-            "relativePath must resolve to a file",
-            "relativePath",
-        ));
-    }
-    if metadata.len() > request.max_bytes {
-        return Err(UniversalExecError::new(
-            UniversalExecErrorCode::OutputLimitExceeded,
-            format!("file exceeds maxBytes {}", request.max_bytes),
-            Some("maxBytes"),
-            false,
-        ));
-    }
-    let mut file = File::open(&path).map_err(|error| io_error(&path, "open", error))?;
-    let mut bytes = Vec::with_capacity((metadata.len().min(request.max_bytes) + 1) as usize);
-    file.by_ref()
-        .take(request.max_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| io_error(&path, "read", error))?;
-    if bytes.len() as u64 > request.max_bytes {
-        return Err(UniversalExecError::new(
-            UniversalExecErrorCode::OutputLimitExceeded,
-            format!("file exceeds maxBytes {}", request.max_bytes),
-            Some("maxBytes"),
-            false,
-        ));
-    }
+    let (file, logical_path) = open_workspace_regular_file(&record, &request.relative_path)?;
+    let bytes = read_workspace_file_bounded(file, &logical_path, request.max_bytes)?;
     let digest = sha256_bytes(&bytes);
     let byte_length = bytes.len() as u64;
     let content = String::from_utf8(bytes).map_err(|error| {
@@ -563,31 +605,8 @@ pub fn read_workspace_content(
 ) -> Result<WorkspaceContentReadResult, UniversalExecError> {
     request.validate_shape()?;
     let record = load_workspace_record(config, &request.workspace_id)?;
-    let path = resolve_existing_workspace_path(&record, &request.relative_path, false)?;
-    let metadata = fs::metadata(&path).map_err(|error| io_error(&path, "inspect", error))?;
-    if !metadata.is_file() {
-        return Err(invalid(
-            "relativePath must resolve to a file",
-            "relativePath",
-        ));
-    }
-    if metadata.len() > request.max_bytes {
-        return Err(UniversalExecError::new(
-            UniversalExecErrorCode::OutputLimitExceeded,
-            format!("file exceeds maxBytes {}", request.max_bytes),
-            Some("maxBytes"),
-            false,
-        ));
-    }
-    let bytes = fs::read(&path).map_err(|error| io_error(&path, "read", error))?;
-    if bytes.len() as u64 > request.max_bytes {
-        return Err(UniversalExecError::new(
-            UniversalExecErrorCode::OutputLimitExceeded,
-            format!("file exceeds maxBytes {}", request.max_bytes),
-            Some("maxBytes"),
-            false,
-        ));
-    }
+    let (file, logical_path) = open_workspace_regular_file(&record, &request.relative_path)?;
+    let bytes = read_workspace_file_bounded(file, &logical_path, request.max_bytes)?;
     let digest = sha256_bytes(&bytes);
     if digest != request.expected_digest {
         return Err(UniversalExecError::new(

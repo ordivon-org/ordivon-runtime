@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,11 +37,11 @@ use super::{
 };
 use crate::universal::{
     canonical_directory, create_git_workspace_compact, inspect_workspace_patch_plan,
-    list_open_workspace_record_inventory, load_workspace_record, mutate_workspace, patch_workspace,
-    plan_workspace_patch, remove_git_workspace, resolve_workspace_cwd,
-    result_from_workspace_patch_plan, sha256_bytes, sha256_file, workspace_cleanup_dependents,
-    workspace_git_common_dir_at, workspace_head_and_dirty_at, workspace_head_revision,
-    workspace_source_state_digest, write_bytes_atomic, write_json_atomic,
+    list_open_workspace_record_inventory, load_workspace_record, mutate_workspace,
+    open_regular_file_beneath, patch_workspace, plan_workspace_patch, remove_git_workspace,
+    resolve_workspace_cwd, result_from_workspace_patch_plan, sha256_bytes, sha256_file,
+    workspace_cleanup_dependents, workspace_git_common_dir_at, workspace_head_and_dirty_at,
+    workspace_head_revision, workspace_source_state_digest, write_bytes_atomic, write_json_atomic,
     CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
     RunnerInputCommitment, RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskProgress,
     RunnerTaskRequest, RunnerTaskResult, UniversalExecutorConfig, WorkspaceCloseRequest,
@@ -3468,52 +3467,15 @@ fn validate_sha256_digest(value: &str, field: &str) -> RuntimeResult<()> {
     Ok(())
 }
 
-#[repr(C)]
-struct OpenHow {
-    flags: u64,
-    mode: u64,
-    resolve: u64,
-}
-
 fn open_authority_file(root_file: &File, relative: &str, index: usize) -> RuntimeResult<File> {
-    let relative = CString::new(relative).map_err(|_| {
+    let relative_path =
+        validate_normal_relative_path(relative, &format!("inputs[{index}].relativeObject"))?;
+    open_regular_file_beneath(root_file, &relative_path, true).map_err(|error| {
         RuntimeError::invalid(
-            "input relativeObject contains NUL",
-            &format!("inputs[{index}].relativeObject"),
-        )
-    })?;
-    let how = OpenHow {
-        flags: (libc::O_RDONLY | libc::O_CLOEXEC) as u64,
-        mode: 0,
-        resolve: 0x02 | 0x04 | 0x08,
-    };
-    let fd = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            root_file.as_raw_fd(),
-            relative.as_ptr(),
-            &how,
-            std::mem::size_of::<OpenHow>(),
-        )
-    };
-    if fd < 0 {
-        let error = std::io::Error::last_os_error();
-        return Err(RuntimeError::invalid(
             format!("cannot resolve input object inside authority: {error}"),
             &format!("inputs[{index}].relativeObject"),
-        ));
-    }
-    let file = unsafe { File::from_raw_fd(fd as i32) };
-    let metadata = file
-        .metadata()
-        .map_err(|error| io_error("inspect input object", error))?;
-    if !metadata.is_file() {
-        return Err(RuntimeError::invalid(
-            "input object must resolve to a regular file",
-            &format!("inputs[{index}].relativeObject"),
-        ));
-    }
-    Ok(file)
+        )
+    })
 }
 
 fn copy_input_and_digest(mut source: File, target: &Path) -> RuntimeResult<String> {

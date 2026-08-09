@@ -4,6 +4,11 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 struct Sandbox {
@@ -228,6 +233,110 @@ fn workspace_round_trip_is_isolated_and_digest_guarded() {
 }
 
 #[test]
+fn workspace_read_allows_relative_parent_symlink_that_stays_beneath_root() {
+    let sandbox = Sandbox::new("workspace-read-relative-parent-symlink");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-read-relative-parent-symlink";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    fs::create_dir_all(workspace.join("real")).unwrap();
+    fs::write(workspace.join("real/value.txt"), b"inside\n").unwrap();
+    symlink("real", workspace.join("alias")).unwrap();
+
+    let read = read_workspace_text(
+        &config,
+        &WorkspaceReadRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            relative_path: "alias/value.txt".to_string(),
+            max_bytes: 1024,
+        },
+    )
+    .unwrap();
+    assert_eq!(read.content, "inside\n");
+
+    let directory_error = read_workspace_text(
+        &config,
+        &WorkspaceReadRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            relative_path: "real".to_string(),
+            max_bytes: 1024,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        directory_error.code,
+        UniversalExecErrorCode::WorkspacePathDenied
+    );
+}
+
+#[test]
+fn workspace_content_rejects_final_symlink_and_preserves_bounded_read() {
+    let sandbox = Sandbox::new("workspace-content-fd-boundaries");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-content-fd-boundaries";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    fs::create_dir_all(workspace.join("out")).unwrap();
+    let png = [b"\x89PNG\r\n\x1a\n".as_slice(), &vec![b'x'; 2048]].concat();
+    fs::write(workspace.join("out/large.png"), &png).unwrap();
+    symlink("large.png", workspace.join("out/link.png")).unwrap();
+
+    let symlink_error = read_workspace_content(
+        &config,
+        &WorkspaceContentRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            relative_path: "out/link.png".to_string(),
+            expected_digest: sha256_bytes(&png),
+            max_bytes: 4096,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        symlink_error.code,
+        UniversalExecErrorCode::WorkspacePathDenied
+    );
+
+    let size_error = read_workspace_content(
+        &config,
+        &WorkspaceContentRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            relative_path: "out/large.png".to_string(),
+            expected_digest: sha256_bytes(&png),
+            max_bytes: 1024,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(size_error.code, UniversalExecErrorCode::OutputLimitExceeded);
+    assert_eq!(size_error.field.as_deref(), Some("maxBytes"));
+}
+
+#[test]
 fn workspace_content_reads_exact_verified_png_bytes() {
     let sandbox = Sandbox::new("workspace-content-png");
     let source = sandbox.root.join("source");
@@ -265,6 +374,158 @@ fn workspace_content_reads_exact_verified_png_bytes() {
     assert_eq!(read.metadata.digest, expected_digest);
     assert_eq!(read.metadata.media_type, "image/png");
     assert_eq!(read.metadata.byte_length, png.len() as u64);
+}
+
+#[test]
+fn workspace_read_never_follows_replaced_symlink_after_fd_binding() {
+    let sandbox = Sandbox::new("workspace-read-toctou-probe");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-read-toctou-probe";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+
+    let workspace = config.workspace_path(workspace_id);
+    let out = workspace.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let target = out.join("view.txt");
+    let safe_swap = out.join("safe.swap");
+    let link_swap = out.join("link.swap");
+    let outside = sandbox.root.join("outside.txt");
+    let safe = b"workspace-safe\n";
+    let escaped = b"outside-secret\n";
+    fs::write(&target, safe).unwrap();
+    fs::write(&outside, escaped).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let attacker_stop = Arc::clone(&stop);
+    let attacker_target = target.clone();
+    let attacker_safe_swap = safe_swap.clone();
+    let attacker_link_swap = link_swap.clone();
+    let attacker_outside = outside.clone();
+    let attacker = thread::spawn(move || {
+        while !attacker_stop.load(Ordering::Relaxed) {
+            fs::write(&attacker_safe_swap, safe).unwrap();
+            fs::rename(&attacker_safe_swap, &attacker_target).unwrap();
+            symlink(&attacker_outside, &attacker_link_swap).unwrap();
+            fs::rename(&attacker_link_swap, &attacker_target).unwrap();
+        }
+    });
+
+    let mut observed_escape = None;
+    for iteration in 0..20_000_u64 {
+        let result = read_workspace_text(
+            &config,
+            &WorkspaceReadRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: workspace_id.to_string(),
+                relative_path: "out/view.txt".to_string(),
+                max_bytes: 1024,
+            },
+        );
+        if let Ok(read) = result {
+            if read.content.as_bytes() == escaped {
+                observed_escape = Some(iteration);
+                break;
+            }
+        }
+        if iteration % 128 == 0 {
+            thread::yield_now();
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    attacker.join().unwrap();
+
+    assert_eq!(
+        observed_escape, None,
+        "workspace.read returned bytes from outside the Workspace after FD binding"
+    );
+}
+
+#[test]
+fn workspace_content_never_follows_replaced_symlink_after_fd_binding() {
+    let sandbox = Sandbox::new("workspace-content-toctou-probe");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-content-toctou-probe";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+
+    let workspace = config.workspace_path(workspace_id);
+    let out = workspace.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let target = out.join("view.png");
+    let safe_swap = out.join("safe.swap");
+    let link_swap = out.join("link.swap");
+    let outside = sandbox.root.join("outside.png");
+    let safe = b"\x89PNG\r\n\x1a\nworkspace-safe";
+    let escaped = b"\x89PNG\r\n\x1a\noutside-secret";
+    fs::write(&target, safe).unwrap();
+    fs::write(&outside, escaped).unwrap();
+    let escaped_digest = sha256_bytes(escaped);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let attacker_stop = Arc::clone(&stop);
+    let attacker_target = target.clone();
+    let attacker_safe_swap = safe_swap.clone();
+    let attacker_link_swap = link_swap.clone();
+    let attacker_outside = outside.clone();
+    let attacker = thread::spawn(move || {
+        while !attacker_stop.load(Ordering::Relaxed) {
+            fs::write(&attacker_safe_swap, safe).unwrap();
+            fs::rename(&attacker_safe_swap, &attacker_target).unwrap();
+            symlink(&attacker_outside, &attacker_link_swap).unwrap();
+            fs::rename(&attacker_link_swap, &attacker_target).unwrap();
+        }
+    });
+
+    let mut observed_escape = None;
+    for iteration in 0..20_000_u64 {
+        let result = read_workspace_content(
+            &config,
+            &WorkspaceContentRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: workspace_id.to_string(),
+                relative_path: "out/view.png".to_string(),
+                expected_digest: escaped_digest.clone(),
+                max_bytes: 1024,
+            },
+        );
+        if let Ok(read) = result {
+            if read.bytes == escaped {
+                observed_escape = Some(iteration);
+                break;
+            }
+        }
+        if iteration % 128 == 0 {
+            thread::yield_now();
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    attacker.join().unwrap();
+
+    assert_eq!(
+        observed_escape, None,
+        "workspace.content returned bytes from outside the Workspace after FD binding"
+    );
 }
 
 #[test]
