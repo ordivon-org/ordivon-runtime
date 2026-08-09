@@ -75,6 +75,7 @@ fn runtime_config(sandbox: &Sandbox) -> RuntimeConfig {
             max_output_bytes: 1_048_576,
         },
         startup_grace_ms: 2_000,
+        windows: None,
     }
 }
 
@@ -194,6 +195,7 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
             steps: Vec::new(),
             budget: crate::ExecutionBudget::default(),
             execution_profile: super::ExecutionProfile::TrustedLocal,
+            execution_target: super::ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
             input_set_id: None,
             effective_inputs: Vec::new(),
@@ -1193,6 +1195,7 @@ fn representation_cardinality_is_not_runtime_admission_policy() {
             steps,
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
+            execution_target: ExecutionTarget::LocalLinux,
             foreign_references,
         },
         wait_ms: 0,
@@ -1224,6 +1227,7 @@ fn operator_runtime_and_output_ceilings_are_enforced_before_admission() {
             steps: Vec::new(),
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
+            execution_target: super::ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -1265,6 +1269,7 @@ fn oversized_exec_string_is_rejected_before_admission() {
             steps: Vec::new(),
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
+            execution_target: super::ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -1295,6 +1300,7 @@ fn request_identity_excludes_observation_preferences_and_capacity_policy() {
             steps: Vec::new(),
             budget: ExecutionBudget::default(),
             execution_profile: super::ExecutionProfile::TrustedLocal,
+            execution_target: super::ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -1302,6 +1308,18 @@ fn request_identity_excludes_observation_preferences_and_capacity_policy() {
         stderr_tail_bytes: 0,
     };
     let digest = operation_request_identity_digest(&base).unwrap();
+    assert_eq!(
+        digest,
+        "runtime-request-v1:sha256:588131daa80c66808139c86fada4fd1b07ed3b67b276b5da7b2ff0a0462bbc22"
+    );
+
+    let mut windows_native = base.clone();
+    windows_native.execution.execution_target = super::ExecutionTarget::WindowsNative;
+    assert_ne!(
+        operation_request_identity_digest(&windows_native).unwrap(),
+        digest,
+        "execution target must be part of operation identity"
+    );
 
     let mut observation_only = base.clone();
     observation_only.global_limit = 99;
@@ -1344,6 +1362,7 @@ fn input_bound_task_request(workspace_id: &str, client_request_id: &str) -> Task
             steps: Vec::new(),
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::ContainedLocal,
+            execution_target: super::ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -1415,6 +1434,7 @@ fn input_bound_proposal_identity_preserves_proposal_and_binding_semantics() {
             steps: Vec::new(),
             budget: request.execution.budget.clone(),
             execution_profile: ExecutionProfile::ContainedLocal,
+            execution_target: super::ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -1599,6 +1619,7 @@ fn execution_profile_and_foreign_references_are_part_of_request_identity() {
             steps: Vec::new(),
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
+            execution_target: super::ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -1606,11 +1627,29 @@ fn execution_profile_and_foreign_references_are_part_of_request_identity() {
         stderr_tail_bytes: 0,
     };
     let trusted = operation_request_identity_digest(&base).unwrap();
+    let serialized_local = serde_json::to_value(&base.execution).unwrap();
+    assert_eq!(serialized_local["executionTarget"], "local_linux");
+
     let mut contained = base.clone();
     contained.execution.execution_profile = ExecutionProfile::ContainedLocal;
     assert_ne!(
         operation_request_identity_digest(&contained).unwrap(),
         trusted
+    );
+
+    let mut windows = base.clone();
+    windows.execution.execution_target = super::ExecutionTarget::WindowsNative;
+    assert_eq!(
+        serde_json::to_value(&windows.execution).unwrap()["executionTarget"],
+        "windows_native"
+    );
+    assert_ne!(
+        operation_request_identity_digest(&windows).unwrap(),
+        trusted
+    );
+    assert_eq!(
+        windows.execution.execution_profile,
+        ExecutionProfile::TrustedLocal
     );
 
     let mut referenced = base;
@@ -1658,6 +1697,7 @@ fn duplicate_foreign_references_are_rejected_before_admission() {
             steps: Vec::new(),
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
+            execution_target: super::ExecutionTarget::LocalLinux,
             foreign_references: vec![reference.clone(), reference],
         },
         wait_ms: 0,
@@ -1677,7 +1717,8 @@ fn duplicate_foreign_references_are_rejected_before_admission() {
 fn terminal_evidence_is_a_durable_artifact_with_native_binding() {
     let sandbox = Sandbox::new("terminal-native-evidence", 5000);
     let mut submit = request(&sandbox, "request:terminal-native-evidence", 4);
-    submit.plan.execution_profile = ExecutionProfile::ContainedLocal;
+    submit.plan.execution_profile = ExecutionProfile::TrustedLocal;
+    submit.plan.execution_target = super::ExecutionTarget::WindowsNative;
     submit.plan.foreign_references.push(ForeignReference {
         namespace: "ordivon.edge".to_string(),
         reference_type: "supervisor_generation".to_string(),
@@ -1725,7 +1766,8 @@ fn terminal_evidence_is_a_durable_artifact_with_native_binding() {
         &fs::read(Path::new(&starting.bundle_path).join(&artifact.relative_path)).unwrap(),
     )
     .unwrap();
-    assert_eq!(evidence["executionProfile"], "contained_local");
+    assert_eq!(evidence["executionProfile"], "trusted_local");
+    assert_eq!(evidence["executionTarget"], "windows_native");
     assert_eq!(evidence["foreignReferences"][0]["id"], "edge-supervisor-9");
     assert_eq!(evidence["executionDisposition"], "succeeded");
     assert_eq!(evidence["deliveryDisposition"], "committed");
@@ -2035,6 +2077,7 @@ fn proposal_identity_preserves_omission_and_normalizes_equivalent_paths() {
             }],
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
+            execution_target: super::ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,

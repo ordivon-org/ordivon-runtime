@@ -64,8 +64,7 @@ The canonical deployment currently supports:
 - a loopback-bound MCP origin protected by a Bearer token;
 - local Git repositories and executables already trusted by the operator.
 
-Windows, macOS, non-systemd Linux, hostile multi-tenant execution, controlled egress, and disposable remote sandboxes are not currently supported Runtime authority profiles.
-A Windows Job Object launcher is repository-owned and real-system verified as experimental execution equipment for WSL-hosted nodes, but it is not a public `workspace.exec` backend or authority profile.
+macOS, non-systemd Linux, hostile multi-tenant execution, controlled egress, and disposable remote sandboxes are not currently supported Runtime authority profiles. `executionTarget=windows_native` is an experimental opt-in backend for configured WSL/Windows nodes, orthogonal to the existing authority profiles; an instance without explicit Windows launcher and WSL-distribution provider facts rejects Windows admission.
 
 ## Supported version
 
@@ -97,7 +96,7 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 | Workspace lifecycle and cache reclamation | operational |
 | `contained_local` authority reduction | experimental but verified for the declared boundary |
 | Immutable input materialization and `workspace.execBound` read-only contained admission | implemented and public-MCP real-system verified; named authority roots remain operator configuration |
-| Windows Job Object launcher source and WSL/Windows acceptance | experimental equipment; real-system verified, not integrated as a public Runtime backend |
+| `windows_native` execution target and Windows Job Object ownership | experimental opt-in backend; real Runtime Job/Attempt success, replay, timeout, evidence, and descendant cleanup verified on WSL/Windows |
 | hostile multi-tenant sandboxing | not provided |
 | semantic Task completion | outside Runtime |
 | external-world effect verification | structured adapter dependent; not generic |
@@ -111,7 +110,8 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 - arbitrary command execution remains effect-opaque.
 - a successful process exit is not proof of semantic completion or external-world success.
 - real systemd/cgroup integration tests cannot run on ordinary hosted CI and require the explicit local acceptance path.
-- direct WSL interop does not make Windows descendants members of the Linux Attempt cgroup; Windows-target experiments must use the verified Job Object launcher or another explicit Windows-native owner.
+- the R-W1 Windows target still uses systemd as the outer WSL launcher supervisor; native Windows child identity is separate evidence, and WSL-restart-independent reconciliation is not yet claimed.
+- R-W1 Windows admission is `trusted_local`, single-command, and explicit-environment only; limited-token default, explicit elevation, durable Windows baseline environment, scoped Power Requests, and immutable-input Windows admission are not yet implemented.
 - the launcher's active-process and committed-memory limits are Windows-native controls and are not claimed to be exact semantic equivalents of cgroup `TasksMax` and `MemoryMax`.
 - public installation and versioning remain pre-1.0.
 

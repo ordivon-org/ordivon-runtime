@@ -66,7 +66,7 @@ See [`docs/status.md`](docs/status.md) for the exact maturity claim, supported p
 - reads, writes, patches, diffs, and safely closes Workspace state;
 - admits idempotent Jobs and ordered execution plans;
 - binds execution to the observed source state before dispatch;
-- owns one systemd unit and cgroup process tree per Attempt;
+- owns one systemd unit and cgroup process tree per Linux Attempt; configured WSL/Windows nodes can select the experimental `windows_native` target, where a systemd-supervised interop launcher owns a native Windows Job Object;
 - bounds time, output, memory, process count, and CPU when requested;
 - records digest-bound Results, Artifacts, and terminal supervision evidence;
 - exposes Job observation, cancellation, listing, reconciliation, backup, restore, and repair paths;
@@ -101,7 +101,7 @@ The complete Runtime path requires:
 - Python 3.11 or newer for operational scripts;
 - root or an equivalently privileged dedicated service account for the current trusted-local deployment model.
 
-Portable unit and protocol checks run on ordinary Linux CI. Real process-supervision acceptance requires the local systemd/cgroup environment.
+Portable unit and protocol checks run on ordinary Linux CI. Real Linux process-supervision acceptance requires the local systemd/cgroup environment. The experimental `windows_native` target additionally requires WSL interop, an explicit repository-built Windows launcher path, and an explicit WSL distribution name; instances without those provider facts reject Windows admission.
 
 ## Quick start
 

@@ -4,7 +4,9 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 
 internal static class OrdivonWindowsJobLauncher
 {
@@ -19,6 +21,11 @@ internal static class OrdivonWindowsJobLauncher
     private const uint CreateUnicodeEnvironment = 0x00000400;
     private const uint StartfUseStdHandles = 0x00000100;
     private const uint Infinite = 0xffffffff;
+    private const uint WaitTimeout = 258;
+    private const uint HandleFlagInherit = 0x00000001;
+    private const int ErrorBrokenPipe = 109;
+    private const uint TimedOutExit = 124;
+    private const uint CancelledExit = 125;
     private const int StdInputHandle = -10;
     private const int StdOutputHandle = -11;
     private const int StdErrorHandle = -12;
@@ -99,6 +106,96 @@ internal static class OrdivonWindowsJobLauncher
         public uint dwThreadId;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes
+    {
+        public uint nLength;
+        public IntPtr lpSecurityDescriptor;
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool bInheritHandle;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTime
+    {
+        public uint dwLowDateTime;
+        public uint dwHighDateTime;
+    }
+
+    private sealed class CapturedOutputInfo
+    {
+        public string ArtifactId;
+        public string FileName;
+        public string Digest;
+        public ulong RetainedBytes;
+        public ulong DroppedBytes;
+        public bool Truncated;
+    }
+
+    private sealed class CaptureWorker
+    {
+        public IntPtr ReadHandle;
+        public string Path;
+        public ulong Limit;
+        public ulong RetainedBytes;
+        public ulong DroppedBytes;
+        public Exception Error;
+
+        public void Run()
+        {
+            try
+            {
+                byte[] buffer = new byte[16 * 1024];
+                using (FileStream output = new FileStream(
+                    Path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough))
+                {
+                    while (true)
+                    {
+                        uint observed;
+                        bool ok = ReadFile(ReadHandle, buffer, (uint)buffer.Length, out observed, IntPtr.Zero);
+                        if (!ok)
+                        {
+                            int code = Marshal.GetLastWin32Error();
+                            if (code == ErrorBrokenPipe)
+                            {
+                                break;
+                            }
+                            throw new InvalidOperationException(
+                                "ReadFile(output pipe) failed with Win32 error " +
+                                code.ToString(CultureInfo.InvariantCulture));
+                        }
+                        if (observed == 0)
+                        {
+                            break;
+                        }
+                        ulong remaining = Limit > RetainedBytes ? Limit - RetainedBytes : 0;
+                        int writeLength = (int)Math.Min((ulong)observed, remaining);
+                        if (writeLength > 0)
+                        {
+                            output.Write(buffer, 0, writeLength);
+                            output.Flush();
+                            RetainedBytes += (ulong)writeLength;
+                        }
+                        DroppedBytes += (ulong)observed - (ulong)writeLength;
+                    }
+                    output.Flush(true);
+                }
+            }
+            catch (Exception error)
+            {
+                Error = error;
+            }
+            finally
+            {
+                if (ReadHandle != IntPtr.Zero)
+                {
+                    CloseHandle(ReadHandle);
+                    ReadHandle = IntPtr.Zero;
+                }
+            }
+        }
+    }
+
     private sealed class Options
     {
         public string Executable;
@@ -110,6 +207,19 @@ internal static class OrdivonWindowsJobLauncher
         public uint? ActiveProcessLimit;
         public uint? CpuQuotaPercent;
         public bool Diagnostics;
+        public string RuntimeBundle;
+        public string RuntimeJobId;
+        public string RuntimeAttemptId;
+        public string RuntimeLaunchTokenDigest;
+        public string JobName;
+        public ulong? StdoutLimitBytes;
+        public ulong? StderrLimitBytes;
+        public ulong? TimeoutMs;
+
+        public bool RuntimeMode
+        {
+            get { return !String.IsNullOrWhiteSpace(RuntimeBundle); }
+        }
     }
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -153,10 +263,49 @@ internal static class OrdivonWindowsJobLauncher
     private static extern bool TerminateProcess(IntPtr process, uint exitCode);
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CreatePipe(
+        out IntPtr readPipe,
+        out IntPtr writePipe,
+        ref SecurityAttributes pipeAttributes,
+        uint size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool ReadFile(
+        IntPtr handle,
+        [Out] byte[] buffer,
+        uint bytesToRead,
+        out uint bytesRead,
+        IntPtr overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr handle);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr GetStdHandle(int stdHandle);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentProcessId();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessTimes(
+        IntPtr process,
+        out FileTime creationTime,
+        out FileTime exitTime,
+        out FileTime kernelTime,
+        out FileTime userTime);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(
+        IntPtr process,
+        uint flags,
+        StringBuilder executableName,
+        ref uint size);
 
     public static int Main(string[] args)
     {
@@ -189,7 +338,7 @@ internal static class OrdivonWindowsJobLauncher
             }
             if (current == "--help")
             {
-                throw new InvalidOperationException("usage: --executable PATH [--cwd PATH] [--inherit-environment true|false] [--env NAME=VALUE] [--memory-max-bytes N] [--active-process-limit N] [--cpu-quota-percent N] [--diagnostics] [-- ARGS...]");
+                throw new InvalidOperationException("usage: --executable PATH [--cwd PATH] [--inherit-environment true|false] [--env NAME=VALUE] [--memory-max-bytes N] [--active-process-limit N] [--cpu-quota-percent N] [--runtime-bundle PATH --runtime-job-id ID --runtime-attempt-id ID --runtime-launch-token-digest DIGEST --job-name NAME --timeout-ms N --stdout-limit-bytes N --stderr-limit-bytes N] [--diagnostics] [-- ARGS...]");
             }
             if (current == "--diagnostics")
             {
@@ -227,6 +376,53 @@ internal static class OrdivonWindowsJobLauncher
                     throw new InvalidOperationException("environment name is invalid");
                 }
                 options.Environment[name] = value.Substring(equals + 1);
+            }
+            else if (current == "--runtime-bundle")
+            {
+                options.RuntimeBundle = value;
+            }
+            else if (current == "--runtime-job-id")
+            {
+                options.RuntimeJobId = value;
+            }
+            else if (current == "--runtime-attempt-id")
+            {
+                options.RuntimeAttemptId = value;
+            }
+            else if (current == "--runtime-launch-token-digest")
+            {
+                options.RuntimeLaunchTokenDigest = value;
+            }
+            else if (current == "--job-name")
+            {
+                options.JobName = value;
+            }
+            else if (current == "--timeout-ms")
+            {
+                ulong parsed;
+                if (!UInt64.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) || parsed == 0)
+                {
+                    throw new InvalidOperationException("--timeout-ms must be a positive integer");
+                }
+                options.TimeoutMs = parsed;
+            }
+            else if (current == "--stdout-limit-bytes")
+            {
+                ulong parsed;
+                if (!UInt64.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) || parsed == 0)
+                {
+                    throw new InvalidOperationException("--stdout-limit-bytes must be a positive integer");
+                }
+                options.StdoutLimitBytes = parsed;
+            }
+            else if (current == "--stderr-limit-bytes")
+            {
+                ulong parsed;
+                if (!UInt64.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) || parsed == 0)
+                {
+                    throw new InvalidOperationException("--stderr-limit-bytes must be a positive integer");
+                }
+                options.StderrLimitBytes = parsed;
             }
             else if (current == "--memory-max-bytes")
             {
@@ -279,6 +475,32 @@ internal static class OrdivonWindowsJobLauncher
         {
             throw new InvalidOperationException("working directory does not exist: " + options.WorkingDirectory);
         }
+        if (options.RuntimeMode)
+        {
+            options.RuntimeBundle = Path.GetFullPath(options.RuntimeBundle);
+            if (!Directory.Exists(options.RuntimeBundle))
+            {
+                throw new InvalidOperationException("runtime bundle does not exist: " + options.RuntimeBundle);
+            }
+            if (String.IsNullOrWhiteSpace(options.RuntimeJobId)
+                || String.IsNullOrWhiteSpace(options.RuntimeAttemptId)
+                || String.IsNullOrWhiteSpace(options.RuntimeLaunchTokenDigest)
+                || String.IsNullOrWhiteSpace(options.JobName)
+                || !options.TimeoutMs.HasValue
+                || !options.StdoutLimitBytes.HasValue
+                || !options.StderrLimitBytes.HasValue)
+            {
+                throw new InvalidOperationException("runtime mode requires complete Runtime identity, Job name, and output bounds");
+            }
+            if (!IsSha256Digest(options.RuntimeLaunchTokenDigest))
+            {
+                throw new InvalidOperationException("runtime launch-token digest is invalid");
+            }
+        }
+        else if (options.StdoutLimitBytes.HasValue || options.StderrLimitBytes.HasValue)
+        {
+            throw new InvalidOperationException("output bounds require --runtime-bundle");
+        }
         return options;
     }
 
@@ -292,6 +514,261 @@ internal static class OrdivonWindowsJobLauncher
     }
 
     private static int Run(Options options)
+    {
+        return options.RuntimeMode ? RunRuntime(options) : RunLegacy(options);
+    }
+
+    private static int RunRuntime(Options options)
+    {
+        IntPtr job = IntPtr.Zero;
+        IntPtr environment = IntPtr.Zero;
+        IntPtr stdoutWrite = IntPtr.Zero;
+        IntPtr stderrWrite = IntPtr.Zero;
+        CaptureWorker stdoutCapture = null;
+        CaptureWorker stderrCapture = null;
+        Thread stdoutThread = null;
+        Thread stderrThread = null;
+        ProcessInformation pi = new ProcessInformation();
+        bool processCreated = false;
+        bool resumed = false;
+        long startedUnixMs = UnixTimeMilliseconds();
+        bool timedOut = false;
+        bool cancelled = false;
+        try
+        {
+            job = CreateJobObject(IntPtr.Zero, options.JobName);
+            if (job == IntPtr.Zero)
+            {
+                ThrowWin32("CreateJobObject");
+            }
+            ConfigureExtendedLimits(job, options);
+            uint cpuRate = ConfigureCpuRate(job, options.CpuQuotaPercent);
+            environment = BuildEnvironment(options);
+
+            stdoutCapture = CreateCaptureWorker(
+                Path.Combine(options.RuntimeBundle, "stdout.log"),
+                options.StdoutLimitBytes.Value,
+                out stdoutWrite);
+            stderrCapture = CreateCaptureWorker(
+                Path.Combine(options.RuntimeBundle, "stderr.log"),
+                options.StderrLimitBytes.Value,
+                out stderrWrite);
+
+            StartupInfo si = new StartupInfo();
+            si.cb = (uint)Marshal.SizeOf(typeof(StartupInfo));
+            si.dwFlags = StartfUseStdHandles;
+            si.hStdInput = GetStdHandle(StdInputHandle);
+            si.hStdOutput = stdoutWrite;
+            si.hStdError = stderrWrite;
+
+            StringBuilder commandLine = new StringBuilder(BuildCommandLine(options.Executable, options.TargetArguments));
+            uint creationFlags = CreateSuspended | CreateUnicodeEnvironment;
+            if (!CreateProcessW(
+                    options.Executable,
+                    commandLine,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    true,
+                    creationFlags,
+                    environment,
+                    options.WorkingDirectory,
+                    ref si,
+                    out pi))
+            {
+                ThrowWin32("CreateProcessW");
+            }
+            processCreated = true;
+            CloseHandle(stdoutWrite);
+            stdoutWrite = IntPtr.Zero;
+            CloseHandle(stderrWrite);
+            stderrWrite = IntPtr.Zero;
+
+            if (!AssignProcessToJobObject(job, pi.hProcess))
+            {
+                ThrowWin32("AssignProcessToJobObject");
+            }
+            bool inJob;
+            if (!IsProcessInJob(pi.hProcess, job, out inJob))
+            {
+                ThrowWin32("IsProcessInJob");
+            }
+            if (!inJob)
+            {
+                throw new InvalidOperationException("target process is not owned by the expected Job Object");
+            }
+
+            WriteWindowsStartEvidence(options, pi);
+            stdoutThread = new Thread(stdoutCapture.Run);
+            stderrThread = new Thread(stderrCapture.Run);
+            stdoutThread.IsBackground = true;
+            stderrThread.IsBackground = true;
+            stdoutThread.Start();
+            stderrThread.Start();
+
+            if (options.Diagnostics)
+            {
+                Console.Error.WriteLine(
+                    "ORDIVON_WINDOWS_JOB_READY pid={0} memoryMaxBytes={1} activeProcessLimit={2} cpuQuotaPercent={3} cpuRate={4} logicalProcessors={5}",
+                    pi.dwProcessId,
+                    NullableText(options.MemoryMaxBytes),
+                    NullableText(options.ActiveProcessLimit),
+                    NullableText(options.CpuQuotaPercent),
+                    cpuRate,
+                    Environment.ProcessorCount);
+            }
+
+            uint resume = ResumeThread(pi.hThread);
+            if (resume == 0xffffffff)
+            {
+                ThrowWin32("ResumeThread");
+            }
+            resumed = true;
+
+            while (true)
+            {
+                uint wait = WaitForSingleObject(pi.hProcess, 20);
+                if (wait == 0)
+                {
+                    break;
+                }
+                if (wait != WaitTimeout)
+                {
+                    throw new InvalidOperationException(
+                        "WaitForSingleObject returned " + wait.ToString(CultureInfo.InvariantCulture));
+                }
+                if (File.Exists(Path.Combine(options.RuntimeBundle, "cancel-requested.json")))
+                {
+                    cancelled = true;
+                    TerminateWholeJob(job, CancelledExit);
+                    break;
+                }
+                long elapsed = UnixTimeMilliseconds() - startedUnixMs;
+                if (elapsed >= 0 && (ulong)elapsed >= options.TimeoutMs.Value)
+                {
+                    timedOut = true;
+                    TerminateWholeJob(job, TimedOutExit);
+                    break;
+                }
+            }
+
+            uint finalWait = WaitForSingleObject(pi.hProcess, 5000);
+            if (finalWait != 0)
+            {
+                throw new InvalidOperationException(
+                    "target did not reach terminal state after Job termination");
+            }
+            uint exitCode;
+            if (!GetExitCodeProcess(pi.hProcess, out exitCode))
+            {
+                ThrowWin32("GetExitCodeProcess");
+            }
+
+            // Closing the final Job handle kills any descendants that outlived the direct child.
+            // Only after that boundary can captured output be finalized without later mutation.
+            CloseHandle(job);
+            job = IntPtr.Zero;
+            stdoutThread.Join();
+            stderrThread.Join();
+            if (stdoutCapture.Error != null)
+            {
+                throw new InvalidOperationException("stdout capture failed: " + stdoutCapture.Error.Message);
+            }
+            if (stderrCapture.Error != null)
+            {
+                throw new InvalidOperationException("stderr capture failed: " + stderrCapture.Error.Message);
+            }
+
+            CapturedOutputInfo stdout = CapturedOutputFromWorker(options, stdoutCapture, true);
+            CapturedOutputInfo stderr = CapturedOutputFromWorker(options, stderrCapture, false);
+            int signedExitCode = unchecked((int)exitCode);
+            WriteRuntimeResult(
+                options,
+                signedExitCode,
+                timedOut,
+                cancelled,
+                startedUnixMs,
+                UnixTimeMilliseconds(),
+                stdout,
+                stderr);
+            if (options.Diagnostics)
+            {
+                Console.Error.WriteLine(
+                    "ORDIVON_WINDOWS_JOB_EXIT pid={0} exitCode={1} timedOut={2} cancelled={3}",
+                    pi.dwProcessId, signedExitCode, timedOut, cancelled);
+            }
+            return signedExitCode;
+        }
+        catch
+        {
+            if (processCreated && !resumed && pi.hProcess != IntPtr.Zero)
+            {
+                TerminateProcess(pi.hProcess, InternalFailureExit);
+            }
+            throw;
+        }
+        finally
+        {
+            if (stdoutWrite != IntPtr.Zero) CloseHandle(stdoutWrite);
+            if (stderrWrite != IntPtr.Zero) CloseHandle(stderrWrite);
+            if (environment != IntPtr.Zero) Marshal.FreeHGlobal(environment);
+            if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread);
+            if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess);
+            if (job != IntPtr.Zero) CloseHandle(job);
+        }
+    }
+
+    private static CaptureWorker CreateCaptureWorker(string path, ulong limit, out IntPtr writeHandle)
+    {
+        SecurityAttributes attributes = new SecurityAttributes();
+        attributes.nLength = (uint)Marshal.SizeOf(typeof(SecurityAttributes));
+        attributes.bInheritHandle = true;
+        IntPtr readHandle;
+        if (!CreatePipe(out readHandle, out writeHandle, ref attributes, 0))
+        {
+            ThrowWin32("CreatePipe(output)");
+        }
+        if (!SetHandleInformation(readHandle, HandleFlagInherit, 0))
+        {
+            int code = Marshal.GetLastWin32Error();
+            CloseHandle(readHandle);
+            CloseHandle(writeHandle);
+            writeHandle = IntPtr.Zero;
+            throw new InvalidOperationException(
+                "SetHandleInformation(output) failed with Win32 error " +
+                code.ToString(CultureInfo.InvariantCulture));
+        }
+        return new CaptureWorker { ReadHandle = readHandle, Path = path, Limit = limit };
+    }
+
+    private static void TerminateWholeJob(IntPtr job, uint exitCode)
+    {
+        if (!TerminateJobObject(job, exitCode))
+        {
+            ThrowWin32("TerminateJobObject");
+        }
+    }
+
+    private static CapturedOutputInfo CapturedOutputFromWorker(
+        Options options, CaptureWorker worker, bool stdout)
+    {
+        string fileName = stdout ? "stdout.log" : "stderr.log";
+        string path = Path.Combine(options.RuntimeBundle, fileName);
+        FileInfo info = new FileInfo(path);
+        if (checked((ulong)info.Length) != worker.RetainedBytes)
+        {
+            throw new InvalidOperationException("captured output length differs from retained count");
+        }
+        return new CapturedOutputInfo {
+            ArtifactId = options.RuntimeAttemptId + (stdout ? ".stdout" : ".stderr"),
+            FileName = fileName,
+            Digest = Sha256File(path),
+            RetainedBytes = worker.RetainedBytes,
+            DroppedBytes = worker.DroppedBytes,
+            Truncated = worker.DroppedBytes != 0,
+        };
+    }
+
+    private static int RunLegacy(Options options)
     {
         IntPtr job = IntPtr.Zero;
         IntPtr environment = IntPtr.Zero;
@@ -411,6 +888,191 @@ internal static class OrdivonWindowsJobLauncher
                 CloseHandle(job);
             }
         }
+    }
+
+    private static void WriteWindowsStartEvidence(Options options, ProcessInformation pi)
+    {
+        FileTime creation;
+        FileTime exit;
+        FileTime kernel;
+        FileTime user;
+        if (!GetProcessTimes(pi.hProcess, out creation, out exit, out kernel, out user))
+        {
+            ThrowWin32("GetProcessTimes");
+        }
+        ulong creationValue = ((ulong)creation.dwHighDateTime << 32) | creation.dwLowDateTime;
+        string imagePath = QueryProcessImagePath(pi.hProcess);
+        string imageDigest = Sha256File(options.Executable);
+        string json = "{" +
+            "\"schemaVersion\":1," +
+            "\"jobId\":" + JsonString(options.RuntimeJobId) + "," +
+            "\"attemptId\":" + JsonString(options.RuntimeAttemptId) + "," +
+            "\"launchTokenDigest\":" + JsonString(options.RuntimeLaunchTokenDigest) + "," +
+            "\"jobName\":" + JsonString(options.JobName) + "," +
+            "\"launcherProcessId\":" + GetCurrentProcessId().ToString(CultureInfo.InvariantCulture) + "," +
+            "\"processId\":" + pi.dwProcessId.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"processCreationTimeFileTime\":" + creationValue.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"imagePath\":" + JsonString(imagePath) + "," +
+            "\"imageDigest\":" + JsonString(imageDigest) + "," +
+            "\"observedUnixMs\":" + UnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) +
+            "}";
+        WriteTextAtomic(Path.Combine(options.RuntimeBundle, "windows-start.json"), json);
+    }
+
+    private static string QueryProcessImagePath(IntPtr process)
+    {
+        uint size = 32768;
+        StringBuilder path = new StringBuilder((int)size);
+        if (!QueryFullProcessImageName(process, 0, path, ref size))
+        {
+            ThrowWin32("QueryFullProcessImageName");
+        }
+        return path.ToString();
+    }
+
+    private static void WriteRuntimeResult(
+        Options options,
+        int exitCode,
+        bool timedOut,
+        bool cancelled,
+        long startedUnixMs,
+        long finishedUnixMs,
+        CapturedOutputInfo stdout,
+        CapturedOutputInfo stderr)
+    {
+        bool succeeded = !timedOut && !cancelled && exitCode == 0;
+        string status = cancelled ? "CANCELLED" : (succeeded ? "COMPLETED" : "FAILED");
+        string stepStatus = cancelled ? "cancelled" : (timedOut ? "timed_out" : (exitCode == 0 ? "succeeded" : "failed"));
+        string step = "{" +
+            "\"id\":\"command\"," +
+            "\"index\":0," +
+            "\"status\":" + JsonString(stepStatus) + "," +
+            "\"exitCode\":" + exitCode.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"timedOut\":" + (timedOut ? "true" : "false") + "," +
+            "\"continued\":false," +
+            "\"startedUnixMs\":" + startedUnixMs.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"finishedUnixMs\":" + finishedUnixMs.ToString(CultureInfo.InvariantCulture) +
+            "}";
+        string failure = succeeded ? String.Empty :
+            ",\"failedStepId\":\"command\",\"failedStepIndex\":0";
+        string json = "{" +
+            "\"schemaVersion\":1," +
+            "\"taskId\":" + JsonString(options.RuntimeAttemptId) + "," +
+            "\"jobId\":" + JsonString(options.RuntimeJobId) + "," +
+            "\"attemptId\":" + JsonString(options.RuntimeAttemptId) + "," +
+            "\"launchTokenDigest\":" + JsonString(options.RuntimeLaunchTokenDigest) + "," +
+            "\"status\":" + JsonString(status) + "," +
+            "\"exitCode\":" + exitCode.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"timedOut\":" + (timedOut ? "true" : "false") + "," +
+            "\"startedUnixMs\":" + startedUnixMs.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"finishedUnixMs\":" + finishedUnixMs.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"steps\":[" + step + "]" + failure + "," +
+            "\"stdout\":" + CapturedOutputJson(stdout) + "," +
+            "\"stderr\":" + CapturedOutputJson(stderr) +
+            "}";
+        WriteTextAtomic(Path.Combine(options.RuntimeBundle, "result.json"), json);
+    }
+
+    private static string CapturedOutputJson(CapturedOutputInfo output)
+    {
+        return "{" +
+            "\"artifactId\":" + JsonString(output.ArtifactId) + "," +
+            "\"fileName\":" + JsonString(output.FileName) + "," +
+            "\"digest\":" + JsonString(output.Digest) + "," +
+            "\"retainedBytes\":" + output.RetainedBytes.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"droppedBytes\":" + output.DroppedBytes.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"truncated\":" + (output.Truncated ? "true" : "false") +
+            "}";
+    }
+
+    private static void WriteTextAtomic(string path, string content)
+    {
+        string temporary = path + ".tmp-" + GetCurrentProcessId().ToString(CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N");
+        byte[] bytes = new UTF8Encoding(false).GetBytes(content);
+        using (FileStream stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            stream.Write(bytes, 0, bytes.Length);
+            stream.Flush(true);
+        }
+        if (File.Exists(path))
+        {
+            File.Delete(temporary);
+            throw new InvalidOperationException("runtime evidence path already exists: " + path);
+        }
+        File.Move(temporary, path);
+    }
+
+    private static string Sha256File(string path)
+    {
+        using (SHA256 sha = SHA256.Create())
+        using (FileStream stream = File.OpenRead(path))
+        {
+            byte[] digest = sha.ComputeHash(stream);
+            StringBuilder text = new StringBuilder("sha256:");
+            for (int index = 0; index < digest.Length; ++index)
+            {
+                text.Append(digest[index].ToString("x2", CultureInfo.InvariantCulture));
+            }
+            return text.ToString();
+        }
+    }
+
+    private static string JsonString(string value)
+    {
+        if (value == null)
+        {
+            return "null";
+        }
+        StringBuilder output = new StringBuilder();
+        output.Append('"');
+        foreach (char c in value)
+        {
+            switch (c)
+            {
+                case '"': output.Append("\\\""); break;
+                case '\\': output.Append("\\\\"); break;
+                case '\b': output.Append("\\b"); break;
+                case '\f': output.Append("\\f"); break;
+                case '\n': output.Append("\\n"); break;
+                case '\r': output.Append("\\r"); break;
+                case '\t': output.Append("\\t"); break;
+                default:
+                    if (c < 0x20)
+                    {
+                        output.Append("\\u");
+                        output.Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                    }
+                    else
+                    {
+                        output.Append(c);
+                    }
+                    break;
+            }
+        }
+        output.Append('"');
+        return output.ToString();
+    }
+
+    private static long UnixTimeMilliseconds()
+    {
+        return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+    }
+
+    private static bool IsSha256Digest(string value)
+    {
+        if (value == null || !value.StartsWith("sha256:", StringComparison.Ordinal) || value.Length != 71)
+        {
+            return false;
+        }
+        for (int index = 7; index < value.Length; ++index)
+        {
+            char c = value[index];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static void ConfigureExtendedLimits(IntPtr job, Options options)

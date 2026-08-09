@@ -48,6 +48,7 @@ impl Sandbox {
                     max_output_bytes: 1024 * 1024,
                 },
                 startup_grace_ms: 1000,
+                windows: None,
             },
             input_authorities: Vec::new(),
             execution: ExecutionContext {
@@ -86,6 +87,7 @@ fn exec_tool_request(
             steps: Vec::new(),
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
+            execution_target: ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -221,6 +223,7 @@ fn workspace_exec_bound_binding_forces_contained_local() {
             stderr_limit_bytes: None,
             steps: Vec::new(),
             budget: ExecutionBudget::default(),
+            execution_target: ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
         },
         inputs: vec![InputBindingRequest {
@@ -289,6 +292,7 @@ fn workspace_exec_plan_keeps_legacy_sum_only_for_legacy_shape() {
             stderr_limit_bytes: Some(8_192),
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
+            execution_target: ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -322,6 +326,7 @@ fn workspace_exec_plan_keeps_legacy_sum_only_for_legacy_shape() {
             stderr_limit_bytes: None,
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
+            execution_target: ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -506,6 +511,14 @@ fn tool_catalog_uses_transactional_job_contract() {
     assert_eq!(
         exec_schema.pointer("/$defs/ExecutionProfile/enum"),
         Some(&serde_json::json!(["trusted_local", "contained_local"]))
+    );
+    assert_eq!(
+        exec_schema.pointer("/$defs/ExecutionProposal/properties/executionTarget/default"),
+        Some(&serde_json::json!("local_linux"))
+    );
+    assert_eq!(
+        exec_schema.pointer("/$defs/ExecutionTarget/enum"),
+        Some(&serde_json::json!(["local_linux", "windows_native"]))
     );
     assert!(exec_schema
         .pointer("/$defs/ExecutionProposal/properties/foreignReferences/maxItems")

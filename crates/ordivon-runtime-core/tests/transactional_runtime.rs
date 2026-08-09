@@ -6,8 +6,9 @@ use ordivon_runtime_core::{
     InputBindingRequest, RegistryConfig, Runtime, RuntimeConfig, RuntimeExecutionPlan,
     RuntimeJobListRequest, SubmitRequest, TaskCancelRequest, TaskObserveRequest,
     TaskObserveWaitUntil, TaskRunRequest, UniversalExecutionRequest, UniversalExecutorConfig,
-    WorkspaceCloseRequest, WorkspaceMutateRequest, WorkspaceMutation, WorkspaceMutationMode,
-    WorkspaceWriteRequest, RUNTIME_SCHEMA_VERSION, UNIVERSAL_EXEC_SCHEMA_VERSION,
+    WindowsExecutionConfig, WorkspaceCloseRequest, WorkspaceMutateRequest, WorkspaceMutation,
+    WorkspaceMutationMode, WorkspaceWriteRequest, RUNTIME_SCHEMA_VERSION,
+    UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -107,6 +108,7 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
         },
         executor: executor.clone(),
         startup_grace_ms: 2000,
+        windows: None,
     })
     .unwrap();
     let request = TaskRunRequest {
@@ -126,6 +128,7 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
             steps: Vec::new(),
             budget: ordivon_runtime_core::ExecutionBudget::default(),
             execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
+            execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
             foreign_references: Vec::new(),
         },
         wait_ms: 30_000,
@@ -212,6 +215,349 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
     )
     .unwrap();
     fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+#[ignore = "requires WSL, Windows interop, root/systemd, .NET csc, and explicit local opt-in"]
+fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
+    if std::env::var("ORDIVON_RUN_WINDOWS_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repo = fs::canonicalize(repo).unwrap();
+    let revision = command_output("git", &["rev-parse", "HEAD"], &repo);
+    let csc = PathBuf::from("/mnt/c/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe");
+    assert!(csc.is_file(), "{} is unavailable", csc.display());
+    let public_root = PathBuf::from("/mnt/c/Users/Public")
+        .join(format!("ordivon-runtime-rw1-{}", Uuid::now_v7()));
+    fs::create_dir(&public_root).unwrap();
+    let launcher_source = public_root.join("Ordivon.WindowsJobLauncher.cs");
+    let fixture_source = public_root.join("Ordivon.WindowsJobFixture.cs");
+    let launcher = public_root.join("ordivon-windows-job-launcher.exe");
+    let fixture = public_root.join("ordivon-windows-job-fixture.exe");
+    fs::copy(
+        repo.join("platform/windows/Ordivon.WindowsJobLauncher.cs"),
+        &launcher_source,
+    )
+    .unwrap();
+    fs::copy(
+        repo.join("platform/windows/Ordivon.WindowsJobFixture.cs"),
+        &fixture_source,
+    )
+    .unwrap();
+
+    fn windows_drive_path(path: &Path) -> String {
+        let text = path.to_str().unwrap();
+        let rest = text
+            .strip_prefix("/mnt/c/")
+            .expect("test path must be on C:");
+        format!("C:\\{}", rest.replace('/', "\\"))
+    }
+    for (source, output) in [(&launcher_source, &launcher), (&fixture_source, &fixture)] {
+        let compiled = Command::new(&csc)
+            .args([
+                "/nologo".to_string(),
+                "/optimize+".to_string(),
+                format!("/out:{}", windows_drive_path(output)),
+                windows_drive_path(source),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&compiled.stdout),
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+    }
+
+    let root = PathBuf::from("/root/.local/share/ordivon-windows-integration")
+        .join(Uuid::now_v7().to_string());
+    let store = root.join("store");
+    let executor = UniversalExecutorConfig {
+        store_root: store.clone(),
+        workspace_root: None,
+        workspace_uid: None,
+        workspace_gid: None,
+        runner_path: PathBuf::from("/usr/bin/true"),
+        allowed_executable_roots: vec![public_root.clone()],
+        max_runtime_ms: 60_000,
+        max_output_bytes: 1024 * 1024,
+    };
+    executor.ensure_store().unwrap();
+    let workspace_id = format!("runtime-windows-it-{}", Uuid::now_v7());
+    create_git_workspace(
+        &executor,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.clone(),
+            source_repo: repo.to_string_lossy().into_owned(),
+            source_revision: revision,
+        },
+    )
+    .unwrap();
+    let runtime = Runtime::new(RuntimeConfig {
+        registry: RegistryConfig {
+            db_path: root.join("registry/registry.sqlite3"),
+            store_root: root.join("registry"),
+            busy_timeout_ms: 5_000,
+        },
+        executor: executor.clone(),
+        startup_grace_ms: 2_000,
+        windows: Some(WindowsExecutionConfig {
+            launcher_path: launcher.clone(),
+            wsl_distribution: std::env::var("WSL_DISTRO_NAME")
+                .unwrap_or_else(|_| "archlinux".to_string()),
+        }),
+    })
+    .unwrap();
+    let request = TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: format!("request:windows-rw1:{}", Uuid::now_v7()),
+        principal: "principal:windows-integration".to_string(),
+        global_limit: 1,
+        execution: UniversalExecutionRequest {
+            workspace_id: workspace_id.clone(),
+            executable: fixture.to_string_lossy().into_owned(),
+            args: vec![
+                "echo".to_string(),
+                "rw1-arg with space".to_string(),
+                "quote\"arg".to_string(),
+            ],
+            cwd_relative: ".".to_string(),
+            env: BTreeMap::from([("W1_ENV".to_string(), "runtime-w1".to_string())]),
+            timeout_ms: 20_000,
+            stdout_limit_bytes: 65_536,
+            stderr_limit_bytes: 65_536,
+            steps: Vec::new(),
+            budget: ExecutionBudget {
+                memory_max_bytes: Some(128 * 1024 * 1024),
+                tasks_max: Some(4),
+                cpu_quota_percent: Some(100),
+            },
+            execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
+            execution_target: ordivon_runtime_core::ExecutionTarget::WindowsNative,
+            foreign_references: Vec::new(),
+        },
+        wait_ms: 30_000,
+        stdout_tail_bytes: 16_384,
+        stderr_tail_bytes: 16_384,
+    };
+    let first = runtime.run_task(&request).unwrap();
+    assert_eq!(first.status, "succeeded", "{}", first.stderr_tail);
+    assert!(first.execution_terminal);
+    assert_eq!(first.exit_code, Some(0));
+    assert!(first
+        .stdout_tail
+        .contains("W1_ECHO_ENV_B64=cnVudGltZS13MQ=="));
+    assert!(first
+        .stdout_tail
+        .contains("W1_ECHO_SYSTEMROOT_B64=PG51bGw+"));
+    assert!(first.stdout_tail.contains("W1_ECHO_ARGC=2"));
+    let attempt_id = first.attempt_id.clone().unwrap();
+    let artifacts = runtime.registry().list_artifacts(&first.job_id).unwrap();
+    assert!(artifacts
+        .iter()
+        .any(|artifact| artifact.kind == "windows_start"));
+    let windows_start = artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "windows_start")
+        .unwrap();
+    let evidence = runtime
+        .read_artifact(&ArtifactReadRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: first.job_id.clone(),
+            artifact_id: windows_start.artifact_id.clone(),
+            offset: 0,
+            max_bytes: 65_536,
+        })
+        .unwrap();
+    let windows_evidence: serde_json::Value = serde_json::from_str(&evidence.content).unwrap();
+    assert_eq!(windows_evidence["jobId"], first.job_id);
+    assert_eq!(windows_evidence["attemptId"], attempt_id);
+    assert_eq!(windows_evidence["imageDigest"], file_digest(&fixture));
+    assert!(windows_evidence["processId"].as_u64().unwrap() > 0);
+    assert!(
+        windows_evidence["processCreationTimeFileTime"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let terminal = artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "terminal_evidence")
+        .unwrap();
+    let terminal_evidence = runtime
+        .read_artifact(&ArtifactReadRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: first.job_id.clone(),
+            artifact_id: terminal.artifact_id.clone(),
+            offset: 0,
+            max_bytes: 65_536,
+        })
+        .unwrap();
+    let terminal_json: serde_json::Value =
+        serde_json::from_str(&terminal_evidence.content).unwrap();
+    assert_eq!(terminal_json["executionTarget"], "windows_native");
+    assert!(terminal_json["terminalArtifactIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == &serde_json::Value::String(format!("{attempt_id}.windows-start"))));
+
+    let replay = runtime.run_task(&request).unwrap();
+    assert_eq!(replay.job_id, first.job_id);
+    assert_eq!(replay.attempt_id, first.attempt_id);
+    assert_eq!(replay.status, "succeeded");
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    println!(
+        "RW1_WINDOWS_RUNTIME jobId={} attemptId={} windowsPid={} creationFileTime={} imageDigest={} artifacts={}",
+        first.job_id,
+        attempt_id,
+        windows_evidence["processId"].as_u64().unwrap(),
+        windows_evidence["processCreationTimeFileTime"].as_u64().unwrap(),
+        windows_evidence["imageDigest"].as_str().unwrap(),
+        artifacts.len(),
+    );
+
+    let timeout_marker = format!("ORDIVON_RW2_TIMEOUT_{}", Uuid::now_v7());
+    let mut timeout_request = request.clone();
+    timeout_request.client_request_id = format!("request:windows-timeout:{}", Uuid::now_v7());
+    timeout_request.execution.args = vec!["tree".to_string(), timeout_marker.clone()];
+    timeout_request.execution.timeout_ms = 300;
+    timeout_request.execution.budget.tasks_max = Some(8);
+    let timeout_started = Instant::now();
+    let timed_out = runtime.run_task(&timeout_request).unwrap();
+    assert_eq!(timed_out.status, "timed_out", "{}", timed_out.stderr_tail);
+    assert!(timeout_started.elapsed() < Duration::from_secs(3));
+    assert!(timed_out.execution_terminal);
+    assert!(timed_out
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.kind == "windows_start"));
+    assert!(timed_out
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.kind == "execution_result"));
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+
+    thread::sleep(Duration::from_millis(500));
+    let process_probe = format!(
+        "$m='{}'; $rows=Get-CimInstance Win32_Process | Where-Object {{$_.ProcessId -ne $PID -and $_.CommandLine -like ('*'+$m+'*')}}; Write-Output @($rows).Count",
+        timeout_marker
+    );
+    let remaining = Command::new("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+        .args(["-NoProfile", "-Command", &process_probe])
+        .output()
+        .unwrap();
+    assert!(
+        remaining.status.success(),
+        "{}",
+        String::from_utf8_lossy(&remaining.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&remaining.stdout).trim(), "0");
+    println!(
+        "RW2_WINDOWS_TIMEOUT jobId={} attemptId={} elapsedMs={} remaining=0",
+        timed_out.job_id,
+        timed_out.attempt_id.as_deref().unwrap(),
+        timeout_started.elapsed().as_millis(),
+    );
+
+    let timeout_unit = format!(
+        "ordivon-{}.service",
+        timed_out.attempt_id.as_deref().unwrap()
+    );
+    let _ = Command::new("systemctl")
+        .args(["stop", &timeout_unit])
+        .output();
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &timeout_unit])
+        .output();
+
+    let cancel_marker = format!("ORDIVON_RW2_CANCEL_{}", Uuid::now_v7());
+    let mut cancel_request = request.clone();
+    cancel_request.client_request_id = format!("request:windows-cancel:{}", Uuid::now_v7());
+    cancel_request.execution.args = vec!["tree".to_string(), cancel_marker.clone()];
+    cancel_request.execution.timeout_ms = 20_000;
+    cancel_request.execution.budget.tasks_max = Some(8);
+    cancel_request.wait_ms = 0;
+    let started_cancel = runtime.run_task(&cancel_request).unwrap();
+    assert!(matches!(started_cancel.status.as_str(), "queued" | "working"));
+    let running_deadline = Instant::now() + Duration::from_secs(10);
+    let cancel_attempt = loop {
+        let attempt = runtime
+            .registry()
+            .get_latest_attempt(&started_cancel.job_id)
+            .unwrap()
+            .unwrap();
+        if attempt.state == AttemptState::Running
+            && attempt.control_group.is_some()
+            && attempt.invocation_id.is_some()
+        {
+            break attempt;
+        }
+        assert!(
+            Instant::now() < running_deadline,
+            "Windows cancel Attempt did not become running"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    let cancelled = runtime
+        .cancel_task(&TaskCancelRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: started_cancel.job_id.clone(),
+        })
+        .unwrap();
+    assert_eq!(cancelled.status, "cancelled");
+    assert!(cancelled.execution_terminal);
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+
+    thread::sleep(Duration::from_millis(500));
+    let cancel_probe = format!(
+        "$m='{}'; $rows=Get-CimInstance Win32_Process | Where-Object {{$_.ProcessId -ne $PID -and $_.CommandLine -like ('*'+$m+'*')}}; Write-Output @($rows).Count",
+        cancel_marker
+    );
+    let cancel_remaining =
+        Command::new("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+            .args(["-NoProfile", "-Command", &cancel_probe])
+            .output()
+            .unwrap();
+    assert!(
+        cancel_remaining.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cancel_remaining.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&cancel_remaining.stdout).trim(), "0");
+    println!(
+        "RW2_WINDOWS_CANCEL jobId={} attemptId={} remaining=0",
+        started_cancel.job_id, cancel_attempt.attempt_id,
+    );
+    let cancel_unit = format!("ordivon-{}.service", cancel_attempt.attempt_id);
+    let _ = Command::new("systemctl")
+        .args(["stop", &cancel_unit])
+        .output();
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &cancel_unit])
+        .output();
+
+    let unit = format!("ordivon-{attempt_id}.service");
+    let _ = Command::new("systemctl").args(["stop", &unit]).output();
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &unit])
+        .output();
+    remove_git_workspace(
+        &executor,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id,
+            force: true,
+            expected_source_state_digest: None,
+        },
+    )
+    .unwrap();
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_dir_all(&public_root).unwrap();
 }
 
 #[test]
@@ -519,6 +865,7 @@ impl IntegrationContext {
             registry: self.registry.clone(),
             executor: self.executor.clone(),
             startup_grace_ms,
+            windows: None,
         })
         .unwrap()
     }
@@ -533,6 +880,7 @@ impl IntegrationContext {
                 registry: self.registry.clone(),
                 executor: self.executor.clone(),
                 startup_grace_ms,
+                windows: None,
             },
             authorities,
         )
@@ -571,6 +919,7 @@ impl IntegrationContext {
                 steps: Vec::new(),
                 budget: ordivon_runtime_core::ExecutionBudget::default(),
                 execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
+                execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
                 foreign_references: Vec::new(),
             },
             wait_ms,
@@ -769,6 +1118,7 @@ print("WRITE_OK=" + pathlib.Path("contained-output.txt").read_text(), flush=True
         },
         executor: executor.clone(),
         startup_grace_ms: 5000,
+        windows: None,
     })
     .unwrap();
     let request = TaskRunRequest {
@@ -788,6 +1138,7 @@ print("WRITE_OK=" + pathlib.Path("contained-output.txt").read_text(), flush=True
             steps: Vec::new(),
             budget: ExecutionBudget::default(),
             execution_profile: ordivon_runtime_core::ExecutionProfile::ContainedLocal,
+            execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
             foreign_references: vec![ordivon_runtime_core::ForeignReference {
                 namespace: "ordivon.edge".to_string(),
                 reference_type: "supervisor_generation".to_string(),
@@ -1053,6 +1404,7 @@ fn runtime_systemd_path_rejects_source_drift_before_target_spawn() {
         registry: context.registry.clone(),
         executor,
         startup_grace_ms: 10_000,
+        windows: None,
     })
     .unwrap();
     let request = context.request("source_drift.py", 10_000);
@@ -1714,6 +2066,7 @@ impl IntegrationContext {
                 steps: Vec::new(),
                 budget: ordivon_runtime_core::ExecutionBudget::default(),
                 execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
+                execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
                 foreign_references: Vec::new(),
                 input_set_id: None,
                 effective_inputs: Vec::new(),
@@ -2097,6 +2450,7 @@ fn runtime_finance_i8_graduation_matches_canonical_semantics_with_job_owned_inpu
             registry,
             executor: executor.clone(),
             startup_grace_ms: 2_000,
+            windows: None,
         },
         vec![InputAuthority {
             name: "finance-state".to_string(),
@@ -2171,6 +2525,7 @@ fn runtime_finance_i8_graduation_matches_canonical_semantics_with_job_owned_inpu
             steps: Vec::new(),
             budget: ExecutionBudget::default(),
             execution_profile: ordivon_runtime_core::ExecutionProfile::ContainedLocal,
+            execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
             foreign_references: vec![ForeignReference {
                 namespace: "ordivon.finance".to_string(),
                 reference_type: "state_version".to_string(),
@@ -2248,6 +2603,7 @@ fn runtime_finance_i8_graduation_matches_canonical_semantics_with_job_owned_inpu
         },
         executor: executor.clone(),
         startup_grace_ms: 2_000,
+        windows: None,
     })
     .unwrap();
     let replay = restarted.run_task_with_inputs(&request, &inputs).unwrap();

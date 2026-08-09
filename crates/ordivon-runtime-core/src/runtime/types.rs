@@ -276,6 +276,27 @@ impl ExecutionProfile {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionTarget {
+    #[default]
+    LocalLinux,
+    WindowsNative,
+}
+
+impl ExecutionTarget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalLinux => "local_linux",
+            Self::WindowsNative => "windows_native",
+        }
+    }
+
+    pub(crate) fn is_default(&self) -> bool {
+        *self == Self::LocalLinux
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ForeignReference {
@@ -432,6 +453,8 @@ pub struct RuntimeExecutionPlan {
     pub budget: ExecutionBudget,
     #[serde(default)]
     pub execution_profile: ExecutionProfile,
+    #[serde(default)]
+    pub execution_target: ExecutionTarget,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -474,6 +497,8 @@ struct OperationRequestIdentity {
     steps: Vec<UniversalExecutionStep>,
     budget: ExecutionBudget,
     execution_profile: ExecutionProfile,
+    #[serde(default, skip_serializing_if = "ExecutionTarget::is_default")]
+    execution_target: ExecutionTarget,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     foreign_references: Vec<ForeignReference>,
 }
@@ -521,6 +546,8 @@ struct ProposalRequestIdentity {
     steps: Vec<ExecutionStepProposal>,
     budget: ExecutionBudget,
     execution_profile: ExecutionProfile,
+    #[serde(default, skip_serializing_if = "ExecutionTarget::is_default")]
+    execution_target: ExecutionTarget,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     foreign_references: Vec<ForeignReference>,
 }
@@ -544,6 +571,7 @@ fn operation_request_identity(request: &TaskRunRequest) -> OperationRequestIdent
         steps: request.execution.steps.clone(),
         budget: request.execution.budget.clone(),
         execution_profile: request.execution.execution_profile,
+        execution_target: request.execution.execution_target,
         foreign_references: request.execution.foreign_references.clone(),
     }
 }
@@ -625,6 +653,7 @@ fn proposal_request_identity(proposal: &TaskRunProposal) -> ProposalRequestIdent
             .collect(),
         budget: proposal.execution.budget.clone(),
         execution_profile: proposal.execution.execution_profile,
+        execution_target: proposal.execution.execution_target,
         foreign_references: proposal.execution.foreign_references.clone(),
     }
 }
@@ -710,6 +739,7 @@ pub(crate) fn operation_request_identity_digest_from_plan(
             .collect(),
         budget: plan.budget.clone(),
         execution_profile: plan.execution_profile,
+        execution_target: plan.execution_target,
         foreign_references: plan.foreign_references.clone(),
     })
 }
@@ -1202,6 +1232,8 @@ pub struct ExecutionProposal {
     pub budget: ExecutionBudget,
     #[serde(default)]
     pub execution_profile: ExecutionProfile,
+    #[serde(default)]
+    pub execution_target: ExecutionTarget,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
 }
@@ -1248,6 +1280,8 @@ pub struct UniversalExecutionRequest {
     pub budget: ExecutionBudget,
     #[serde(default)]
     pub execution_profile: ExecutionProfile,
+    #[serde(default)]
+    pub execution_target: ExecutionTarget,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
 }

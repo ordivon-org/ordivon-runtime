@@ -13,7 +13,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use ordivon_runtime_core::{
-    InputAuthority, RegistryConfig, RuntimeConfig, UniversalExecutorConfig,
+    InputAuthority, RegistryConfig, RuntimeConfig, UniversalExecutorConfig, WindowsExecutionConfig,
 };
 use ordivon_runtime_mcp::server::{ExecutionContext, RuntimeServer, ServerConfig};
 use ordivon_runtime_mcp::{append_rotating_jsonl, DEFAULT_TRACE_ROTATION_BYTES};
@@ -287,6 +287,22 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     let store_root = PathBuf::from(required_env("ORDIVON_STORE_ROOT")?);
     let registry_root = PathBuf::from(required_env("ORDIVON_REGISTRY_ROOT")?);
     let runner_path = PathBuf::from(required_env("ORDIVON_RUNNER_PATH")?);
+    let windows = match (
+        optional_env("ORDIVON_WINDOWS_LAUNCHER_PATH")?,
+        optional_env("ORDIVON_WINDOWS_WSL_DISTRIBUTION")?,
+    ) {
+        (None, None) => None,
+        (Some(launcher), Some(wsl_distribution)) => Some(WindowsExecutionConfig {
+            launcher_path: PathBuf::from(launcher),
+            wsl_distribution,
+        }),
+        _ => {
+            return Err(
+                "ORDIVON_WINDOWS_LAUNCHER_PATH and ORDIVON_WINDOWS_WSL_DISTRIBUTION must appear together"
+                    .into(),
+            )
+        }
+    };
     let allowed_executable_roots = std::env::var("ORDIVON_ALLOWED_EXECUTABLE_ROOTS")
         .ok()
         .map(|roots| {
@@ -410,6 +426,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                     max_output_bytes,
                 },
                 startup_grace_ms,
+                windows,
             },
             input_authorities,
             execution: ExecutionContext {

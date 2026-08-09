@@ -9,6 +9,7 @@ mod repair;
 mod supervisor;
 mod systemd;
 mod types;
+mod windows;
 
 pub use doctor::{
     inspect_runtime, RuntimeDoctorAttemptState, RuntimeDoctorCapacityHolder, RuntimeDoctorCase,
@@ -53,10 +54,10 @@ pub use types::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,
     CreatedAdmission, EffectiveExecutionLimits, EffectiveInputBinding, EffectiveStepTimeout,
-    ExecutionBudget, ExecutionProfile, ExecutionProposal, ExecutionStepProposal, ForeignReference,
-    InputAccessMode, InputAuthority, InputBindingRequest, JobDesiredState, JobProjection,
-    JobResolution, ReservationRecord, ReservationState, RunnerIdentity, RuntimeArtifactRecord,
-    RuntimeDeliveryDisposition, RuntimeExecutionPlan, RuntimeExecutionStep,
+    ExecutionBudget, ExecutionProfile, ExecutionProposal, ExecutionStepProposal, ExecutionTarget,
+    ForeignReference, InputAccessMode, InputAuthority, InputBindingRequest, JobDesiredState,
+    JobProjection, JobResolution, ReservationRecord, ReservationState, RunnerIdentity,
+    RuntimeArtifactRecord, RuntimeDeliveryDisposition, RuntimeExecutionPlan, RuntimeExecutionStep,
     RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult,
     RuntimeJobRecord, RuntimeJobSummary, RuntimeWorkspaceGetRequest, RuntimeWorkspaceIssue,
     RuntimeWorkspaceIssueStage, RuntimeWorkspaceListCursor, RuntimeWorkspaceListRequest,
@@ -65,6 +66,7 @@ pub use types::{
     TerminalCommit, UniversalExecutionRequest, UniversalExecutionStep, MAX_ARTIFACT_READ_BYTES,
     MAX_RUNTIME_LIST_LIMIT, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
 };
+pub use windows::WindowsExecutionConfig;
 
 #[cfg(test)]
 mod tests;

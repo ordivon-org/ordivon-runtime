@@ -12,7 +12,7 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ### Added
 
-- experimental Windows Job Object launcher equipment plus repeatable WSL/Windows real-system acceptance for descendant ownership, exit/stdout/stderr propagation, argv/environment fidelity, and native process, memory, and CPU controls; this does not add a public Windows execution backend;
+- orthogonal `executionTarget=windows_native` admission for configured WSL/Windows nodes, backed by the repository-owned Windows Job Object launcher while preserving the existing Job/Attempt/result/replay model; R-W1 proves exact executable/image binding, explicit non-inherited environment, bounded output, timeout and descendant termination, native Job memory/process/CPU controls, Windows start evidence as a durable Artifact, and exact replay without turning Windows into an `ExecutionProfile`;
 - public Quick Start, status, data/privacy, release, and generated Tool-reference documents;
 - executable documentation ownership and local-link validation;
 - scheduled CodeQL, dependency-policy, advisory, and real-system acceptance workflows;

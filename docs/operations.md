@@ -381,7 +381,17 @@ scripts/windows-job-launcher-acceptance.py
 
 The acceptance copies only the repository-owned launcher and fixture source into a unique temporary directory below `C:\Users\Public`, compiles them there, verifies exact target exit/stdout/stderr propagation, difficult argv and explicit environment round-trip, a 64 MiB committed-memory cap against a 128 MiB control allocation, active-process rejection, CPU hard-cap behavior relative to an uncapped control, and kill-on-close cleanup of a real child/grandchild tree. The temporary directory is removed on exit.
 
-Passing this acceptance proves the Windows launcher equipment on that node; it does **not** change the supported public Runtime platform, invent a Windows `ExecutionProfile`, or claim that native Windows resource accounting is identical to cgroup accounting.
+Passing this acceptance proves the Windows launcher equipment on that node; it does not by itself prove Runtime Job/Attempt integration or invent a Windows `ExecutionProfile`. The configured Runtime target uses two paired operator facts, `ORDIVON_WINDOWS_LAUNCHER_PATH` and `ORDIVON_WINDOWS_WSL_DISTRIBUTION`; omit both to disable Windows admission.
+
+For the Runtime-level R-W1 proof, run the ignored integration fixture on the same trusted WSL/Windows node:
+
+```bash
+ORDIVON_RUN_WINDOWS_INTEGRATION=1 cargo test -p ordivon-runtime-core \
+  --test transactional_runtime runtime_windows_native_executes_as_real_job_attempt_and_replays \
+  --all-features -- --ignored --nocapture --test-threads=1
+```
+
+That fixture builds the current launcher and Windows fixture, admits `executionTarget=windows_native` through `Runtime::run_task`, verifies explicit environment with no ambient `SystemRoot`, validates Windows PID/creation/image evidence as an Artifact, requires exact replay to return the same Job/Attempt, injects a real timeout against a descendant tree, and independently confirms no marker process survives. It still does not prove WSL-restart-independent recovery, limited-token execution, elevation, or scoped power inhibition.
 
 ## Contained-local acceptance
 

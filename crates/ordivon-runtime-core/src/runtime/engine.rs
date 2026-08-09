@@ -21,6 +21,7 @@ use super::supervisor::{
     SupervisorUnitState, TerminationIntent,
 };
 use super::systemd::*;
+use super::windows::*;
 use super::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent,
@@ -54,6 +55,7 @@ const RUNNER_REQUEST_FILE: &str = "request.json";
 const PLAN_FILE: &str = "plan.json";
 const BUNDLE_MANIFEST_FILE: &str = "bundle-manifest.json";
 const RUNNER_START_FILE: &str = "runner-start.json";
+const WINDOWS_START_FILE: &str = "windows-start.json";
 const RESULT_FILE: &str = "result.json";
 const STDOUT_FILE: &str = "stdout.log";
 const STDERR_FILE: &str = "stderr.log";
@@ -105,6 +107,7 @@ pub struct RuntimeConfig {
     pub registry: RegistryConfig,
     pub executor: UniversalExecutorConfig,
     pub startup_grace_ms: u64,
+    pub windows: Option<WindowsExecutionConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +129,7 @@ pub struct Runtime {
     startup_grace_ms: u64,
     execution_path: String,
     execution_home: String,
+    windows: Option<WindowsExecutionConfig>,
     input_authorities: BTreeMap<String, OpenedInputAuthority>,
     lifecycle_lock: Arc<Mutex<()>>,
 }
@@ -248,6 +252,8 @@ struct TerminalProcessEvidence {
     workspace_id: String,
     source_revision: String,
     execution_profile: super::ExecutionProfile,
+    #[serde(default, skip_serializing_if = "super::ExecutionTarget::is_default")]
+    execution_target: super::ExecutionTarget,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     foreign_references: Vec<super::ForeignReference>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -294,6 +300,9 @@ impl Runtime {
         input_authorities: Vec<InputAuthority>,
     ) -> RuntimeResult<Self> {
         config.executor.validate().map_err(map_universal_error)?;
+        if let Some(windows) = &config.windows {
+            windows.validate()?;
+        }
         if config.startup_grace_ms == 0 {
             return Err(RuntimeError::invalid(
                 "startupGraceMs must be positive",
@@ -356,6 +365,7 @@ impl Runtime {
             startup_grace_ms: config.startup_grace_ms,
             execution_path,
             execution_home,
+            windows: config.windows,
             input_authorities: configured_input_authorities,
             lifecycle_lock: Arc::new(Mutex::new(())),
         };
@@ -471,6 +481,12 @@ impl Runtime {
         request_identity_digest: String,
         inputs: &[InputBindingRequest],
     ) -> RuntimeResult<String> {
+        if request.execution.execution_target == super::ExecutionTarget::WindowsNative {
+            return Err(RuntimeError::invalid(
+                "windows_native immutable input bindings are not implemented in R-W1",
+                "execution.executionTarget",
+            ));
+        }
         if request.execution.execution_profile != super::ExecutionProfile::ContainedLocal {
             return Err(RuntimeError::invalid(
                 "immutable input bindings require contained_local execution",
@@ -684,6 +700,7 @@ impl Runtime {
                     .collect(),
                 budget: proposal.execution.budget.clone(),
                 execution_profile: proposal.execution.execution_profile,
+                execution_target: proposal.execution.execution_target,
                 foreign_references: proposal.execution.foreign_references.clone(),
             },
             wait_ms: proposal.wait_ms,
@@ -1127,8 +1144,26 @@ impl Runtime {
             &request.execution.executable,
             "execution.executable",
         )?;
-        let base_environment =
-            self.execution_environment(&record, request.execution.execution_profile)?;
+        let base_environment = match request.execution.execution_target {
+            super::ExecutionTarget::LocalLinux => {
+                self.execution_environment(&record, request.execution.execution_profile)?
+            }
+            super::ExecutionTarget::WindowsNative => {
+                if self.windows.is_none() {
+                    return Err(RuntimeError::invalid(
+                        "windows_native target is not configured on this Runtime",
+                        "execution.executionTarget",
+                    ));
+                }
+                if mounted_windows_path(&executable).is_none() {
+                    return Err(RuntimeError::invalid(
+                        "windows_native executable must reside on a WSL-mounted Windows drive",
+                        "execution.executable",
+                    ));
+                }
+                BTreeMap::new()
+            }
+        };
         let mut steps = Vec::with_capacity(request.execution.steps.len());
         for (step_index, step) in request.execution.steps.iter().enumerate() {
             let step_cwd = resolve_workspace_cwd(
@@ -1179,6 +1214,7 @@ impl Runtime {
             steps,
             budget: request.execution.budget.clone(),
             execution_profile: request.execution.execution_profile,
+            execution_target: request.execution.execution_target,
             foreign_references: request.execution.foreign_references.clone(),
             input_set_id: None,
             effective_inputs: Vec::new(),
@@ -1709,32 +1745,67 @@ impl Runtime {
         let plan = self.registry.execution_plan(&starting.job_id)?;
         let bundle_path = canonical_directory(Path::new(&starting.bundle_path), "bundlePath")
             .map_err(map_universal_error)?;
-        let runner = validate_runner(&self.executor.runner_path)?;
-        let input_set_path = if plan.input_set_id.is_some() {
-            self.ensure_job_input_ownership(&starting.job_id)?;
-            let path = self.executor.job_input_path(&starting.job_id);
-            let requests = effective_input_requests_from_plan(&plan)?;
-            verify_effective_input_set(&path, &requests)?;
-            Some(path)
-        } else {
-            None
-        };
         let runtime_ceiling = plan.timeout_ms.saturating_add(5_000);
-        let output = systemd_run(&SystemdRunSpec {
-            unit_name: &starting.unit_name,
-            runner: &runner,
-            bundle_path: &bundle_path,
-            workspace_path: Path::new(&plan.workspace_path),
-            workspace_git_common_dir: plan.workspace_git_common_dir.as_deref().map(Path::new),
-            input_set_path: input_set_path.as_deref(),
-            runtime_ceiling_ms: runtime_ceiling,
-            budget: &plan.budget,
-            execution_profile: plan.execution_profile,
-            environment: &plan.env,
-        })?;
+        let output = match plan.execution_target {
+            super::ExecutionTarget::LocalLinux => {
+                let runner = validate_runner(&self.executor.runner_path)?;
+                let input_set_path = if plan.input_set_id.is_some() {
+                    self.ensure_job_input_ownership(&starting.job_id)?;
+                    let path = self.executor.job_input_path(&starting.job_id);
+                    let requests = effective_input_requests_from_plan(&plan)?;
+                    verify_effective_input_set(&path, &requests)?;
+                    Some(path)
+                } else {
+                    None
+                };
+                systemd_run(&SystemdRunSpec {
+                    unit_name: &starting.unit_name,
+                    runner: &runner,
+                    bundle_path: &bundle_path,
+                    workspace_path: Path::new(&plan.workspace_path),
+                    workspace_git_common_dir: plan
+                        .workspace_git_common_dir
+                        .as_deref()
+                        .map(Path::new),
+                    input_set_path: input_set_path.as_deref(),
+                    runtime_ceiling_ms: runtime_ceiling,
+                    budget: &plan.budget,
+                    execution_profile: plan.execution_profile,
+                    environment: &plan.env,
+                })?
+            }
+            super::ExecutionTarget::WindowsNative => {
+                let windows = self.windows.as_ref().ok_or_else(|| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::RegistryCorrupt,
+                        "committed windows_native Job has no configured Windows provider",
+                        Some("executionTarget"),
+                        true,
+                    )
+                })?;
+                windows_systemd_run(&WindowsSystemdRunSpec {
+                    config: windows,
+                    unit_name: &starting.unit_name,
+                    bundle_path: &bundle_path,
+                    job_id: &starting.job_id,
+                    attempt_id: &starting.attempt_id,
+                    launch_token_digest: &starting.launch_token_digest,
+                    executable: Path::new(&plan.executable),
+                    args: &plan.args,
+                    cwd: Path::new(&plan.cwd),
+                    environment: &plan.env,
+                    budget: &plan.budget,
+                    runtime_ceiling_ms: runtime_ceiling,
+                    timeout_ms: plan.timeout_ms,
+                    stdout_limit_bytes: plan.stdout_limit_bytes,
+                    stderr_limit_bytes: plan.stderr_limit_bytes,
+                })?
+            }
+        };
         if !output.status.success() {
             let detail = format!(
-                "systemd-run failed: {}",
+                "{} launch failed: {}",
+                plan.execution_target.as_str(),
                 String::from_utf8_lossy(&output.stderr).trim()
             );
             self.commit_control_terminal(
@@ -1757,16 +1828,18 @@ impl Runtime {
                     "startupGraceMs",
                 )
             })?;
+        let plan = self.registry.execution_plan(&attempt.job_id)?;
+        let start_path = Path::new(&attempt.bundle_path).join(match plan.execution_target {
+            super::ExecutionTarget::LocalLinux => RUNNER_START_FILE,
+            super::ExecutionTarget::WindowsNative => WINDOWS_START_FILE,
+        });
         let mut poll_index = 0;
         loop {
             if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
                 return self.reconcile_runner_result(attempt);
             }
-            if Path::new(&attempt.bundle_path)
-                .join(RUNNER_START_FILE)
-                .exists()
-            {
-                match self.bind_runner_start(attempt) {
+            if start_path.exists() {
+                match self.bind_attempt_start(attempt, plan.execution_target) {
                     Ok(_) => return Ok(()),
                     Err(error) if error.code == RuntimeErrorCode::LaunchIdentityMismatch => {
                         // A very short-lived unit can write valid start evidence, finish, and be
@@ -1791,6 +1864,129 @@ impl Runtime {
             sleep_until_poll(deadline, &mut poll_index);
         }
         self.reconcile_attempt(&attempt.attempt_id)
+    }
+
+    fn bind_attempt_start(
+        &self,
+        attempt: &AttemptRecord,
+        target: super::ExecutionTarget,
+    ) -> RuntimeResult<AttemptRecord> {
+        match target {
+            super::ExecutionTarget::LocalLinux => self.bind_runner_start(attempt),
+            super::ExecutionTarget::WindowsNative => self.bind_windows_start(attempt),
+        }
+    }
+
+    fn validate_windows_start_evidence(
+        &self,
+        attempt: &AttemptRecord,
+    ) -> RuntimeResult<(WindowsStartEvidence, String)> {
+        let path = Path::new(&attempt.bundle_path).join(WINDOWS_START_FILE);
+        let bytes =
+            fs::read(&path).map_err(|error| io_error("read Windows start evidence", error))?;
+        let evidence: WindowsStartEvidence = serde_json::from_slice(&bytes).map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::LaunchIdentityMismatch,
+                format!("invalid Windows start evidence: {error}"),
+                Some("windowsStart"),
+                false,
+            )
+        })?;
+        let plan = self.registry.execution_plan(&attempt.job_id)?;
+        if plan.execution_target != super::ExecutionTarget::WindowsNative {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "Windows start evidence belongs to a non-Windows execution plan",
+                Some("windowsStart"),
+                false,
+            ));
+        }
+        let windows = self.windows.as_ref().ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "committed windows_native Job has no configured Windows provider",
+                Some("executionTarget"),
+                true,
+            )
+        })?;
+        let expected_job_name = format!("Ordivon.{}", attempt.attempt_id);
+        let expected_image =
+            windows_visible_path(windows, Path::new(&plan.executable), "execution.executable")?;
+        let observed_image = evidence
+            .image_path
+            .strip_prefix("\\\\?\\")
+            .unwrap_or(&evidence.image_path);
+        let expected_image_normalized = expected_image
+            .strip_prefix("\\\\?\\")
+            .unwrap_or(&expected_image);
+        if evidence.schema_version != RUNTIME_SCHEMA_VERSION
+            || evidence.job_id != attempt.job_id
+            || evidence.attempt_id != attempt.attempt_id
+            || evidence.launch_token_digest != attempt.launch_token_digest
+            || evidence.job_name != expected_job_name
+            || evidence.launcher_process_id == 0
+            || evidence.process_id == 0
+            || evidence.process_creation_time_file_time == 0
+            || evidence.image_digest != plan.executable_digest
+            || !observed_image.eq_ignore_ascii_case(expected_image_normalized)
+        {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::LaunchIdentityMismatch,
+                "Windows start identity does not match committed Attempt",
+                Some("windowsStart"),
+                false,
+            ));
+        }
+        let start_digest = sha256_bytes(&bytes);
+        if start_digest != sha256_file(&path).map_err(map_universal_error)? {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::LaunchIdentityMismatch,
+                "Windows start evidence digest changed while reading",
+                Some("windowsStart"),
+                false,
+            ));
+        }
+        Ok((evidence, start_digest))
+    }
+
+    fn bind_windows_start(&self, attempt: &AttemptRecord) -> RuntimeResult<AttemptRecord> {
+        let (evidence, start_digest) = self.validate_windows_start_evidence(attempt)?;
+        let properties = systemctl_show(&attempt.unit_name)?;
+        let invocation_id = nonempty_property(&properties, "InvocationID")
+            .ok_or_else(|| missing_systemd_property("InvocationID"))?;
+        let control_group = nonempty_property(&properties, "ControlGroup")
+            .ok_or_else(|| missing_systemd_property("ControlGroup"))?;
+        let main_pid: u32 = properties
+            .get("MainPID")
+            .ok_or_else(|| missing_systemd_property("MainPID"))?
+            .parse()
+            .map_err(|_| missing_systemd_property("MainPID"))?;
+        if main_pid == 0 {
+            return Err(missing_systemd_property("MainPID"));
+        }
+        let process_start_identity = process_identity(main_pid).ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::LaunchIdentityMismatch,
+                "Windows launcher systemd MainPID has no observable host process identity",
+                Some("mainPid"),
+                false,
+            )
+        })?;
+        let boot_id = read_trimmed("/proc/sys/kernel/random/boot_id")?;
+        self.registry.bind_running(
+            &attempt.attempt_id,
+            attempt.row_version,
+            &RunnerIdentity {
+                boot_id,
+                unit_name: attempt.unit_name.clone(),
+                invocation_id,
+                control_group,
+                main_pid,
+                process_start_identity,
+                runner_start_digest: start_digest,
+                observed_at_ms: evidence.observed_unix_ms,
+            },
+        )
     }
 
     fn bind_runner_start(&self, attempt: &AttemptRecord) -> RuntimeResult<AttemptRecord> {
@@ -1877,6 +2073,7 @@ impl Runtime {
                     RuntimeErrorCode::RegistryCorrupt
                         | RuntimeErrorCode::ResultIdentityConflict
                         | RuntimeErrorCode::ArtifactIdentityConflict
+                        | RuntimeErrorCode::LaunchIdentityMismatch
                 ) =>
             {
                 self.commit_control_terminal(
@@ -1925,7 +2122,24 @@ impl Runtime {
     }
 
     fn prepare_runner_terminal(&self, current: &AttemptRecord) -> RuntimeResult<TerminalCommit> {
-        prepare_runner_terminal_from_bundle(current)
+        let mut terminal = prepare_runner_terminal_from_bundle(current)?;
+        let plan = self.registry.execution_plan(&current.job_id)?;
+        if plan.execution_target == super::ExecutionTarget::WindowsNative {
+            let (_, digest) = self.validate_windows_start_evidence(current)?;
+            let path = Path::new(&current.bundle_path).join(WINDOWS_START_FILE);
+            terminal.artifacts.push(ArtifactRegistration {
+                artifact_id: format!("{}.windows-start", current.attempt_id),
+                kind: "windows_start".to_string(),
+                relative_path: WINDOWS_START_FILE.to_string(),
+                digest,
+                media_type: "application/json".to_string(),
+                byte_length: fs::metadata(&path)
+                    .map_err(|error| io_error("inspect Windows start evidence", error))?
+                    .len(),
+                truncated: false,
+            });
+        }
+        Ok(terminal)
     }
 
     pub fn observe_task(&self, request: &TaskObserveRequest) -> RuntimeResult<TaskObservation> {
@@ -2573,9 +2787,13 @@ impl Runtime {
         if result_path.exists() {
             return self.reconcile_runner_result(&attempt);
         }
-        let runner_start_path = Path::new(&attempt.bundle_path).join(RUNNER_START_FILE);
-        if attempt.state == AttemptState::Starting && runner_start_path.exists() {
-            let running = self.bind_runner_start(&attempt)?;
+        let plan = self.registry.execution_plan(&attempt.job_id)?;
+        let start_path = Path::new(&attempt.bundle_path).join(match plan.execution_target {
+            super::ExecutionTarget::LocalLinux => RUNNER_START_FILE,
+            super::ExecutionTarget::WindowsNative => WINDOWS_START_FILE,
+        });
+        if attempt.state == AttemptState::Starting && start_path.exists() {
+            let running = self.bind_attempt_start(&attempt, plan.execution_target)?;
             if Path::new(&running.bundle_path).join(RESULT_FILE).exists() {
                 return self.reconcile_runner_result(&running);
             }
@@ -3132,6 +3350,7 @@ fn append_terminal_evidence_for_commit_with_observation(
         workspace_id: plan.workspace_id,
         source_revision: plan.source_revision,
         execution_profile: plan.execution_profile,
+        execution_target: plan.execution_target,
         foreign_references: plan.foreign_references,
         input_set_id: plan.input_set_id,
         effective_inputs: plan.effective_inputs,
@@ -3672,6 +3891,20 @@ fn validate_run_request_structure(request: &TaskRunRequest) -> RuntimeResult<()>
         ));
     }
     validate_execution_budget(&request.execution.budget, "execution.budget")?;
+    if request.execution.execution_target == super::ExecutionTarget::WindowsNative {
+        if request.execution.execution_profile != super::ExecutionProfile::TrustedLocal {
+            return Err(RuntimeError::invalid(
+                "windows_native R-W1 currently supports trusted_local only",
+                "execution.executionProfile",
+            ));
+        }
+        if !request.execution.steps.is_empty() {
+            return Err(RuntimeError::invalid(
+                "windows_native R-W1 currently supports one command only",
+                "execution.steps",
+            ));
+        }
+    }
     crate::universal::validate_exec_payload(
         &request.execution.args,
         &request.execution.env,
@@ -3787,6 +4020,7 @@ fn validate_run_proposal_structure(proposal: &super::TaskRunProposal) -> Runtime
                 .collect(),
             budget: proposal.execution.budget.clone(),
             execution_profile: proposal.execution.execution_profile,
+            execution_target: proposal.execution.execution_target,
             foreign_references: proposal.execution.foreign_references.clone(),
         },
         wait_ms: proposal.wait_ms,
@@ -4453,6 +4687,7 @@ mod trusted_systemd_command_tests {
                 steps: Vec::new(),
                 budget: ExecutionBudget::default(),
                 execution_profile: ExecutionProfile::ContainedLocal,
+                execution_target: crate::runtime::ExecutionTarget::LocalLinux,
                 foreign_references: Vec::new(),
             },
             wait_ms: 0,
@@ -4496,6 +4731,7 @@ mod trusted_systemd_command_tests {
                             max_output_bytes: 1_048_576,
                         },
                         startup_grace_ms: 2_000,
+                        windows: None,
                     },
                     vec![InputAuthority {
                         name: "finance".to_string(),
@@ -4690,6 +4926,7 @@ mod trusted_systemd_command_tests {
                 max_output_bytes,
             },
             startup_grace_ms: 2_000,
+            windows: None,
         })
         .unwrap()
     }
@@ -4724,6 +4961,7 @@ mod trusted_systemd_command_tests {
                     .collect(),
                 budget: ExecutionBudget::default(),
                 execution_profile: ExecutionProfile::TrustedLocal,
+                execution_target: crate::runtime::ExecutionTarget::LocalLinux,
                 foreign_references: Vec::new(),
             },
             wait_ms: 0,
@@ -4881,6 +5119,7 @@ mod trusted_systemd_command_tests {
                 steps: Vec::new(),
                 budget: crate::ExecutionBudget::default(),
                 execution_profile: crate::runtime::ExecutionProfile::TrustedLocal,
+                execution_target: crate::runtime::ExecutionTarget::LocalLinux,
                 foreign_references: Vec::new(),
             },
             wait_ms: 0,
@@ -4912,6 +5151,7 @@ mod trusted_systemd_command_tests {
                 steps: Vec::new(),
                 budget: crate::ExecutionBudget::default(),
                 execution_profile: crate::runtime::ExecutionProfile::ContainedLocal,
+                execution_target: crate::runtime::ExecutionTarget::LocalLinux,
                 foreign_references: Vec::new(),
             },
             wait_ms: 0,
@@ -4973,6 +5213,7 @@ mod trusted_systemd_command_tests {
                 max_output_bytes: 1_048_576,
             },
             startup_grace_ms: 2_000,
+            windows: None,
         })
         .unwrap();
         drop(runtime);
@@ -5006,6 +5247,7 @@ mod trusted_systemd_command_tests {
                 max_output_bytes: 1_048_576,
             },
             startup_grace_ms: 2_000,
+            windows: None,
         })
         .unwrap();
         let record = crate::universal::WorkspaceRecord {

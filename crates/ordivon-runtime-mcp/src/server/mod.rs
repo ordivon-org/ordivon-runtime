@@ -11,8 +11,8 @@ use ordivon_runtime_core::{
     workspace_changes_page, workspace_diff_compact, ArtifactReadRequest, ArtifactReadResult,
     CompactWorkspaceDiffResult, CompactWorkspaceOpenResult, DurableWorkspacePatchRequest,
     DurableWorkspacePatchResult, ExecutionBudget, ExecutionProfile, ExecutionProposal,
-    ExecutionStepProposal, ForeignReference, GitWorkspaceCreateRequest, InputAuthority,
-    InputBindingRequest, Runtime, RuntimeCapacity, RuntimeConfig, RuntimeError,
+    ExecutionStepProposal, ExecutionTarget, ForeignReference, GitWorkspaceCreateRequest,
+    InputAuthority, InputBindingRequest, Runtime, RuntimeCapacity, RuntimeConfig, RuntimeError,
     RuntimeJobInspection, RuntimeJobListRequest, RuntimeJobListResult, RuntimeWorkspaceGetRequest,
     RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
     TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunProposal, TaskRunRequest,
@@ -214,6 +214,8 @@ pub struct WorkspaceExecBoundExecution {
     pub steps: Vec<ExecutionStepProposal>,
     #[serde(default, skip_serializing_if = "ExecutionBudget::is_empty")]
     pub budget: ExecutionBudget,
+    #[serde(default)]
+    pub execution_target: ExecutionTarget,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
 }
@@ -259,6 +261,8 @@ pub struct WorkspaceExecPlanInput {
     pub budget: ExecutionBudget,
     #[serde(default)]
     pub execution_profile: ExecutionProfile,
+    #[serde(default)]
+    pub execution_target: ExecutionTarget,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
 }
@@ -364,6 +368,7 @@ impl ExecutionContext {
                         .collect(),
                     budget: request.execution.budget,
                     execution_profile: request.execution.execution_profile,
+                    execution_target: request.execution.execution_target,
                     foreign_references: request.execution.foreign_references,
                 },
                 wait_ms: request.wait_ms,
@@ -407,6 +412,7 @@ impl ExecutionContext {
                     steps: execution.steps,
                     budget: execution.budget,
                     execution_profile: ExecutionProfile::ContainedLocal,
+                    execution_target: execution.execution_target,
                     foreign_references: execution.foreign_references,
                 },
                 wait_ms: request.wait_ms,
@@ -479,6 +485,7 @@ impl ExecutionContext {
                         .collect(),
                     budget: request.execution.budget,
                     execution_profile: request.execution.execution_profile,
+                    execution_target: request.execution.execution_target,
                     foreign_references: request.execution.foreign_references,
                 },
                 wait_ms: request.wait_ms,
@@ -504,6 +511,7 @@ impl ExecutionContext {
                 steps: request.execution.steps,
                 budget: request.execution.budget,
                 execution_profile: request.execution.execution_profile,
+                execution_target: request.execution.execution_target,
                 foreign_references: request.execution.foreign_references,
             },
             wait_ms: request.wait_ms,
