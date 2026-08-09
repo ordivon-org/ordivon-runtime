@@ -1111,6 +1111,46 @@ fn execution_budget_is_validated_and_part_of_idempotent_identity() {
 }
 
 #[test]
+fn deployment_fence_blocks_only_new_admission_and_preserves_exact_replay() {
+    use std::fs::OpenOptions;
+    use std::os::fd::AsRawFd;
+
+    let sandbox = Sandbox::new("deployment-admission-fence", 5_000);
+    let existing_request = request(&sandbox, "request:deployment-fence-existing", 4);
+    let created = created(sandbox.registry.submit(&existing_request).unwrap());
+    let fence = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(sandbox.registry.config().admission_fence_path())
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(fence.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+
+    let replay = sandbox.registry.submit(&existing_request).unwrap();
+    let replay_job = match replay {
+        AdmissionOutcome::Existing { job } => job,
+        AdmissionOutcome::Created(_) => {
+            panic!("exact replay created a second Job under deployment fence")
+        }
+    };
+    assert_eq!(replay_job.job_id, created.job.job_id);
+
+    let mut new_request = request(&sandbox, "request:deployment-fence-new", 4);
+    new_request.plan.workspace_id = "workspace:deployment-fence-new".to_string();
+    let blocked = sandbox.registry.submit(&new_request).unwrap_err();
+    assert_eq!(blocked.code, RuntimeErrorCode::DeploymentInProgress);
+    assert!(blocked.retryable);
+    assert_eq!(blocked.retry_after_ms, Some(1_000));
+    drop(fence);
+    assert!(matches!(
+        sandbox.registry.submit(&new_request).unwrap(),
+        AdmissionOutcome::Created(_)
+    ));
+}
+
+#[test]
 fn representation_cardinality_is_not_runtime_admission_policy() {
     let sandbox = Sandbox::new("representation-cardinality", 5000);
     let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();

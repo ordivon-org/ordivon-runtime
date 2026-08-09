@@ -2,7 +2,9 @@ use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -107,6 +109,10 @@ impl RegistryConfig {
     pub fn attempt_path(&self, attempt_id: &str) -> PathBuf {
         self.attempts_root().join(attempt_id)
     }
+
+    pub fn admission_fence_path(&self) -> PathBuf {
+        self.store_root.join("admission.lock")
+    }
 }
 
 fn capacity_holders(
@@ -142,6 +148,23 @@ impl Registry {
         config.validate()?;
         create_private_directory(&config.store_root)?;
         create_private_directory(&config.attempts_root())?;
+        let admission_fence = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(config.admission_fence_path())
+            .map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryUnavailable,
+                    format!("cannot open admission fence: {error}"),
+                    None,
+                    false,
+                )
+            })?;
+        drop(admission_fence);
+        set_private_file(&config.admission_fence_path())?;
         if let Some(parent) = config.db_path.parent() {
             create_private_directory(parent)?;
         }
@@ -628,6 +651,11 @@ impl Registry {
             });
         }
 
+        // New admission shares the deployment fence until its Registry transaction commits.
+        // Exact replay deliberately returns above this boundary, so deployment cannot make a
+        // previously committed request unreplayable.
+        let _admission_fence = self.acquire_admission_fence()?;
+
         let workspace_active: u32 = transaction
             .query_row(
                 "SELECT COUNT(*) FROM concurrency_reservations r JOIN attempts a ON a.attempt_id=r.attempt_id JOIN jobs j ON j.job_id=a.job_id WHERE r.state IN ('active','held_orphaned') AND j.workspace_id=?1",
@@ -803,6 +831,39 @@ impl Registry {
             reservation,
             launch_token,
         })))
+    }
+
+    fn acquire_admission_fence(&self) -> RuntimeResult<File> {
+        let path = self.config.admission_fence_path();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryUnavailable,
+                    format!("cannot open admission fence {}: {error}", path.display()),
+                    None,
+                    false,
+                )
+            })?;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+        if result == 0 {
+            return Ok(file);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Err(RuntimeError::deployment_in_progress());
+        }
+        Err(RuntimeError::new(
+            RuntimeErrorCode::RegistryUnavailable,
+            format!("cannot acquire admission fence {}: {error}", path.display()),
+            None,
+            false,
+        ))
     }
 
     pub fn get_job(&self, job_id: &str) -> RuntimeResult<RuntimeJobRecord> {

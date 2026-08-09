@@ -946,6 +946,28 @@ fn capacity_failure_preserves_retry_and_scope_metadata() {
 }
 
 #[test]
+fn deployment_in_progress_is_safe_same_request_without_commitment() {
+    let error = RuntimeError::deployment_in_progress();
+    let value = serde_json::to_value(ToolError::from(error)).unwrap();
+    assert_eq!(
+        value.pointer("/code").and_then(Value::as_str),
+        Some("DEPLOYMENT_IN_PROGRESS")
+    );
+    assert_eq!(
+        value.pointer("/retryClass").and_then(Value::as_str),
+        Some("safe_same_request")
+    );
+    assert_eq!(
+        value.pointer("/commitState").and_then(Value::as_str),
+        Some("not_started")
+    );
+    assert_eq!(
+        value.pointer("/retryAfterMs").and_then(Value::as_u64),
+        Some(1_000)
+    );
+}
+
+#[test]
 fn workspace_exists_guides_reconciliation_instead_of_blind_retry() {
     let error = RuntimeError::new(
         ordivon_runtime_core::RuntimeErrorCode::WorkspaceExists,

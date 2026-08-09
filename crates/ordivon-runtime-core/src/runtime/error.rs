@@ -14,6 +14,7 @@ pub enum RuntimeErrorCode {
     MigrationChecksumMismatch,
     IdempotencyConflict,
     ConcurrencyLimit,
+    DeploymentInProgress,
     WorkspaceBusy,
     WorkspaceExists,
     WorkspaceNotFound,
@@ -55,6 +56,7 @@ impl RuntimeErrorCode {
             Self::MigrationChecksumMismatch => "MIGRATION_CHECKSUM_MISMATCH",
             Self::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
             Self::ConcurrencyLimit => "CONCURRENCY_LIMIT",
+            Self::DeploymentInProgress => "DEPLOYMENT_IN_PROGRESS",
             Self::WorkspaceBusy => "WORKSPACE_BUSY",
             Self::WorkspaceExists => "WORKSPACE_EXISTS",
             Self::WorkspaceNotFound => "WORKSPACE_NOT_FOUND",
@@ -140,6 +142,17 @@ impl RuntimeError {
     pub fn with_operation_id(mut self, operation_id: impl Into<String>) -> Self {
         self.operation_id = Some(operation_id.into());
         self
+    }
+
+    pub fn deployment_in_progress() -> Self {
+        let mut error = Self::new(
+            RuntimeErrorCode::DeploymentInProgress,
+            "Runtime deployment holds the new-admission fence",
+            None,
+            true,
+        );
+        error.retry_after_ms = Some(1_000);
+        error
     }
 
     pub fn concurrency(message: impl Into<String>, field: &str, capacity: RuntimeCapacity) -> Self {

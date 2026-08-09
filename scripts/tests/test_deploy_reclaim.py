@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import runpy
@@ -8,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import threading
 import unittest
 from contextlib import closing, contextmanager
@@ -639,6 +641,62 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual(json.loads(completed.stdout)["status"], "restored_previous")
             self.assertEqual((install / "runtime").read_text(), "legacy-previous\n")
             self.assertEqual((install / "runtime").stat().st_mode & 0o777, 0o755)
+
+    def test_deploy_admission_fence_is_exclusive_and_drain_waits_for_natural_release(self) -> None:
+        scripts_path = str(REPO / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
+        finally:
+            sys.path.remove(scripts_path)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "registry.sqlite3"
+            initialize_registry(database, active_workspace="busy")
+            fence_path = module["admission_fence_path"](database)
+            self.assertEqual(fence_path, root / "admission.lock")
+
+            def release_job() -> None:
+                time.sleep(0.15)
+                with sqlite3.connect(database) as connection:
+                    connection.execute("UPDATE jobs SET resolution='succeeded' WHERE job_id='job-active'")
+                    connection.execute("UPDATE concurrency_reservations SET state='released' WHERE attempt_id='attempt-active'")
+                    connection.commit()
+
+            release = threading.Thread(target=release_job)
+            release.start()
+            started = time.monotonic()
+            fence = module["acquire_exclusive_admission_fence"](database)
+            try:
+                self.assertEqual(module["wait_for_execution_drain"](database, 2.0), [])
+                competing = fence_path.open("a+")
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(competing.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                finally:
+                    competing.close()
+            finally:
+                fence.close()
+            release.join(timeout=2)
+            self.assertGreaterEqual(time.monotonic() - started, 0.1)
+
+    def test_deploy_drain_timeout_reports_remaining_jobs_without_mutation(self) -> None:
+        scripts_path = str(REPO / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
+        finally:
+            sys.path.remove(scripts_path)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "registry.sqlite3"
+            initialize_registry(database, active_workspace="busy")
+            fence = module["acquire_exclusive_admission_fence"](database)
+            try:
+                remaining = module["wait_for_execution_drain"](database, 0.15)
+            finally:
+                fence.close()
+            self.assertEqual(remaining, ["job-active"])
 
     def test_deploy_wait_policy_has_no_legacy_five_minute_ceiling(self) -> None:
         module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
@@ -1426,8 +1484,18 @@ class DeployReclaimTests(unittest.TestCase):
             manifest = root / "candidate-manifest.json"
             write_candidate_manifest(manifest, candidate, commit, ("runtime", "runner"), repo)
             database = root / "registry.sqlite3"
-            initialize_registry(database)
+            initialize_registry(database, active_workspace="draining")
             systemctl = fake_systemctl(root)
+
+            def release_drain_job() -> None:
+                time.sleep(0.2)
+                with sqlite3.connect(database) as connection:
+                    connection.execute("UPDATE jobs SET resolution='succeeded' WHERE job_id='job-active'")
+                    connection.execute("UPDATE concurrency_reservations SET state='released' WHERE attempt_id='attempt-active'")
+                    connection.commit()
+
+            release = threading.Thread(target=release_drain_job)
+            release.start()
             with mcp_server(["workspace.get", "workspace.execPlan"]) as port:
                 env_file = root / "runtime.env"
                 env_file.write_text(
@@ -1474,6 +1542,8 @@ class DeployReclaimTests(unittest.TestCase):
                     "2",
                     "--wait-seconds",
                     "2",
+                    "--drain-seconds",
+                    "2",
                 ]
                 deployed = subprocess.run(
                     command,
@@ -1482,7 +1552,10 @@ class DeployReclaimTests(unittest.TestCase):
                     text=True,
                     capture_output=True,
                 )
+                release.join(timeout=2)
+                self.assertFalse(release.is_alive())
                 deployment = json.loads(deployed.stdout)
+                self.assertEqual(deployment["status"], "deployed")
                 self.assertEqual(deployment["probe"]["lifecycle"], "modern")
                 self.assertEqual(deployment["probe"]["protocolVersion"], "2026-07-28")
                 self.assertIn("2026-07-28", deployment["probe"]["supportedVersions"])

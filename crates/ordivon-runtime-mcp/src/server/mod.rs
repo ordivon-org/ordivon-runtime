@@ -726,6 +726,7 @@ impl From<RuntimeError> for ToolError {
                     (ToolRetryClass::ReconcileFirst, ToolCommitState::NotStarted)
                 }
                 ordivon_runtime_core::RuntimeErrorCode::ConcurrencyLimit
+                | ordivon_runtime_core::RuntimeErrorCode::DeploymentInProgress
                 | ordivon_runtime_core::RuntimeErrorCode::RegistryBusy
                 | ordivon_runtime_core::RuntimeErrorCode::WorkspaceBusy => {
                     (ToolRetryClass::SafeSameRequest, ToolCommitState::NotStarted)

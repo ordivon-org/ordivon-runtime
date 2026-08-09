@@ -62,6 +62,12 @@ Reissue an exact committed request only with the same `clientRequestId`, executi
 
 A successful Runtime Job or Runtime Attempt is not a Host completion decision. Required Artifacts, unresolved Effects or `UNKNOWN` state, and semantic acceptance remain above Runtime.
 
+## Deployment admission fence
+
+A production cutover owns a short mechanical **new-admission fence**, not a semantic maintenance mode. Exact replay of an already committed `clientRequestId` is resolved before this fence and remains available for recovery. A genuinely new execution request presented while the deployment fence is exclusive fails before Job/Attempt/reservation creation with `DEPLOYMENT_IN_PROGRESS`, `retryClass=safe_same_request`, `commitState=not_started`, and bounded retry guidance. The Agent may therefore retry the same request after the cutover without reconciling a phantom operation.
+
+The fence exists only to make an idle deployment frontier stable: it does not cancel active work, pause observation, reinterpret Task meaning, or create a queued Job. The deployer waits for existing active/held reservations to release naturally under the fence, then stops the MCP ingress, rechecks the Registry, and commits the release.
+
 ## Capacity backpressure
 
 `CONCURRENCY_LIMIT` is a pre-admission mechanical backpressure signal, not a queued Job state. Runtime returns `commitState=not_started`, `retryClass=safe_same_request`, `retryAfterMs`, the exact capacity scope and `active`/`limit`, plus bounded `holderJobIds`/`holderWorkspaceIds`. The Agent can inspect an exact holder with projection-only `task.get` and decide whether to wait, continue independent work, or later retry the same request. Runtime does not hide that decision behind an internal queue.
