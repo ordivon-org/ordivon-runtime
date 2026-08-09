@@ -114,5 +114,31 @@
     "Windows provider launcher source or token selection",
     "Attempt-scoped Power Request semantics",
     "operation/proposal identity canonicalization"
-  ]
+  ],
+  "rw5IntegrationValidation": {
+    "integratedRevision": "14ccb315c657a93157e548bfbb0b0a794674b4c4",
+    "baseRw5Revision": "230f20d0a868f4ff141beecaf13e7359e2886684",
+    "jobId": "job-019fe7a9-02e8-73a0-93ca-3eef88e74cc9",
+    "attemptId": "attempt-019fe7a9-02e8-73a0-93ca-3ef94ccd1fb8",
+    "terminalEvidenceDigest": "sha256:a87b81efd0eb489d7621ca387611bb2d1110f767bd82199dfa6f1ebab7d872af",
+    "rustCoreTestsPassed": 196,
+    "runtimeMcpTestsPassed": 32,
+    "runtimeMainTestsPassed": 3,
+    "pythonOperationalTestsPassed": 88,
+    "pythonOptionalSkips": 5,
+    "documentationContractValid": true,
+    "windowsPhysicalIntegrationPassed": true,
+    "diffCheckPassed": true,
+    "windowsIntegration": {
+      "limitedJobId": "job-019fe7a9-e087-7942-b4f9-76f12ee590b5",
+      "limitedAttemptId": "attempt-019fe7a9-e087-7942-b4f9-770703893df8",
+      "elevatedJobId": "job-019fe7a9-e5bb-7263-9bf9-83c4f5a8a21f",
+      "elevatedAttemptId": "attempt-019fe7a9-e5bb-7263-9bf9-83df6823f8a9",
+      "runtimeReconnectJobId": "job-019fe7a9-e89c-7533-ab0a-455621da7f1f",
+      "runtimeReconnectAttemptId": "attempt-019fe7a9-e89c-7533-ab0a-456864f8c56a",
+      "launcherCrashJobId": "job-019fe7a9-ef20-7032-9cc3-9c11544e903f",
+      "launcherCrashAttemptId": "attempt-019fe7a9-ef20-7032-9cc3-9c2ec3b06614"
+    },
+    "meaning": "argv preservation composes with R-W5 Runtime reconstruction and deterministic launcher-death recovery without duplicate Windows dispatch"
+  }
 }
