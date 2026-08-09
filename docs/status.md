@@ -14,7 +14,7 @@ audience:
   - builder
   - operator
   - agent
-updated: 2026-08-04
+updated: 2026-08-09
 summary: Stable maturity claim, support boundary, known limits, and live-state verification path for Ordivon Runtime.
 evidence_status: verified
 readiness: READY
@@ -65,6 +65,7 @@ The canonical deployment currently supports:
 - local Git repositories and executables already trusted by the operator.
 
 Windows, macOS, non-systemd Linux, hostile multi-tenant execution, controlled egress, and disposable remote sandboxes are not currently supported Runtime authority profiles.
+A Windows Job Object launcher is repository-owned and real-system verified as experimental execution equipment for WSL-hosted nodes, but it is not a public `workspace.exec` backend or authority profile.
 
 ## Supported version
 
@@ -96,6 +97,7 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 | Workspace lifecycle and cache reclamation | operational |
 | `contained_local` authority reduction | experimental but verified for the declared boundary |
 | Immutable input materialization and `workspace.execBound` read-only contained admission | implemented and public-MCP real-system verified; named authority roots remain operator configuration |
+| Windows Job Object launcher source and WSL/Windows acceptance | experimental equipment; real-system verified, not integrated as a public Runtime backend |
 | hostile multi-tenant sandboxing | not provided |
 | semantic Task completion | outside Runtime |
 | external-world effect verification | structured adapter dependent; not generic |
@@ -109,6 +111,8 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 - arbitrary command execution remains effect-opaque.
 - a successful process exit is not proof of semantic completion or external-world success.
 - real systemd/cgroup integration tests cannot run on ordinary hosted CI and require the explicit local acceptance path.
+- direct WSL interop does not make Windows descendants members of the Linux Attempt cgroup; Windows-target experiments must use the verified Job Object launcher or another explicit Windows-native owner.
+- the launcher's active-process and committed-memory limits are Windows-native controls and are not claimed to be exact semantic equivalents of cgroup `TasksMax` and `MemoryMax`.
 - public installation and versioning remain pre-1.0.
 
 ## Live state is machine-owned

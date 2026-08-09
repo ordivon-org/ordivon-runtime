@@ -13,7 +13,7 @@ audience:
   - builder
   - operator
   - agent
-updated: 2026-08-04
+updated: 2026-08-09
 summary: Canonical Runtime architecture for Workspace-bound admission, Jobs, Attempts, execution evidence, reconciliation, and recovery.
 evidence_status: verified
 readiness: READY
@@ -154,6 +154,18 @@ Current policy gates only new admission. Runtime performs idempotent existing-Jo
 Runtime no longer adds a separate 24-hour/64-MiB product law. A caller may also commit optional positive physical budgets for memory, process count, and CPU quota. These values participate in the operation Digest and are applied by systemd to the Attempt cgroup through `MemoryMax=`, `TasksMax=`, and `CPUQuota=`. Runtime validates representability and positivity, while the operator and systemd/kernel own the actual resource policy. An empty budget is omitted from canonical serialization so requests admitted before this contract remain idempotently replayable.
 
 Budgets constrain physical consumption; they are not a scheduler, priority system, sandbox, or approval policy. The trusted-local authority model remains unchanged.
+
+## Windows-host execution equipment
+
+The public Runtime execution backend remains Linux with systemd and cgroup v2. Direct WSL interop does not extend that process-tree ownership into the Windows kernel: a Linux Runner can reach a terminal timeout while Windows descendants that it launched remain alive. Runtime therefore carries [`../platform/windows/Ordivon.WindowsJobLauncher.cs`](../platform/windows/Ordivon.WindowsJobLauncher.cs) as **experimental execution equipment**, not as a third `ExecutionProfile`, a hidden fallback, or a claim that `workspace.exec` has a Windows backend.
+
+The launcher is ephemeral rather than a resident daemon. It creates a Windows Job Object, enables kill-on-close, creates the target process suspended, assigns and verifies Job membership before resuming it, inherits standard handles so existing Runtime stdout/stderr capture remains usable, waits for the target, and returns the target exit code. If the launcher is terminated by the owning Runtime Attempt, closing the Job handle causes the Windows kernel to terminate remaining associated descendants. The launcher can also enforce native Job limits for committed job memory and active process count, and a hard CPU rate cap.
+
+`--cpu-quota-percent` intentionally uses Runtime's one-CPU-equivalent interpretation rather than copying a Windows percentage. Windows Job CPU rate is a share of the whole Windows machine, so the launcher converts the requested quota to `floor(cpuQuotaPercent * 100 / logicalProcessors)`, bounded to the representable `1..10000` rate. This translation is physically verified by the Windows acceptance path but is not yet part of the public Execution Plan schema.
+
+The other resource controls are not declared identical across kernels. Windows `ActiveProcessLimit` counts active processes, while Linux `TasksMax`/cgroup PID accounting covers kernel tasks and therefore also reflects threads. Windows `JobMemoryLimit` caps the job-wide sum of committed virtual memory, which is not byte-for-byte the same accounting domain as cgroup `MemoryMax`. Runtime must preserve these differences rather than silently claiming a cross-platform budget equivalence.
+
+The repeatable proof is `scripts/windows-job-launcher-acceptance.py`; it compiles the repository-owned launcher and fixture with the Windows .NET Framework compiler on a WSL/Windows node and verifies exit/stdout/stderr, argv and environment round-trip, memory and process limits, CPU throttling, and kill-on-close descendant cleanup.
 
 ### Bound ownership rule
 

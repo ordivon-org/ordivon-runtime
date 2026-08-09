@@ -13,7 +13,7 @@ audience:
   - operator
   - builder
   - agent
-updated: 2026-08-05
+updated: 2026-08-09
 summary: Canonical deployment, health, capacity, Workspace lifecycle, reclaim, rollback, and operational verification contract.
 evidence_status: verified
 readiness: READY
@@ -365,6 +365,18 @@ scripts/local-acceptance run
 This executes all ignored systemd/cgroup fixtures serially and then performs the complete public MCP journey against a temporary loopback Runtime. The optional output path receives a JSON receipt binding the tested source commit, candidate binary digests, Tool catalog digest, and every asserted journey check.
 
 `.github/workflows/system-acceptance.yml` runs this path only on an operator-owned self-hosted runner labeled `ordivon-runtime-systemd`; ordinary hosted CI is not represented as equivalent evidence. A release that changes dispatch, Runner behavior, supervision, cancellation, authority profiles, resource controls, or recovery must retain a successful receipt for the exact candidate commit.
+
+## Windows-host launcher acceptance
+
+The Windows Job Object launcher has a separate real-system acceptance because ordinary Linux CI cannot exercise Win32 Job ownership. On a WSL/Windows node with the in-box .NET Framework C# compiler available, run:
+
+```bash
+scripts/windows-job-launcher-acceptance.py
+```
+
+The acceptance copies only the repository-owned launcher and fixture source into a unique temporary directory below `C:\Users\Public`, compiles them there, verifies exact target exit/stdout/stderr propagation, difficult argv and explicit environment round-trip, a 64 MiB committed-memory cap against a 128 MiB control allocation, active-process rejection, CPU hard-cap behavior relative to an uncapped control, and kill-on-close cleanup of a real child/grandchild tree. The temporary directory is removed on exit.
+
+Passing this acceptance proves the Windows launcher equipment on that node; it does **not** change the supported public Runtime platform, invent a Windows `ExecutionProfile`, or claim that native Windows resource accounting is identical to cgroup accounting.
 
 ## Contained-local acceptance
 
