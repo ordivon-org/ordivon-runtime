@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "kind": "ordivon.runtime.windows-native-systemd-argv-preservation-acceptance",
+  "status": "passed",
+  "capturedAt": "2026-08-10T01:51:01+08:00",
+  "sourceBaseRevision": "70705a2bd8dc022d2a02079f59934e34f548e38d",
+  "problem": {
+    "failureClass": "outer-supervisor-argv-corruption",
+    "scope": "windows_native physical dispatch through systemd-run",
+    "oldBehavior": "systemd-run default environment expansion rewrites Agent-authored $VAR and ${VAR} target arguments before the Windows launcher receives them",
+    "requiredBehavior": "Agent-authored argv is execution truth and must remain literal across the outer WSL supervisor boundary"
+  },
+  "productionContextBeforeFix": {
+    "runtimeRevision": "70705a2bd8dc022d2a02079f59934e34f548e38d",
+    "providerActive": true,
+    "afVsockActive": true,
+    "elevatedAndPowerRequestBaseline": {
+      "jobId": "job-019fe799-a7d4-77d3-8a0b-a3aa47198b4c",
+      "attemptId": "attempt-019fe799-a7d4-77d3-8a0b-a3b3d475df18",
+      "windowsStartDigest": "sha256:cee8ff8ad6f479bb1d38487048fc20ae146657fa76571f2544a4e9fe1811fbe7",
+      "terminalEvidenceDigest": "sha256:62839d632b7970452a1818f8a7ae6515c5de51c2439e04dfa9ae01d8897aa9a9",
+      "result": "succeeded",
+      "exitCode": 0,
+      "meaning": "R-W3 elevation, R-W4 Power Request, Workstation provider and AF_VSOCK substrate were already operational; the later failure was not a general Windows-provider failure"
+    },
+    "rawPowershellFailure": {
+      "clientRequestId": "rw4-live-raw-powershell-recheck-20260810-01",
+      "jobId": "job-019fe79d-0ee1-7ae1-b0ee-95ddf5367a19",
+      "attemptId": "attempt-019fe79d-0ee1-7ae1-b0ee-95e5b5694717",
+      "windowsStartDigest": "sha256:f9730916a7f6b8b1dd0d1515c7b363be78dce79d2cf743ed294a37f30f553753",
+      "terminalEvidenceDigest": "sha256:f92ec86b0deffa8ce4dece54fa10a1a7ae5c9792824f2f93e18124d310af299b",
+      "exitCode": -196608,
+      "observedFailure": "PowerShell reported a missing -Command value after the Agent argument string containing $id/$p/$PID crossed the outer systemd-run boundary"
+    }
+  },
+  "falsifiers": [
+    "repository QuoteWindowsArgument implementation already round-trips spaces, embedded quotes, trailing backslashes and empty arguments",
+    "direct Windows PowerShell -Command succeeds for both simple and original complex expressions",
+    "direct launcher legacy mode succeeds for the same complex expression",
+    "the Runtime bounded Windows baseline environment succeeds for the same complex expression",
+    "the Runtime UNC Workspace cwd succeeds for the same complex expression",
+    "direct launcher Runtime-mode using CreateProcessAsUserW succeeds for the same complex expression under both limited and elevated authority",
+    "therefore launcher quoting, PowerShell syntax, bounded environment, UNC cwd, CreateProcessAsUserW, Windows authority and Power Request were individually falsified as the root cause"
+  ],
+  "decisiveSystemdRunAB": {
+    "clientRequestId": "runtime-systemd-run-expansion-ab-20260810-0208",
+    "jobId": "job-019fe79f-3285-77c3-8b29-e59c780fb349",
+    "attemptId": "attempt-019fe79f-3285-77c3-8b29-e5a529bd5d35",
+    "terminalEvidenceDigest": "sha256:911f49fdafca10124eb8b6ce71f5c3ef95bf4709fad9bd9eab114952b96da189",
+    "defaultSystemdRun": {
+      "expandEnvironment": "default-enabled",
+      "targetExitCode": -196608,
+      "targetStatus": "FAILED",
+      "result": "PowerShell received a malformed/missing -Command payload"
+    },
+    "noExpand": {
+      "flag": "--expand-environment=no",
+      "targetExitCode": 0,
+      "targetStatus": "COMPLETED",
+      "stdout": "identity JSON from the unchanged original PowerShell command"
+    },
+    "onlyChangedVariable": "systemd-run environment expansion"
+  },
+  "fix": {
+    "file": "crates/ordivon-runtime-core/src/runtime/windows.rs",
+    "change": "append --expand-environment=no before the Windows launcher command",
+    "operationIdentityChanged": false,
+    "proposalIdentityChanged": false,
+    "agentFacingSchemaChanged": false,
+    "executionSemantics": "physical supervisor now preserves literal Agent argv instead of interpreting $ syntax as manager environment references"
+  },
+  "physicalRegression": {
+    "firstJobId": "job-019fe7a1-f0f7-7e73-944c-fe7b33a70e85",
+    "firstAttemptId": "attempt-019fe7a1-f0f7-7e73-944c-fe8b70bc1d46",
+    "firstTerminalEvidenceDigest": "sha256:83934ec0ec3588b63e517ae36f95d3659ab8e065fd1cbb25a93021cbaaaf040b",
+    "fixtureArguments": [
+      "$ORDIVON_LITERAL",
+      "${ORDIVON_LITERAL}"
+    ],
+    "expectedBase64": [
+      "JE9SRElWT05fTElURVJBTA==",
+      "JHtPUkRJVk9OX0xJVEVSQUx9"
+    ],
+    "meaning": "literal dollar-prefixed arguments survived Runtime -> systemd-run -> WSL interop -> Windows launcher -> CreateProcessAsUserW -> target fixture"
+  },
+  "finalCloseout": {
+    "jobId": "job-019fe7a3-2d0a-74c1-961f-a7e468ff3212",
+    "attemptId": "attempt-019fe7a3-2d0a-74c1-961f-a7f07686e45f",
+    "terminalEvidenceDigest": "sha256:a8ee7384b91f86cf6af8e7f91417ebfe03ea7c4ca03fc947fb37ebbc96ea7d56",
+    "rustCoreTestsPassed": 195,
+    "runtimeMcpTestsPassed": 32,
+    "runtimeMainTestsPassed": 3,
+    "pythonOperationalTestsPassed": 88,
+    "pythonOptionalSkips": 5,
+    "documentationContractValid": true,
+    "windowsLiteralPhysicalIntegrationPassed": true,
+    "diffCheckPassed": true,
+    "latestWindowsIntegration": {
+      "limitedJobId": "job-019fe7a3-daec-7b92-85aa-802e006021ec",
+      "limitedAttemptId": "attempt-019fe7a3-daec-7b92-85aa-80307aff8412",
+      "elevatedJobId": "job-019fe7a3-dff7-7433-b9c3-645c4836f152",
+      "elevatedAttemptId": "attempt-019fe7a3-dff7-7433-b9c3-646f71ff7f14"
+    }
+  },
+  "laws": [
+    "Agent-authored argv is execution truth",
+    "outer supervisor convenience syntax must not reinterpret payload argv",
+    "a successful Windows provider/elevation proof does not prove argument fidelity across every intermediate supervisor",
+    "physical A/B should isolate each translation boundary before changing a lower-level provider"
+  ],
+  "boundariesNotChanged": [
+    "ExecutionProfile semantics",
+    "windowsAuthority semantics",
+    "Windows provider launcher source or token selection",
+    "Attempt-scoped Power Request semantics",
+    "operation/proposal identity canonicalization"
+  ]
+}

@@ -4,6 +4,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ## Unreleased
 
+- Windows-native transient launch now disables `systemd-run` environment expansion so Agent-authored `$VAR` and `${VAR}` arguments remain literal across the outer WSL supervisor boundary.
+
 - `workspace.open` now classifies a missing Git revision as `REVISION_NOT_FOUND` on `sourceRevision` instead of collapsing the Git rejection into a generic `TOOL_FAILED` error.
 
 - concurrent observers now converge when the exact same Runner identity was already durably bound by another Runtime instance; divergent Runner identity still fails closed and duplicate observation does not append another `RUNNER_BOUND` event.

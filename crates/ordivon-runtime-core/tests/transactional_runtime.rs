@@ -382,6 +382,8 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
                 "echo".to_string(),
                 "rw1-arg with space".to_string(),
                 "quote\"arg".to_string(),
+                "$ORDIVON_LITERAL".to_string(),
+                "${ORDIVON_LITERAL}".to_string(),
             ],
             cwd_relative: ".".to_string(),
             env: BTreeMap::from([("W1_ENV".to_string(), "runtime-w1".to_string())]),
@@ -417,7 +419,13 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     assert!(first
         .stdout_tail
         .contains("W1_ECHO_WSL_DISTRO_B64=PG51bGw+"));
-    assert!(first.stdout_tail.contains("W1_ECHO_ARGC=2"));
+    assert!(first.stdout_tail.contains("W1_ECHO_ARGC=4"));
+    assert!(first
+        .stdout_tail
+        .contains("W1_ECHO_ARG_2_B64=JE9SRElWT05fTElURVJBTA=="));
+    assert!(first
+        .stdout_tail
+        .contains("W1_ECHO_ARG_3_B64=JHtPUkRJVk9OX0xJVEVSQUx9"));
     let committed_job = runtime.registry().get_job(&first.job_id).unwrap();
     let committed_plan: RuntimeExecutionPlan =
         serde_json::from_str(&committed_job.execution_plan_json).unwrap();

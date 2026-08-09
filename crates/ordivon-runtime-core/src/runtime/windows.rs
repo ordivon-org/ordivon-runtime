@@ -372,6 +372,9 @@ pub(crate) fn build_windows_systemd_run_command(
     command
         .arg(format!("--unit={}", spec.unit_name))
         .arg("--no-block")
+        // Agent-authored argv is execution truth. systemd-run otherwise expands $VAR and
+        // ${VAR} from the manager environment before the Windows launcher receives it.
+        .arg("--expand-environment=no")
         .args([
             "--property=Type=exec",
             "--property=CollectMode=inactive",
