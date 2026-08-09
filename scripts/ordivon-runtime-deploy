@@ -888,15 +888,10 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                     "deployment drain timed out with active or held Jobs: "
                     + ", ".join(remaining_jobs)
                 )
-            plan = deployment_plan(args)
-            if not plan["eligible"]:
-                raise RuntimeError(
-                    "deployment is not eligible after admission drain: "
-                    + "; ".join(plan["blockers"])
-                )
-            plan["admissionFence"] = str(admission_fence_path(args.database))
-            plan["drainSeconds"] = args.drain_seconds
-            write_json_atomic(receipt / "plan.json", plan)
+            # Stop ingress immediately after the Registry first reaches zero. This ordering is
+            # required for the one-time bootstrap from a Runtime that does not yet participate in
+            # admission.lock; doing full candidate/ref revalidation before stop would reopen the
+            # plan→apply race we are trying to remove. Future fenced Runtimes cannot admit here.
             run([str(args.systemctl), "stop", args.service])
             stopped = True
             race_jobs, _ = active_job_ids(args.database)
@@ -905,6 +900,15 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                     "active or held Jobs appeared after service stop: "
                     + ", ".join(race_jobs)
                 )
+            plan = deployment_plan(args)
+            if not plan["eligible"]:
+                raise RuntimeError(
+                    "deployment is not eligible after ingress stop: "
+                    + "; ".join(plan["blockers"])
+                )
+            plan["admissionFence"] = str(admission_fence_path(args.database))
+            plan["drainSeconds"] = args.drain_seconds
+            write_json_atomic(receipt / "plan.json", plan)
             for record in previous_records:
                 name = str(record["name"])
                 atomic_copy(
