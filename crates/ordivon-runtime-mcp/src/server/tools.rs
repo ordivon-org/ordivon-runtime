@@ -184,6 +184,39 @@ impl RuntimeServer {
     }
 
     #[tool(
+        name = "workspace.changes",
+        description = "Page one exact Workspace change projection without unbounded path arrays. Entries expose atomic modified, added, deleted, and untracked changes in stable path/kind order; rename/copy interpretation stays on workspace.diff rather than adding similarity analysis to this large-change-set primitive. limit bounds entry count, maxBytes bounds encoded entry payload (not Git discovery I/O/RSS), totalEntries/remainingEntries expose traversal size, and nextCursor={changeSetDigest,afterPath,afterKind} fails closed if the projected change set changes. Use this for large change sets; workspace.diff remains the richer legacy convenience surface.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<WorkspaceChangePageResult>>(),
+        annotations(
+            title = "Page workspace changes",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspace_changes(
+        &self,
+        Parameters(request): Parameters<WorkspaceChangesRequest>,
+    ) -> ToolOutcome<WorkspaceChangePageResult> {
+        let config = self.state.executor.clone();
+        self.run_core("workspace.changes", move || {
+            workspace_changes_page(
+                &config,
+                &ExecWorkspaceChangePageRequest {
+                    schema_version: request.schema_version,
+                    workspace_id: request.workspace_id,
+                    limit: request.limit,
+                    max_bytes: request.max_bytes,
+                    cursor: request.cursor,
+                },
+            )
+            .map_err(ToolError::from)
+        })
+        .await
+    }
+
+    #[tool(
         name = "workspace.patch",
         description = "Apply one digest-guarded atomic text patch under a durable clientRequestId. Active or held Jobs block mutation without being reconciled or dispatched by this call. Exact replay returns the committed receipt; changed input conflicts; uncertain mixed outcomes require reconciliation.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<DurableWorkspacePatchResult>>(),
@@ -237,7 +270,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.diff",
-        description = "Return Git diff text bounded by maxBytes plus the complete structured changed, modified, added, deleted, renamed, and untracked path projection for an isolated Workspace. maxBytes bounds only diff text; it does not bound the structured path-list payload.",
+        description = "Return Git diff text with bounded Git stdout capture plus the complete legacy structured changed, modified, added, deleted, renamed, and untracked path projection. maxBytes bounds diff text only; the structured path arrays remain complete and are not response-bounded. Prefer workspace.changes for large or paged change sets.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<CompactWorkspaceDiffResult>>(),
         annotations(
             title = "Inspect workspace diff",

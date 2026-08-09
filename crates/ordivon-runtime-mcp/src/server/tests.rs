@@ -358,6 +358,7 @@ fn tool_effect_annotations_match_runtime_behavior() {
         ("task.list", true, false, true, false),
         ("task.observe", false, true, true, true),
         ("workspace.close", false, true, true, false),
+        ("workspace.changes", true, false, true, false),
         ("workspace.diff", true, false, true, false),
         ("workspace.exec", false, true, false, true),
         ("workspace.execBound", false, true, false, false),
@@ -431,6 +432,7 @@ fn tool_catalog_uses_transactional_job_contract() {
             "task.cancel",
             "task.list",
             "task.observe",
+            "workspace.changes",
             "workspace.close",
             "workspace.diff",
             "workspace.exec",
@@ -920,7 +922,7 @@ fn every_public_tool_publishes_structured_output_contract() {
     let sandbox = Sandbox::new("all-output-schemas");
     let server = sandbox.server();
     let tools = server.tool_router.list_all();
-    assert_eq!(tools.len(), 16);
+    assert_eq!(tools.len(), 17);
     for tool in tools {
         let schema = tool
             .output_schema
@@ -1004,6 +1006,58 @@ fn task_list_schema_exposes_workspace_reattachment_filter() {
     assert!(!required
         .iter()
         .any(|value| value.as_str() == Some("workspaceId")));
+}
+
+#[test]
+fn workspace_changes_schema_exposes_bounded_continuation_contract() {
+    let sandbox = Sandbox::new("workspace-changes-schema");
+    let server = sandbox.server();
+    let tool = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .find(|tool| tool.name.as_ref() == "workspace.changes")
+        .unwrap();
+    let input = serde_json::to_value(&tool.input_schema).unwrap();
+    assert_eq!(
+        input.pointer("/properties/limit/default"),
+        Some(&serde_json::json!(64))
+    );
+    assert_eq!(
+        input.pointer("/properties/limit/maximum"),
+        Some(&serde_json::json!(1024))
+    );
+    assert_eq!(
+        input.pointer("/properties/maxBytes/default"),
+        Some(&serde_json::json!(262_144))
+    );
+    assert_eq!(
+        input.pointer("/properties/maxBytes/maximum"),
+        Some(&serde_json::json!(MAX_WORKSPACE_IO_BYTES))
+    );
+    assert!(input.pointer("/properties/cursor").is_some());
+    assert!(input
+        .pointer("/$defs/WorkspaceChangeCursor/properties/changeSetDigest")
+        .is_some());
+    assert!(input
+        .pointer("/$defs/WorkspaceChangeCursor/properties/afterPath")
+        .is_some());
+
+    let output = serde_json::to_value(tool.output_schema.as_ref().unwrap()).unwrap();
+    let encoded = serde_json::to_string(&output).unwrap();
+    assert!(encoded.contains("changeSetDigest"));
+    assert!(encoded.contains("nextCursor"));
+    assert!(encoded.contains("complete"));
+    assert!(encoded.contains("entryBytes"));
+    assert!(encoded.contains("totalEntries"));
+    assert!(encoded.contains("remainingEntries"));
+    assert!(encoded.contains("afterPath"));
+    assert!(encoded.contains("afterKind"));
+    assert!(encoded.contains("modified"));
+    assert!(encoded.contains("deleted"));
+    assert!(encoded.contains("untracked"));
+    assert!(!encoded.contains("renamed"));
+    assert!(!encoded.contains("copied"));
 }
 
 #[test]

@@ -31,6 +31,7 @@ EXPECTED_TOOLS = {
     "task.cancel",
     "task.list",
     "task.observe",
+    "workspace.changes",
     "workspace.close",
     "workspace.diff",
     "workspace.exec",
@@ -586,6 +587,18 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             == {"authority", "relativeObject", "expectedDigest", "presentationRelativePath"},
             bound_schema,
         )
+        changes_schema = tool_entries["workspace.changes"].get("inputSchema", {})
+        changes_cursor = changes_schema.get("$defs", {}).get("WorkspaceChangeCursor", {})
+        check(
+            "changes-schema-contract",
+            changes_schema.get("properties", {}).get("limit", {}).get("default") == 64
+            and changes_schema.get("properties", {}).get("limit", {}).get("maximum") == 1024
+            and changes_schema.get("properties", {}).get("maxBytes", {}).get("default") == 256 * 1024
+            and changes_schema.get("properties", {}).get("maxBytes", {}).get("maximum") == 4 * 1024 * 1024
+            and {"changeSetDigest", "afterPath", "afterKind"}
+            <= set(changes_cursor.get("properties", {})),
+            changes_schema,
+        )
         mutate_schema_text = json.dumps(tool_entries["workspace.mutate"].get("inputSchema", {}), sort_keys=True)
         check(
             "mutation-digest-contract",
@@ -778,6 +791,81 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             conflict_result.get("isError") is True
             and conflict_error.get("code") == "IDEMPOTENCY_CONFLICT",
             conflict_result,
+        )
+
+        changes_first = client.tool(
+            "workspace.changes",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "workspaceId": workspace_id,
+                "limit": 1,
+                "maxBytes": 4096,
+            },
+        )
+        first_change_entries = changes_first.get("entries", [])
+        first_change_cursor = changes_first.get("nextCursor")
+        check(
+            "workspace-changes-page-1",
+            len(first_change_entries) == 1
+            and changes_first.get("complete") is False
+            and isinstance(changes_first.get("changeSetDigest"), str)
+            and isinstance(first_change_cursor, dict)
+            and changes_first.get("entryBytes", 0) <= 4096
+            and changes_first.get("totalEntries", 0) >= 2
+            and changes_first.get("remainingEntries", 0) >= 1,
+            changes_first,
+        )
+        changes_second = client.tool(
+            "workspace.changes",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "workspaceId": workspace_id,
+                "limit": 1,
+                "maxBytes": 4096,
+                "cursor": first_change_cursor,
+            },
+        )
+        second_change_entries = changes_second.get("entries", [])
+        check(
+            "workspace-changes-page-2",
+            len(second_change_entries) == 1
+            and changes_second.get("changeSetDigest") == changes_first.get("changeSetDigest")
+            and first_change_entries[0] != second_change_entries[0]
+            and changes_second.get("entryBytes", 0) <= 4096
+            and changes_second.get("remainingEntries", 0) < changes_first.get("remainingEntries", 0),
+            changes_second,
+        )
+        client.tool(
+            "workspace.mutate",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "workspaceId": workspace_id,
+                "mutations": [
+                    {
+                        "relativePath": "changes-drift.txt",
+                        "mode": "WRITE",
+                        "content": "new change-set member\n",
+                    }
+                ],
+            },
+        )
+        stale_changes = client.tool_result(
+            "workspace.changes",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "workspaceId": workspace_id,
+                "limit": 1,
+                "maxBytes": 4096,
+                "cursor": first_change_cursor,
+            },
+        )
+        stale_changes_error = stale_changes.get("structuredContent", {}).get("error", {})
+        check(
+            "workspace-changes-cursor-drift",
+            stale_changes.get("isError") is True
+            and stale_changes_error.get("code") == "WORKSPACE_STATE_MISMATCH"
+            and stale_changes_error.get("field") == "cursor.changeSetDigest",
+            stale_changes,
         )
 
         diff = client.tool(

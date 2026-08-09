@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ordivon_runtime_core::{
-    read_workspace_slice_compact, read_workspace_text_compact, workspace_diff_compact,
-    ArtifactReadRequest, ArtifactReadResult, CompactWorkspaceDiffResult,
+    read_workspace_slice_compact, read_workspace_text_compact, workspace_changes_page,
+    workspace_diff_compact, ArtifactReadRequest, ArtifactReadResult, CompactWorkspaceDiffResult,
     CompactWorkspaceOpenResult, DurableWorkspacePatchRequest, DurableWorkspacePatchResult,
     ExecutionBudget, ExecutionProfile, ExecutionProposal, ExecutionStepProposal, ForeignReference,
     GitWorkspaceCreateRequest, InputAuthority, InputBindingRequest, Runtime, RuntimeCapacity,
@@ -15,11 +15,14 @@ use ordivon_runtime_core::{
     RuntimeWorkspaceGetRequest, RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult,
     RuntimeWorkspaceSummary, TaskCancelRequest, TaskObservation, TaskObserveRequest,
     TaskRunProposal, TaskRunRequest, UniversalExecError, UniversalExecutionRequest,
-    UniversalExecutionStep, UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult,
-    WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceFilePatch, WorkspaceMutateRequest,
-    WorkspaceMutateResult, WorkspacePatchOperationStatus, WorkspacePatchRequest,
-    WorkspacePatchStatusRequest, WorkspaceReadRequest as ExecWorkspaceReadRequest,
-    WorkspaceReadSliceRequest, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_IO_BYTES,
+    UniversalExecutionStep, UniversalExecutorConfig, WorkspaceChangeCursor,
+    WorkspaceChangePageRequest as ExecWorkspaceChangePageRequest, WorkspaceChangePageResult,
+    WorkspaceCloseRequest, WorkspaceCloseResult, WorkspaceDiffRequest as ExecWorkspaceDiffRequest,
+    WorkspaceFilePatch, WorkspaceMutateRequest, WorkspaceMutateResult,
+    WorkspacePatchOperationStatus, WorkspacePatchRequest, WorkspacePatchStatusRequest,
+    WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
+    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_CHANGE_PAGE_ENTRIES,
+    MAX_WORKSPACE_IO_BYTES,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{IntoCallToolResult, ToolCallContext};
@@ -102,6 +105,30 @@ pub struct WorkspaceDiffRequest {
     pub workspace_id: String,
     #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
     pub max_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceChangesRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    pub schema_version: u32,
+    pub workspace_id: String,
+    #[serde(default = "default_change_page_limit")]
+    #[schemars(range(min = 1, max = MAX_WORKSPACE_CHANGE_PAGE_ENTRIES))]
+    pub limit: u32,
+    #[serde(default = "default_change_page_bytes")]
+    #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
+    pub max_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<WorkspaceChangeCursor>,
+}
+
+fn default_change_page_limit() -> u32 {
+    64
+}
+
+fn default_change_page_bytes() -> u64 {
+    256 * 1024
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]

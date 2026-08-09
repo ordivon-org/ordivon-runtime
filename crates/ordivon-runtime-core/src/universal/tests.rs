@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -348,6 +348,352 @@ fn workspace_diff_reports_structured_modified_added_deleted_and_renamed_paths() 
         }]
     );
     assert_eq!(diff.untracked_paths, vec!["untracked.txt"]);
+}
+
+#[test]
+fn workspace_changes_pages_across_tracked_and_untracked_without_loss() {
+    let sandbox = Sandbox::new("workspace-changes-pages");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    for index in 0..150 {
+        fs::write(
+            source.join(format!("tracked-{index:03}.txt")),
+            format!("before-{index}\n"),
+        )
+        .unwrap();
+    }
+    run_git(&source, ["add", "."]);
+    run_git(&source, ["commit", "-qm", "add tracked page fixtures"]);
+    let config = sandbox.config();
+    let workspace_id = "workspace-changes-pages";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    for index in 0..150 {
+        fs::write(
+            workspace.join(format!("tracked-{index:03}.txt")),
+            format!("after-{index}\n"),
+        )
+        .unwrap();
+    }
+    for index in 0..90 {
+        fs::write(
+            workspace.join(format!("untracked-{index:03}.txt")),
+            format!("new-{index}\n"),
+        )
+        .unwrap();
+    }
+
+    let mut cursor = None;
+    let mut observed = Vec::new();
+    let mut change_set_digest = None;
+    for _ in 0..32 {
+        let page = workspace_changes_page(
+            &config,
+            &WorkspaceChangePageRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: workspace_id.to_string(),
+                limit: 17,
+                max_bytes: 4096,
+                cursor: cursor.clone(),
+            },
+        )
+        .unwrap();
+        assert!(page.entries.len() <= 17);
+        assert!(page.entry_bytes <= 4096);
+        assert_eq!(page.total_entries, 240);
+        assert_eq!(
+            page.remaining_entries + page.entries.len() as u64,
+            240 - observed.len() as u64
+        );
+        if let Some(expected) = &change_set_digest {
+            assert_eq!(&page.change_set_digest, expected);
+        } else {
+            change_set_digest = Some(page.change_set_digest.clone());
+        }
+        observed.extend(page.entries);
+        if page.complete {
+            assert!(page.next_cursor.is_none());
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+
+    assert_eq!(observed.len(), 240);
+    let modified: BTreeSet<_> = observed
+        .iter()
+        .filter(|entry| entry.kind == WorkspaceChangeKind::Modified)
+        .map(|entry| entry.path.clone())
+        .collect();
+    let untracked: BTreeSet<_> = observed
+        .iter()
+        .filter(|entry| entry.kind == WorkspaceChangeKind::Untracked)
+        .map(|entry| entry.path.clone())
+        .collect();
+    assert_eq!(modified.len(), 150);
+    assert_eq!(untracked.len(), 90);
+    assert!(modified.contains("tracked-000.txt"));
+    assert!(modified.contains("tracked-149.txt"));
+    assert!(untracked.contains("untracked-000.txt"));
+    assert!(untracked.contains("untracked-089.txt"));
+}
+
+#[test]
+fn workspace_changes_cursor_fails_closed_after_workspace_drift() {
+    let sandbox = Sandbox::new("workspace-changes-drift");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-changes-drift";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    fs::write(workspace.join("one.txt"), "one\n").unwrap();
+    fs::write(workspace.join("two.txt"), "two\n").unwrap();
+    let first = workspace_changes_page(
+        &config,
+        &WorkspaceChangePageRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            limit: 1,
+            max_bytes: 4096,
+            cursor: None,
+        },
+    )
+    .unwrap();
+    let cursor = first.next_cursor.expect("continuation cursor");
+    fs::write(workspace.join("three.txt"), "three\n").unwrap();
+    let error = workspace_changes_page(
+        &config,
+        &WorkspaceChangePageRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            limit: 1,
+            max_bytes: 4096,
+            cursor: Some(cursor),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, UniversalExecErrorCode::WorkspaceStateMismatch);
+    assert_eq!(error.field.as_deref(), Some("cursor.changeSetDigest"));
+}
+
+#[test]
+fn workspace_changes_represents_staged_rename_as_delete_plus_add() {
+    let sandbox = Sandbox::new("workspace-changes-atomic-rename");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    fs::write(source.join("old-name.txt"), "rename body\n").unwrap();
+    run_git(&source, ["add", "."]);
+    run_git(&source, ["commit", "-qm", "add rename fixture"]);
+    let config = sandbox.config();
+    let workspace_id = "workspace-changes-atomic-rename";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    fs::rename(
+        workspace.join("old-name.txt"),
+        workspace.join("new-name.txt"),
+    )
+    .unwrap();
+    run_git(&workspace, ["add", "-A"]);
+    let page = workspace_changes_page(
+        &config,
+        &WorkspaceChangePageRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            limit: 8,
+            max_bytes: 4096,
+            cursor: None,
+        },
+    )
+    .unwrap();
+    assert!(page.complete);
+    assert_eq!(page.total_entries, 2);
+    assert_eq!(page.remaining_entries, 0);
+    let observed: BTreeSet<_> = page
+        .entries
+        .into_iter()
+        .map(|entry| (entry.kind, entry.path))
+        .collect();
+    assert_eq!(
+        observed,
+        BTreeSet::from([
+            (WorkspaceChangeKind::Added, "new-name.txt".to_string()),
+            (WorkspaceChangeKind::Deleted, "old-name.txt".to_string()),
+        ])
+    );
+}
+
+#[test]
+fn workspace_changes_rejects_forged_after_path_kind() {
+    let sandbox = Sandbox::new("workspace-changes-forged-cursor");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-changes-forged-cursor";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    fs::write(workspace.join("one.txt"), "one\n").unwrap();
+    fs::write(workspace.join("two.txt"), "two\n").unwrap();
+
+    let first = workspace_changes_page(
+        &config,
+        &WorkspaceChangePageRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            limit: 1,
+            max_bytes: 4096,
+            cursor: None,
+        },
+    )
+    .unwrap();
+    let mut cursor = first.next_cursor.expect("continuation cursor");
+    cursor.after_path = "definitely-not-a-change-member.txt".to_string();
+    cursor.after_kind = WorkspaceChangeKind::Modified;
+
+    let error = workspace_changes_page(
+        &config,
+        &WorkspaceChangePageRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            limit: 1,
+            max_bytes: 4096,
+            cursor: Some(cursor),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, UniversalExecErrorCode::WorkspaceStateMismatch);
+    assert_eq!(error.field.as_deref(), Some("cursor.afterPath"));
+}
+
+#[test]
+fn workspace_changes_cursor_survives_content_only_drift_with_same_change_set() {
+    let sandbox = Sandbox::new("workspace-changes-content-only-drift");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-changes-content-only-drift";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    fs::write(workspace.join("README.md"), "first modified body\n").unwrap();
+    fs::write(workspace.join("untracked.txt"), "first untracked body\n").unwrap();
+
+    let first = workspace_changes_page(
+        &config,
+        &WorkspaceChangePageRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            limit: 1,
+            max_bytes: 4096,
+            cursor: None,
+        },
+    )
+    .unwrap();
+    let cursor = first.next_cursor.clone().expect("continuation cursor");
+
+    fs::write(
+        workspace.join("README.md"),
+        "second modified body with different bytes\n",
+    )
+    .unwrap();
+    fs::write(
+        workspace.join("untracked.txt"),
+        "second untracked body with different bytes\n",
+    )
+    .unwrap();
+
+    let second = workspace_changes_page(
+        &config,
+        &WorkspaceChangePageRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            limit: 1,
+            max_bytes: 4096,
+            cursor: Some(cursor.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(second.change_set_digest, cursor.change_set_digest);
+    assert_eq!(second.entries.len(), 1);
+    assert!(second.complete);
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn workspace_changes_rejects_an_entry_larger_than_page_byte_budget() {
+    let sandbox = Sandbox::new("workspace-changes-entry-budget");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-changes-entry-budget";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    fs::write(workspace.join(format!("{}.txt", "x".repeat(120))), "x\n").unwrap();
+    let error = workspace_changes_page(
+        &config,
+        &WorkspaceChangePageRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            limit: 8,
+            max_bytes: 16,
+            cursor: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, UniversalExecErrorCode::OutputLimitExceeded);
+    assert_eq!(error.field.as_deref(), Some("maxBytes"));
 }
 
 #[test]
