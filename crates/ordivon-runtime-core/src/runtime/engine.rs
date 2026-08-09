@@ -2925,6 +2925,7 @@ impl Runtime {
     }
 
     fn reconcile_bound_attempt(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
+        let plan = self.registry.execution_plan(&attempt.job_id)?;
         let expected = supervisor_identity(attempt)?;
         let properties = systemctl_show(&attempt.unit_name)?;
         let current_boot_id = read_trimmed("/proc/sys/kernel/random/boot_id")?;
@@ -2974,6 +2975,24 @@ impl Runtime {
         };
         if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
             return self.reconcile_runner_result(attempt);
+        }
+        if windows_native_launcher_lineage_is_definite_failure(
+            plan.execution_target,
+            attempt.termination_intent,
+            observation.unit_state,
+            observation.recorded_pid_alive,
+        ) {
+            self.commit_observed_control_terminal(
+                attempt,
+                AttemptState::Failed,
+                "WINDOWS_LAUNCHER_LINEAGE_GONE",
+                Some(
+                    "windows_native launcher unit and persisted launcher process identity are absent; the launcher is the sole owner of the JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE handle, so the native process tree cannot still be running and no result evidence exists"
+                        .to_string(),
+                ),
+                Some(&observation),
+            )?;
+            return Ok(());
         }
         let disposition =
             classify_supervisor_recovery(&expected, &observation, intent).map_err(|error| {
@@ -4546,6 +4565,63 @@ fn read_tail_text(path: &Path, max_bytes: u64) -> RuntimeResult<String> {
         .read_to_end(&mut bytes)
         .map_err(|error| io_error("read output tail", error))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn windows_native_launcher_lineage_is_definite_failure(
+    execution_target: super::ExecutionTarget,
+    termination_intent: super::AttemptTerminationIntent,
+    unit_state: SupervisorUnitState,
+    recorded_pid_alive: bool,
+) -> bool {
+    execution_target == super::ExecutionTarget::WindowsNative
+        && termination_intent == super::AttemptTerminationIntent::Natural
+        && unit_state == SupervisorUnitState::NotFound
+        && !recorded_pid_alive
+}
+
+#[cfg(test)]
+mod windows_lineage_tests {
+    use super::*;
+
+    #[test]
+    fn missing_windows_launcher_lineage_is_failed_only_for_natural_windows_execution() {
+        assert!(windows_native_launcher_lineage_is_definite_failure(
+            crate::runtime::ExecutionTarget::WindowsNative,
+            crate::runtime::AttemptTerminationIntent::Natural,
+            SupervisorUnitState::NotFound,
+            false,
+        ));
+        assert!(!windows_native_launcher_lineage_is_definite_failure(
+            crate::runtime::ExecutionTarget::LocalLinux,
+            crate::runtime::AttemptTerminationIntent::Natural,
+            SupervisorUnitState::NotFound,
+            false,
+        ));
+        assert!(!windows_native_launcher_lineage_is_definite_failure(
+            crate::runtime::ExecutionTarget::WindowsNative,
+            crate::runtime::AttemptTerminationIntent::StopRequested,
+            SupervisorUnitState::NotFound,
+            false,
+        ));
+        assert!(!windows_native_launcher_lineage_is_definite_failure(
+            crate::runtime::ExecutionTarget::WindowsNative,
+            crate::runtime::AttemptTerminationIntent::DeadlineExceeded,
+            SupervisorUnitState::NotFound,
+            false,
+        ));
+        assert!(!windows_native_launcher_lineage_is_definite_failure(
+            crate::runtime::ExecutionTarget::WindowsNative,
+            crate::runtime::AttemptTerminationIntent::Natural,
+            SupervisorUnitState::Running,
+            false,
+        ));
+        assert!(!windows_native_launcher_lineage_is_definite_failure(
+            crate::runtime::ExecutionTarget::WindowsNative,
+            crate::runtime::AttemptTerminationIntent::Natural,
+            SupervisorUnitState::NotFound,
+            true,
+        ));
+    }
 }
 
 #[cfg(test)]

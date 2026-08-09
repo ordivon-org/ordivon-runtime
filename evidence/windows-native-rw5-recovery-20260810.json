@@ -1,0 +1,101 @@
+{
+  "boundariesNotClaimed": [
+    "user-initiated Windows host suspend/resume continuity",
+    "Long Paths Runtime admission evidence",
+    "Windows-native immutable-input admission",
+    "structured multi-step windows_native execution"
+  ],
+  "claims": {
+    "exactReplayNeverRedispatchesInterruptedEffect": true,
+    "launcherDeathClearsPowerLease": true,
+    "launcherDeathKillsNativeTree": true,
+    "launcherDeathNaturalExecutionIsFailed": true,
+    "newWindowsRegistryIdentityRequired": false,
+    "runtimeCoreReconstructionReattachesWithoutRedispatch": true,
+    "wslDistroTerminateClearsPowerLease": true,
+    "wslDistroTerminateKillsNativeTree": true,
+    "wslKernelBootIdIsNotDistroGenerationIdentity": true,
+    "wslRestartRecoveryUsesSameJobAttempt": true
+  },
+  "finalExactAcceptance": {
+    "attemptId": "attempt-019fe798-ef3f-7fa1-957f-3cabc6d5b8c5",
+    "completedSteps": 10,
+    "diffCheckPassed": true,
+    "documentationContractValid": true,
+    "evidenceJsonValid": true,
+    "jobId": "job-019fe798-ef3f-7fa1-957f-3c901d01e5bd",
+    "launcherAcceptancePassed": true,
+    "localAcceptanceContractValid": true,
+    "pythonOperationalTestsPassed": 88,
+    "pythonOptionalSkips": 5,
+    "runtimeMainTestsPassed": 3,
+    "runtimeMcpTestsPassed": 32,
+    "rustCoreTestsPassed": 196,
+    "terminalEvidenceDigest": "sha256:c9587a7800534f40b9a5ff72b481461ea65732b8d13fcf559514f413073c6c7f",
+    "watchdogPowerShellParsed": true,
+    "windowsRuntimeIntegrationPassed": true
+  },
+  "firstRealWslRestartBeforeFix": {
+    "afterTerminateMarkerCount": 0,
+    "afterTerminatePowerPresent": false,
+    "attemptId": "attempt-019fe78d-cd7b-72f2-9fc1-9e0e5dbf6280",
+    "beforeMarkerCount": 4,
+    "beforePowerPresent": true,
+    "bootChanged": false,
+    "duplicateDispatch": false,
+    "genericObservedStatus": "lost",
+    "jobId": "job-019fe78d-cd7b-72f2-9fc1-9df1fc1ef1b1",
+    "postBootId": "c6bcdee7-a997-49cf-a13a-e8c2ded047a8",
+    "preBootId": "c6bcdee7-a997-49cf-a13a-e8c2ded047a8"
+  },
+  "kind": "ordivon.runtime.windows-native-rw5-recovery-acceptance",
+  "launcherCrash": {
+    "attemptId": "attempt-019fe787-7900-72a3-ba21-ae1e2c14fd2a",
+    "duplicateDispatch": false,
+    "jobId": "job-019fe787-7900-72a3-ba21-ae0e645fdbb3",
+    "powerRequestPresentAfterTerminal": false,
+    "remainingMarkerProcesses": 0,
+    "status": "failed"
+  },
+  "nextLayer": "Close Windows-native target series and resolve Workstation-owned provider materialization/publication boundary",
+  "repeatability": {
+    "phaseFixture": "runtime_windows_native_wsl_restart_prepare_or_recover",
+    "watchdog": "scripts/windows-wsl-restart-watchdog.ps1"
+  },
+  "ruleBoundary": {
+    "deadlineExceededSemanticsChanged": false,
+    "executionTarget": "windows_native",
+    "linuxSemanticsChanged": false,
+    "recordedLauncherPidAlive": false,
+    "resultAbsent": true,
+    "stopRequestedSemanticsChanged": false,
+    "supervisorUnitState": "not_found",
+    "terminationIntent": "natural"
+  },
+  "runtimeReconstruction": {
+    "attemptId": "attempt-019fe787-7276-74f2-9296-e05c7a977928",
+    "duplicateDispatch": false,
+    "jobId": "job-019fe787-7276-74f2-9296-e04089775e85",
+    "postCancelRemainingMarkerProcesses": 0
+  },
+  "schemaVersion": 1,
+  "secondRealWslRestartAfterFix": {
+    "afterRestartMarkerCount": 0,
+    "afterRestartPowerPresent": false,
+    "afterTerminateMarkerCount": 0,
+    "afterTerminatePowerPresent": false,
+    "attemptId": "attempt-019fe793-88ed-75f3-8d0f-0c4cc9d37089",
+    "beforeMarkerCount": 4,
+    "beforePowerPresent": true,
+    "bootChanged": false,
+    "duplicateDispatch": false,
+    "jobId": "job-019fe793-88ed-75f3-8d0f-0c302ad69c5f",
+    "observedStatus": "failed",
+    "postBootId": "c6bcdee7-a997-49cf-a13a-e8c2ded047a8",
+    "preBootId": "c6bcdee7-a997-49cf-a13a-e8c2ded047a8",
+    "reasonCode": "WINDOWS_LAUNCHER_LINEAGE_GONE",
+    "reservationReleased": true
+  },
+  "sourceBaseRevision": "70705a2bd8dc022d2a02079f59934e34f548e38d",
+  "status": "passed"
+}

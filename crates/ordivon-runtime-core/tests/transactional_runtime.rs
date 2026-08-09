@@ -288,6 +288,30 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
             .contains(&expected.to_ascii_lowercase())
     }
 
+    fn windows_marker_process_count(marker: &str) -> usize {
+        let escaped = marker.replace('\'', "''");
+        let script = format!(
+            "$m='{escaped}'; $rows=Get-CimInstance Win32_Process | Where-Object {{$_.ProcessId -ne $PID -and $_.CommandLine -like ('*'+$m+'*')}}; Write-Output @($rows).Count"
+        );
+        let mut last_error = String::new();
+        for _ in 0..3 {
+            let output =
+                Command::new("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                    .output()
+                    .unwrap();
+            if output.status.success() {
+                return String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .parse::<usize>()
+                    .unwrap();
+            }
+            last_error = String::from_utf8_lossy(&output.stderr).into_owned();
+            thread::sleep(Duration::from_millis(100));
+        }
+        panic!("Windows process observation failed: {last_error}");
+    }
+
     for (source, output) in [(&launcher_source, &launcher), (&fixture_source, &fixture)] {
         let compiled = Command::new(&csc)
             .args([
@@ -633,6 +657,193 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
         elevated_admin_attrs,
     );
 
+    let reconnect_marker = format!("ORDIVON_RW5_RECONNECT_{}", Uuid::now_v7());
+    let mut reconnect_request = request.clone();
+    reconnect_request.client_request_id = format!("request:windows-reconnect:{}", Uuid::now_v7());
+    reconnect_request.execution.args = vec!["tree".to_string(), reconnect_marker.clone()];
+    reconnect_request.execution.timeout_ms = 20_000;
+    reconnect_request.execution.budget.tasks_max = Some(8);
+    reconnect_request.wait_ms = 0;
+    let reconnect_started = runtime.run_task(&reconnect_request).unwrap();
+    assert!(matches!(
+        reconnect_started.status.as_str(),
+        "queued" | "working"
+    ));
+    let reconnect_deadline = Instant::now() + Duration::from_secs(10);
+    let reconnect_attempt = loop {
+        let attempt = runtime
+            .registry()
+            .get_latest_attempt(&reconnect_started.job_id)
+            .unwrap()
+            .unwrap();
+        if attempt.state == AttemptState::Running
+            && attempt.control_group.is_some()
+            && attempt.invocation_id.is_some()
+        {
+            break attempt;
+        }
+        assert!(
+            Instant::now() < reconnect_deadline,
+            "Windows reconnect Attempt did not become running"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert!(power_request_present(&reconnect_attempt.attempt_id));
+    let marker_deadline = Instant::now() + Duration::from_secs(5);
+    while windows_marker_process_count(&reconnect_marker) == 0 {
+        assert!(
+            Instant::now() < marker_deadline,
+            "Windows reconnect marker process never appeared"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let reconnect_job_id = reconnect_started.job_id.clone();
+    let reconnect_attempt_id = reconnect_attempt.attempt_id.clone();
+    drop(runtime);
+    let runtime = Runtime::new(RuntimeConfig {
+        registry: RegistryConfig {
+            db_path: root.join("registry/registry.sqlite3"),
+            store_root: root.join("registry"),
+            busy_timeout_ms: 5_000,
+        },
+        executor: executor.clone(),
+        startup_grace_ms: 2_000,
+        windows: Some(WindowsExecutionConfig {
+            launcher_path: launcher.clone(),
+            wsl_distribution: std::env::var("WSL_DISTRO_NAME")
+                .unwrap_or_else(|_| "archlinux".to_string()),
+        }),
+    })
+    .unwrap();
+    let reattached = runtime.run_task(&reconnect_request).unwrap();
+    assert_eq!(reattached.job_id, reconnect_job_id);
+    assert_eq!(
+        reattached.attempt_id.as_deref(),
+        Some(reconnect_attempt_id.as_str())
+    );
+    assert!(!reattached.execution_terminal);
+    assert_eq!(
+        runtime
+            .registry()
+            .get_latest_attempt(&reconnect_job_id)
+            .unwrap()
+            .unwrap()
+            .attempt_id,
+        reconnect_attempt_id
+    );
+    assert!(power_request_present(&reconnect_attempt_id));
+    let reconnect_cancelled = runtime
+        .cancel_task(&TaskCancelRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: reconnect_job_id.clone(),
+        })
+        .unwrap();
+    assert_eq!(reconnect_cancelled.status, "cancelled");
+    assert!(reconnect_cancelled.execution_terminal);
+    assert!(!power_request_present(&reconnect_attempt_id));
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(windows_marker_process_count(&reconnect_marker), 0);
+    println!(
+        "RW5_WINDOWS_RUNTIME_RECONNECT jobId={} attemptId={} duplicateDispatch=false remaining=0",
+        reconnect_job_id, reconnect_attempt_id,
+    );
+    let reconnect_unit = format!("ordivon-{reconnect_attempt_id}.service");
+    let _ = Command::new("systemctl")
+        .args(["stop", &reconnect_unit])
+        .output();
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &reconnect_unit])
+        .output();
+
+    let crash_marker = format!("ORDIVON_RW5_LAUNCHER_CRASH_{}", Uuid::now_v7());
+    let mut crash_request = request.clone();
+    crash_request.client_request_id = format!("request:windows-launcher-crash:{}", Uuid::now_v7());
+    crash_request.execution.args = vec!["tree".to_string(), crash_marker.clone()];
+    crash_request.execution.timeout_ms = 20_000;
+    crash_request.execution.budget.tasks_max = Some(8);
+    crash_request.wait_ms = 0;
+    let crash_started = runtime.run_task(&crash_request).unwrap();
+    assert!(matches!(
+        crash_started.status.as_str(),
+        "queued" | "working"
+    ));
+    let crash_deadline = Instant::now() + Duration::from_secs(10);
+    let crash_attempt = loop {
+        let attempt = runtime
+            .registry()
+            .get_latest_attempt(&crash_started.job_id)
+            .unwrap()
+            .unwrap();
+        if attempt.state == AttemptState::Running
+            && attempt.control_group.is_some()
+            && attempt.invocation_id.is_some()
+        {
+            break attempt;
+        }
+        assert!(
+            Instant::now() < crash_deadline,
+            "Windows launcher-crash Attempt did not become running"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert!(power_request_present(&crash_attempt.attempt_id));
+    let crash_marker_deadline = Instant::now() + Duration::from_secs(5);
+    while windows_marker_process_count(&crash_marker) == 0 {
+        assert!(
+            Instant::now() < crash_marker_deadline,
+            "Windows crash marker process never appeared"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let crash_unit = format!("ordivon-{}.service", crash_attempt.attempt_id);
+    let killed = Command::new("systemctl")
+        .args(["kill", "--kill-who=main", "--signal=KILL", &crash_unit])
+        .output()
+        .unwrap();
+    assert!(
+        killed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&killed.stderr)
+    );
+    let crash_observed = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: crash_started.job_id.clone(),
+            wait_ms: 10_000,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 4096,
+            stderr_tail_bytes: 4096,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert!(crash_observed.execution_terminal);
+    assert!(matches!(
+        crash_observed.status.as_str(),
+        "failed" | "lost" | "orphaned"
+    ));
+    assert_eq!(
+        crash_observed.attempt_id.as_deref(),
+        Some(crash_attempt.attempt_id.as_str())
+    );
+    assert!(!power_request_present(&crash_attempt.attempt_id));
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(windows_marker_process_count(&crash_marker), 0);
+    let crash_replay = runtime.run_task(&crash_request).unwrap();
+    assert_eq!(crash_replay.job_id, crash_started.job_id);
+    assert_eq!(crash_replay.attempt_id, crash_observed.attempt_id);
+    assert_eq!(crash_replay.status, crash_observed.status);
+    println!(
+        "RW5_WINDOWS_LAUNCHER_CRASH jobId={} attemptId={} status={} duplicateDispatch=false remaining=0",
+        crash_started.job_id, crash_attempt.attempt_id, crash_observed.status,
+    );
+    let _ = Command::new("systemctl")
+        .args(["stop", &crash_unit])
+        .output();
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &crash_unit])
+        .output();
+
     println!(
         "RW2_WINDOWS_RUNTIME jobId={} attemptId={} windowsPid={} creationFileTime={} imageDigest={} artifacts={}",
         first.job_id,
@@ -930,6 +1141,321 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     let _ = Command::new("systemctl").args(["stop", &unit]).output();
     let _ = Command::new("systemctl")
         .args(["reset-failed", &unit])
+        .output();
+    remove_git_workspace(
+        &executor,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id,
+            force: true,
+            expected_source_state_digest: None,
+        },
+    )
+    .unwrap();
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_dir_all(&public_root).unwrap();
+}
+
+#[test]
+#[ignore = "requires WSL restart, Windows interop, root/systemd, .NET csc, and explicit local opt-in"]
+fn runtime_windows_native_wsl_restart_prepare_or_recover() {
+    let phase = match std::env::var("ORDIVON_RUN_WINDOWS_WSL_RESTART_PHASE") {
+        Ok(value) if value == "prepare" || value == "recover" => value,
+        _ => return,
+    };
+    let repo = fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
+    let revision = command_output("git", &["rev-parse", "HEAD"], &repo);
+    let root = PathBuf::from("/root/.local/share/ordivon-windows-rw5-wsl-restart");
+    let public_root = PathBuf::from("/mnt/c/Users/Public/ordivon-rw5-wsl-restart");
+    let manifest_path = public_root.join("manifest.json");
+    let launcher = public_root.join("ordivon-windows-job-launcher.exe");
+    let fixture = public_root.join("ordivon-windows-job-fixture.exe");
+    let workspace_id = "runtime-windows-rw5-wsl-restart".to_string();
+    let executor = UniversalExecutorConfig {
+        store_root: root.join("store"),
+        workspace_root: None,
+        workspace_uid: None,
+        workspace_gid: None,
+        runner_path: PathBuf::from("/usr/bin/true"),
+        allowed_executable_roots: vec![public_root.clone()],
+        max_runtime_ms: 600_000,
+        max_output_bytes: 1024 * 1024,
+    };
+    let registry = RegistryConfig {
+        db_path: root.join("registry/registry.sqlite3"),
+        store_root: root.join("registry"),
+        busy_timeout_ms: 5_000,
+    };
+    let runtime_config = || RuntimeConfig {
+        registry: registry.clone(),
+        executor: executor.clone(),
+        startup_grace_ms: 2_000,
+        windows: Some(WindowsExecutionConfig {
+            launcher_path: launcher.clone(),
+            wsl_distribution: std::env::var("WSL_DISTRO_NAME")
+                .unwrap_or_else(|_| "archlinux".to_string()),
+        }),
+    };
+    let windows_drive_path = |path: &Path| -> String {
+        let text = path.to_str().unwrap();
+        let rest = text
+            .strip_prefix("/mnt/c/")
+            .expect("R-W5 Windows path must be on C:");
+        format!("C:\\{}", rest.replace('/', "\\"))
+    };
+    let windows_marker_count = |marker: &str| -> usize {
+        let escaped = marker.replace('\'', "''");
+        let script = format!(
+            "$m='{escaped}'; $rows=Get-CimInstance Win32_Process | Where-Object {{$_.ProcessId -ne $PID -and $_.CommandLine -like ('*'+$m+'*')}}; Write-Output @($rows).Count"
+        );
+        let output = Command::new("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<usize>()
+            .unwrap()
+    };
+    let power_present = |attempt_id: &str| -> bool {
+        let output = Command::new("/mnt/c/Windows/System32/powercfg.exe")
+            .arg("/requests")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected = format!("Ordivon Runtime Attempt {attempt_id}").to_ascii_lowercase();
+        String::from_utf8_lossy(&output.stdout)
+            .to_ascii_lowercase()
+            .contains(&expected)
+    };
+
+    if phase == "prepare" {
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        let pruned = Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            pruned.status.success(),
+            "{}",
+            String::from_utf8_lossy(&pruned.stderr)
+        );
+        if public_root.exists() {
+            fs::remove_dir_all(&public_root).unwrap();
+        }
+        fs::create_dir_all(&public_root).unwrap();
+        let csc = PathBuf::from("/mnt/c/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe");
+        let launcher_source = public_root.join("Ordivon.WindowsJobLauncher.cs");
+        let fixture_source = public_root.join("Ordivon.WindowsJobFixture.cs");
+        fs::copy(
+            repo.join("platform/windows/Ordivon.WindowsJobLauncher.cs"),
+            &launcher_source,
+        )
+        .unwrap();
+        fs::copy(
+            repo.join("platform/windows/Ordivon.WindowsJobFixture.cs"),
+            &fixture_source,
+        )
+        .unwrap();
+        for (source, output) in [(&launcher_source, &launcher), (&fixture_source, &fixture)] {
+            let compiled = Command::new(&csc)
+                .args([
+                    "/nologo".to_string(),
+                    "/optimize+".to_string(),
+                    format!("/out:{}", windows_drive_path(output)),
+                    windows_drive_path(source),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                compiled.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&compiled.stdout),
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+        }
+        executor.ensure_store().unwrap();
+        create_git_workspace(
+            &executor,
+            &GitWorkspaceCreateRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: workspace_id.clone(),
+                source_repo: repo.to_string_lossy().into_owned(),
+                source_revision: revision,
+            },
+        )
+        .unwrap();
+        let runtime = Runtime::new(runtime_config()).unwrap();
+        let marker = format!("ORDIVON_RW5_WSL_RESTART_{}", Uuid::now_v7());
+        let request = TaskRunRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            client_request_id: format!("request:windows-wsl-restart:{}", Uuid::now_v7()),
+            principal: "principal:windows-wsl-restart".to_string(),
+            global_limit: 1,
+            execution: UniversalExecutionRequest {
+                workspace_id: workspace_id.clone(),
+                executable: fixture.to_string_lossy().into_owned(),
+                args: vec!["tree".to_string(), marker.clone()],
+                cwd_relative: ".".to_string(),
+                env: BTreeMap::new(),
+                timeout_ms: 600_000,
+                stdout_limit_bytes: 65_536,
+                stderr_limit_bytes: 65_536,
+                steps: Vec::new(),
+                budget: ExecutionBudget {
+                    memory_max_bytes: Some(128 * 1024 * 1024),
+                    tasks_max: Some(8),
+                    cpu_quota_percent: Some(100),
+                },
+                execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
+                execution_target: ordivon_runtime_core::ExecutionTarget::WindowsNative,
+                windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
+                foreign_references: Vec::new(),
+            },
+            wait_ms: 0,
+            stdout_tail_bytes: 4096,
+            stderr_tail_bytes: 4096,
+        };
+        let started = runtime.run_task(&request).unwrap();
+        assert!(matches!(started.status.as_str(), "queued" | "working"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let attempt = loop {
+            let attempt = runtime
+                .registry()
+                .get_latest_attempt(&started.job_id)
+                .unwrap()
+                .unwrap();
+            if attempt.state == AttemptState::Running
+                && attempt.control_group.is_some()
+                && attempt.invocation_id.is_some()
+            {
+                break attempt;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "R-W5 restart Attempt did not become running"
+            );
+            thread::sleep(Duration::from_millis(25));
+        };
+        let marker_deadline = Instant::now() + Duration::from_secs(5);
+        while windows_marker_count(&marker) == 0 {
+            assert!(
+                Instant::now() < marker_deadline,
+                "R-W5 restart marker never appeared"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(power_present(&attempt.attempt_id));
+        let manifest = serde_json::json!({
+            "schemaVersion": 1,
+            "jobId": started.job_id,
+            "attemptId": attempt.attempt_id,
+            "clientRequestId": request.client_request_id,
+            "marker": marker,
+            "unitName": attempt.unit_name,
+            "preBootId": fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap().trim(),
+            "workspaceId": workspace_id,
+        });
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        println!("RW5_WSL_RESTART_PREPARED {}", manifest);
+        return;
+    }
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let job_id = manifest["jobId"].as_str().unwrap().to_string();
+    let attempt_id = manifest["attemptId"].as_str().unwrap().to_string();
+    let client_request_id = manifest["clientRequestId"].as_str().unwrap().to_string();
+    let marker = manifest["marker"].as_str().unwrap().to_string();
+    let pre_boot = manifest["preBootId"].as_str().unwrap();
+    let current_boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+    let boot_changed = current_boot.trim() != pre_boot;
+    let watchdog_text = fs::read_to_string(public_root.join("watchdog-result.json")).unwrap();
+    let watchdog: serde_json::Value =
+        serde_json::from_str(watchdog_text.trim_start_matches('\u{feff}')).unwrap();
+    assert_eq!(watchdog["completed"], true);
+    assert!(watchdog["beforeMarkerCount"].as_u64().unwrap() > 0);
+    assert_eq!(watchdog["beforePowerPresent"], true);
+    assert_eq!(watchdog["terminateExitCode"], 0);
+    assert_eq!(watchdog["afterTerminateMarkerCount"], 0);
+    assert_eq!(watchdog["afterTerminatePowerPresent"], false);
+    assert_eq!(watchdog["restartExitCode"], 0);
+    assert_eq!(watchdog["afterRestartMarkerCount"], 0);
+    assert_eq!(watchdog["afterRestartPowerPresent"], false);
+    let runtime = Runtime::new(runtime_config()).unwrap();
+    let observed = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: job_id.clone(),
+            wait_ms: 10_000,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 4096,
+            stderr_tail_bytes: 4096,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert!(observed.execution_terminal);
+    assert_eq!(observed.attempt_id.as_deref(), Some(attempt_id.as_str()));
+    assert_eq!(observed.status, "failed");
+    assert_eq!(windows_marker_count(&marker), 0);
+    assert!(!power_present(&attempt_id));
+    let replay_request = TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id,
+        principal: "principal:windows-wsl-restart".to_string(),
+        global_limit: 1,
+        execution: UniversalExecutionRequest {
+            workspace_id: workspace_id.clone(),
+            executable: fixture.to_string_lossy().into_owned(),
+            args: vec!["tree".to_string(), marker.clone()],
+            cwd_relative: ".".to_string(),
+            env: BTreeMap::new(),
+            timeout_ms: 600_000,
+            stdout_limit_bytes: 65_536,
+            stderr_limit_bytes: 65_536,
+            steps: Vec::new(),
+            budget: ExecutionBudget {
+                memory_max_bytes: Some(128 * 1024 * 1024),
+                tasks_max: Some(8),
+                cpu_quota_percent: Some(100),
+            },
+            execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
+            execution_target: ordivon_runtime_core::ExecutionTarget::WindowsNative,
+            windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
+            foreign_references: Vec::new(),
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 4096,
+        stderr_tail_bytes: 4096,
+    };
+    let replay = runtime.run_task(&replay_request).unwrap();
+    assert_eq!(replay.job_id, job_id);
+    assert_eq!(replay.attempt_id.as_deref(), Some(attempt_id.as_str()));
+    assert_eq!(replay.status, observed.status);
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    println!(
+        "RW5_WSL_RESTART_RECOVERED jobId={} attemptId={} status={} bootChanged={} duplicateDispatch=false remaining=0",
+        job_id, attempt_id, observed.status, boot_changed
+    );
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &format!("ordivon-{attempt_id}.service")])
         .output();
     remove_git_workspace(
         &executor,
