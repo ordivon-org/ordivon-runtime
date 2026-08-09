@@ -146,6 +146,8 @@ internal static class OrdivonWindowsJobFixture
         Console.WriteLine("W1_ECHO_CWD_B64=" + B64(Directory.GetCurrentDirectory()));
         Console.WriteLine("W1_ECHO_ENV_B64=" + B64(Environment.GetEnvironmentVariable("W1_ENV") ?? "<null>"));
         Console.WriteLine("W1_ECHO_SYSTEMROOT_B64=" + B64(Environment.GetEnvironmentVariable("SystemRoot") ?? "<null>"));
+        Console.WriteLine("W1_ECHO_PATH_B64=" + B64(Environment.GetEnvironmentVariable("Path") ?? "<null>"));
+        Console.WriteLine("W1_ECHO_WSL_DISTRO_B64=" + B64(Environment.GetEnvironmentVariable("WSL_DISTRO_NAME") ?? "<null>"));
         Console.WriteLine("W1_ECHO_ARGC=" + (args.Length - 1));
         for (int i = 1; i < args.Length; ++i)
         {

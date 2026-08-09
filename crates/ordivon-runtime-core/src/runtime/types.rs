@@ -297,6 +297,20 @@ impl ExecutionTarget {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsTokenClass {
+    Limited,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WindowsExecutionContext {
+    pub token_class: WindowsTokenClass,
+    pub token_user_sid: String,
+    pub environment_source: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ForeignReference {
@@ -455,6 +469,8 @@ pub struct RuntimeExecutionPlan {
     pub execution_profile: ExecutionProfile,
     #[serde(default)]
     pub execution_target: ExecutionTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_execution_context: Option<WindowsExecutionContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

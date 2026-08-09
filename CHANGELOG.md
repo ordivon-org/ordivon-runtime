@@ -12,7 +12,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ### Added
 
-- orthogonal `executionTarget=windows_native` admission for configured WSL/Windows nodes, backed by the repository-owned Windows Job Object launcher while preserving the existing Job/Attempt/result/replay model; R-W2 proves exact executable/image binding, durable explicit non-inherited request environment, bounded output, timeout and explicit-cancel descendant termination, native Job memory/process/CPU controls, Windows start evidence as a durable Artifact, and exact replay without turning Windows into an `ExecutionProfile`;
+- orthogonal `executionTarget=windows_native` admission for configured WSL/Windows nodes, backed by the repository-owned Windows Job Object launcher while preserving the existing Job/Attempt/result/replay model; R-W1 proves exact executable/image binding, explicit non-inherited environment, bounded output, timeout and descendant termination, native Job memory/process/CPU controls, Windows start evidence as a durable Artifact, and exact replay without turning Windows into an `ExecutionProfile`;
+- R-W2 Windows execution authority: first admission derives and validates a limited native primary token, snapshots only a bounded allowlist from that token's Windows user/machine environment with inheritance disabled, freezes the baseline plus explicit Agent overlay into the execution plan, and revalidates effective SID/elevation/integrity/Administrators evidence from `windows-start.json`; repeatable acceptance proves replay does not re-read the launcher/context and preserves timeout/cancel/descendant cleanup;
 - public Quick Start, status, data/privacy, release, and generated Tool-reference documents;
 - executable documentation ownership and local-link validation;
 - scheduled CodeQL, dependency-policy, advisory, and real-system acceptance workflows;

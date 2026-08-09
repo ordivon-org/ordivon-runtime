@@ -16,6 +16,49 @@ use serde::Deserialize;
 
 use super::{ExecutionBudget, RuntimeError, RuntimeErrorCode, RuntimeResult};
 
+const WINDOWS_BASELINE_ENVIRONMENT_NAMES: &[&str] = &[
+    "APPDATA",
+    "CommonProgramFiles",
+    "CommonProgramW6432",
+    "COMPUTERNAME",
+    "ComSpec",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOCALAPPDATA",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "Path",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramW6432",
+    "PUBLIC",
+    "SystemDrive",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "USERDOMAIN",
+    "USERNAME",
+    "USERPROFILE",
+    "windir",
+];
+
+const REQUIRED_WINDOWS_BASELINE_ENVIRONMENT_NAMES: &[&str] = &[
+    "ComSpec",
+    "Path",
+    "PATHEXT",
+    "SystemDrive",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "ProgramData",
+    "ProgramFiles",
+];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowsExecutionConfig {
     /// WSL-visible path to the exact Windows launcher executable, normally under /mnt/<drive>/.
@@ -73,6 +116,21 @@ impl WindowsExecutionConfig {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct WindowsRuntimeContextSnapshot {
+    pub schema_version: u32,
+    pub token_selection: String,
+    pub token_user_sid: String,
+    pub token_type: i32,
+    pub token_elevation_type: i32,
+    pub token_is_elevated: bool,
+    pub token_integrity_level_rid: i32,
+    pub token_is_restricted: bool,
+    pub administrators_group_attributes: u32,
+    pub environment: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct WindowsStartEvidence {
     pub schema_version: u32,
     pub job_id: String,
@@ -84,6 +142,14 @@ pub(crate) struct WindowsStartEvidence {
     pub process_creation_time_file_time: u64,
     pub image_path: String,
     pub image_digest: String,
+    pub token_selection: String,
+    pub token_user_sid: String,
+    pub token_type: i32,
+    pub token_elevation_type: i32,
+    pub token_is_elevated: bool,
+    pub token_integrity_level_rid: i32,
+    pub token_is_restricted: bool,
+    pub administrators_group_attributes: u32,
     pub observed_unix_ms: u64,
 }
 
@@ -103,6 +169,146 @@ pub(crate) struct WindowsSystemdRunSpec<'a> {
     pub timeout_ms: u64,
     pub stdout_limit_bytes: u64,
     pub stderr_limit_bytes: u64,
+}
+
+pub(crate) fn snapshot_windows_runtime_context(
+    config: &WindowsExecutionConfig,
+) -> RuntimeResult<WindowsRuntimeContextSnapshot> {
+    config.validate()?;
+    let launcher = fs::canonicalize(&config.launcher_path).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::IoError,
+            format!("canonicalize Windows launcher: {error}"),
+            Some("windows.launcherPath"),
+            false,
+        )
+    })?;
+    let mut command = Command::new(launcher);
+    command.arg("--describe-runtime-context");
+    for name in WINDOWS_BASELINE_ENVIRONMENT_NAMES {
+        command.arg("--context-env").arg(name);
+    }
+    let output = command
+        .output()
+        .map_err(|error| tool_error("describe Windows runtime context", error))?;
+    if !output.status.success() {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::IoError,
+            format!(
+                "Windows runtime context probe failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Some("windows.runtimeContext"),
+            true,
+        ));
+    }
+    if output.stdout.len() > 64 * 1024 || output.stderr.len() > 64 * 1024 {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::InvalidRequest,
+            "Windows runtime context probe output exceeded bounded size",
+            Some("windows.runtimeContext"),
+            false,
+        ));
+    }
+    let snapshot: WindowsRuntimeContextSnapshot =
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::InvalidRequest,
+                format!("invalid Windows runtime context evidence: {error}"),
+                Some("windows.runtimeContext"),
+                false,
+            )
+        })?;
+    validate_windows_runtime_context(&snapshot)?;
+    Ok(snapshot)
+}
+
+fn validate_windows_runtime_context(snapshot: &WindowsRuntimeContextSnapshot) -> RuntimeResult<()> {
+    if snapshot.schema_version != 1
+        || snapshot.token_user_sid.is_empty()
+        || snapshot.token_type != 1
+        || snapshot.token_is_elevated
+        || snapshot.token_integrity_level_rid > 8192
+        || (snapshot.administrators_group_attributes != u32::MAX
+            && (snapshot.administrators_group_attributes & 0x4) != 0
+            && (snapshot.administrators_group_attributes & 0x10) == 0)
+        || !matches!(
+            snapshot.token_selection.as_str(),
+            "lua_medium_filtered" | "current_limited"
+        )
+    {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::InvalidRequest,
+            "Windows runtime context did not prove limited execution authority",
+            Some("windows.runtimeContext"),
+            false,
+        ));
+    }
+    for name in REQUIRED_WINDOWS_BASELINE_ENVIRONMENT_NAMES {
+        if !snapshot
+            .environment
+            .iter()
+            .any(|(actual, value)| actual.eq_ignore_ascii_case(name) && !value.is_empty())
+        {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::InvalidRequest,
+                format!("Windows runtime context omitted required baseline variable {name}"),
+                Some("windows.runtimeContext.environment"),
+                false,
+            ));
+        }
+    }
+    for name in snapshot.environment.keys() {
+        if !WINDOWS_BASELINE_ENVIRONMENT_NAMES
+            .iter()
+            .any(|allowed| name.eq_ignore_ascii_case(allowed))
+        {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::InvalidRequest,
+                format!("Windows runtime context returned non-allowlisted variable {name}"),
+                Some("windows.runtimeContext.environment"),
+                false,
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn merge_windows_environment(
+    baseline: &BTreeMap<String, String>,
+    overlay: &BTreeMap<String, String>,
+) -> RuntimeResult<BTreeMap<String, String>> {
+    let mut seen = Vec::<String>::new();
+    for name in overlay.keys() {
+        if name.is_empty() || name.contains('=') || name.contains('\0') {
+            return Err(RuntimeError::invalid(
+                "invalid Windows environment variable name",
+                "execution.env",
+            ));
+        }
+        if seen
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(name))
+        {
+            return Err(RuntimeError::invalid(
+                "Windows environment variable names must be unique case-insensitively",
+                "execution.env",
+            ));
+        }
+        seen.push(name.clone());
+    }
+    let mut result = baseline.clone();
+    for (name, value) in overlay {
+        if let Some(existing) = result
+            .keys()
+            .find(|existing| existing.eq_ignore_ascii_case(name))
+            .cloned()
+        {
+            result.remove(&existing);
+        }
+        result.insert(name.clone(), value.clone());
+    }
+    Ok(result)
 }
 
 pub(crate) fn windows_systemd_run(spec: &WindowsSystemdRunSpec<'_>) -> RuntimeResult<Output> {
@@ -262,5 +468,55 @@ mod tests {
             .unwrap(),
             "\\\\wsl.localhost\\archlinux\\var\\lib\\ordivon\\runtime\\workspaces\\w"
         );
+    }
+
+    #[test]
+    fn windows_environment_overlay_is_case_insensitive_and_does_not_duplicate_baseline_keys() {
+        let baseline = BTreeMap::from([
+            ("Path".to_string(), "C:\\Windows\\System32".to_string()),
+            ("SystemRoot".to_string(), "C:\\Windows".to_string()),
+        ]);
+        let overlay = BTreeMap::from([
+            ("PATH".to_string(), "C:\\Agent\\Bin".to_string()),
+            ("AgentFlag".to_string(), "1".to_string()),
+        ]);
+        let merged = merge_windows_environment(&baseline, &overlay).unwrap();
+        assert_eq!(
+            merged.get("PATH").map(String::as_str),
+            Some("C:\\Agent\\Bin")
+        );
+        assert!(!merged.contains_key("Path"));
+        assert_eq!(
+            merged.get("SystemRoot").map(String::as_str),
+            Some("C:\\Windows")
+        );
+        assert_eq!(merged.get("AgentFlag").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn windows_runtime_context_rejects_elevated_or_ambient_environment_claims() {
+        let mut snapshot = WindowsRuntimeContextSnapshot {
+            schema_version: 1,
+            token_selection: "lua_medium_filtered".to_string(),
+            token_user_sid: "S-1-5-21-test-1001".to_string(),
+            token_type: 1,
+            token_elevation_type: 2,
+            token_is_elevated: false,
+            token_integrity_level_rid: 8192,
+            token_is_restricted: false,
+            administrators_group_attributes: 0x10,
+            environment: REQUIRED_WINDOWS_BASELINE_ENVIRONMENT_NAMES
+                .iter()
+                .map(|name| ((*name).to_string(), format!("value:{name}")))
+                .collect(),
+        };
+        validate_windows_runtime_context(&snapshot).unwrap();
+        snapshot.token_is_elevated = true;
+        assert!(validate_windows_runtime_context(&snapshot).is_err());
+        snapshot.token_is_elevated = false;
+        snapshot
+            .environment
+            .insert("PNPM_HOME".to_string(), "C:\\pnpm".to_string());
+        assert!(validate_windows_runtime_context(&snapshot).is_err());
     }
 }

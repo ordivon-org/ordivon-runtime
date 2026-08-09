@@ -196,6 +196,7 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
             budget: crate::ExecutionBudget::default(),
             execution_profile: super::ExecutionProfile::TrustedLocal,
             execution_target: super::ExecutionTarget::LocalLinux,
+            windows_execution_context: None,
             foreign_references: Vec::new(),
             input_set_id: None,
             effective_inputs: Vec::new(),
@@ -1282,6 +1283,24 @@ fn oversized_exec_string_is_rejected_before_admission() {
 }
 
 #[test]
+fn windows_execution_context_is_durable_plan_evidence_not_request_identity_input() {
+    let context = super::WindowsExecutionContext {
+        token_class: super::WindowsTokenClass::Limited,
+        token_user_sid: "S-1-5-21-test-1001".to_string(),
+        environment_source: "windows_user_machine_profile_allowlist_v1".to_string(),
+    };
+    let value = serde_json::to_value(&context).unwrap();
+    assert_eq!(value["tokenClass"], "limited");
+    assert_eq!(value["tokenUserSid"], "S-1-5-21-test-1001");
+    assert_eq!(
+        value["environmentSource"],
+        "windows_user_machine_profile_allowlist_v1"
+    );
+    let decoded: super::WindowsExecutionContext = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded, context);
+}
+
+#[test]
 fn request_identity_excludes_observation_preferences_and_capacity_policy() {
     let base = TaskRunRequest {
         schema_version: RUNTIME_SCHEMA_VERSION,
@@ -1719,6 +1738,11 @@ fn terminal_evidence_is_a_durable_artifact_with_native_binding() {
     let mut submit = request(&sandbox, "request:terminal-native-evidence", 4);
     submit.plan.execution_profile = ExecutionProfile::TrustedLocal;
     submit.plan.execution_target = super::ExecutionTarget::WindowsNative;
+    submit.plan.windows_execution_context = Some(super::WindowsExecutionContext {
+        token_class: super::WindowsTokenClass::Limited,
+        token_user_sid: "S-1-5-21-test-1001".to_string(),
+        environment_source: "windows_user_machine_profile_allowlist_v1".to_string(),
+    });
     submit.plan.foreign_references.push(ForeignReference {
         namespace: "ordivon.edge".to_string(),
         reference_type: "supervisor_generation".to_string(),
@@ -1768,6 +1792,11 @@ fn terminal_evidence_is_a_durable_artifact_with_native_binding() {
     .unwrap();
     assert_eq!(evidence["executionProfile"], "trusted_local");
     assert_eq!(evidence["executionTarget"], "windows_native");
+    assert_eq!(evidence["windowsExecutionContext"]["tokenClass"], "limited");
+    assert_eq!(
+        evidence["windowsExecutionContext"]["tokenUserSid"],
+        "S-1-5-21-test-1001"
+    );
     assert_eq!(evidence["foreignReferences"][0]["id"], "edge-supervisor-9");
     assert_eq!(evidence["executionDisposition"], "succeeded");
     assert_eq!(evidence["deliveryDisposition"], "committed");

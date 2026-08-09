@@ -254,6 +254,8 @@ struct TerminalProcessEvidence {
     execution_profile: super::ExecutionProfile,
     #[serde(default, skip_serializing_if = "super::ExecutionTarget::is_default")]
     execution_target: super::ExecutionTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windows_execution_context: Option<super::WindowsExecutionContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     foreign_references: Vec<super::ForeignReference>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1144,24 +1146,34 @@ impl Runtime {
             &request.execution.executable,
             "execution.executable",
         )?;
-        let base_environment = match request.execution.execution_target {
-            super::ExecutionTarget::LocalLinux => {
-                self.execution_environment(&record, request.execution.execution_profile)?
-            }
+        let (base_environment, windows_execution_context) = match request.execution.execution_target
+        {
+            super::ExecutionTarget::LocalLinux => (
+                self.execution_environment(&record, request.execution.execution_profile)?,
+                None,
+            ),
             super::ExecutionTarget::WindowsNative => {
-                if self.windows.is_none() {
-                    return Err(RuntimeError::invalid(
+                let windows = self.windows.as_ref().ok_or_else(|| {
+                    RuntimeError::invalid(
                         "windows_native target is not configured on this Runtime",
                         "execution.executionTarget",
-                    ));
-                }
+                    )
+                })?;
                 if mounted_windows_path(&executable).is_none() {
                     return Err(RuntimeError::invalid(
                         "windows_native executable must reside on a WSL-mounted Windows drive",
                         "execution.executable",
                     ));
                 }
-                BTreeMap::new()
+                let snapshot = snapshot_windows_runtime_context(windows)?;
+                (
+                    snapshot.environment,
+                    Some(super::WindowsExecutionContext {
+                        token_class: super::WindowsTokenClass::Limited,
+                        token_user_sid: snapshot.token_user_sid,
+                        environment_source: "windows_user_machine_profile_allowlist_v1".to_string(),
+                    }),
+                )
             }
         };
         let mut steps = Vec::with_capacity(request.execution.steps.len());
@@ -1183,7 +1195,14 @@ impl Runtime {
                 executable_digest: sha256_file(&step_executable).map_err(map_universal_error)?,
                 args: step.args.clone(),
                 cwd: step_cwd.to_string_lossy().into_owned(),
-                env: merge_environment(&base_environment, &step.env),
+                env: match request.execution.execution_target {
+                    super::ExecutionTarget::LocalLinux => {
+                        merge_environment(&base_environment, &step.env)
+                    }
+                    super::ExecutionTarget::WindowsNative => {
+                        merge_windows_environment(&base_environment, &step.env)?
+                    }
+                },
                 timeout_ms: step.timeout_ms,
                 continue_on_error: step.continue_on_error,
             });
@@ -1207,7 +1226,14 @@ impl Runtime {
             executable_digest: sha256_file(&executable).map_err(map_universal_error)?,
             args: request.execution.args.clone(),
             cwd: cwd.to_string_lossy().into_owned(),
-            env: merge_environment(&base_environment, &request.execution.env),
+            env: match request.execution.execution_target {
+                super::ExecutionTarget::LocalLinux => {
+                    merge_environment(&base_environment, &request.execution.env)
+                }
+                super::ExecutionTarget::WindowsNative => {
+                    merge_windows_environment(&base_environment, &request.execution.env)?
+                }
+            },
             timeout_ms: request.execution.timeout_ms,
             stdout_limit_bytes: request.execution.stdout_limit_bytes,
             stderr_limit_bytes: request.execution.stderr_limit_bytes,
@@ -1215,6 +1241,7 @@ impl Runtime {
             budget: request.execution.budget.clone(),
             execution_profile: request.execution.execution_profile,
             execution_target: request.execution.execution_target,
+            windows_execution_context,
             foreign_references: request.execution.foreign_references.clone(),
             input_set_id: None,
             effective_inputs: Vec::new(),
@@ -1909,6 +1936,24 @@ impl Runtime {
                 true,
             )
         })?;
+        let context = plan.windows_execution_context.as_ref().ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "committed windows_native Job has no frozen Windows execution context",
+                Some("windowsExecutionContext"),
+                false,
+            )
+        })?;
+        if context.token_class != super::WindowsTokenClass::Limited
+            || context.environment_source != "windows_user_machine_profile_allowlist_v1"
+        {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "committed Windows execution context is unsupported",
+                Some("windowsExecutionContext"),
+                false,
+            ));
+        }
         let expected_job_name = format!("Ordivon.{}", attempt.attempt_id);
         let expected_image =
             windows_visible_path(windows, Path::new(&plan.executable), "execution.executable")?;
@@ -1928,6 +1973,20 @@ impl Runtime {
             || evidence.process_id == 0
             || evidence.process_creation_time_file_time == 0
             || evidence.image_digest != plan.executable_digest
+            || evidence.token_user_sid != context.token_user_sid
+            || evidence.token_type != 1
+            || evidence.token_is_elevated
+            || evidence.token_integrity_level_rid > 8192
+            || (evidence.administrators_group_attributes != u32::MAX
+                && (evidence.administrators_group_attributes & 0x4) != 0
+                && (evidence.administrators_group_attributes & 0x10) == 0)
+            || !matches!(
+                evidence.token_selection.as_str(),
+                "lua_medium_filtered" | "current_limited"
+            )
+            || (evidence.token_selection == "lua_medium_filtered"
+                && evidence.administrators_group_attributes != u32::MAX
+                && (evidence.administrators_group_attributes & 0x10) == 0)
             || !observed_image.eq_ignore_ascii_case(expected_image_normalized)
         {
             return Err(RuntimeError::new(
@@ -3351,6 +3410,7 @@ fn append_terminal_evidence_for_commit_with_observation(
         source_revision: plan.source_revision,
         execution_profile: plan.execution_profile,
         execution_target: plan.execution_target,
+        windows_execution_context: plan.windows_execution_context,
         foreign_references: plan.foreign_references,
         input_set_id: plan.input_set_id,
         effective_inputs: plan.effective_inputs,

@@ -350,10 +350,54 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     assert!(first
         .stdout_tail
         .contains("W1_ECHO_ENV_B64=cnVudGltZS13MQ=="));
-    assert!(first
+    assert!(!first
         .stdout_tail
         .contains("W1_ECHO_SYSTEMROOT_B64=PG51bGw+"));
+    assert!(!first.stdout_tail.contains("W1_ECHO_PATH_B64=PG51bGw+"));
+    assert!(first
+        .stdout_tail
+        .contains("W1_ECHO_WSL_DISTRO_B64=PG51bGw+"));
     assert!(first.stdout_tail.contains("W1_ECHO_ARGC=2"));
+    let committed_job = runtime.registry().get_job(&first.job_id).unwrap();
+    let committed_plan: RuntimeExecutionPlan =
+        serde_json::from_str(&committed_job.execution_plan_json).unwrap();
+    assert_eq!(
+        committed_plan.execution_target,
+        ordivon_runtime_core::ExecutionTarget::WindowsNative
+    );
+    let committed_windows = committed_plan.windows_execution_context.as_ref().unwrap();
+    assert_eq!(
+        committed_windows.token_class,
+        ordivon_runtime_core::WindowsTokenClass::Limited
+    );
+    assert_eq!(
+        committed_windows.environment_source,
+        "windows_user_machine_profile_allowlist_v1"
+    );
+    assert!(committed_plan
+        .env
+        .get("SystemRoot")
+        .is_some_and(|value| !value.is_empty()));
+    assert!(committed_plan
+        .env
+        .get("Path")
+        .is_some_and(|value| !value.is_empty()));
+    assert_eq!(
+        committed_plan.env.get("W1_ENV").map(String::as_str),
+        Some("runtime-w1")
+    );
+    assert!(!committed_plan
+        .env
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("PNPM_HOME")));
+    assert!(!committed_plan
+        .env
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("WSL_DISTRO_NAME")));
+    assert!(!committed_plan
+        .env
+        .keys()
+        .any(|name| name.contains('(') || name.contains(')')));
     let attempt_id = first.attempt_id.clone().unwrap();
     let artifacts = runtime.registry().list_artifacts(&first.job_id).unwrap();
     assert!(artifacts
@@ -376,6 +420,15 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     assert_eq!(windows_evidence["jobId"], first.job_id);
     assert_eq!(windows_evidence["attemptId"], attempt_id);
     assert_eq!(windows_evidence["imageDigest"], file_digest(&fixture));
+    assert_eq!(windows_evidence["tokenSelection"], "lua_medium_filtered");
+    assert_eq!(windows_evidence["tokenType"], 1);
+    assert_eq!(windows_evidence["tokenIsElevated"], false);
+    assert_eq!(windows_evidence["tokenIntegrityLevelRid"], 8192);
+    let admin_attrs = windows_evidence["administratorsGroupAttributes"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(admin_attrs & 0x4, 0);
+    assert_ne!(admin_attrs & 0x10, 0);
     assert!(windows_evidence["processId"].as_u64().unwrap() > 0);
     assert!(
         windows_evidence["processCreationTimeFileTime"]
@@ -400,19 +453,27 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     let terminal_json: serde_json::Value =
         serde_json::from_str(&terminal_evidence.content).unwrap();
     assert_eq!(terminal_json["executionTarget"], "windows_native");
+    assert_eq!(
+        terminal_json["windowsExecutionContext"]["tokenClass"],
+        "limited"
+    );
+    assert_eq!(
+        terminal_json["windowsExecutionContext"]["tokenUserSid"],
+        windows_evidence["tokenUserSid"]
+    );
+    assert_eq!(
+        terminal_json["windowsExecutionContext"]["environmentSource"],
+        "windows_user_machine_profile_allowlist_v1"
+    );
     assert!(terminal_json["terminalArtifactIds"]
         .as_array()
         .unwrap()
         .iter()
         .any(|value| value == &serde_json::Value::String(format!("{attempt_id}.windows-start"))));
 
-    let replay = runtime.run_task(&request).unwrap();
-    assert_eq!(replay.job_id, first.job_id);
-    assert_eq!(replay.attempt_id, first.attempt_id);
-    assert_eq!(replay.status, "succeeded");
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
     println!(
-        "RW1_WINDOWS_RUNTIME jobId={} attemptId={} windowsPid={} creationFileTime={} imageDigest={} artifacts={}",
+        "RW2_WINDOWS_RUNTIME jobId={} attemptId={} windowsPid={} creationFileTime={} imageDigest={} artifacts={}",
         first.job_id,
         attempt_id,
         windows_evidence["processId"].as_u64().unwrap(),
@@ -546,6 +607,20 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     let _ = Command::new("systemctl")
         .args(["reset-failed", &cancel_unit])
         .output();
+
+    let launcher_unavailable = launcher.with_extension("exe.replay-proof-unavailable");
+    fs::rename(&launcher, &launcher_unavailable).unwrap();
+    let replay = runtime.run_task(&request).unwrap();
+    assert_eq!(replay.job_id, first.job_id);
+    assert_eq!(replay.attempt_id, first.attempt_id);
+    assert_eq!(replay.status, "succeeded");
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    fs::rename(&launcher_unavailable, &launcher).unwrap();
+    println!(
+        "RW2_WINDOWS_REPLAY jobId={} attemptId={} launcherAvailableDuringReplay=false",
+        replay.job_id,
+        replay.attempt_id.as_deref().unwrap(),
+    );
 
     let unit = format!("ordivon-{attempt_id}.service");
     let _ = Command::new("systemctl").args(["stop", &unit]).output();
@@ -2073,6 +2148,7 @@ impl IntegrationContext {
                 budget: ordivon_runtime_core::ExecutionBudget::default(),
                 execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
                 execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
+                windows_execution_context: None,
                 foreign_references: Vec::new(),
                 input_set_id: None,
                 effective_inputs: Vec::new(),

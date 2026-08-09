@@ -114,6 +114,49 @@ def main() -> int:
         spaced_fixture = spaced_dir / 'fixture with spaces.exe'
         shutil.copyfile(fixture, spaced_fixture)
 
+        context_names = [
+            'APPDATA', 'CommonProgramFiles', 'CommonProgramW6432', 'COMPUTERNAME', 'ComSpec',
+            'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'NUMBER_OF_PROCESSORS', 'OS', 'Path',
+            'PATHEXT', 'PROCESSOR_ARCHITECTURE', 'ProgramData', 'ProgramFiles', 'ProgramW6432',
+            'PUBLIC', 'SystemDrive', 'SystemRoot', 'TEMP', 'TMP', 'USERDOMAIN', 'USERNAME',
+            'USERPROFILE', 'windir',
+        ]
+        context_command = [str(launcher), '--describe-runtime-context']
+        for name in context_names:
+            context_command.extend(['--context-env', name])
+        context = run(context_command)
+        if context.returncode != 0:
+            fail('limited runtime context probe failed: ' + context.stderr)
+        try:
+            context_value = json.loads(context.stdout)
+        except json.JSONDecodeError as error:
+            fail(f'limited runtime context probe returned invalid JSON: {error}')
+        admin_attrs = int(context_value['administratorsGroupAttributes'])
+        if context_value.get('tokenType') != 1:
+            fail('limited runtime context token is not primary')
+        if context_value.get('tokenIsElevated') is not False:
+            fail('limited runtime context token is elevated')
+        if int(context_value.get('tokenIntegrityLevelRid', 0)) > 8192:
+            fail('limited runtime context token exceeds Medium integrity')
+        if admin_attrs != 0xFFFFFFFF and (admin_attrs & 0x4) != 0 and (admin_attrs & 0x10) == 0:
+            fail('limited runtime context leaves Administrators enabled')
+        if context_value.get('tokenSelection') == 'lua_medium_filtered' and admin_attrs != 0xFFFFFFFF and (admin_attrs & 0x10) == 0:
+            fail('LUA-derived runtime token did not make Administrators deny-only')
+        context_env = context_value.get('environment', {})
+        for required in ['SystemRoot', 'Path', 'PATHEXT', 'USERPROFILE', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA']:
+            if not context_env.get(required):
+                fail(f'limited runtime context omitted required environment {required}')
+        for forbidden in ['PNPM_HOME', 'OneDrive', 'WSL_DISTRO_NAME', 'PSModulePath']:
+            if any(name.lower() == forbidden.lower() for name in context_env):
+                fail(f'limited runtime context leaked non-baseline environment {forbidden}')
+        summary['limitedContext'] = {
+            'tokenSelection': context_value['tokenSelection'],
+            'tokenIsElevated': context_value['tokenIsElevated'],
+            'integrityLevelRid': context_value['tokenIntegrityLevelRid'],
+            'administratorsGroupAttributes': admin_attrs,
+            'environmentKeys': len(context_env),
+        }
+
         normal = run(launcher_args(
             launcher, spaced_fixture, '--diagnostics',
             target_args=['normal', 'accept-normal', '23'],

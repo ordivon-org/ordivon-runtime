@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 
@@ -30,6 +31,21 @@ internal static class OrdivonWindowsJobLauncher
     private const int StdOutputHandle = -11;
     private const int StdErrorHandle = -12;
     private const int InternalFailureExit = 125;
+    private const uint TokenQuery = 0x0008;
+    private const uint TokenDuplicate = 0x0002;
+    private const uint TokenAssignPrimary = 0x0001;
+    private const uint TokenAdjustDefault = 0x0080;
+    private const uint LuaToken = 0x00000004;
+    private const uint SeGroupEnabled = 0x00000004;
+    private const uint SeGroupUseForDenyOnly = 0x00000010;
+    private const uint SeGroupIntegrity = 0x00000020;
+    private const int TokenGroupsClass = 2;
+    private const int TokenTypeClass = 8;
+    private const int TokenElevationTypeClass = 18;
+    private const int TokenElevationClass = 20;
+    private const int TokenIntegrityLevelClass = 25;
+    private const int TokenPrimary = 1;
+    private const int MediumIntegrityRid = 8192;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct JobObjectBasicLimitInformation
@@ -120,6 +136,37 @@ internal static class OrdivonWindowsJobLauncher
     {
         public uint dwLowDateTime;
         public uint dwHighDateTime;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenElevation
+    {
+        public int TokenIsElevated;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SidAndAttributes
+    {
+        public IntPtr Sid;
+        public uint Attributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenMandatoryLabel
+    {
+        public SidAndAttributes Label;
+    }
+
+    private sealed class TokenEvidence
+    {
+        public string Selection;
+        public string UserSid;
+        public int TokenType;
+        public int ElevationType;
+        public bool IsElevated;
+        public int IntegrityLevelRid;
+        public bool IsRestricted;
+        public uint AdministratorsGroupAttributes;
     }
 
     private sealed class CapturedOutputInfo
@@ -215,6 +262,8 @@ internal static class OrdivonWindowsJobLauncher
         public ulong? StdoutLimitBytes;
         public ulong? StderrLimitBytes;
         public ulong? TimeoutMs;
+        public bool DescribeRuntimeContext;
+        public readonly List<string> ContextEnvironmentNames = new List<string>();
 
         public bool RuntimeMode
         {
@@ -307,12 +356,79 @@ internal static class OrdivonWindowsJobLauncher
         StringBuilder executableName,
         ref uint size);
 
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, uint desiredAccess, out IntPtr token);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool CreateRestrictedToken(
+        IntPtr existingToken,
+        uint flags,
+        uint disableSidCount,
+        IntPtr sidsToDisable,
+        uint deletePrivilegeCount,
+        IntPtr privilegesToDelete,
+        uint restrictedSidCount,
+        IntPtr sidsToRestrict,
+        out IntPtr newToken);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetTokenInformation(
+        IntPtr token, int tokenInformationClass, IntPtr tokenInformation, uint tokenInformationLength, out uint returnLength);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool SetTokenInformation(
+        IntPtr token, int tokenInformationClass, IntPtr tokenInformation, uint tokenInformationLength);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ConvertStringSidToSid(string stringSid, out IntPtr sid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool EqualSid(IntPtr sid1, IntPtr sid2);
+
+    [DllImport("advapi32.dll")]
+    private static extern uint GetLengthSid(IntPtr sid);
+
+    [DllImport("advapi32.dll")]
+    private static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+
+    [DllImport("advapi32.dll")]
+    private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint subAuthority);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool IsTokenRestricted(IntPtr token);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcessAsUserW(
+        IntPtr token,
+        string applicationName,
+        StringBuilder commandLine,
+        IntPtr processAttributes,
+        IntPtr threadAttributes,
+        bool inheritHandles,
+        uint creationFlags,
+        IntPtr environment,
+        string currentDirectory,
+        ref StartupInfo startupInfo,
+        out ProcessInformation processInformation);
+
+    [DllImport("userenv.dll", SetLastError = true)]
+    private static extern bool CreateEnvironmentBlock(out IntPtr environment, IntPtr token, bool inherit);
+
+    [DllImport("userenv.dll")]
+    private static extern bool DestroyEnvironmentBlock(IntPtr environment);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
     public static int Main(string[] args)
     {
         try
         {
             Options options = ParseOptions(args);
-            return Run(options);
+            return options.DescribeRuntimeContext ? DescribeRuntimeContext(options) : Run(options);
         }
         catch (Exception error)
         {
@@ -340,13 +456,26 @@ internal static class OrdivonWindowsJobLauncher
             {
                 throw new InvalidOperationException("usage: --executable PATH [--cwd PATH] [--inherit-environment true|false] [--env NAME=VALUE] [--memory-max-bytes N] [--active-process-limit N] [--cpu-quota-percent N] [--runtime-bundle PATH --runtime-job-id ID --runtime-attempt-id ID --runtime-launch-token-digest DIGEST --job-name NAME --timeout-ms N --stdout-limit-bytes N --stderr-limit-bytes N] [--diagnostics] [-- ARGS...]");
             }
+            if (current == "--describe-runtime-context")
+            {
+                options.DescribeRuntimeContext = true;
+                continue;
+            }
             if (current == "--diagnostics")
             {
                 options.Diagnostics = true;
                 continue;
             }
             string value = RequireValue(args, ref index, current);
-            if (current == "--executable")
+            if (current == "--context-env")
+            {
+                if (String.IsNullOrWhiteSpace(value) || value.IndexOf('=') >= 0 || value.IndexOf('\0') >= 0)
+                {
+                    throw new InvalidOperationException("--context-env name is invalid");
+                }
+                options.ContextEnvironmentNames.Add(value);
+            }
+            else if (current == "--executable")
             {
                 options.Executable = value;
             }
@@ -457,6 +586,18 @@ internal static class OrdivonWindowsJobLauncher
             }
         }
 
+        if (options.DescribeRuntimeContext)
+        {
+            if (options.RuntimeMode || !String.IsNullOrWhiteSpace(options.Executable) || options.TargetArguments.Count != 0)
+            {
+                throw new InvalidOperationException("runtime context description cannot be combined with process execution");
+            }
+            if (options.ContextEnvironmentNames.Count == 0)
+            {
+                throw new InvalidOperationException("runtime context description requires at least one --context-env");
+            }
+            return options;
+        }
         if (String.IsNullOrWhiteSpace(options.Executable))
         {
             throw new InvalidOperationException("--executable is required");
@@ -513,6 +654,339 @@ internal static class OrdivonWindowsJobLauncher
         return args[index++];
     }
 
+    private static int DescribeRuntimeContext(Options options)
+    {
+        IntPtr token = IntPtr.Zero;
+        IntPtr environment = IntPtr.Zero;
+        try
+        {
+            TokenEvidence evidence;
+            token = AcquireLimitedExecutionToken(out evidence);
+            if (!CreateEnvironmentBlock(out environment, token, false))
+            {
+                ThrowWin32("CreateEnvironmentBlock");
+            }
+            Dictionary<string, string> native = ReadEnvironmentBlock(environment);
+            SortedDictionary<string, string> selected = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string name in options.ContextEnvironmentNames)
+            {
+                string value;
+                if (native.TryGetValue(name, out value))
+                {
+                    selected[name] = value;
+                }
+            }
+            StringBuilder environmentJson = new StringBuilder();
+            environmentJson.Append('{');
+            bool first = true;
+            foreach (KeyValuePair<string, string> pair in selected)
+            {
+                if (!first) environmentJson.Append(',');
+                first = false;
+                environmentJson.Append(JsonString(pair.Key));
+                environmentJson.Append(':');
+                environmentJson.Append(JsonString(pair.Value));
+            }
+            environmentJson.Append('}');
+            string json = "{" +
+                "\"schemaVersion\":1," +
+                TokenEvidenceJsonFields(evidence) + "," +
+                "\"environment\":" + environmentJson.ToString() +
+                "}";
+            Console.Out.WriteLine(json);
+            return 0;
+        }
+        finally
+        {
+            if (environment != IntPtr.Zero) DestroyEnvironmentBlock(environment);
+            if (token != IntPtr.Zero) CloseHandle(token);
+        }
+    }
+
+    private static IntPtr AcquireLimitedExecutionToken(out TokenEvidence evidence)
+    {
+        IntPtr current = IntPtr.Zero;
+        IntPtr limited = IntPtr.Zero;
+        uint access = TokenQuery | TokenDuplicate | TokenAssignPrimary | TokenAdjustDefault;
+        if (!OpenProcessToken(GetCurrentProcess(), access, out current))
+        {
+            ThrowWin32("OpenProcessToken");
+        }
+        try
+        {
+            TokenEvidence currentEvidence = ReadTokenEvidence(current, "current_limited");
+            if (currentEvidence.TokenType != TokenPrimary)
+            {
+                throw new InvalidOperationException("launcher process token is not primary");
+            }
+            bool administratorsEnabled = GroupIsEnabled(currentEvidence.AdministratorsGroupAttributes);
+            if (!currentEvidence.IsElevated
+                && currentEvidence.IntegrityLevelRid <= MediumIntegrityRid
+                && !administratorsEnabled)
+            {
+                evidence = currentEvidence;
+                IntPtr selected = current;
+                current = IntPtr.Zero;
+                return selected;
+            }
+            if (!CreateRestrictedToken(
+                    current,
+                    LuaToken,
+                    0,
+                    IntPtr.Zero,
+                    0,
+                    IntPtr.Zero,
+                    0,
+                    IntPtr.Zero,
+                    out limited))
+            {
+                ThrowWin32("CreateRestrictedToken(LUA_TOKEN)");
+            }
+            if (TokenIntegrityLevelRid(limited) > MediumIntegrityRid)
+            {
+                SetMediumIntegrity(limited);
+            }
+            evidence = ReadTokenEvidence(limited, "lua_medium_filtered");
+            ValidateLimitedExecutionToken(currentEvidence, evidence);
+            IntPtr selectedLimited = limited;
+            limited = IntPtr.Zero;
+            return selectedLimited;
+        }
+        finally
+        {
+            if (limited != IntPtr.Zero) CloseHandle(limited);
+            if (current != IntPtr.Zero) CloseHandle(current);
+        }
+    }
+
+    private static void ValidateLimitedExecutionToken(TokenEvidence source, TokenEvidence selected)
+    {
+        if (selected.TokenType != TokenPrimary
+            || selected.IsElevated
+            || selected.IntegrityLevelRid > MediumIntegrityRid
+            || GroupIsEnabled(selected.AdministratorsGroupAttributes)
+            || selected.UserSid != source.UserSid)
+        {
+            throw new InvalidOperationException("derived Windows execution token is not limited");
+        }
+        if (selected.Selection == "lua_medium_filtered"
+            && selected.AdministratorsGroupAttributes != UInt32.MaxValue
+            && (selected.AdministratorsGroupAttributes & SeGroupUseForDenyOnly) == 0)
+        {
+            throw new InvalidOperationException("LUA execution token did not preserve deny-only Administrator semantics");
+        }
+    }
+
+    private static bool GroupIsEnabled(uint attributes)
+    {
+        return attributes != UInt32.MaxValue
+            && (attributes & SeGroupEnabled) != 0
+            && (attributes & SeGroupUseForDenyOnly) == 0;
+    }
+
+    private static TokenEvidence ReadTokenEvidence(IntPtr token, string selection)
+    {
+        TokenElevation elevation = TokenInformation<TokenElevation>(token, TokenElevationClass);
+        using (WindowsIdentity identity = new WindowsIdentity(token))
+        {
+            if (identity.User == null)
+            {
+                throw new InvalidOperationException("execution token has no user SID");
+            }
+            return new TokenEvidence {
+                Selection = selection,
+                UserSid = identity.User.Value,
+                TokenType = TokenInformation<int>(token, TokenTypeClass),
+                ElevationType = TokenInformation<int>(token, TokenElevationTypeClass),
+                IsElevated = elevation.TokenIsElevated != 0,
+                IntegrityLevelRid = TokenIntegrityLevelRid(token),
+                IsRestricted = IsTokenRestricted(token),
+                AdministratorsGroupAttributes = GroupAttributes(token, "S-1-5-32-544"),
+            };
+        }
+    }
+
+    private static T TokenInformation<T>(IntPtr token, int informationClass) where T : struct
+    {
+        uint required;
+        GetTokenInformation(token, informationClass, IntPtr.Zero, 0, out required);
+        if (required == 0)
+        {
+            ThrowWin32("GetTokenInformation(size)");
+        }
+        IntPtr buffer = Marshal.AllocHGlobal(checked((int)required));
+        try
+        {
+            if (!GetTokenInformation(token, informationClass, buffer, required, out required))
+            {
+                ThrowWin32("GetTokenInformation");
+            }
+            return (T)Marshal.PtrToStructure(buffer, typeof(T));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private static int TokenIntegrityLevelRid(IntPtr token)
+    {
+        uint required;
+        GetTokenInformation(token, TokenIntegrityLevelClass, IntPtr.Zero, 0, out required);
+        if (required == 0)
+        {
+            ThrowWin32("GetTokenInformation(integrity size)");
+        }
+        IntPtr buffer = Marshal.AllocHGlobal(checked((int)required));
+        try
+        {
+            if (!GetTokenInformation(token, TokenIntegrityLevelClass, buffer, required, out required))
+            {
+                ThrowWin32("GetTokenInformation(integrity)");
+            }
+            TokenMandatoryLabel label = (TokenMandatoryLabel)Marshal.PtrToStructure(
+                buffer, typeof(TokenMandatoryLabel));
+            IntPtr countPointer = GetSidSubAuthorityCount(label.Label.Sid);
+            if (countPointer == IntPtr.Zero)
+            {
+                ThrowWin32("GetSidSubAuthorityCount");
+            }
+            byte count = Marshal.ReadByte(countPointer);
+            if (count == 0)
+            {
+                throw new InvalidOperationException("integrity SID has no RID");
+            }
+            IntPtr ridPointer = GetSidSubAuthority(label.Label.Sid, (uint)(count - 1));
+            if (ridPointer == IntPtr.Zero)
+            {
+                ThrowWin32("GetSidSubAuthority");
+            }
+            return Marshal.ReadInt32(ridPointer);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private static uint GroupAttributes(IntPtr token, string sidText)
+    {
+        IntPtr expectedSid;
+        if (!ConvertStringSidToSid(sidText, out expectedSid))
+        {
+            ThrowWin32("ConvertStringSidToSid(group)");
+        }
+        try
+        {
+            uint required;
+            GetTokenInformation(token, TokenGroupsClass, IntPtr.Zero, 0, out required);
+            if (required == 0)
+            {
+                ThrowWin32("GetTokenInformation(groups size)");
+            }
+            IntPtr buffer = Marshal.AllocHGlobal(checked((int)required));
+            try
+            {
+                if (!GetTokenInformation(token, TokenGroupsClass, buffer, required, out required))
+                {
+                    ThrowWin32("GetTokenInformation(groups)");
+                }
+                uint count = unchecked((uint)Marshal.ReadInt32(buffer));
+                int offset = IntPtr.Size == 8 ? 8 : 4;
+                int stride = Marshal.SizeOf(typeof(SidAndAttributes));
+                for (uint index = 0; index < count; ++index)
+                {
+                    SidAndAttributes group = (SidAndAttributes)Marshal.PtrToStructure(
+                        IntPtr.Add(buffer, offset + checked((int)index) * stride),
+                        typeof(SidAndAttributes));
+                    if (EqualSid(group.Sid, expectedSid))
+                    {
+                        return group.Attributes;
+                    }
+                }
+                return UInt32.MaxValue;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+        finally
+        {
+            LocalFree(expectedSid);
+        }
+    }
+
+    private static void SetMediumIntegrity(IntPtr token)
+    {
+        IntPtr sid;
+        if (!ConvertStringSidToSid("S-1-16-8192", out sid))
+        {
+            ThrowWin32("ConvertStringSidToSid(medium integrity)");
+        }
+        try
+        {
+            TokenMandatoryLabel label = new TokenMandatoryLabel();
+            label.Label.Sid = sid;
+            label.Label.Attributes = SeGroupIntegrity;
+            int structSize = Marshal.SizeOf(typeof(TokenMandatoryLabel));
+            IntPtr buffer = Marshal.AllocHGlobal(structSize);
+            try
+            {
+                Marshal.StructureToPtr(label, buffer, false);
+                uint length = checked((uint)structSize + GetLengthSid(sid));
+                if (!SetTokenInformation(token, TokenIntegrityLevelClass, buffer, length))
+                {
+                    ThrowWin32("SetTokenInformation(medium integrity)");
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+        finally
+        {
+            LocalFree(sid);
+        }
+    }
+
+    private static Dictionary<string, string> ReadEnvironmentBlock(IntPtr environment)
+    {
+        Dictionary<string, string> values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        long cursor = environment.ToInt64();
+        while (true)
+        {
+            string entry = Marshal.PtrToStringUni(new IntPtr(cursor));
+            if (String.IsNullOrEmpty(entry))
+            {
+                break;
+            }
+            cursor += checked((entry.Length + 1) * 2);
+            int equals = entry.IndexOf('=');
+            if (equals <= 0)
+            {
+                // Drive-current-directory pseudo variables (=C:=...) are irrelevant because
+                // Runtime always supplies an absolute executable and explicit working directory.
+                continue;
+            }
+            values[entry.Substring(0, equals)] = entry.Substring(equals + 1);
+        }
+        return values;
+    }
+
+    private static string TokenEvidenceJsonFields(TokenEvidence evidence)
+    {
+        return "\"tokenSelection\":" + JsonString(evidence.Selection) + "," +
+            "\"tokenUserSid\":" + JsonString(evidence.UserSid) + "," +
+            "\"tokenType\":" + evidence.TokenType.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"tokenElevationType\":" + evidence.ElevationType.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"tokenIsElevated\":" + (evidence.IsElevated ? "true" : "false") + "," +
+            "\"tokenIntegrityLevelRid\":" + evidence.IntegrityLevelRid.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"tokenIsRestricted\":" + (evidence.IsRestricted ? "true" : "false") + "," +
+            "\"administratorsGroupAttributes\":" + evidence.AdministratorsGroupAttributes.ToString(CultureInfo.InvariantCulture);
+    }
+
     private static int Run(Options options)
     {
         return options.RuntimeMode ? RunRuntime(options) : RunLegacy(options);
@@ -522,6 +996,8 @@ internal static class OrdivonWindowsJobLauncher
     {
         IntPtr job = IntPtr.Zero;
         IntPtr environment = IntPtr.Zero;
+        IntPtr executionToken = IntPtr.Zero;
+        TokenEvidence tokenEvidence = null;
         IntPtr stdoutWrite = IntPtr.Zero;
         IntPtr stderrWrite = IntPtr.Zero;
         CaptureWorker stdoutCapture = null;
@@ -543,6 +1019,7 @@ internal static class OrdivonWindowsJobLauncher
             }
             ConfigureExtendedLimits(job, options);
             uint cpuRate = ConfigureCpuRate(job, options.CpuQuotaPercent);
+            executionToken = AcquireLimitedExecutionToken(out tokenEvidence);
             environment = BuildEnvironment(options);
 
             stdoutCapture = CreateCaptureWorker(
@@ -563,7 +1040,8 @@ internal static class OrdivonWindowsJobLauncher
 
             StringBuilder commandLine = new StringBuilder(BuildCommandLine(options.Executable, options.TargetArguments));
             uint creationFlags = CreateSuspended | CreateUnicodeEnvironment;
-            if (!CreateProcessW(
+            if (!CreateProcessAsUserW(
+                    executionToken,
                     options.Executable,
                     commandLine,
                     IntPtr.Zero,
@@ -575,7 +1053,7 @@ internal static class OrdivonWindowsJobLauncher
                     ref si,
                     out pi))
             {
-                ThrowWin32("CreateProcessW");
+                ThrowWin32("CreateProcessAsUserW");
             }
             processCreated = true;
             CloseHandle(stdoutWrite);
@@ -597,7 +1075,7 @@ internal static class OrdivonWindowsJobLauncher
                 throw new InvalidOperationException("target process is not owned by the expected Job Object");
             }
 
-            WriteWindowsStartEvidence(options, pi);
+            WriteWindowsStartEvidence(options, pi, tokenEvidence);
             stdoutThread = new Thread(stdoutCapture.Run);
             stderrThread = new Thread(stderrCapture.Run);
             stdoutThread.IsBackground = true;
@@ -711,6 +1189,7 @@ internal static class OrdivonWindowsJobLauncher
             if (stdoutWrite != IntPtr.Zero) CloseHandle(stdoutWrite);
             if (stderrWrite != IntPtr.Zero) CloseHandle(stderrWrite);
             if (environment != IntPtr.Zero) Marshal.FreeHGlobal(environment);
+            if (executionToken != IntPtr.Zero) CloseHandle(executionToken);
             if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread);
             if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess);
             if (job != IntPtr.Zero) CloseHandle(job);
@@ -890,7 +1369,7 @@ internal static class OrdivonWindowsJobLauncher
         }
     }
 
-    private static void WriteWindowsStartEvidence(Options options, ProcessInformation pi)
+    private static void WriteWindowsStartEvidence(Options options, ProcessInformation pi, TokenEvidence tokenEvidence)
     {
         FileTime creation;
         FileTime exit;
@@ -914,6 +1393,7 @@ internal static class OrdivonWindowsJobLauncher
             "\"processCreationTimeFileTime\":" + creationValue.ToString(CultureInfo.InvariantCulture) + "," +
             "\"imagePath\":" + JsonString(imagePath) + "," +
             "\"imageDigest\":" + JsonString(imageDigest) + "," +
+            TokenEvidenceJsonFields(tokenEvidence) + "," +
             "\"observedUnixMs\":" + UnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) +
             "}";
         WriteTextAtomic(Path.Combine(options.RuntimeBundle, "windows-start.json"), json);
