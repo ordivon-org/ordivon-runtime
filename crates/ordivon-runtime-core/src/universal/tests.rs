@@ -351,6 +351,61 @@ fn workspace_diff_reports_structured_modified_added_deleted_and_renamed_paths() 
 }
 
 #[test]
+fn current_workspace_inventory_read_does_not_create_missing_store() {
+    let root = std::env::temp_dir().join(format!(
+        "ordivon-list-readonly-missing-store-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let config = UniversalExecutorConfig {
+        store_root: root.join("runtime"),
+        workspace_root: None,
+        workspace_uid: None,
+        workspace_gid: None,
+        runner_path: PathBuf::from("/usr/bin/true"),
+        allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
+        max_runtime_ms: 60_000,
+        max_output_bytes: 1_048_576,
+    };
+    assert!(!config.store_root.exists());
+    let error = list_open_workspace_record_inventory(&config).unwrap_err();
+    assert_eq!(error.code, UniversalExecErrorCode::IoError);
+    assert!(!config.store_root.exists());
+}
+
+#[test]
+fn workspace_head_and_dirty_probe_combines_detached_head_and_worktree_state() {
+    let sandbox = Sandbox::new("workspace-head-dirty-probe");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let expected = git_text(&source, ["rev-parse", "HEAD"]);
+    let config = sandbox.config();
+    let workspace_id = "workspace-head-dirty-probe";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    let (head, dirty) = workspace_head_and_dirty_at(&workspace).unwrap();
+    assert_eq!(head, expected);
+    assert!(!dirty);
+
+    fs::write(workspace.join("untracked.txt"), "visible").unwrap();
+    let (head, dirty) = workspace_head_and_dirty_at(&workspace).unwrap();
+    assert_eq!(head, expected);
+    assert!(dirty);
+}
+
+#[test]
 fn workspace_dirty_probe_is_lightweight_and_respects_git_ignores() {
     let sandbox = Sandbox::new("workspace-dirty-probe");
     let source = sandbox.root.join("source");
@@ -1852,6 +1907,74 @@ fn workspace_slice_returns_full_digest_and_utf8_safe_range() {
     assert!(!slice.eof);
     assert_eq!(slice.file_byte_length, 9);
     assert!(slice.file_digest.starts_with("sha256:"));
+}
+
+#[test]
+fn workspace_slice_streams_large_file_while_preserving_whole_file_digest() {
+    let sandbox = Sandbox::new("workspace-slice-large");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-slice-large".to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path("workspace-slice-large");
+    let content = "abcdefgh".repeat(1_048_576);
+    fs::write(workspace.join("large.txt"), content.as_bytes()).unwrap();
+    let slice = read_workspace_slice(
+        &config,
+        &WorkspaceReadSliceRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-slice-large".to_string(),
+            relative_path: "large.txt".to_string(),
+            offset: 4_194_304,
+            max_bytes: 16,
+        },
+    )
+    .unwrap();
+    assert_eq!(slice.content, &content[4_194_304..4_194_320]);
+    assert_eq!(slice.file_byte_length, content.len() as u64);
+    assert_eq!(slice.file_digest, sha256_bytes(content.as_bytes()));
+    assert!(!slice.eof);
+}
+
+#[test]
+fn workspace_slice_still_rejects_invalid_utf8_outside_requested_range() {
+    let sandbox = Sandbox::new("workspace-slice-invalid-tail");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-slice-invalid-tail".to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path("workspace-slice-invalid-tail");
+    fs::write(workspace.join("bad.txt"), b"visible-prefix\n\xff").unwrap();
+    let error = read_workspace_slice(
+        &config,
+        &WorkspaceReadSliceRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: "workspace-slice-invalid-tail".to_string(),
+            relative_path: "bad.txt".to_string(),
+            offset: 0,
+            max_bytes: 7,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, UniversalExecErrorCode::ArtifactNotUtf8);
 }
 
 fn init_git_repo(path: &Path) {

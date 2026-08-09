@@ -179,6 +179,8 @@ Rollback validates the receipt-bound install directory, service, environment fil
 
 `ordivon-runtime-deploy`, `ordivon-runtime-reclaim`, and `ordivon-runtime-capacity-acceptance` share `mcp_probe.py`; they do not embed separate protocol clients. Repository execution remains useful during development and bootstrap, but canonical production installation is the receipt-bound release artifact set above: the three consumers and `mcp_probe.py` are installed and rolled back together with the Runtime binaries. A manually copied executable or support module is therefore outside canonical deployment truth until a normal release brings its digest and mode under the latest receipt. Candidate deployment requires modern discovery; reclaim uses modern discovery first and falls back to legacy initialization only so that an installed previous Runtime can still release a Workspace through its own `workspace.close` contract.
 
+The probe identifies itself as `ordivon-mcp-probe/1` instead of inheriting Python urllib's default User-Agent. This is an explicit machine-client identity, not browser impersonation: public edge policy can observe or selectively exempt it without Browser Integrity Check turning a valid MCP route into a false negative. Local bearer credentials remain separate from any Cloudflare Access token required by the public origin.
+
 ## Workspace lifecycle and reclaim
 
 Workspace lifecycle has separate states and release rules:

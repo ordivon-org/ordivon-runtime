@@ -1009,6 +1009,10 @@ fn open_read_only(config: &RuntimeInspectionConfig) -> RuntimeResult<(Connection
     connection
         .pragma_update(None, "trusted_schema", false)
         .map_err(|error| RuntimeError::from_sql(error, "cannot disable trusted schema"))?;
+    connection
+        .execute_batch("BEGIN")
+        .map_err(|error| RuntimeError::from_sql(error, "cannot begin inspection read snapshot"))?;
+    debug_assert!(!connection.is_autocommit());
     let integrity: String = connection
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .map_err(|error| RuntimeError::from_sql(error, "cannot inspect Registry integrity"))?;

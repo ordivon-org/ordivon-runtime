@@ -6,7 +6,6 @@ use crate::universal::{
     WorkspaceMutationMode, WorkspacePatchRequest, WorkspaceTextEdit, WorkspaceTextPosition,
     WorkspaceTextRange, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
-use proptest::prelude::*;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2664,46 +2663,108 @@ fn workspace_list_isolates_workspace_local_projection_failure_with_stage() {
     assert_eq!(issue.code, "METADATA_CORRUPT");
 }
 
-proptest! {
-    #[test]
-    fn newest_first_cursor_pagination_is_complete_and_unique(
-        job_count in 1usize..30,
-        page_size in 1u32..10,
-    ) {
-        let sandbox = Sandbox::new("property-list", 5000);
-        for index in 0..job_count {
-            let mut list_request = request(&sandbox, &format!("request:property:{index}"), 64);
-            list_request.plan.workspace_id = format!("workspace:property:{index}");
-            sandbox.registry.submit(&list_request).unwrap();
-        }
+#[test]
+fn workspace_list_surfaces_invalid_current_physical_candidate() {
+    let (_sandbox, runtime, executor) = durable_patch_fixture(
+        "workspace-list-invalid-current",
+        "workspace-list-current-valid",
+    );
+    fs::create_dir(executor.workspaces_root().join("invalid current id")).unwrap();
+
+    let result = runtime
+        .list_workspaces(&RuntimeWorkspaceListRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            limit: 20,
+            cursor: None,
+            include_source_state_digest: false,
+        })
+        .unwrap();
+
+    assert_eq!(result.workspaces.len(), 1);
+    assert_eq!(
+        result.workspaces[0].workspace_id,
+        "workspace-list-current-valid"
+    );
+    assert!(result.issues.iter().any(|issue| {
+        issue.workspace_id == "invalid current id"
+            && issue.stage == RuntimeWorkspaceIssueStage::Inventory
+            && issue.code == "INVALID_REQUEST"
+    }));
+}
+
+#[test]
+fn workspace_list_ignores_corrupt_history_without_a_physical_open_workspace() {
+    let (_sandbox, runtime, executor) =
+        durable_patch_fixture("workspace-list-history-poison", "workspace-list-current");
+    fs::write(
+        executor
+            .workspace_records_root()
+            .join("historical-poison.json"),
+        b"{ definitely-not-json",
+    )
+    .unwrap();
+
+    let result = runtime
+        .list_workspaces(&RuntimeWorkspaceListRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            limit: 20,
+            cursor: None,
+            include_source_state_digest: false,
+        })
+        .unwrap();
+
+    assert_eq!(result.workspaces.len(), 1);
+    assert_eq!(result.workspaces[0].workspace_id, "workspace-list-current");
+    assert!(result.issues.is_empty());
+}
+
+#[test]
+fn newest_first_cursor_pagination_is_complete_and_unique() {
+    let sandbox = Sandbox::new("pagination-maximal", 5000);
+    let job_count = 29usize;
+    for index in 0..job_count {
+        let mut list_request = request(&sandbox, &format!("request:pagination:{index}"), 64);
+        list_request.plan.workspace_id = format!("workspace:pagination:{index}");
+        sandbox.registry.submit(&list_request).unwrap();
+    }
+
+    for page_size in 1u32..10 {
         let mut cursor = None;
         let mut observed = Vec::new();
         loop {
-            let page = sandbox.registry.list_jobs(&RuntimeJobListRequest {
-                limit: page_size,
-                cursor,
-                client_request_id: None,
-                workspace_id: None,
-            }).unwrap();
-            observed.extend(page.jobs.iter().map(|job| (
-                job.created_at_ms,
-                job.job_id.clone(),
-                job.client_request_id.clone(),
-            )));
+            let page = sandbox
+                .registry
+                .list_jobs(&RuntimeJobListRequest {
+                    limit: page_size,
+                    cursor,
+                    client_request_id: None,
+                    workspace_id: None,
+                })
+                .unwrap();
+            observed.extend(page.jobs.iter().map(|job| {
+                (
+                    job.created_at_ms,
+                    job.job_id.clone(),
+                    job.client_request_id.clone(),
+                )
+            }));
             cursor = page.next_cursor;
             if cursor.is_none() {
                 break;
             }
         }
-        prop_assert_eq!(observed.len(), job_count);
+        assert_eq!(observed.len(), job_count, "page_size={page_size}");
         let unique: std::collections::BTreeSet<_> = observed.iter().map(|(_, id, _)| id).collect();
-        prop_assert_eq!(unique.len(), job_count);
-        let newest_first = observed.windows(2).all(|pair| {
-            (pair[0].0, pair[0].1.as_str()) >= (pair[1].0, pair[1].1.as_str())
-        });
-        prop_assert!(newest_first);
-        let requests: std::collections::BTreeSet<_> = observed.iter().map(|(_, _, request)| request).collect();
-        prop_assert_eq!(requests.len(), job_count);
+        assert_eq!(unique.len(), job_count, "page_size={page_size}");
+        assert!(
+            observed
+                .windows(2)
+                .all(|pair| { (pair[0].0, pair[0].1.as_str()) >= (pair[1].0, pair[1].1.as_str()) }),
+            "page_size={page_size}"
+        );
+        let requests: std::collections::BTreeSet<_> =
+            observed.iter().map(|(_, _, request)| request).collect();
+        assert_eq!(requests.len(), job_count, "page_size={page_size}");
     }
 }
 

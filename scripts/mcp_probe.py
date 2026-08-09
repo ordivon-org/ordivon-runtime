@@ -13,6 +13,7 @@ from typing import Any
 
 MODERN_PROTOCOL_VERSION = "2026-07-28"
 LEGACY_PROTOCOL_VERSION = "2025-06-18"
+PROBE_USER_AGENT = "ordivon-mcp-probe/1"
 
 
 class McpProbeError(RuntimeError):
@@ -120,6 +121,10 @@ class McpClient:
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": self.protocol_version,
+            # Do not inherit Python urllib's non-browser default signature. Public MCP
+            # endpoints may legitimately enable browser-integrity or bot controls; a
+            # stable product identity makes this machine client observable and exemptable.
+            "User-Agent": PROBE_USER_AGENT,
         }
         if self.lifecycle == "modern":
             headers["Mcp-Method"] = method

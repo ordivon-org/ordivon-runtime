@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -346,6 +347,75 @@ pub(crate) fn list_workspace_record_inventory(
     Ok(WorkspaceRecordInventory { records, issues })
 }
 
+pub(crate) fn list_open_workspace_record_inventory(
+    config: &UniversalExecutorConfig,
+) -> Result<WorkspaceRecordInventory, UniversalExecError> {
+    let workspaces_root = config.workspaces_root();
+    let mut records = Vec::new();
+    let mut issues = Vec::new();
+    for entry in
+        fs::read_dir(&workspaces_root).map_err(|error| io_error(&workspaces_root, "list", error))?
+    {
+        let entry =
+            entry.map_err(|error| io_error(&workspaces_root, "read directory entry", error))?;
+        let workspace_id = entry.file_name().to_string_lossy().into_owned();
+        if let Err(error) = super::validate_id(&workspace_id, "workspaceId") {
+            issues.push(WorkspaceRecordInventoryIssue {
+                workspace_id,
+                error,
+            });
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|error| io_error(&entry.path(), "inspect", error))?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            issues.push(WorkspaceRecordInventoryIssue {
+                workspace_id,
+                error: UniversalExecError::new(
+                    UniversalExecErrorCode::MetadataCorrupt,
+                    "workspace target must be a non-symlink directory",
+                    Some("workspaceId"),
+                    false,
+                ),
+            });
+            continue;
+        }
+        let record = match load_workspace_record_metadata(config, &workspace_id) {
+            Ok(record) => record,
+            Err(error) => {
+                issues.push(WorkspaceRecordInventoryIssue {
+                    workspace_id,
+                    error,
+                });
+                continue;
+            }
+        };
+        let expected_path = config.workspace_path(&workspace_id);
+        if Path::new(&record.workspace_path) != expected_path {
+            issues.push(WorkspaceRecordInventoryIssue {
+                workspace_id,
+                error: UniversalExecError::new(
+                    UniversalExecErrorCode::MetadataCorrupt,
+                    "workspace record path does not match its identity",
+                    Some("workspaceId"),
+                    false,
+                ),
+            });
+            continue;
+        }
+        records.push(record);
+    }
+    records.sort_by(|left, right| {
+        right
+            .created_unix_ms
+            .cmp(&left.created_unix_ms)
+            .then_with(|| left.workspace_id.cmp(&right.workspace_id))
+    });
+    issues.sort_by(|left, right| left.workspace_id.cmp(&right.workspace_id));
+    Ok(WorkspaceRecordInventory { records, issues })
+}
+
 pub(crate) fn workspace_cleanup_dependents(
     config: &UniversalExecutorConfig,
     workspace_id: &str,
@@ -432,8 +502,23 @@ pub fn read_workspace_text(
             false,
         ));
     }
-    let bytes = fs::read(&path).map_err(|error| io_error(&path, "read", error))?;
-    let content = String::from_utf8(bytes.clone()).map_err(|error| {
+    let mut file = File::open(&path).map_err(|error| io_error(&path, "open", error))?;
+    let mut bytes = Vec::with_capacity((metadata.len().min(request.max_bytes) + 1) as usize);
+    file.by_ref()
+        .take(request.max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| io_error(&path, "read", error))?;
+    if bytes.len() as u64 > request.max_bytes {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::OutputLimitExceeded,
+            format!("file exceeds maxBytes {}", request.max_bytes),
+            Some("maxBytes"),
+            false,
+        ));
+    }
+    let digest = sha256_bytes(&bytes);
+    let byte_length = bytes.len() as u64;
+    let content = String::from_utf8(bytes).map_err(|error| {
         UniversalExecError::new(
             UniversalExecErrorCode::ArtifactNotUtf8,
             format!("workspace file is not UTF-8: {error}"),
@@ -445,8 +530,8 @@ pub fn read_workspace_text(
         workspace_id: request.workspace_id.clone(),
         relative_path: request.relative_path.clone(),
         content,
-        digest: sha256_bytes(&bytes),
-        byte_length: bytes.len() as u64,
+        digest,
+        byte_length,
     })
 }
 
@@ -797,6 +882,67 @@ pub(crate) fn workspace_diff_paths(
         )
     })?;
     Ok((diff, retained < total))
+}
+
+pub(crate) fn workspace_head_and_dirty_at(
+    workspace: &Path,
+) -> Result<(String, bool), UniversalExecError> {
+    let workspace = canonical_directory(workspace, "workspacePath")?;
+    let output = Command::new("git")
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(&workspace)
+        .args([
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=normal",
+            "--ignore-submodules=none",
+        ])
+        .output()
+        .map_err(|error| tool_unavailable("git status", error))?;
+    if !output.status.success() {
+        return Err(tool_failed("git status", &output.stderr));
+    }
+    let mut head_revision = None;
+    let mut dirty = false;
+    for raw in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+    {
+        if let Some(value) = raw.strip_prefix(b"# branch.oid ") {
+            let value = String::from_utf8(value.to_vec()).map_err(|error| {
+                UniversalExecError::new(
+                    UniversalExecErrorCode::ArtifactNotUtf8,
+                    format!("Git branch OID is not UTF-8: {error}"),
+                    None,
+                    false,
+                )
+            })?;
+            head_revision = Some(value);
+        } else if !raw.starts_with(b"# ") {
+            dirty = true;
+        }
+    }
+    let head_revision = head_revision.ok_or_else(|| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::RevisionNotFound,
+            "git status omitted branch.oid",
+            Some("workspaceId"),
+            false,
+        )
+    })?;
+    if head_revision.len() != 40 && head_revision.len() != 64 {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::RevisionNotFound,
+            "workspace HEAD did not resolve to a commit",
+            Some("workspaceId"),
+            false,
+        ));
+    }
+    Ok((head_revision, dirty))
 }
 
 #[cfg(any(feature = "transactional-runtime", test))]
@@ -1448,17 +1594,18 @@ pub(crate) fn resolve_existing_workspace_path(
 pub(crate) fn resolve_workspace_cwd(
     record: &WorkspaceRecord,
     relative: &str,
+    field: &str,
 ) -> Result<PathBuf, UniversalExecError> {
-    resolve_existing_workspace_path(record, relative, true).and_then(|path| {
-        if !path.is_dir() {
-            Err(invalid(
-                "cwdRelative must resolve to a directory",
-                "cwdRelative",
-            ))
-        } else {
-            Ok(path)
+    let path = resolve_existing_workspace_path(record, relative, true).map_err(|mut error| {
+        if error.field.as_deref() == Some("relativePath") {
+            error.field = Some(field.to_string());
         }
-    })
+        error
+    })?;
+    if !path.is_dir() {
+        return Err(invalid("cwdRelative must resolve to a directory", field));
+    }
+    Ok(path)
 }
 
 pub(crate) fn preflight_workspace_write_path(

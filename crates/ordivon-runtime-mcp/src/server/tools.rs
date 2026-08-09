@@ -34,7 +34,7 @@ impl RuntimeServer {
             title = "Close workspace",
             read_only_hint = false,
             destructive_hint = true,
-            idempotent_hint = false,
+            idempotent_hint = true,
             open_world_hint = false
         )
     )]
@@ -74,7 +74,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.list",
-        description = "List newest healthy open Workspaces using stable cursor pagination, with canonical sourceRepo, opening/base sourceRevision, and exact currentHeadRevision. Exact sourceStateDigest is omitted by default and may be requested explicitly; workspace.get remains the precise proof boundary. This is a projection-only read and does not reconcile or dispatch Jobs. Missing historical records are omitted; inventory issues are returned as global diagnostics and page-local projection failures are isolated with a machine-readable stage, while authority-wide failures still fail closed.",
+        description = "List newest healthy open Workspaces using stable cursor pagination, with canonical sourceRepo, opening/base sourceRevision, and exact currentHeadRevision. Exact sourceStateDigest is omitted by default and may be requested explicitly; workspace.get remains the precise proof boundary. This is a projection-only read and does not reconcile or dispatch Jobs. Inventory is derived from current physical Workspace candidates rather than historical closed tombstones; current inventory and page-local projection failures are isolated with a machine-readable stage, while authority-wide failures still fail closed.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeWorkspaceListResult>>(),
         annotations(
             title = "List open workspaces",
@@ -237,7 +237,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.diff",
-        description = "Return a bounded Git diff plus structured changed, modified, added, deleted, renamed, and untracked paths for an isolated Workspace.",
+        description = "Return Git diff text bounded by maxBytes plus the complete structured changed, modified, added, deleted, renamed, and untracked path projection for an isolated Workspace. maxBytes bounds only diff text; it does not bound the structured path-list payload.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<CompactWorkspaceDiffResult>>(),
         annotations(
             title = "Inspect workspace diff",
@@ -268,7 +268,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.exec",
-        description = "Run one effect-opaque command inside a workspace with the installed service user's trusted-local authority. execution.executable must be an absolute host path and execution.cwdRelative must be relative to the Workspace root. Duplicate clientRequestId admission is idempotent and current Git source state is bound. Results expose exact Attempt state, execution and delivery disposition, recovery requirement, and explicitly do not claim semantic completion or external-effect idempotency.",
+        description = "Run one effect-opaque command inside a workspace with the installed service user's trusted-local authority. execution.executable must be an absolute host path and execution.cwdRelative must be relative to the Workspace root. Duplicate clientRequestId admission is idempotent and current Git source state is bound. Omitted waitMs performs only a brief 2-second observation after durable admission; long work returns the same Job for task.observe rather than holding the MCP request open. Results expose exact Attempt state, execution and delivery disposition, recovery requirement, and explicitly do not claim semantic completion or external-effect idempotency.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),
         annotations(
             title = "Execute transactional workspace job",
@@ -295,7 +295,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.execBound",
-        description = "Admit one contained-local execution with exact immutable inputs from operator-configured named authorities. Each input names only an authority, a relative object, an expected SHA-256 digest, and its presentation-relative path. Runtime resolves and copies those bytes only on new admission, freezes effective input commitments into the Job, presents them read-only under /run/ordivon/inputs, and replays an existing Job before consulting current authority state. This is physical execution evidence only and does not imply domain semantic completion.",
+        description = "Admit one contained-local execution with exact immutable inputs from operator-configured named authorities. Each input names only an authority, a relative object, an expected SHA-256 digest, and its presentation-relative path. Runtime resolves and copies those bytes only on new admission, freezes effective input commitments into the Job, presents them read-only under /run/ordivon/inputs, and replays an existing Job before consulting current authority state. Omitted waitMs performs only a brief 2-second observation after durable admission; long work returns the same Job for task.observe. This is physical execution evidence only and does not imply domain semantic completion.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),
         annotations(
             title = "Execute with immutable inputs",
@@ -321,7 +321,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.execPlan",
-        description = "Run an ordered structured execution plan inside one Workspace. Steps use absolute executables and explicit args, run sequentially, stop on the first failure by default, and continue only when that step explicitly sets continueOnError. The Job exposes step progress plus exact Attempt state, execution and delivery disposition, and recovery requirement without asking the caller to infer them from output.",
+        description = "Run an ordered structured execution plan inside one Workspace. Steps use absolute executables and explicit args, run sequentially, stop on the first failure by default, and continue only when that step explicitly sets continueOnError. Omitted waitMs performs only a brief 2-second observation after durable admission; long work returns the same Job for task.observe. The Job exposes step progress plus exact Attempt state, execution and delivery disposition, and recovery requirement without asking the caller to infer them from output.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),
         annotations(
             title = "Execute fail-fast workspace plan",

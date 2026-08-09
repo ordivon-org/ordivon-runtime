@@ -115,6 +115,14 @@ fn workspace_exec_schema_exposes_mechanical_limits_as_optional() {
         .find(|tool| tool.name.as_ref() == "workspace.exec")
         .expect("workspace.exec");
     let schema = serde_json::to_value(&tool.input_schema).unwrap();
+    assert_eq!(
+        schema.pointer("/properties/waitMs/default"),
+        Some(&serde_json::json!(2_000))
+    );
+    assert_eq!(
+        schema.pointer("/properties/waitMs/maximum"),
+        Some(&serde_json::json!(30_000))
+    );
     let required = schema
         .pointer("/$defs/ExecutionProposal/required")
         .and_then(Value::as_array)
@@ -139,6 +147,10 @@ fn workspace_exec_bound_schema_exposes_only_named_immutable_input_authority() {
         .find(|tool| tool.name.as_ref() == "workspace.execBound")
         .expect("workspace.execBound");
     let schema = serde_json::to_value(&tool.input_schema).unwrap();
+    assert_eq!(
+        schema.pointer("/properties/waitMs/default"),
+        Some(&serde_json::json!(2_000))
+    );
     assert_eq!(
         schema.pointer("/properties/inputs/minItems"),
         Some(&serde_json::json!(1))
@@ -174,6 +186,22 @@ fn workspace_exec_bound_schema_exposes_only_named_immutable_input_authority() {
     );
     let text = serde_json::to_string(&schema).unwrap();
     assert!(!text.contains("sourcePath"));
+}
+
+#[test]
+fn workspace_exec_plan_defaults_to_brief_mcp_observation() {
+    let server = Sandbox::new("plan-wait-schema").server();
+    let tools = server.tool_router.list_all();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "workspace.execPlan")
+        .expect("workspace.execPlan");
+    let schema = serde_json::to_value(&tool.input_schema).unwrap();
+    assert_eq!(
+        schema.pointer("/properties/waitMs/default"),
+        Some(&serde_json::json!(2_000))
+    );
+    assert_eq!(default_exec_wait_ms(), 2_000);
 }
 
 #[test]
@@ -329,7 +357,7 @@ fn tool_effect_annotations_match_runtime_behavior() {
         ("task.cancel", false, true, true, false),
         ("task.list", true, false, true, false),
         ("task.observe", false, true, true, true),
-        ("workspace.close", false, true, false, false),
+        ("workspace.close", false, true, true, false),
         ("workspace.diff", true, false, true, false),
         ("workspace.exec", false, true, false, true),
         ("workspace.execBound", false, true, false, false),

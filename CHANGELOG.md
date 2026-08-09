@@ -23,6 +23,11 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ### Changed
 
+- public `workspace.exec`, `workspace.execPlan`, and `workspace.execBound` now default omitted `waitMs` to a brief 2-second post-admission observation while preserving explicit waits up to the existing 30-second Core bound; durable long-running Jobs are returned for `task.observe` instead of keeping the MCP request open by default;
+- `workspace.list` derives its common projection from current physical Workspace candidates rather than scanning historical closed tombstones, uses one Git porcelain-v2 probe for HEAD plus dirty state, and leaves historical record/physical reconciliation to status, doctor, lifecycle, and reclaim surfaces;
+- systemd dispatch and cancellation submit their already-durable intents with `--no-block`; Runtime launch evidence, terminal evidence, and reconciliation remain the authority for what physically happened rather than synchronous systemd CLI completion;
+- executable admission preserves the exact absolute invocation path while requiring both invocation location and canonical target to remain inside executable authority, then digest-validating the target, and Runner restores that invocation as `argv[0]`, preserving rustup-style multicall/proxy semantics without trusting a retargeted symlink;
+- `workspace.diff.maxBytes` is documented as a bound on diff text only; the complete structured path projection is intentionally not presented as bounded by that field and requires a future continuation contract before it can be safely truncated.
 - README now provides a public product entry, current capability boundary, requirements, first workflow, security warning, and documentation map;
 - security reporting now uses a private, actionable channel and names response and disclosure expectations;
 - dependency automation and CI actions are explicitly enabled and pinned;
@@ -46,6 +51,12 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ### Fixed
 
+- Doctor, local Runtime inspection, and secret-free status invariant reads now use one SQLite read snapshot instead of combining independently timed Registry queries;
+- `systemctl show` and terminal `reset-failed` observation paths have a one-second local CLI deadline, so `task.observe(waitMs=0)` cannot be held indefinitely by a stuck observation command;
+- Workspace FULL reads now enforce `maxBytes` against bytes actually read, SLICE reads preserve whole-file UTF-8/digest semantics with bounded memory and a single file pass, and output tails preserve valid text around binary bytes while hard-bounding raw bytes read;
+- `workspace.close` now advertises the idempotence already guaranteed by closed-tombstone replay, while remaining correctly marked destructive;
+- executable/cwd physical-validation failures now point to the exact top-level or `execution.steps[i]` field that failed;
+- the shared `mcp_probe.py` uses a stable machine User-Agent instead of Python urllib's default browser signature, preventing Cloudflare Browser Integrity Check from turning a healthy public route into a false probe failure.
 - Python operational and test helpers explicitly close temporary SQLite connections instead of emitting resource warnings;
 - `artifactsAvailable` now reflects registered Artifact existence rather than merely the presence of an Attempt result digest;
 - recovery-bearing states such as `orphaned` explicitly project reconciliation requirements instead of appearing mechanically complete;

@@ -571,7 +571,7 @@ fn execute_step(
     let executable =
         validate_executable_identity(&step.executable, &step.executable_digest, "executable")?;
     let mut command = Command::new(&executable);
-    command.args(&step.args);
+    command.arg0(&step.executable).args(&step.args);
     if !request.inherit_host_environment {
         command.env_clear();
     }

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,35 +12,79 @@ use super::supervisor::SupervisorIdentity;
 use super::{AttemptRecord, RuntimeError, RuntimeErrorCode, RuntimeResult};
 use crate::universal::UniversalExecutorConfig;
 
+const SYSTEMCTL_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(1);
+const OBSERVATION_COMMAND_POLL: Duration = Duration::from_millis(10);
+
 pub(super) fn validate_executable(
     config: &UniversalExecutorConfig,
     value: &str,
+    field: &str,
 ) -> RuntimeResult<PathBuf> {
     let path = Path::new(value);
-    let canonical =
-        fs::canonicalize(path).map_err(|error| io_error("canonicalize executable", error))?;
-    let metadata =
-        fs::metadata(&canonical).map_err(|error| io_error("inspect executable", error))?;
+    if !path.is_absolute() {
+        return Err(RuntimeError::invalid(
+            "executable must be an absolute path",
+            field,
+        ));
+    }
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::IoError,
+            format!("canonicalize executable: {error}"),
+            Some(field),
+            false,
+        )
+    })?;
+    let metadata = fs::metadata(&canonical).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::IoError,
+            format!("inspect executable: {error}"),
+            Some(field),
+            false,
+        )
+    })?;
     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
         return Err(RuntimeError::invalid(
             "executable must resolve to an executable file",
-            "execution.executable",
+            field,
         ));
     }
-    let allowed = config.allowed_executable_roots.iter().any(|root| {
-        fs::canonicalize(root)
-            .map(|root| canonical.starts_with(root))
-            .unwrap_or(false)
-    });
-    if !allowed {
+    let canonical_roots = config
+        .allowed_executable_roots
+        .iter()
+        .map(|root| {
+            fs::canonicalize(root).map_err(|error| io_error("canonicalize executable root", error))
+        })
+        .collect::<RuntimeResult<Vec<_>>>()?;
+    let invocation_parent = path
+        .parent()
+        .ok_or_else(|| RuntimeError::invalid("executable must have an absolute parent", field))?;
+    let canonical_invocation_parent = fs::canonicalize(invocation_parent).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::IoError,
+            format!("canonicalize executable invocation parent: {error}"),
+            Some(field),
+            false,
+        )
+    })?;
+    let invocation_allowed = canonical_roots
+        .iter()
+        .any(|root| canonical_invocation_parent.starts_with(root));
+    let target_allowed = canonical_roots
+        .iter()
+        .any(|root| canonical.starts_with(root));
+    if !invocation_allowed || !target_allowed {
         return Err(RuntimeError::new(
             RuntimeErrorCode::InvalidRequest,
-            "executable is outside configured roots",
-            Some("execution.executable"),
+            "executable invocation and target must both remain inside configured roots",
+            Some(field),
             false,
         ));
     }
-    Ok(canonical)
+    // Preserve the caller-visible invocation path. The canonical target above owns
+    // authority and digest validation; Runner executes that target with this path
+    // restored as argv[0] so multicall/proxy executables retain their semantics.
+    Ok(path.to_path_buf())
 }
 
 pub(super) fn validate_runner(path: &Path) -> RuntimeResult<PathBuf> {
@@ -86,6 +130,7 @@ pub(super) fn build_systemd_run_command(spec: &SystemdRunSpec<'_>) -> RuntimeRes
     let mut command = Command::new("systemd-run");
     command
         .arg(format!("--unit={unit_name}"))
+        .arg("--no-block")
         .args([
             "--property=Type=exec",
             "--property=CollectMode=inactive",
@@ -284,9 +329,13 @@ pub(super) fn release_terminal_unit(unit_name: &str) {
             return;
         }
         if !unit_is_active(&properties) {
-            let _ = Command::new("systemctl")
-                .args(["reset-failed", unit_name])
-                .output();
+            let mut command = Command::new("systemctl");
+            command.args(["reset-failed", unit_name]);
+            let _ = bounded_observation_output(
+                &mut command,
+                SYSTEMCTL_OBSERVATION_TIMEOUT,
+                "systemctl reset-failed",
+            );
             return;
         }
         if Instant::now() >= deadline {
@@ -296,15 +345,53 @@ pub(super) fn release_terminal_unit(unit_name: &str) {
     }
 }
 
+fn bounded_observation_output(
+    command: &mut Command,
+    timeout: Duration,
+    context: &str,
+) -> RuntimeResult<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| tool_error(&format!("cannot execute {context}"), error))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child
+            .try_wait()
+            .map_err(|error| tool_error(&format!("cannot observe {context}"), error))?
+        {
+            Some(_) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| tool_error(&format!("cannot collect {context}"), error));
+            }
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::ToolFailed,
+                    format!("{context} timed out after {} ms", timeout.as_millis()),
+                    None,
+                    true,
+                ));
+            }
+            None => thread::sleep(OBSERVATION_COMMAND_POLL.min(timeout)),
+        }
+    }
+}
+
 pub(super) fn systemctl_show(unit_name: &str) -> RuntimeResult<BTreeMap<String, String>> {
-    let output = Command::new("systemctl")
-        .args([
-            "show",
-            unit_name,
-            "--property=LoadState,ActiveState,SubState,InvocationID,ControlGroup,MainPID,Result,ExecMainCode,ExecMainStatus",
-        ])
-        .output()
-        .map_err(|error| tool_error("cannot execute systemctl show", error))?;
+    let mut command = Command::new("systemctl");
+    command.args([
+        "show",
+        unit_name,
+        "--property=LoadState,ActiveState,SubState,InvocationID,ControlGroup,MainPID,Result,ExecMainCode,ExecMainStatus",
+    ]);
+    let output = bounded_observation_output(
+        &mut command,
+        SYSTEMCTL_OBSERVATION_TIMEOUT,
+        "systemctl show",
+    )?;
     if !output.status.success() && output.stdout.is_empty() {
         return Err(RuntimeError::new(
             RuntimeErrorCode::ToolFailed,
@@ -508,4 +595,148 @@ fn tool_error(context: &str, error: std::io::Error) -> RuntimeError {
         None,
         true,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executable_validation_preserves_absolute_proxy_invocation_path() {
+        let root =
+            std::env::temp_dir().join(format!("ordivon-executable-proxy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let proxy = root.join("true-proxy");
+        std::os::unix::fs::symlink("/usr/bin/true", &proxy).unwrap();
+        let config = UniversalExecutorConfig {
+            store_root: root.join("store"),
+            workspace_root: None,
+            workspace_uid: None,
+            workspace_gid: None,
+            runner_path: PathBuf::from("/usr/bin/true"),
+            allowed_executable_roots: vec![root.clone(), PathBuf::from("/usr/bin")],
+            max_runtime_ms: 60_000,
+            max_output_bytes: 1_048_576,
+        };
+        assert_eq!(
+            validate_executable(&config, proxy.to_str().unwrap(), "execution.executable").unwrap(),
+            proxy
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn executable_validation_rejects_proxy_invocation_outside_allowed_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "ordivon-executable-proxy-outside-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let proxy = root.join("true-proxy");
+        std::os::unix::fs::symlink("/usr/bin/true", &proxy).unwrap();
+        let config = UniversalExecutorConfig {
+            store_root: root.join("store"),
+            workspace_root: None,
+            workspace_uid: None,
+            workspace_gid: None,
+            runner_path: PathBuf::from("/usr/bin/true"),
+            allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
+            max_runtime_ms: 60_000,
+            max_output_bytes: 1_048_576,
+        };
+        let error = validate_executable(&config, proxy.to_str().unwrap(), "execution.executable")
+            .unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+        assert_eq!(error.field.as_deref(), Some("execution.executable"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn executable_validation_rejects_relative_paths_before_resolution() {
+        let config = UniversalExecutorConfig {
+            store_root: PathBuf::from("/tmp/ordivon-relative-executable-test"),
+            workspace_root: None,
+            workspace_uid: None,
+            workspace_gid: None,
+            runner_path: PathBuf::from("/usr/bin/true"),
+            allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
+            max_runtime_ms: 60_000,
+            max_output_bytes: 1_048_576,
+        };
+        let error = validate_executable(&config, "true", "execution.executable").unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+        assert_eq!(error.field.as_deref(), Some("execution.executable"));
+    }
+
+    #[test]
+    fn executable_validation_preserves_exact_step_field_on_physical_failure() {
+        let config = UniversalExecutorConfig {
+            store_root: PathBuf::from("/tmp/ordivon-missing-executable-test"),
+            workspace_root: None,
+            workspace_uid: None,
+            workspace_gid: None,
+            runner_path: PathBuf::from("/usr/bin/true"),
+            allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
+            max_runtime_ms: 60_000,
+            max_output_bytes: 1_048_576,
+        };
+        let error = validate_executable(
+            &config,
+            "/definitely/not/an/ordivon/executable",
+            "execution.steps[3].executable",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::IoError);
+        assert_eq!(
+            error.field.as_deref(),
+            Some("execution.steps[3].executable")
+        );
+    }
+
+    #[test]
+    fn systemd_run_command_submits_without_waiting_for_start_job_completion() {
+        let budget = super::super::ExecutionBudget::default();
+        let environment = BTreeMap::new();
+        let command = build_systemd_run_command(&SystemdRunSpec {
+            unit_name: "ordivon-test.service",
+            runner: Path::new("/usr/bin/true"),
+            bundle_path: Path::new("/tmp/ordivon-test-bundle"),
+            workspace_path: Path::new("/tmp/ordivon-test-workspace"),
+            workspace_git_common_dir: None,
+            input_set_path: None,
+            runtime_ceiling_ms: 5_000,
+            budget: &budget,
+            execution_profile: super::super::ExecutionProfile::TrustedLocal,
+            environment: &environment,
+        })
+        .unwrap();
+        assert!(command.get_args().any(|arg| arg == "--no-block"));
+    }
+
+    #[test]
+    fn bounded_observation_output_fails_fast_for_hung_cli() {
+        let mut command = Command::new("/usr/bin/sh");
+        command.args(["-c", "sleep 5"]);
+        let started = Instant::now();
+        let error =
+            bounded_observation_output(&mut command, Duration::from_millis(50), "test observation")
+                .unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::ToolFailed);
+        assert!(error.retryable);
+        assert!(error.message.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn bounded_observation_output_preserves_success_output() {
+        let mut command = Command::new("/usr/bin/printf");
+        command.arg("ok");
+        let output =
+            bounded_observation_output(&mut command, Duration::from_secs(1), "test observation")
+                .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ok");
+    }
 }

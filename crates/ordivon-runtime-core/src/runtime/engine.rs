@@ -38,10 +38,10 @@ use super::{
 };
 use crate::universal::{
     canonical_directory, create_git_workspace_compact, inspect_workspace_patch_plan,
-    list_workspace_record_inventory, load_workspace_record, mutate_workspace, patch_workspace,
+    list_open_workspace_record_inventory, load_workspace_record, mutate_workspace, patch_workspace,
     plan_workspace_patch, remove_git_workspace, resolve_workspace_cwd,
     result_from_workspace_patch_plan, sha256_bytes, sha256_file, workspace_cleanup_dependents,
-    workspace_git_common_dir_at, workspace_head_revision, workspace_is_dirty,
+    workspace_git_common_dir_at, workspace_head_and_dirty_at, workspace_head_revision,
     workspace_source_state_digest, write_bytes_atomic, write_json_atomic,
     CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
     RunnerInputCommitment, RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskProgress,
@@ -720,7 +720,7 @@ impl Runtime {
                 .map_err(map_universal_error)?;
         }
         let inventory =
-            list_workspace_record_inventory(&self.executor).map_err(map_universal_error)?;
+            list_open_workspace_record_inventory(&self.executor).map_err(map_universal_error)?;
         let (records, next_cursor) =
             workspace_record_page(inventory.records, request.limit, request.cursor.as_ref());
         let mut workspaces = Vec::with_capacity(records.len());
@@ -751,24 +751,20 @@ impl Runtime {
                     continue;
                 }
             };
-            let dirty = match workspace_is_dirty(&self.executor, &record.workspace_id) {
-                Ok(dirty) => dirty,
-                Err(error) => {
-                    issues.push(workspace_issue(
-                        &record.workspace_id,
-                        RuntimeWorkspaceIssueStage::DirtyProbe,
-                        map_universal_error(error),
-                    ));
-                    continue;
-                }
-            };
-            let current_head_revision =
-                match workspace_head_revision(&self.executor, &record.workspace_id) {
-                    Ok(revision) => revision,
+            let (current_head_revision, dirty) =
+                match workspace_head_and_dirty_at(Path::new(&record.workspace_path)) {
+                    Ok(projection) => projection,
                     Err(error) => {
+                        let stage = if error.code
+                            == crate::universal::UniversalExecErrorCode::RevisionNotFound
+                        {
+                            RuntimeWorkspaceIssueStage::HeadRevision
+                        } else {
+                            RuntimeWorkspaceIssueStage::DirtyProbe
+                        };
                         issues.push(workspace_issue(
                             &record.workspace_id,
-                            RuntimeWorkspaceIssueStage::HeadRevision,
+                            stage,
                             map_universal_error(error),
                         ));
                         continue;
@@ -1104,16 +1100,32 @@ impl Runtime {
         let workspace_path =
             canonical_directory(Path::new(&record.workspace_path), "workspacePath")
                 .map_err(map_universal_error)?;
-        let cwd = resolve_workspace_cwd(&record, &request.execution.cwd_relative)
-            .map_err(map_universal_error)?;
-        let executable = validate_executable(&self.executor, &request.execution.executable)?;
+        let cwd = resolve_workspace_cwd(
+            &record,
+            &request.execution.cwd_relative,
+            "execution.cwdRelative",
+        )
+        .map_err(map_universal_error)?;
+        let executable = validate_executable(
+            &self.executor,
+            &request.execution.executable,
+            "execution.executable",
+        )?;
         let base_environment =
             self.execution_environment(&record, request.execution.execution_profile)?;
         let mut steps = Vec::with_capacity(request.execution.steps.len());
-        for step in &request.execution.steps {
-            let step_cwd =
-                resolve_workspace_cwd(&record, &step.cwd_relative).map_err(map_universal_error)?;
-            let step_executable = validate_executable(&self.executor, &step.executable)?;
+        for (step_index, step) in request.execution.steps.iter().enumerate() {
+            let step_cwd = resolve_workspace_cwd(
+                &record,
+                &step.cwd_relative,
+                &format!("execution.steps[{step_index}].cwdRelative"),
+            )
+            .map_err(map_universal_error)?;
+            let step_executable = validate_executable(
+                &self.executor,
+                &step.executable,
+                &format!("execution.steps[{step_index}].executable"),
+            )?;
             steps.push(RuntimeExecutionStep {
                 id: step.id.clone(),
                 executable: step_executable.to_string_lossy().into_owned(),
@@ -2854,7 +2866,7 @@ impl Runtime {
         )
         .map_err(map_universal_error)?;
         let output = Command::new("systemctl")
-            .args(["stop", &attempt.unit_name])
+            .args(["--no-block", "stop", &attempt.unit_name])
             .output()
             .map_err(|error| tool_error("cannot execute systemctl stop", error))?;
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -4221,13 +4233,38 @@ fn read_tail_text(path: &Path, max_bytes: u64) -> RuntimeResult<String> {
     let offset = length.saturating_sub(max_bytes);
     file.seek(SeekFrom::Start(offset))
         .map_err(|error| io_error("seek output tail", error))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    let mut bytes = Vec::with_capacity(usize::try_from(max_bytes.min(length)).unwrap_or(0));
+    file.take(max_bytes)
+        .read_to_end(&mut bytes)
         .map_err(|error| io_error("read output tail", error))?;
-    while offset > 0 && !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
-        bytes.remove(0);
-    }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(test)]
+mod output_tail_tests {
+    use super::*;
+
+    #[test]
+    fn tail_lossy_decode_preserves_valid_text_around_invalid_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "ordivon-tail-test-{}-{}",
+            std::process::id(),
+            now_ms().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("output.log");
+        fs::write(&path, b"0123456789alpha\xffomega").unwrap();
+        let observed = read_tail_text(&path, 11).unwrap();
+        assert!(
+            observed.contains("alpha"),
+            "valid prefix was discarded: {observed:?}"
+        );
+        assert!(
+            observed.contains("omega"),
+            "valid suffix was discarded: {observed:?}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn write_bytes_synced(path: &Path, bytes: &[u8]) -> RuntimeResult<()> {

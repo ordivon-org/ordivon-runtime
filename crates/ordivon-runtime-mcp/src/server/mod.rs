@@ -473,7 +473,10 @@ fn default_patch_diff_bytes() -> u64 {
 }
 
 fn default_exec_wait_ms() -> u64 {
-    30_000
+    // Public MCP admission should return quickly once durable Job identity exists.
+    // Callers that deliberately want a longer synchronous observation may still
+    // request any wait up to Core's MAX_TASK_WAIT_MS.
+    2_000
 }
 
 fn default_exec_tail_bytes() -> u64 {
