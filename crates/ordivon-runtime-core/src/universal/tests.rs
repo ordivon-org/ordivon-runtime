@@ -77,6 +77,56 @@ fn public_requests_reject_unknown_fields_and_path_escape() {
 }
 
 #[test]
+fn workspace_open_missing_revision_is_classified_before_creation() {
+    let sandbox = Sandbox::new("workspace-missing-revision");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-missing-revision";
+
+    let error = create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "definitely-missing-revision".to_string(),
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code, UniversalExecErrorCode::RevisionNotFound);
+    assert_eq!(error.field.as_deref(), Some("sourceRevision"));
+    assert!(!config.workspace_path(workspace_id).exists());
+    assert!(!config.workspace_record_path(workspace_id).exists());
+}
+
+#[test]
+fn workspace_open_non_git_source_is_not_misclassified_as_revision() {
+    let sandbox = Sandbox::new("workspace-non-git-source");
+    let source = sandbox.root.join("source");
+    fs::create_dir_all(&source).unwrap();
+    let config = sandbox.config();
+    let workspace_id = "workspace-non-git-source";
+
+    let error = create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code, UniversalExecErrorCode::ToolFailed);
+    assert_eq!(error.field.as_deref(), Some("sourceRepo"));
+    assert!(!config.workspace_path(workspace_id).exists());
+    assert!(!config.workspace_record_path(workspace_id).exists());
+}
+
+#[test]
 fn workspace_round_trip_is_isolated_and_digest_guarded() {
     let sandbox = Sandbox::new("workspace");
     let source = sandbox.root.join("source");

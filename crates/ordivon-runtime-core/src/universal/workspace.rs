@@ -83,16 +83,7 @@ pub fn create_git_workspace(
         ));
     }
     let source_repo = canonical_directory(Path::new(&request.source_repo), "sourceRepo")?;
-    let revision = git_output(
-        &source_repo,
-        [
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            &format!("{}^{{commit}}", request.source_revision),
-        ],
-    )?;
-    let revision = revision.trim().to_string();
+    let revision = resolve_git_commit(&source_repo, &request.source_revision)?;
     if revision.len() != 40 && revision.len() != 64 {
         return Err(UniversalExecError::new(
             UniversalExecErrorCode::RevisionNotFound,
@@ -2361,6 +2352,54 @@ fn resolve_workspace_write_path(
         }
     }
     Ok(safe_parent.join(file_name))
+}
+
+fn resolve_git_commit(repo: &Path, source_revision: &str) -> Result<String, UniversalExecError> {
+    let revision_spec = format!("{source_revision}^{{commit}}");
+    let output = Command::new("git")
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--verify", "--end-of-options"])
+        .arg(&revision_spec)
+        .output()
+        .map_err(|error| tool_unavailable("git", error))?;
+    if !output.status.success() {
+        let repository_probe = Command::new("git")
+            .arg("--no-optional-locks")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", "--git-dir"])
+            .output()
+            .map_err(|error| tool_unavailable("git", error))?;
+        if !repository_probe.status.success() {
+            let message = String::from_utf8_lossy(&repository_probe.stderr)
+                .trim()
+                .to_string();
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::ToolFailed,
+                format!("source repository is not usable by git: {message}"),
+                Some("sourceRepo"),
+                false,
+            ));
+        }
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::RevisionNotFound,
+            "source revision does not resolve to a commit",
+            Some("sourceRevision"),
+            false,
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map(|revision| revision.trim().to_string())
+        .map_err(|error| {
+            UniversalExecError::new(
+                UniversalExecErrorCode::ToolFailed,
+                format!("git revision output is not UTF-8: {error}"),
+                Some("sourceRevision"),
+                false,
+            )
+        })
 }
 
 fn git_output<'a>(

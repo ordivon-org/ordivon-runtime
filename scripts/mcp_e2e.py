@@ -607,6 +607,40 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             mutate_schema_text,
         )
 
+        missing_revision_workspace_id = f"acceptance-missing-revision-{uuid.uuid4()}"
+        missing_revision = client.tool_result(
+            "workspace.open",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "workspaceId": missing_revision_workspace_id,
+                "sourceRepo": str(source),
+                "sourceRevision": "definitely-missing-revision",
+            },
+        )
+        missing_revision_error = missing_revision.get("structuredContent", {}).get("error", {})
+        check(
+            "workspace-open-missing-revision",
+            missing_revision.get("isError") is True
+            and missing_revision_error.get("code") == "REVISION_NOT_FOUND"
+            and missing_revision_error.get("field") == "sourceRevision"
+            and missing_revision_error.get("commitState") == "not_committed"
+            and missing_revision_error.get("retryClass") == "never",
+            missing_revision,
+        )
+        missing_revision_lookup = client.tool_result(
+            "workspace.get",
+            {"schemaVersion": SCHEMA_VERSION, "workspaceId": missing_revision_workspace_id},
+        )
+        missing_revision_lookup_error = missing_revision_lookup.get("structuredContent", {}).get(
+            "error", {}
+        )
+        check(
+            "workspace-open-missing-revision-no-create",
+            missing_revision_lookup.get("isError") is True
+            and missing_revision_lookup_error.get("code") == "WORKSPACE_NOT_FOUND",
+            missing_revision_lookup,
+        )
+
         workspace_id = f"acceptance-{uuid.uuid4()}"
         opened = client.tool(
             "workspace.open",

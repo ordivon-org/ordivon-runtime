@@ -4,6 +4,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ## Unreleased
 
+- `workspace.open` now classifies a missing Git revision as `REVISION_NOT_FOUND` on `sourceRevision` instead of collapsing the Git rejection into a generic `TOOL_FAILED` error.
+
 - concurrent observers now converge when the exact same Runner identity was already durably bound by another Runtime instance; divergent Runner identity still fails closed and duplicate observation does not append another `RUNNER_BOUND` event.
 
 - added projection-only `task.get` over the existing read-only Runtime Job inspection path, separating ordinary Job reads from `task.observe` reconciliation/dispatch semantics; public timeline detail remains omitted and forensic detail stays operator-local.
