@@ -196,6 +196,7 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
             budget: crate::ExecutionBudget::default(),
             execution_profile: super::ExecutionProfile::TrustedLocal,
             execution_target: super::ExecutionTarget::LocalLinux,
+            windows_authority: super::WindowsAuthority::Limited,
             windows_execution_context: None,
             foreign_references: Vec::new(),
             input_set_id: None,
@@ -1197,6 +1198,7 @@ fn representation_cardinality_is_not_runtime_admission_policy() {
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
             execution_target: ExecutionTarget::LocalLinux,
+            windows_authority: super::WindowsAuthority::Limited,
             foreign_references,
         },
         wait_ms: 0,
@@ -1229,6 +1231,7 @@ fn operator_runtime_and_output_ceilings_are_enforced_before_admission() {
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
             execution_target: super::ExecutionTarget::LocalLinux,
+            windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -1271,6 +1274,7 @@ fn oversized_exec_string_is_rejected_before_admission() {
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
             execution_target: super::ExecutionTarget::LocalLinux,
+            windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -1320,6 +1324,7 @@ fn request_identity_excludes_observation_preferences_and_capacity_policy() {
             budget: ExecutionBudget::default(),
             execution_profile: super::ExecutionProfile::TrustedLocal,
             execution_target: super::ExecutionTarget::LocalLinux,
+            windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -1338,6 +1343,19 @@ fn request_identity_excludes_observation_preferences_and_capacity_policy() {
         operation_request_identity_digest(&windows_native).unwrap(),
         digest,
         "execution target must be part of operation identity"
+    );
+
+    let windows_limited_digest = operation_request_identity_digest(&windows_native).unwrap();
+    assert_eq!(
+        windows_limited_digest,
+        "runtime-request-v1:sha256:3c177dbeb4756a4db09a939de2f923415f6ca5a1ea03d50b7bf4f69c6dfe1078"
+    );
+    let mut windows_elevated = windows_native.clone();
+    windows_elevated.execution.windows_authority = super::WindowsAuthority::Elevated;
+    assert_ne!(
+        operation_request_identity_digest(&windows_elevated).unwrap(),
+        windows_limited_digest,
+        "requested Windows authority must be part of operation identity"
     );
 
     let mut observation_only = base.clone();
@@ -1363,6 +1381,41 @@ fn request_identity_excludes_observation_preferences_and_capacity_policy() {
     assert_ne!(operation_request_identity_digest(&changed).unwrap(), digest);
 }
 
+#[test]
+fn elevated_windows_authority_is_rejected_for_local_linux_before_admission() {
+    let sandbox = Sandbox::new("windows-authority-local-linux", 5000);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let request = TaskRunRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: "request:windows-authority-local-linux".to_string(),
+        principal: "principal:test".to_string(),
+        global_limit: 1,
+        execution: UniversalExecutionRequest {
+            workspace_id: "workspace-does-not-exist".to_string(),
+            executable: "/usr/bin/true".to_string(),
+            args: Vec::new(),
+            cwd_relative: ".".to_string(),
+            env: BTreeMap::new(),
+            timeout_ms: 1_000,
+            stdout_limit_bytes: 1_024,
+            stderr_limit_bytes: 1_024,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            execution_profile: ExecutionProfile::TrustedLocal,
+            execution_target: super::ExecutionTarget::LocalLinux,
+            windows_authority: super::WindowsAuthority::Elevated,
+            foreign_references: Vec::new(),
+        },
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    let error = runtime.run_task(&request).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert_eq!(error.field.as_deref(), Some("execution.windowsAuthority"));
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
+
 fn input_bound_task_request(workspace_id: &str, client_request_id: &str) -> TaskRunRequest {
     TaskRunRequest {
         schema_version: RUNTIME_SCHEMA_VERSION,
@@ -1382,6 +1435,7 @@ fn input_bound_task_request(workspace_id: &str, client_request_id: &str) -> Task
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::ContainedLocal,
             execution_target: super::ExecutionTarget::LocalLinux,
+            windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -1454,6 +1508,7 @@ fn input_bound_proposal_identity_preserves_proposal_and_binding_semantics() {
             budget: request.execution.budget.clone(),
             execution_profile: ExecutionProfile::ContainedLocal,
             execution_target: super::ExecutionTarget::LocalLinux,
+            windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -1639,6 +1694,7 @@ fn execution_profile_and_foreign_references_are_part_of_request_identity() {
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
             execution_target: super::ExecutionTarget::LocalLinux,
+            windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -1717,6 +1773,7 @@ fn duplicate_foreign_references_are_rejected_before_admission() {
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
             execution_target: super::ExecutionTarget::LocalLinux,
+            windows_authority: super::WindowsAuthority::Limited,
             foreign_references: vec![reference.clone(), reference],
         },
         wait_ms: 0,
@@ -2107,6 +2164,7 @@ fn proposal_identity_preserves_omission_and_normalizes_equivalent_paths() {
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
             execution_target: super::ExecutionTarget::LocalLinux,
+            windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,

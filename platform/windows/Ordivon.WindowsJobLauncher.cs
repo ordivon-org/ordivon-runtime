@@ -243,6 +243,12 @@ internal static class OrdivonWindowsJobLauncher
         }
     }
 
+    private enum ExecutionAuthority
+    {
+        Limited,
+        Elevated,
+    }
+
     private sealed class Options
     {
         public string Executable;
@@ -263,6 +269,7 @@ internal static class OrdivonWindowsJobLauncher
         public ulong? StderrLimitBytes;
         public ulong? TimeoutMs;
         public bool DescribeRuntimeContext;
+        public ExecutionAuthority Authority = ExecutionAuthority.Limited;
         public readonly List<string> ContextEnvironmentNames = new List<string>();
 
         public bool RuntimeMode
@@ -467,7 +474,13 @@ internal static class OrdivonWindowsJobLauncher
                 continue;
             }
             string value = RequireValue(args, ref index, current);
-            if (current == "--context-env")
+            if (current == "--authority")
+            {
+                if (String.Equals(value, "limited", StringComparison.OrdinalIgnoreCase)) options.Authority = ExecutionAuthority.Limited;
+                else if (String.Equals(value, "elevated", StringComparison.OrdinalIgnoreCase)) options.Authority = ExecutionAuthority.Elevated;
+                else throw new InvalidOperationException("--authority must be limited or elevated");
+            }
+            else if (current == "--context-env")
             {
                 if (String.IsNullOrWhiteSpace(value) || value.IndexOf('=') >= 0 || value.IndexOf('\0') >= 0)
                 {
@@ -642,6 +655,10 @@ internal static class OrdivonWindowsJobLauncher
         {
             throw new InvalidOperationException("output bounds require --runtime-bundle");
         }
+        else if (options.Authority != ExecutionAuthority.Limited)
+        {
+            throw new InvalidOperationException("--authority requires runtime execution or context description");
+        }
         return options;
     }
 
@@ -661,7 +678,7 @@ internal static class OrdivonWindowsJobLauncher
         try
         {
             TokenEvidence evidence;
-            token = AcquireLimitedExecutionToken(out evidence);
+            token = AcquireExecutionToken(options.Authority, out evidence);
             if (!CreateEnvironmentBlock(out environment, token, false))
             {
                 ThrowWin32("CreateEnvironmentBlock");
@@ -700,6 +717,38 @@ internal static class OrdivonWindowsJobLauncher
         {
             if (environment != IntPtr.Zero) DestroyEnvironmentBlock(environment);
             if (token != IntPtr.Zero) CloseHandle(token);
+        }
+    }
+
+    private static IntPtr AcquireExecutionToken(ExecutionAuthority authority, out TokenEvidence evidence)
+    {
+        return authority == ExecutionAuthority.Elevated
+            ? AcquireElevatedExecutionToken(out evidence)
+            : AcquireLimitedExecutionToken(out evidence);
+    }
+
+    private static IntPtr AcquireElevatedExecutionToken(out TokenEvidence evidence)
+    {
+        IntPtr current = IntPtr.Zero;
+        uint access = TokenQuery | TokenDuplicate | TokenAssignPrimary | TokenAdjustDefault;
+        if (!OpenProcessToken(GetCurrentProcess(), access, out current)) ThrowWin32("OpenProcessToken(elevated)");
+        try
+        {
+            evidence = ReadTokenEvidence(current, "current_elevated");
+            if (evidence.TokenType != TokenPrimary
+                || !evidence.IsElevated
+                || evidence.IntegrityLevelRid < 12288
+                || !GroupIsEnabled(evidence.AdministratorsGroupAttributes))
+            {
+                throw new InvalidOperationException("explicit elevated authority is unavailable from the current Windows provider token");
+            }
+            IntPtr selected = current;
+            current = IntPtr.Zero;
+            return selected;
+        }
+        finally
+        {
+            if (current != IntPtr.Zero) CloseHandle(current);
         }
     }
 
@@ -1019,7 +1068,7 @@ internal static class OrdivonWindowsJobLauncher
             }
             ConfigureExtendedLimits(job, options);
             uint cpuRate = ConfigureCpuRate(job, options.CpuQuotaPercent);
-            executionToken = AcquireLimitedExecutionToken(out tokenEvidence);
+            executionToken = AcquireExecutionToken(options.Authority, out tokenEvidence);
             environment = BuildEnvironment(options);
 
             stdoutCapture = CreateCaptureWorker(

@@ -2,6 +2,7 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using Microsoft.Win32;
 using System.Text;
 using System.Threading;
 
@@ -23,6 +24,7 @@ internal static class OrdivonWindowsJobFixture
         if (mode == "memory") return Memory(args);
         if (mode == "cpu") return Cpu(args);
         if (mode == "echo") return Echo(args);
+        if (mode == "authority-probe") return AuthorityProbe(args);
         Console.Error.WriteLine("unknown fixture mode: " + mode);
         return 64;
     }
@@ -154,6 +156,35 @@ internal static class OrdivonWindowsJobFixture
             Console.WriteLine("W1_ECHO_ARG_" + (i - 1) + "_B64=" + B64(args[i]));
         }
         return 0;
+    }
+
+    private static int AuthorityProbe(string[] args)
+    {
+        string marker = args[1];
+        string keyPath = "SOFTWARE\\OrdivonRuntimeRw3\\" + marker;
+        try
+        {
+            using (RegistryKey key = Registry.LocalMachine.CreateSubKey(keyPath, true))
+            {
+                if (key == null) throw new InvalidOperationException("HKLM CreateSubKey returned null");
+                key.SetValue("marker", marker, RegistryValueKind.String);
+                string observed = key.GetValue("marker") as string;
+                if (observed != marker) throw new InvalidOperationException("HKLM marker readback mismatch");
+            }
+            Registry.LocalMachine.DeleteSubKeyTree(keyPath, false);
+            Console.WriteLine("W1_AUTHORITY_HKLM=allowed marker=" + marker);
+            return 0;
+        }
+        catch (UnauthorizedAccessException error)
+        {
+            Console.WriteLine("W1_AUTHORITY_HKLM=denied marker=" + marker + " type=" + error.GetType().Name);
+            return 0;
+        }
+        catch (System.Security.SecurityException error)
+        {
+            Console.WriteLine("W1_AUTHORITY_HKLM=denied marker=" + marker + " type=" + error.GetType().Name);
+            return 0;
+        }
     }
 
     private static string B64(string value)

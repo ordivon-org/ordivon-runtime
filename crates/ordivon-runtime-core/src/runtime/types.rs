@@ -297,10 +297,28 @@ impl ExecutionTarget {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsAuthority {
+    #[default]
+    Limited,
+    Elevated,
+}
+
+impl WindowsAuthority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Limited => "limited",
+            Self::Elevated => "elevated",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WindowsTokenClass {
     Limited,
+    Elevated,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
@@ -469,6 +487,8 @@ pub struct RuntimeExecutionPlan {
     pub execution_profile: ExecutionProfile,
     #[serde(default)]
     pub execution_target: ExecutionTarget,
+    #[serde(default)]
+    pub windows_authority: WindowsAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub windows_execution_context: Option<WindowsExecutionContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -515,6 +535,8 @@ struct OperationRequestIdentity {
     execution_profile: ExecutionProfile,
     #[serde(default, skip_serializing_if = "ExecutionTarget::is_default")]
     execution_target: ExecutionTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windows_authority: Option<WindowsAuthority>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     foreign_references: Vec<ForeignReference>,
 }
@@ -564,8 +586,20 @@ struct ProposalRequestIdentity {
     execution_profile: ExecutionProfile,
     #[serde(default, skip_serializing_if = "ExecutionTarget::is_default")]
     execution_target: ExecutionTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windows_authority: Option<WindowsAuthority>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     foreign_references: Vec<ForeignReference>,
+}
+
+fn identity_windows_authority(
+    target: ExecutionTarget,
+    authority: WindowsAuthority,
+) -> Option<WindowsAuthority> {
+    match (target, authority) {
+        (ExecutionTarget::WindowsNative, WindowsAuthority::Elevated) => Some(authority),
+        _ => None,
+    }
 }
 
 pub(crate) fn operation_request_identity_digest(request: &TaskRunRequest) -> RuntimeResult<String> {
@@ -588,6 +622,10 @@ fn operation_request_identity(request: &TaskRunRequest) -> OperationRequestIdent
         budget: request.execution.budget.clone(),
         execution_profile: request.execution.execution_profile,
         execution_target: request.execution.execution_target,
+        windows_authority: identity_windows_authority(
+            request.execution.execution_target,
+            request.execution.windows_authority,
+        ),
         foreign_references: request.execution.foreign_references.clone(),
     }
 }
@@ -670,6 +708,10 @@ fn proposal_request_identity(proposal: &TaskRunProposal) -> ProposalRequestIdent
         budget: proposal.execution.budget.clone(),
         execution_profile: proposal.execution.execution_profile,
         execution_target: proposal.execution.execution_target,
+        windows_authority: identity_windows_authority(
+            proposal.execution.execution_target,
+            proposal.execution.windows_authority,
+        ),
         foreign_references: proposal.execution.foreign_references.clone(),
     }
 }
@@ -756,6 +798,10 @@ pub(crate) fn operation_request_identity_digest_from_plan(
         budget: plan.budget.clone(),
         execution_profile: plan.execution_profile,
         execution_target: plan.execution_target,
+        windows_authority: identity_windows_authority(
+            plan.execution_target,
+            plan.windows_authority,
+        ),
         foreign_references: plan.foreign_references.clone(),
     })
 }
@@ -1250,6 +1296,8 @@ pub struct ExecutionProposal {
     pub execution_profile: ExecutionProfile,
     #[serde(default)]
     pub execution_target: ExecutionTarget,
+    #[serde(default)]
+    pub windows_authority: WindowsAuthority,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
 }
@@ -1298,6 +1346,8 @@ pub struct UniversalExecutionRequest {
     pub execution_profile: ExecutionProfile,
     #[serde(default)]
     pub execution_target: ExecutionTarget,
+    #[serde(default)]
+    pub windows_authority: WindowsAuthority,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
 }

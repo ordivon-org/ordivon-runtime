@@ -101,7 +101,7 @@ The complete Runtime path requires:
 - Python 3.11 or newer for operational scripts;
 - root or an equivalently privileged dedicated service account for the current trusted-local deployment model.
 
-Portable unit and protocol checks run on ordinary Linux CI. Real Linux process-supervision acceptance requires the local systemd/cgroup environment. The experimental `windows_native` target additionally requires WSL interop, an explicit repository-built Windows launcher path, and an explicit WSL distribution name; instances without those provider facts reject Windows admission. New Windows Jobs execute under a verified limited native token and freeze a bounded Windows-native baseline environment at admission rather than inheriting the WSL launcher environment.
+Portable unit and protocol checks run on ordinary Linux CI. Real Linux process-supervision acceptance requires the local systemd/cgroup environment. The experimental `windows_native` target additionally requires WSL interop, an explicit repository-built Windows launcher path, and an explicit WSL distribution name; instances without those provider facts reject Windows admission. New Windows Jobs execute under a verified limited native token by default and freeze a bounded Windows-native baseline environment at admission rather than inheriting the WSL launcher environment. Explicit `windowsAuthority=elevated` is identity-bound selection of already-present provider authority and must be independently proven effective; Runtime never invokes an elevation UI or silently upgrades a Job.
 
 ## Quick start
 

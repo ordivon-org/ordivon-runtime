@@ -63,9 +63,9 @@ pub use types::{
     RuntimeWorkspaceIssueStage, RuntimeWorkspaceListCursor, RuntimeWorkspaceListRequest,
     RuntimeWorkspaceListResult, RuntimeWorkspaceSummary, SubmitRequest, TaskCancelRequest,
     TaskObservation, TaskObserveRequest, TaskObserveWaitUntil, TaskRunProposal, TaskRunRequest,
-    TerminalCommit, UniversalExecutionRequest, UniversalExecutionStep, WindowsExecutionContext,
-    WindowsTokenClass, MAX_ARTIFACT_READ_BYTES, MAX_RUNTIME_LIST_LIMIT, MAX_TASK_TAIL_BYTES,
-    MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
+    TerminalCommit, UniversalExecutionRequest, UniversalExecutionStep, WindowsAuthority,
+    WindowsExecutionContext, WindowsTokenClass, MAX_ARTIFACT_READ_BYTES, MAX_RUNTIME_LIST_LIMIT,
+    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
 };
 pub use windows::WindowsExecutionConfig;
 

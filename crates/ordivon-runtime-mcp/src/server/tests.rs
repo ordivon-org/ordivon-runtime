@@ -88,6 +88,7 @@ fn exec_tool_request(
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
             execution_target: ExecutionTarget::LocalLinux,
+            windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -224,6 +225,7 @@ fn workspace_exec_bound_binding_forces_contained_local() {
             steps: Vec::new(),
             budget: ExecutionBudget::default(),
             execution_target: ExecutionTarget::LocalLinux,
+            windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         inputs: vec![InputBindingRequest {
@@ -293,6 +295,7 @@ fn workspace_exec_plan_keeps_legacy_sum_only_for_legacy_shape() {
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
             execution_target: ExecutionTarget::LocalLinux,
+            windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -327,6 +330,7 @@ fn workspace_exec_plan_keeps_legacy_sum_only_for_legacy_shape() {
             budget: ExecutionBudget::default(),
             execution_profile: ExecutionProfile::TrustedLocal,
             execution_target: ExecutionTarget::LocalLinux,
+            windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         wait_ms: 0,
@@ -519,6 +523,14 @@ fn tool_catalog_uses_transactional_job_contract() {
     assert_eq!(
         exec_schema.pointer("/$defs/ExecutionTarget/enum"),
         Some(&serde_json::json!(["local_linux", "windows_native"]))
+    );
+    assert_eq!(
+        exec_schema.pointer("/$defs/ExecutionProposal/properties/windowsAuthority/default"),
+        Some(&serde_json::json!("limited"))
+    );
+    assert_eq!(
+        exec_schema.pointer("/$defs/WindowsAuthority/enum"),
+        Some(&serde_json::json!(["limited", "elevated"]))
     );
     assert!(exec_schema
         .pointer("/$defs/ExecutionProposal/properties/foreignReferences/maxItems")

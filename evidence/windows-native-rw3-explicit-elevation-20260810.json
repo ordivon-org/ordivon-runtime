@@ -1,0 +1,100 @@
+{
+  "boundariesNotClaimed": [
+    "scoped Windows Power Request",
+    "Long Paths admission evidence",
+    "WSL-restart-independent native Windows process reconciliation",
+    "Windows-native immutable-input admission",
+    "structured multi-step windows_native execution"
+  ],
+  "claims": {
+    "elevatedCancelKillsDescendants": true,
+    "elevatedHklmCapabilityAllowedAndCleaned": true,
+    "elevatedHklmMarkerAbsentAfterProbe": true,
+    "elevatedTimeoutKillsDescendants": true,
+    "executionProfileUnchanged": true,
+    "explicitElevatedAuthorityIsOperationIdentityBound": true,
+    "historicalLinuxOperationIdentityPreserved": true,
+    "limitedAndElevatedExactReplayWorkWithoutCurrentLauncher": true,
+    "limitedAndElevatedUseSameBoundedBaselineEnvironment": true,
+    "limitedAndElevatedUseSameUserSid": true,
+    "limitedHklmCapabilityDenied": true,
+    "limitedHklmMarkerAbsentAfterProbe": true,
+    "limitedIsDefault": true,
+    "requestedAndEffectiveAuthorityAreSeparateEvidence": true,
+    "runtimeDoesNotInvokeElevationUi": true,
+    "runtimeDoesNotUseLinkedUacTokenAsPrimaryAuthority": true,
+    "rw2LimitedOperationIdentityPreserved": true,
+    "windowsAuthorityIsTargetSpecific": true
+  },
+  "finalExactAcceptance": {
+    "attemptId": "attempt-019fe771-0506-7400-9972-4e3f47ca5c10",
+    "completedSteps": 8,
+    "diffCheckPassed": true,
+    "documentationContractValid": true,
+    "jobId": "job-019fe771-0506-7400-9972-4e2880fac434",
+    "launcherAcceptancePassed": true,
+    "localAcceptanceContractValid": true,
+    "pythonOperationalTestsPassed": 88,
+    "pythonOptionalSkips": 5,
+    "runtimeMainTestsPassed": 3,
+    "runtimeMcpTestsPassed": 32,
+    "rustCoreTestsPassed": 195,
+    "terminalEvidenceDigest": "sha256:48158ac96b72b491d11b29819ad66606f434fd20f21c2852085a296a5accf907",
+    "windowsRuntimeIntegrationPassed": true
+  },
+  "kind": "ordivon.runtime.windows-native-rw3-explicit-elevation-acceptance",
+  "launcherAcceptance": {
+    "elevated": {
+      "administratorsGroupAttributes": 15,
+      "integrityLevelRid": 12288,
+      "tokenIsElevated": true,
+      "tokenSelection": "current_elevated"
+    },
+    "killOnCloseRemaining": 0,
+    "limited": {
+      "administratorsGroupAttributes": 16,
+      "integrityLevelRid": 8192,
+      "tokenIsElevated": false,
+      "tokenSelection": "lua_medium_filtered"
+    },
+    "sameEnvironment": true,
+    "sameUserSid": true
+  },
+  "nextLayer": "R-W4 scoped Windows Power Request tied to Attempt lifetime",
+  "operationIdentity": {
+    "explicitElevatedDiffersFromLimited": true,
+    "historicalLinuxDigest": "runtime-request-v1:sha256:588131daa80c66808139c86fada4fd1b07ed3b67b276b5da7b2ff0a0462bbc22",
+    "rw2WindowsLimitedDigest": "runtime-request-v1:sha256:3c177dbeb4756a4db09a939de2f923415f6ca5a1ea03d50b7bf4f69c6dfe1078"
+  },
+  "runtimePhysicalAcceptance": {
+    "elevatedAdministratorsGroupAttributes": 15,
+    "elevatedAttemptId": "attempt-019fe771-bfd6-7812-9530-e812b1ab51f6",
+    "elevatedCancel": {
+      "jobId": "job-019fe771-d61e-70e0-808f-b138391452a9",
+      "remainingMarkerProcesses": 0
+    },
+    "elevatedHklm": "allowed_cleaned_and_externally_absent",
+    "elevatedIntegrityLevelRid": 12288,
+    "elevatedJobId": "job-019fe771-bfd6-7812-9530-e80d36f7b419",
+    "elevatedReplayWithoutLauncher": true,
+    "elevatedTimeout": {
+      "jobId": "job-019fe771-cf39-73d2-baf7-9654431fb78a",
+      "remainingMarkerProcesses": 0
+    },
+    "limitedAttemptId": "attempt-019fe771-ba77-7472-b22a-83cc7dd5c385",
+    "limitedCancel": {
+      "jobId": "job-019fe771-c96f-7a00-843a-e7cfb6672cda",
+      "remainingMarkerProcesses": 0
+    },
+    "limitedHklm": "denied_and_externally_absent",
+    "limitedJobId": "job-019fe771-ba77-7472-b22a-83be93643bb3",
+    "limitedReplayWithoutLauncher": true,
+    "limitedTimeout": {
+      "jobId": "job-019fe771-c2c2-7802-b00c-5018fcea4bc4",
+      "remainingMarkerProcesses": 0
+    }
+  },
+  "schemaVersion": 1,
+  "sourceBaseRevision": "f3d6840fba644c66524bb4dd0236fc765c2eba79",
+  "status": "passed"
+}

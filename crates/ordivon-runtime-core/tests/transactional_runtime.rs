@@ -129,6 +129,7 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
             budget: ordivon_runtime_core::ExecutionBudget::default(),
             execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
             execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
+            windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         wait_ms: 30_000,
@@ -253,6 +254,23 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
             .expect("test path must be on C:");
         format!("C:\\{}", rest.replace('/', "\\"))
     }
+
+    fn registry_marker_exists(marker: &str) -> bool {
+        let escaped = marker.replace('\'', "''");
+        let script = format!(
+            "if (Test-Path 'HKLM:\\SOFTWARE\\OrdivonRuntimeRw3\\{escaped}') {{ Write-Output 1 }} else {{ Write-Output 0 }}"
+        );
+        let output = Command::new("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim() == "1"
+    }
     for (source, output) in [(&launcher_source, &launcher), (&fixture_source, &fixture)] {
         let compiled = Command::new(&csc)
             .args([
@@ -337,6 +355,7 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
             },
             execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
             execution_target: ordivon_runtime_core::ExecutionTarget::WindowsNative,
+            windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
         },
         wait_ms: 30_000,
@@ -453,6 +472,7 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     let terminal_json: serde_json::Value =
         serde_json::from_str(&terminal_evidence.content).unwrap();
     assert_eq!(terminal_json["executionTarget"], "windows_native");
+    assert_eq!(terminal_json["windowsAuthority"], "limited");
     assert_eq!(
         terminal_json["windowsExecutionContext"]["tokenClass"],
         "limited"
@@ -472,6 +492,124 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
         .any(|value| value == &serde_json::Value::String(format!("{attempt_id}.windows-start"))));
 
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+
+    let limited_admin_marker = format!("LIMITED_{}", Uuid::now_v7());
+    let mut limited_admin_request = request.clone();
+    limited_admin_request.client_request_id =
+        format!("request:windows-limited-admin:{}", Uuid::now_v7());
+    limited_admin_request.execution.args =
+        vec!["authority-probe".to_string(), limited_admin_marker.clone()];
+    let limited_admin = runtime.run_task(&limited_admin_request).unwrap();
+    assert_eq!(
+        limited_admin.status, "succeeded",
+        "{}",
+        limited_admin.stderr_tail
+    );
+    assert!(limited_admin.stdout_tail.contains(&format!(
+        "W1_AUTHORITY_HKLM=denied marker={limited_admin_marker}"
+    )));
+    assert!(!registry_marker_exists(&limited_admin_marker));
+
+    let elevated_marker = format!("ELEVATED_{}", Uuid::now_v7());
+    let mut elevated_request = request.clone();
+    elevated_request.client_request_id = format!("request:windows-elevated:{}", Uuid::now_v7());
+    elevated_request.execution.windows_authority = ordivon_runtime_core::WindowsAuthority::Elevated;
+    elevated_request.execution.args = vec!["authority-probe".to_string(), elevated_marker.clone()];
+    let elevated = runtime.run_task(&elevated_request).unwrap();
+    assert_eq!(elevated.status, "succeeded", "{}", elevated.stderr_tail);
+    assert!(elevated.stdout_tail.contains(&format!(
+        "W1_AUTHORITY_HKLM=allowed marker={elevated_marker}"
+    )));
+    assert!(!registry_marker_exists(&elevated_marker));
+    let elevated_attempt_id = elevated.attempt_id.clone().unwrap();
+    let elevated_job = runtime.registry().get_job(&elevated.job_id).unwrap();
+    let elevated_plan: RuntimeExecutionPlan =
+        serde_json::from_str(&elevated_job.execution_plan_json).unwrap();
+    assert_eq!(
+        elevated_plan.windows_authority,
+        ordivon_runtime_core::WindowsAuthority::Elevated
+    );
+    let elevated_context = elevated_plan.windows_execution_context.as_ref().unwrap();
+    assert_eq!(
+        elevated_context.token_class,
+        ordivon_runtime_core::WindowsTokenClass::Elevated
+    );
+    assert_eq!(
+        elevated_context.token_user_sid,
+        committed_windows.token_user_sid
+    );
+    let elevated_artifacts = runtime.registry().list_artifacts(&elevated.job_id).unwrap();
+    let elevated_start = elevated_artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "windows_start")
+        .unwrap();
+    let elevated_start_value: serde_json::Value = serde_json::from_str(
+        &runtime
+            .read_artifact(&ArtifactReadRequest {
+                schema_version: RUNTIME_SCHEMA_VERSION,
+                job_id: elevated.job_id.clone(),
+                artifact_id: elevated_start.artifact_id.clone(),
+                offset: 0,
+                max_bytes: 65_536,
+            })
+            .unwrap()
+            .content,
+    )
+    .unwrap();
+    assert_eq!(elevated_start_value["tokenSelection"], "current_elevated");
+    assert_eq!(
+        elevated_start_value["tokenUserSid"],
+        committed_windows.token_user_sid
+    );
+    assert_eq!(elevated_start_value["tokenType"], 1);
+    assert_eq!(elevated_start_value["tokenIsElevated"], true);
+    assert!(
+        elevated_start_value["tokenIntegrityLevelRid"]
+            .as_i64()
+            .unwrap()
+            >= 12288
+    );
+    let elevated_admin_attrs = elevated_start_value["administratorsGroupAttributes"]
+        .as_u64()
+        .unwrap();
+    assert_ne!(elevated_admin_attrs & 0x4, 0);
+    assert_eq!(elevated_admin_attrs & 0x10, 0);
+    let elevated_terminal = elevated_artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "terminal_evidence")
+        .unwrap();
+    let elevated_terminal_value: serde_json::Value = serde_json::from_str(
+        &runtime
+            .read_artifact(&ArtifactReadRequest {
+                schema_version: RUNTIME_SCHEMA_VERSION,
+                job_id: elevated.job_id.clone(),
+                artifact_id: elevated_terminal.artifact_id.clone(),
+                offset: 0,
+                max_bytes: 65_536,
+            })
+            .unwrap()
+            .content,
+    )
+    .unwrap();
+    assert_eq!(elevated_terminal_value["windowsAuthority"], "elevated");
+    assert_eq!(
+        elevated_terminal_value["windowsExecutionContext"]["tokenClass"],
+        "elevated"
+    );
+    assert_eq!(
+        elevated_terminal_value["windowsExecutionContext"]["tokenUserSid"],
+        committed_windows.token_user_sid
+    );
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    println!(
+        "RW3_WINDOWS_ELEVATED jobId={} attemptId={} windowsPid={} integrity={} adminAttrs={} hklm=allowed",
+        elevated.job_id,
+        elevated_attempt_id,
+        elevated_start_value["processId"].as_u64().unwrap(),
+        elevated_start_value["tokenIntegrityLevelRid"].as_i64().unwrap(),
+        elevated_admin_attrs,
+    );
+
     println!(
         "RW2_WINDOWS_RUNTIME jobId={} attemptId={} windowsPid={} creationFileTime={} imageDigest={} artifacts={}",
         first.job_id,
@@ -608,12 +746,143 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
         .args(["reset-failed", &cancel_unit])
         .output();
 
+    let elevated_timeout_marker = format!("ORDIVON_RW3_ELEVATED_TIMEOUT_{}", Uuid::now_v7());
+    let mut elevated_timeout_request = elevated_request.clone();
+    elevated_timeout_request.client_request_id =
+        format!("request:windows-elevated-timeout:{}", Uuid::now_v7());
+    elevated_timeout_request.execution.args =
+        vec!["tree".to_string(), elevated_timeout_marker.clone()];
+    elevated_timeout_request.execution.timeout_ms = 300;
+    elevated_timeout_request.execution.budget.tasks_max = Some(8);
+    let elevated_timeout_started = Instant::now();
+    let elevated_timed_out = runtime.run_task(&elevated_timeout_request).unwrap();
+    assert_eq!(
+        elevated_timed_out.status, "timed_out",
+        "{}",
+        elevated_timed_out.stderr_tail
+    );
+    assert!(elevated_timeout_started.elapsed() < Duration::from_secs(3));
+    assert!(elevated_timed_out.execution_terminal);
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    thread::sleep(Duration::from_millis(500));
+    let elevated_timeout_probe = format!(
+        "$m='{}'; $rows=Get-CimInstance Win32_Process | Where-Object {{$_.ProcessId -ne $PID -and $_.CommandLine -like ('*'+$m+'*')}}; Write-Output @($rows).Count",
+        elevated_timeout_marker
+    );
+    let elevated_timeout_remaining =
+        Command::new("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+            .args(["-NoProfile", "-Command", &elevated_timeout_probe])
+            .output()
+            .unwrap();
+    assert!(
+        elevated_timeout_remaining.status.success(),
+        "{}",
+        String::from_utf8_lossy(&elevated_timeout_remaining.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&elevated_timeout_remaining.stdout).trim(),
+        "0"
+    );
+    println!(
+        "RW3_WINDOWS_ELEVATED_TIMEOUT jobId={} attemptId={} elapsedMs={} remaining=0",
+        elevated_timed_out.job_id,
+        elevated_timed_out.attempt_id.as_deref().unwrap(),
+        elevated_timeout_started.elapsed().as_millis(),
+    );
+    let elevated_timeout_unit = format!(
+        "ordivon-{}.service",
+        elevated_timed_out.attempt_id.as_deref().unwrap()
+    );
+    let _ = Command::new("systemctl")
+        .args(["stop", &elevated_timeout_unit])
+        .output();
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &elevated_timeout_unit])
+        .output();
+
+    let elevated_cancel_marker = format!("ORDIVON_RW3_ELEVATED_CANCEL_{}", Uuid::now_v7());
+    let mut elevated_cancel_request = elevated_request.clone();
+    elevated_cancel_request.client_request_id =
+        format!("request:windows-elevated-cancel:{}", Uuid::now_v7());
+    elevated_cancel_request.execution.args =
+        vec!["tree".to_string(), elevated_cancel_marker.clone()];
+    elevated_cancel_request.execution.timeout_ms = 20_000;
+    elevated_cancel_request.execution.budget.tasks_max = Some(8);
+    elevated_cancel_request.wait_ms = 0;
+    let started_elevated_cancel = runtime.run_task(&elevated_cancel_request).unwrap();
+    assert!(matches!(
+        started_elevated_cancel.status.as_str(),
+        "queued" | "working"
+    ));
+    let elevated_running_deadline = Instant::now() + Duration::from_secs(10);
+    let elevated_cancel_attempt = loop {
+        let attempt = runtime
+            .registry()
+            .get_latest_attempt(&started_elevated_cancel.job_id)
+            .unwrap()
+            .unwrap();
+        if attempt.state == AttemptState::Running
+            && attempt.control_group.is_some()
+            && attempt.invocation_id.is_some()
+        {
+            break attempt;
+        }
+        assert!(
+            Instant::now() < elevated_running_deadline,
+            "Elevated Windows cancel Attempt did not become running"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    let elevated_cancelled = runtime
+        .cancel_task(&TaskCancelRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: started_elevated_cancel.job_id.clone(),
+        })
+        .unwrap();
+    assert_eq!(elevated_cancelled.status, "cancelled");
+    assert!(elevated_cancelled.execution_terminal);
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    thread::sleep(Duration::from_millis(500));
+    let elevated_cancel_probe = format!(
+        "$m='{}'; $rows=Get-CimInstance Win32_Process | Where-Object {{$_.ProcessId -ne $PID -and $_.CommandLine -like ('*'+$m+'*')}}; Write-Output @($rows).Count",
+        elevated_cancel_marker
+    );
+    let elevated_cancel_remaining =
+        Command::new("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+            .args(["-NoProfile", "-Command", &elevated_cancel_probe])
+            .output()
+            .unwrap();
+    assert!(
+        elevated_cancel_remaining.status.success(),
+        "{}",
+        String::from_utf8_lossy(&elevated_cancel_remaining.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&elevated_cancel_remaining.stdout).trim(),
+        "0"
+    );
+    println!(
+        "RW3_WINDOWS_ELEVATED_CANCEL jobId={} attemptId={} remaining=0",
+        started_elevated_cancel.job_id, elevated_cancel_attempt.attempt_id,
+    );
+    let elevated_cancel_unit = format!("ordivon-{}.service", elevated_cancel_attempt.attempt_id);
+    let _ = Command::new("systemctl")
+        .args(["stop", &elevated_cancel_unit])
+        .output();
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &elevated_cancel_unit])
+        .output();
+
     let launcher_unavailable = launcher.with_extension("exe.replay-proof-unavailable");
     fs::rename(&launcher, &launcher_unavailable).unwrap();
     let replay = runtime.run_task(&request).unwrap();
     assert_eq!(replay.job_id, first.job_id);
     assert_eq!(replay.attempt_id, first.attempt_id);
     assert_eq!(replay.status, "succeeded");
+    let elevated_replay = runtime.run_task(&elevated_request).unwrap();
+    assert_eq!(elevated_replay.job_id, elevated.job_id);
+    assert_eq!(elevated_replay.attempt_id, elevated.attempt_id);
+    assert_eq!(elevated_replay.status, "succeeded");
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
     fs::rename(&launcher_unavailable, &launcher).unwrap();
     println!(
@@ -1001,6 +1270,7 @@ impl IntegrationContext {
                 budget: ordivon_runtime_core::ExecutionBudget::default(),
                 execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
                 execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
+                windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
                 foreign_references: Vec::new(),
             },
             wait_ms,
@@ -1220,6 +1490,7 @@ print("WRITE_OK=" + pathlib.Path("contained-output.txt").read_text(), flush=True
             budget: ExecutionBudget::default(),
             execution_profile: ordivon_runtime_core::ExecutionProfile::ContainedLocal,
             execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
+            windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: vec![ordivon_runtime_core::ForeignReference {
                 namespace: "ordivon.edge".to_string(),
                 reference_type: "supervisor_generation".to_string(),
@@ -2148,6 +2419,7 @@ impl IntegrationContext {
                 budget: ordivon_runtime_core::ExecutionBudget::default(),
                 execution_profile: ordivon_runtime_core::ExecutionProfile::TrustedLocal,
                 execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
+                windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
                 windows_execution_context: None,
                 foreign_references: Vec::new(),
                 input_set_id: None,
@@ -2608,6 +2880,7 @@ fn runtime_finance_i8_graduation_matches_canonical_semantics_with_job_owned_inpu
             budget: ExecutionBudget::default(),
             execution_profile: ordivon_runtime_core::ExecutionProfile::ContainedLocal,
             execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
+            windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: vec![ForeignReference {
                 namespace: "ordivon.finance".to_string(),
                 reference_type: "state_version".to_string(),

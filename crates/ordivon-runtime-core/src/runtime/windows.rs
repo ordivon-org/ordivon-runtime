@@ -14,7 +14,7 @@ use std::process::{Command, Output};
 
 use serde::Deserialize;
 
-use super::{ExecutionBudget, RuntimeError, RuntimeErrorCode, RuntimeResult};
+use super::{ExecutionBudget, RuntimeError, RuntimeErrorCode, RuntimeResult, WindowsAuthority};
 
 const WINDOWS_BASELINE_ENVIRONMENT_NAMES: &[&str] = &[
     "APPDATA",
@@ -160,6 +160,7 @@ pub(crate) struct WindowsSystemdRunSpec<'a> {
     pub job_id: &'a str,
     pub attempt_id: &'a str,
     pub launch_token_digest: &'a str,
+    pub authority: WindowsAuthority,
     pub executable: &'a Path,
     pub args: &'a [String],
     pub cwd: &'a Path,
@@ -173,6 +174,7 @@ pub(crate) struct WindowsSystemdRunSpec<'a> {
 
 pub(crate) fn snapshot_windows_runtime_context(
     config: &WindowsExecutionConfig,
+    authority: WindowsAuthority,
 ) -> RuntimeResult<WindowsRuntimeContextSnapshot> {
     config.validate()?;
     let launcher = fs::canonicalize(&config.launcher_path).map_err(|error| {
@@ -184,7 +186,10 @@ pub(crate) fn snapshot_windows_runtime_context(
         )
     })?;
     let mut command = Command::new(launcher);
-    command.arg("--describe-runtime-context");
+    command
+        .arg("--describe-runtime-context")
+        .arg("--authority")
+        .arg(authority.as_str());
     for name in WINDOWS_BASELINE_ENVIRONMENT_NAMES {
         command.arg("--context-env").arg(name);
     }
@@ -219,27 +224,49 @@ pub(crate) fn snapshot_windows_runtime_context(
                 false,
             )
         })?;
-    validate_windows_runtime_context(&snapshot)?;
+    validate_windows_runtime_context(&snapshot, authority)?;
     Ok(snapshot)
 }
 
-fn validate_windows_runtime_context(snapshot: &WindowsRuntimeContextSnapshot) -> RuntimeResult<()> {
+fn validate_windows_runtime_context(
+    snapshot: &WindowsRuntimeContextSnapshot,
+    authority: WindowsAuthority,
+) -> RuntimeResult<()> {
+    let token_authority_valid = match authority {
+        WindowsAuthority::Limited => {
+            !snapshot.token_is_elevated
+                && snapshot.token_integrity_level_rid <= 8192
+                && (snapshot.administrators_group_attributes == u32::MAX
+                    || (snapshot.administrators_group_attributes & 0x4) == 0
+                    || (snapshot.administrators_group_attributes & 0x10) != 0)
+                && matches!(
+                    snapshot.token_selection.as_str(),
+                    "lua_medium_filtered" | "current_limited"
+                )
+                && (snapshot.token_selection != "lua_medium_filtered"
+                    || snapshot.administrators_group_attributes == u32::MAX
+                    || (snapshot.administrators_group_attributes & 0x10) != 0)
+        }
+        WindowsAuthority::Elevated => {
+            snapshot.token_is_elevated
+                && snapshot.token_integrity_level_rid >= 12288
+                && snapshot.administrators_group_attributes != u32::MAX
+                && (snapshot.administrators_group_attributes & 0x4) != 0
+                && (snapshot.administrators_group_attributes & 0x10) == 0
+                && snapshot.token_selection == "current_elevated"
+        }
+    };
     if snapshot.schema_version != 1
         || snapshot.token_user_sid.is_empty()
         || snapshot.token_type != 1
-        || snapshot.token_is_elevated
-        || snapshot.token_integrity_level_rid > 8192
-        || (snapshot.administrators_group_attributes != u32::MAX
-            && (snapshot.administrators_group_attributes & 0x4) != 0
-            && (snapshot.administrators_group_attributes & 0x10) == 0)
-        || !matches!(
-            snapshot.token_selection.as_str(),
-            "lua_medium_filtered" | "current_limited"
-        )
+        || !token_authority_valid
     {
         return Err(RuntimeError::new(
             RuntimeErrorCode::InvalidRequest,
-            "Windows runtime context did not prove limited execution authority",
+            format!(
+                "Windows runtime context did not prove requested {} authority",
+                authority.as_str()
+            ),
             Some("windows.runtimeContext"),
             false,
         ));
@@ -367,6 +394,8 @@ pub(crate) fn build_windows_systemd_run_command(
         .arg(spec.launch_token_digest)
         .arg("--job-name")
         .arg(job_name)
+        .arg("--authority")
+        .arg(spec.authority.as_str())
         .arg("--timeout-ms")
         .arg(spec.timeout_ms.to_string())
         .arg("--stdout-limit-bytes")
@@ -510,13 +539,37 @@ mod tests {
                 .map(|name| ((*name).to_string(), format!("value:{name}")))
                 .collect(),
         };
-        validate_windows_runtime_context(&snapshot).unwrap();
+        validate_windows_runtime_context(&snapshot, WindowsAuthority::Limited).unwrap();
         snapshot.token_is_elevated = true;
-        assert!(validate_windows_runtime_context(&snapshot).is_err());
+        assert!(validate_windows_runtime_context(&snapshot, WindowsAuthority::Limited).is_err());
         snapshot.token_is_elevated = false;
         snapshot
             .environment
             .insert("PNPM_HOME".to_string(), "C:\\pnpm".to_string());
-        assert!(validate_windows_runtime_context(&snapshot).is_err());
+        assert!(validate_windows_runtime_context(&snapshot, WindowsAuthority::Limited).is_err());
+    }
+
+    #[test]
+    fn windows_runtime_context_requires_requested_elevated_authority_to_be_effective() {
+        let environment: BTreeMap<String, String> = REQUIRED_WINDOWS_BASELINE_ENVIRONMENT_NAMES
+            .iter()
+            .map(|name| ((*name).to_string(), format!("value:{name}")))
+            .collect();
+        let mut elevated = WindowsRuntimeContextSnapshot {
+            schema_version: 1,
+            token_selection: "current_elevated".to_string(),
+            token_user_sid: "S-1-5-21-test-1001".to_string(),
+            token_type: 1,
+            token_elevation_type: 2,
+            token_is_elevated: true,
+            token_integrity_level_rid: 12288,
+            token_is_restricted: false,
+            administrators_group_attributes: 0x0f,
+            environment,
+        };
+        validate_windows_runtime_context(&elevated, WindowsAuthority::Elevated).unwrap();
+        assert!(validate_windows_runtime_context(&elevated, WindowsAuthority::Limited).is_err());
+        elevated.token_is_elevated = false;
+        assert!(validate_windows_runtime_context(&elevated, WindowsAuthority::Elevated).is_err());
     }
 }

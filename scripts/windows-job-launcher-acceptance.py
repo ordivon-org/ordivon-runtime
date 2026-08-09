@@ -157,6 +157,38 @@ def main() -> int:
             'environmentKeys': len(context_env),
         }
 
+        elevated_command = [str(launcher), '--describe-runtime-context', '--authority', 'elevated']
+        for name in context_names:
+            elevated_command.extend(['--context-env', name])
+        elevated_context = run(elevated_command)
+        if elevated_context.returncode != 0:
+            fail('elevated runtime context probe failed: ' + elevated_context.stderr)
+        try:
+            elevated_value = json.loads(elevated_context.stdout)
+        except json.JSONDecodeError as error:
+            fail(f'elevated runtime context probe returned invalid JSON: {error}')
+        elevated_admin_attrs = int(elevated_value['administratorsGroupAttributes'])
+        if elevated_value.get('tokenSelection') != 'current_elevated':
+            fail('elevated context did not select the current elevated provider token')
+        if elevated_value.get('tokenType') != 1 or elevated_value.get('tokenIsElevated') is not True:
+            fail('elevated context did not prove an elevated primary token')
+        if int(elevated_value.get('tokenIntegrityLevelRid', 0)) < 12288:
+            fail('elevated context is below High integrity')
+        if elevated_admin_attrs == 0xFFFFFFFF or (elevated_admin_attrs & 0x4) == 0 or (elevated_admin_attrs & 0x10) != 0:
+            fail('elevated context did not prove Administrators enabled')
+        if elevated_value.get('tokenUserSid') != context_value.get('tokenUserSid'):
+            fail('limited and elevated contexts changed user SID')
+        if elevated_value.get('environment') != context_env:
+            fail('requested authority changed the frozen baseline environment')
+        summary['elevatedContext'] = {
+            'tokenSelection': elevated_value['tokenSelection'],
+            'tokenIsElevated': elevated_value['tokenIsElevated'],
+            'integrityLevelRid': elevated_value['tokenIntegrityLevelRid'],
+            'administratorsGroupAttributes': elevated_admin_attrs,
+            'sameUserSid': True,
+            'sameEnvironment': True,
+        }
+
         normal = run(launcher_args(
             launcher, spaced_fixture, '--diagnostics',
             target_args=['normal', 'accept-normal', '23'],

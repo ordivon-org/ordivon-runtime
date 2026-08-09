@@ -254,6 +254,8 @@ struct TerminalProcessEvidence {
     execution_profile: super::ExecutionProfile,
     #[serde(default, skip_serializing_if = "super::ExecutionTarget::is_default")]
     execution_target: super::ExecutionTarget,
+    #[serde(default)]
+    windows_authority: super::WindowsAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     windows_execution_context: Option<super::WindowsExecutionContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -703,6 +705,7 @@ impl Runtime {
                 budget: proposal.execution.budget.clone(),
                 execution_profile: proposal.execution.execution_profile,
                 execution_target: proposal.execution.execution_target,
+                windows_authority: proposal.execution.windows_authority,
                 foreign_references: proposal.execution.foreign_references.clone(),
             },
             wait_ms: proposal.wait_ms,
@@ -1165,11 +1168,16 @@ impl Runtime {
                         "execution.executable",
                     ));
                 }
-                let snapshot = snapshot_windows_runtime_context(windows)?;
+                let snapshot =
+                    snapshot_windows_runtime_context(windows, request.execution.windows_authority)?;
+                let token_class = match request.execution.windows_authority {
+                    super::WindowsAuthority::Limited => super::WindowsTokenClass::Limited,
+                    super::WindowsAuthority::Elevated => super::WindowsTokenClass::Elevated,
+                };
                 (
                     snapshot.environment,
                     Some(super::WindowsExecutionContext {
-                        token_class: super::WindowsTokenClass::Limited,
+                        token_class,
                         token_user_sid: snapshot.token_user_sid,
                         environment_source: "windows_user_machine_profile_allowlist_v1".to_string(),
                     }),
@@ -1241,6 +1249,7 @@ impl Runtime {
             budget: request.execution.budget.clone(),
             execution_profile: request.execution.execution_profile,
             execution_target: request.execution.execution_target,
+            windows_authority: request.execution.windows_authority,
             windows_execution_context,
             foreign_references: request.execution.foreign_references.clone(),
             input_set_id: None,
@@ -1817,6 +1826,7 @@ impl Runtime {
                     job_id: &starting.job_id,
                     attempt_id: &starting.attempt_id,
                     launch_token_digest: &starting.launch_token_digest,
+                    authority: plan.windows_authority,
                     executable: Path::new(&plan.executable),
                     args: &plan.args,
                     cwd: Path::new(&plan.cwd),
@@ -1944,12 +1954,16 @@ impl Runtime {
                 false,
             )
         })?;
-        if context.token_class != super::WindowsTokenClass::Limited
+        let expected_token_class = match plan.windows_authority {
+            super::WindowsAuthority::Limited => super::WindowsTokenClass::Limited,
+            super::WindowsAuthority::Elevated => super::WindowsTokenClass::Elevated,
+        };
+        if context.token_class != expected_token_class
             || context.environment_source != "windows_user_machine_profile_allowlist_v1"
         {
             return Err(RuntimeError::new(
                 RuntimeErrorCode::RegistryCorrupt,
-                "committed Windows execution context is unsupported",
+                "committed Windows requested/effective authority is inconsistent",
                 Some("windowsExecutionContext"),
                 false,
             ));
@@ -1964,6 +1978,30 @@ impl Runtime {
         let expected_image_normalized = expected_image
             .strip_prefix("\\\\?\\")
             .unwrap_or(&expected_image);
+        let token_authority_matches = match plan.windows_authority {
+            super::WindowsAuthority::Limited => {
+                !evidence.token_is_elevated
+                    && evidence.token_integrity_level_rid <= 8192
+                    && (evidence.administrators_group_attributes == u32::MAX
+                        || (evidence.administrators_group_attributes & 0x4) == 0
+                        || (evidence.administrators_group_attributes & 0x10) != 0)
+                    && matches!(
+                        evidence.token_selection.as_str(),
+                        "lua_medium_filtered" | "current_limited"
+                    )
+                    && (evidence.token_selection != "lua_medium_filtered"
+                        || evidence.administrators_group_attributes == u32::MAX
+                        || (evidence.administrators_group_attributes & 0x10) != 0)
+            }
+            super::WindowsAuthority::Elevated => {
+                evidence.token_is_elevated
+                    && evidence.token_integrity_level_rid >= 12288
+                    && evidence.administrators_group_attributes != u32::MAX
+                    && (evidence.administrators_group_attributes & 0x4) != 0
+                    && (evidence.administrators_group_attributes & 0x10) == 0
+                    && evidence.token_selection == "current_elevated"
+            }
+        };
         if evidence.schema_version != RUNTIME_SCHEMA_VERSION
             || evidence.job_id != attempt.job_id
             || evidence.attempt_id != attempt.attempt_id
@@ -1975,18 +2013,7 @@ impl Runtime {
             || evidence.image_digest != plan.executable_digest
             || evidence.token_user_sid != context.token_user_sid
             || evidence.token_type != 1
-            || evidence.token_is_elevated
-            || evidence.token_integrity_level_rid > 8192
-            || (evidence.administrators_group_attributes != u32::MAX
-                && (evidence.administrators_group_attributes & 0x4) != 0
-                && (evidence.administrators_group_attributes & 0x10) == 0)
-            || !matches!(
-                evidence.token_selection.as_str(),
-                "lua_medium_filtered" | "current_limited"
-            )
-            || (evidence.token_selection == "lua_medium_filtered"
-                && evidence.administrators_group_attributes != u32::MAX
-                && (evidence.administrators_group_attributes & 0x10) == 0)
+            || !token_authority_matches
             || !observed_image.eq_ignore_ascii_case(expected_image_normalized)
         {
             return Err(RuntimeError::new(
@@ -3410,6 +3437,7 @@ fn append_terminal_evidence_for_commit_with_observation(
         source_revision: plan.source_revision,
         execution_profile: plan.execution_profile,
         execution_target: plan.execution_target,
+        windows_authority: plan.windows_authority,
         windows_execution_context: plan.windows_execution_context,
         foreign_references: plan.foreign_references,
         input_set_id: plan.input_set_id,
@@ -3951,16 +3979,24 @@ fn validate_run_request_structure(request: &TaskRunRequest) -> RuntimeResult<()>
         ));
     }
     validate_execution_budget(&request.execution.budget, "execution.budget")?;
+    if request.execution.execution_target == super::ExecutionTarget::LocalLinux
+        && request.execution.windows_authority != super::WindowsAuthority::Limited
+    {
+        return Err(RuntimeError::invalid(
+            "windowsAuthority=elevated requires executionTarget=windows_native",
+            "execution.windowsAuthority",
+        ));
+    }
     if request.execution.execution_target == super::ExecutionTarget::WindowsNative {
         if request.execution.execution_profile != super::ExecutionProfile::TrustedLocal {
             return Err(RuntimeError::invalid(
-                "windows_native R-W2 currently supports trusted_local only",
+                "windows_native currently supports trusted_local only",
                 "execution.executionProfile",
             ));
         }
         if !request.execution.steps.is_empty() {
             return Err(RuntimeError::invalid(
-                "windows_native R-W2 currently supports one command only",
+                "windows_native currently supports one command only",
                 "execution.steps",
             ));
         }
@@ -4081,6 +4117,7 @@ fn validate_run_proposal_structure(proposal: &super::TaskRunProposal) -> Runtime
             budget: proposal.execution.budget.clone(),
             execution_profile: proposal.execution.execution_profile,
             execution_target: proposal.execution.execution_target,
+            windows_authority: proposal.execution.windows_authority,
             foreign_references: proposal.execution.foreign_references.clone(),
         },
         wait_ms: proposal.wait_ms,
@@ -4748,6 +4785,7 @@ mod trusted_systemd_command_tests {
                 budget: ExecutionBudget::default(),
                 execution_profile: ExecutionProfile::ContainedLocal,
                 execution_target: crate::runtime::ExecutionTarget::LocalLinux,
+                windows_authority: crate::runtime::WindowsAuthority::Limited,
                 foreign_references: Vec::new(),
             },
             wait_ms: 0,
@@ -5022,6 +5060,7 @@ mod trusted_systemd_command_tests {
                 budget: ExecutionBudget::default(),
                 execution_profile: ExecutionProfile::TrustedLocal,
                 execution_target: crate::runtime::ExecutionTarget::LocalLinux,
+                windows_authority: crate::runtime::WindowsAuthority::Limited,
                 foreign_references: Vec::new(),
             },
             wait_ms: 0,
@@ -5180,6 +5219,7 @@ mod trusted_systemd_command_tests {
                 budget: crate::ExecutionBudget::default(),
                 execution_profile: crate::runtime::ExecutionProfile::TrustedLocal,
                 execution_target: crate::runtime::ExecutionTarget::LocalLinux,
+                windows_authority: crate::runtime::WindowsAuthority::Limited,
                 foreign_references: Vec::new(),
             },
             wait_ms: 0,
@@ -5212,6 +5252,7 @@ mod trusted_systemd_command_tests {
                 budget: crate::ExecutionBudget::default(),
                 execution_profile: crate::runtime::ExecutionProfile::ContainedLocal,
                 execution_target: crate::runtime::ExecutionTarget::LocalLinux,
+                windows_authority: crate::runtime::WindowsAuthority::Limited,
                 foreign_references: Vec::new(),
             },
             wait_ms: 0,

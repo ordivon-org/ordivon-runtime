@@ -17,9 +17,9 @@ use ordivon_runtime_core::{
     RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
     TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunProposal, TaskRunRequest,
     UniversalExecError, UniversalExecutionRequest, UniversalExecutionStep, UniversalExecutorConfig,
-    WorkspaceChangeCursor, WorkspaceChangePageRequest as ExecWorkspaceChangePageRequest,
-    WorkspaceChangePageResult, WorkspaceCloseRequest, WorkspaceCloseResult,
-    WorkspaceContentMetadata, WorkspaceContentRequest,
+    WindowsAuthority, WorkspaceChangeCursor,
+    WorkspaceChangePageRequest as ExecWorkspaceChangePageRequest, WorkspaceChangePageResult,
+    WorkspaceCloseRequest, WorkspaceCloseResult, WorkspaceContentMetadata, WorkspaceContentRequest,
     WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceFilePatch, WorkspaceMutateRequest,
     WorkspaceMutateResult, WorkspacePatchOperationStatus, WorkspacePatchRequest,
     WorkspacePatchStatusRequest, WorkspaceReadRequest as ExecWorkspaceReadRequest,
@@ -216,6 +216,8 @@ pub struct WorkspaceExecBoundExecution {
     pub budget: ExecutionBudget,
     #[serde(default)]
     pub execution_target: ExecutionTarget,
+    #[serde(default)]
+    pub windows_authority: WindowsAuthority,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
 }
@@ -263,6 +265,8 @@ pub struct WorkspaceExecPlanInput {
     pub execution_profile: ExecutionProfile,
     #[serde(default)]
     pub execution_target: ExecutionTarget,
+    #[serde(default)]
+    pub windows_authority: WindowsAuthority,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
 }
@@ -369,6 +373,7 @@ impl ExecutionContext {
                     budget: request.execution.budget,
                     execution_profile: request.execution.execution_profile,
                     execution_target: request.execution.execution_target,
+                    windows_authority: request.execution.windows_authority,
                     foreign_references: request.execution.foreign_references,
                 },
                 wait_ms: request.wait_ms,
@@ -413,6 +418,7 @@ impl ExecutionContext {
                     budget: execution.budget,
                     execution_profile: ExecutionProfile::ContainedLocal,
                     execution_target: execution.execution_target,
+                    windows_authority: execution.windows_authority,
                     foreign_references: execution.foreign_references,
                 },
                 wait_ms: request.wait_ms,
@@ -486,6 +492,7 @@ impl ExecutionContext {
                     budget: request.execution.budget,
                     execution_profile: request.execution.execution_profile,
                     execution_target: request.execution.execution_target,
+                    windows_authority: request.execution.windows_authority,
                     foreign_references: request.execution.foreign_references,
                 },
                 wait_ms: request.wait_ms,
@@ -512,6 +519,7 @@ impl ExecutionContext {
                 budget: request.execution.budget,
                 execution_profile: request.execution.execution_profile,
                 execution_target: request.execution.execution_target,
+                windows_authority: request.execution.windows_authority,
                 foreign_references: request.execution.foreign_references,
             },
             wait_ms: request.wait_ms,
