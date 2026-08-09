@@ -150,6 +150,8 @@ pub(crate) struct WindowsStartEvidence {
     pub token_integrity_level_rid: i32,
     pub token_is_restricted: bool,
     pub administrators_group_attributes: u32,
+    pub power_request_type: String,
+    pub power_request_acquired: bool,
     pub observed_unix_ms: u64,
 }
 

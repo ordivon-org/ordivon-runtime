@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -46,6 +47,8 @@ internal static class OrdivonWindowsJobLauncher
     private const int TokenIntegrityLevelClass = 25;
     private const int TokenPrimary = 1;
     private const int MediumIntegrityRid = 8192;
+    private const uint PowerRequestContextSimpleString = 0x00000001;
+    private const int PowerRequestSystemRequired = 1;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct JobObjectBasicLimitInformation
@@ -136,6 +139,14 @@ internal static class OrdivonWindowsJobLauncher
     {
         public uint dwLowDateTime;
         public uint dwHighDateTime;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ReasonContext
+    {
+        public uint Version;
+        public uint Flags;
+        public IntPtr ReasonString;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -362,6 +373,15 @@ internal static class OrdivonWindowsJobLauncher
         uint flags,
         StringBuilder executableName,
         ref uint size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr PowerCreateRequest(ref ReasonContext context);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool PowerSetRequest(IntPtr powerRequest, int requestType);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool PowerClearRequest(IntPtr powerRequest, int requestType);
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentProcess();
@@ -1041,12 +1061,54 @@ internal static class OrdivonWindowsJobLauncher
         return options.RuntimeMode ? RunRuntime(options) : RunLegacy(options);
     }
 
+    private static IntPtr AcquireSystemPowerRequest(string attemptId)
+    {
+        string reason = "Ordivon Runtime Attempt " + attemptId;
+        IntPtr reasonString = Marshal.StringToHGlobalUni(reason);
+        try
+        {
+            ReasonContext context = new ReasonContext();
+            context.Version = 0;
+            context.Flags = PowerRequestContextSimpleString;
+            context.ReasonString = reasonString;
+            IntPtr handle = PowerCreateRequest(ref context);
+            if (handle == new IntPtr(-1))
+            {
+                ThrowWin32("PowerCreateRequest");
+            }
+            if (!PowerSetRequest(handle, PowerRequestSystemRequired))
+            {
+                int error = Marshal.GetLastWin32Error();
+                CloseHandle(handle);
+                throw new Win32Exception(error, "PowerSetRequest(SystemRequired)");
+            }
+            return handle;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(reasonString);
+        }
+    }
+
+    private static void ReleaseSystemPowerRequest(IntPtr handle, bool diagnostics)
+    {
+        if (handle == IntPtr.Zero || handle == new IntPtr(-1)) return;
+        if (!PowerClearRequest(handle, PowerRequestSystemRequired) && diagnostics)
+        {
+            Console.Error.WriteLine(
+                "ORDIVON_WINDOWS_POWER_CLEAR_FAILED error={0}",
+                Marshal.GetLastWin32Error());
+        }
+        CloseHandle(handle);
+    }
+
     private static int RunRuntime(Options options)
     {
         IntPtr job = IntPtr.Zero;
         IntPtr environment = IntPtr.Zero;
         IntPtr executionToken = IntPtr.Zero;
         TokenEvidence tokenEvidence = null;
+        IntPtr powerRequest = IntPtr.Zero;
         IntPtr stdoutWrite = IntPtr.Zero;
         IntPtr stderrWrite = IntPtr.Zero;
         CaptureWorker stdoutCapture = null;
@@ -1068,6 +1130,7 @@ internal static class OrdivonWindowsJobLauncher
             }
             ConfigureExtendedLimits(job, options);
             uint cpuRate = ConfigureCpuRate(job, options.CpuQuotaPercent);
+            powerRequest = AcquireSystemPowerRequest(options.RuntimeAttemptId);
             executionToken = AcquireExecutionToken(options.Authority, out tokenEvidence);
             environment = BuildEnvironment(options);
 
@@ -1124,7 +1187,7 @@ internal static class OrdivonWindowsJobLauncher
                 throw new InvalidOperationException("target process is not owned by the expected Job Object");
             }
 
-            WriteWindowsStartEvidence(options, pi, tokenEvidence);
+            WriteWindowsStartEvidence(options, pi, tokenEvidence, powerRequest != IntPtr.Zero);
             stdoutThread = new Thread(stdoutCapture.Run);
             stderrThread = new Thread(stderrCapture.Run);
             stdoutThread.IsBackground = true;
@@ -1208,6 +1271,9 @@ internal static class OrdivonWindowsJobLauncher
             CapturedOutputInfo stdout = CapturedOutputFromWorker(options, stdoutCapture, true);
             CapturedOutputInfo stderr = CapturedOutputFromWorker(options, stderrCapture, false);
             int signedExitCode = unchecked((int)exitCode);
+            // Terminal result is publishable only after this Attempt-scoped physical lease is gone.
+            ReleaseSystemPowerRequest(powerRequest, options.Diagnostics);
+            powerRequest = IntPtr.Zero;
             WriteRuntimeResult(
                 options,
                 signedExitCode,
@@ -1239,6 +1305,7 @@ internal static class OrdivonWindowsJobLauncher
             if (stderrWrite != IntPtr.Zero) CloseHandle(stderrWrite);
             if (environment != IntPtr.Zero) Marshal.FreeHGlobal(environment);
             if (executionToken != IntPtr.Zero) CloseHandle(executionToken);
+            ReleaseSystemPowerRequest(powerRequest, options.Diagnostics);
             if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread);
             if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess);
             if (job != IntPtr.Zero) CloseHandle(job);
@@ -1418,7 +1485,11 @@ internal static class OrdivonWindowsJobLauncher
         }
     }
 
-    private static void WriteWindowsStartEvidence(Options options, ProcessInformation pi, TokenEvidence tokenEvidence)
+    private static void WriteWindowsStartEvidence(
+        Options options,
+        ProcessInformation pi,
+        TokenEvidence tokenEvidence,
+        bool systemPowerRequestAcquired)
     {
         FileTime creation;
         FileTime exit;
@@ -1443,6 +1514,8 @@ internal static class OrdivonWindowsJobLauncher
             "\"imagePath\":" + JsonString(imagePath) + "," +
             "\"imageDigest\":" + JsonString(imageDigest) + "," +
             TokenEvidenceJsonFields(tokenEvidence) + "," +
+            "\"powerRequestType\":\"system_required\"," +
+            "\"powerRequestAcquired\":" + (systemPowerRequestAcquired ? "true" : "false") + "," +
             "\"observedUnixMs\":" + UnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) +
             "}";
         WriteTextAtomic(Path.Combine(options.RuntimeBundle, "windows-start.json"), json);

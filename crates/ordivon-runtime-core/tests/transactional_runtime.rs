@@ -271,6 +271,23 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
         );
         String::from_utf8_lossy(&output.stdout).trim() == "1"
     }
+    fn power_request_present(attempt_id: &str) -> bool {
+        let output = Command::new("/mnt/c/Windows/System32/powercfg.exe")
+            .arg("/requests")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let observed = String::from_utf8_lossy(&output.stdout);
+        let expected = format!("Ordivon Runtime Attempt {attempt_id}");
+        observed
+            .to_ascii_lowercase()
+            .contains(&expected.to_ascii_lowercase())
+    }
+
     for (source, output) in [(&launcher_source, &launcher), (&fixture_source, &fixture)] {
         let compiled = Command::new(&csc)
             .args([
@@ -443,6 +460,9 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     assert_eq!(windows_evidence["tokenType"], 1);
     assert_eq!(windows_evidence["tokenIsElevated"], false);
     assert_eq!(windows_evidence["tokenIntegrityLevelRid"], 8192);
+    assert_eq!(windows_evidence["powerRequestType"], "system_required");
+    assert_eq!(windows_evidence["powerRequestAcquired"], true);
+    assert!(!power_request_present(&attempt_id));
     let admin_attrs = windows_evidence["administratorsGroupAttributes"]
         .as_u64()
         .unwrap();
@@ -563,6 +583,9 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     );
     assert_eq!(elevated_start_value["tokenType"], 1);
     assert_eq!(elevated_start_value["tokenIsElevated"], true);
+    assert_eq!(elevated_start_value["powerRequestType"], "system_required");
+    assert_eq!(elevated_start_value["powerRequestAcquired"], true);
+    assert!(!power_request_present(&elevated_attempt_id));
     assert!(
         elevated_start_value["tokenIntegrityLevelRid"]
             .as_i64()
@@ -640,6 +663,9 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
         .iter()
         .any(|artifact| artifact.kind == "execution_result"));
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    assert!(!power_request_present(
+        timed_out.attempt_id.as_deref().unwrap()
+    ));
 
     thread::sleep(Duration::from_millis(500));
     let process_probe = format!(
@@ -705,6 +731,7 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
         );
         thread::sleep(Duration::from_millis(25));
     };
+    assert!(power_request_present(&cancel_attempt.attempt_id));
     let cancelled = runtime
         .cancel_task(&TaskCancelRequest {
             schema_version: RUNTIME_SCHEMA_VERSION,
@@ -714,6 +741,7 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     assert_eq!(cancelled.status, "cancelled");
     assert!(cancelled.execution_terminal);
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    assert!(!power_request_present(&cancel_attempt.attempt_id));
 
     thread::sleep(Duration::from_millis(500));
     let cancel_probe = format!(
@@ -764,6 +792,9 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     assert!(elevated_timeout_started.elapsed() < Duration::from_secs(3));
     assert!(elevated_timed_out.execution_terminal);
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    assert!(!power_request_present(
+        elevated_timed_out.attempt_id.as_deref().unwrap(),
+    ));
     thread::sleep(Duration::from_millis(500));
     let elevated_timeout_probe = format!(
         "$m='{}'; $rows=Get-CimInstance Win32_Process | Where-Object {{$_.ProcessId -ne $PID -and $_.CommandLine -like ('*'+$m+'*')}}; Write-Output @($rows).Count",
@@ -833,6 +864,7 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
         );
         thread::sleep(Duration::from_millis(25));
     };
+    assert!(power_request_present(&elevated_cancel_attempt.attempt_id));
     let elevated_cancelled = runtime
         .cancel_task(&TaskCancelRequest {
             schema_version: RUNTIME_SCHEMA_VERSION,
@@ -842,6 +874,7 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     assert_eq!(elevated_cancelled.status, "cancelled");
     assert!(elevated_cancelled.execution_terminal);
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    assert!(!power_request_present(&elevated_cancel_attempt.attempt_id));
     thread::sleep(Duration::from_millis(500));
     let elevated_cancel_probe = format!(
         "$m='{}'; $rows=Get-CimInstance Win32_Process | Where-Object {{$_.ProcessId -ne $PID -and $_.CommandLine -like ('*'+$m+'*')}}; Write-Output @($rows).Count",
@@ -883,6 +916,8 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     assert_eq!(elevated_replay.job_id, elevated.job_id);
     assert_eq!(elevated_replay.attempt_id, elevated.attempt_id);
     assert_eq!(elevated_replay.status, "succeeded");
+    assert!(!power_request_present(&attempt_id));
+    assert!(!power_request_present(&elevated_attempt_id));
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
     fs::rename(&launcher_unavailable, &launcher).unwrap();
     println!(

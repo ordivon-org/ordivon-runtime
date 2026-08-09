@@ -2014,6 +2014,8 @@ impl Runtime {
             || evidence.token_user_sid != context.token_user_sid
             || evidence.token_type != 1
             || !token_authority_matches
+            || evidence.power_request_type != "system_required"
+            || !evidence.power_request_acquired
             || !observed_image.eq_ignore_ascii_case(expected_image_normalized)
         {
             return Err(RuntimeError::new(

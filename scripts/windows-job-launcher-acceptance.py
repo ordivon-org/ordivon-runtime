@@ -38,7 +38,7 @@ def compile_cs(source: Path, output: Path) -> None:
         f'/out:{windows_path(output)}',
         windows_path(source),
     ]
-    completed = subprocess.run(command, text=True, capture_output=True, timeout=20)
+    completed = subprocess.run(command, text=True, errors='replace', capture_output=True, timeout=20)
     if completed.returncode != 0:
         fail(f'csc failed for {source.name}: {completed.stdout}{completed.stderr}')
 

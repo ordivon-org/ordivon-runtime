@@ -1,0 +1,85 @@
+{
+  "boundariesNotClaimed": [
+    "WSL-restart-independent native Windows process reconciliation",
+    "Long Paths admission evidence",
+    "Windows-native immutable-input admission",
+    "structured multi-step windows_native execution",
+    "prevention of user-initiated sleep or lid-close actions"
+  ],
+  "contract": {
+    "agentFacingRequestFieldAdded": false,
+    "automaticForEveryWindowsAttempt": true,
+    "globalPowerPolicyMutated": false,
+    "normalResultPublishedAfterExplicitRelease": true,
+    "processHandleTeardownIsCrashCancelFallback": true,
+    "reasonFormat": "Ordivon Runtime Attempt <attemptId>",
+    "requestType": "system_required"
+  },
+  "finalExactAcceptance": {
+    "attemptId": "attempt-019fe781-4295-7011-8700-7e65947fb6c6",
+    "completedSteps": 9,
+    "diffCheckPassed": true,
+    "documentationContractValid": true,
+    "evidenceJsonValid": true,
+    "jobId": "job-019fe781-4295-7011-8700-7e5c8493f154",
+    "launcherAcceptancePassed": true,
+    "localAcceptanceContractValid": true,
+    "pythonOperationalTestsPassed": 88,
+    "pythonOptionalSkips": 5,
+    "runtimeMainTestsPassed": 3,
+    "runtimeMcpTestsPassed": 32,
+    "rustCoreTestsPassed": 195,
+    "terminalEvidenceDigest": "sha256:db2f076e2dc0dd3b25c03ae6362310a30c364fac29766abd1c6594c4cd3d337a",
+    "windowsRuntimeIntegrationPassed": true
+  },
+  "kind": "ordivon.runtime.windows-native-rw4-power-request-acceptance",
+  "nextLayer": "R-W5 WSL-restart-independent native Windows reconciliation and interruption falsifiers",
+  "runtimePhysicalAcceptance": {
+    "elevatedCancel": {
+      "absentAtTerminal": true,
+      "activeReasonObserved": true,
+      "attemptId": "attempt-019fe77e-d6aa-70d3-b565-3aaaf91a9b9e",
+      "jobId": "job-019fe77e-d6aa-70d3-b565-3a91ede20898"
+    },
+    "elevatedReplayReacquired": false,
+    "elevatedSuccess": {
+      "absentAtTerminal": true,
+      "attemptId": "attempt-019fe77e-bffe-74e0-b103-27b1be0d90ed",
+      "jobId": "job-019fe77e-bffe-74e0-b103-27ae1b0f89d1",
+      "startEvidenceAcquired": true
+    },
+    "elevatedTimeout": {
+      "absentAtTerminal": true,
+      "attemptId": "attempt-019fe77e-d009-7572-a61b-a3ee71e71391",
+      "jobId": "job-019fe77e-d009-7572-a61b-a3d8107bf202"
+    },
+    "limitedCancel": {
+      "absentAtTerminal": true,
+      "activeReasonObserved": true,
+      "attemptId": "attempt-019fe77e-ca06-78a3-8ff4-0298345ce423",
+      "jobId": "job-019fe77e-ca06-78a3-8ff4-028b4901a925"
+    },
+    "limitedReplayReacquired": false,
+    "limitedSuccess": {
+      "absentAtTerminal": true,
+      "attemptId": "attempt-019fe77e-ba8d-71a2-96f5-8faa43f27247",
+      "jobId": "job-019fe77e-ba8d-71a2-96f5-8f989a35844d",
+      "startEvidenceAcquired": true
+    },
+    "limitedTimeout": {
+      "absentAtTerminal": true,
+      "attemptId": "attempt-019fe77e-c312-7911-9c0b-ff9f50f8d32e",
+      "jobId": "job-019fe77e-c312-7911-9c0b-ff877f8460d2"
+    },
+    "outerJobId": "job-019fe77e-b3a5-7591-8258-00d867fe5ae7"
+  },
+  "schemaVersion": 1,
+  "sourceBaseRevision": "c8b55577031ecdfebe515ddf9fbb9040bc7bcbc2",
+  "standaloneFalsifier": {
+    "activeObserved": true,
+    "explicitClearAbsentWhileHolderAlive": true,
+    "forcedHolderExitAbsentWithoutClear": true,
+    "jobId": "job-019fe777-4737-7040-9392-da148278a2cd"
+  },
+  "status": "passed"
+}
