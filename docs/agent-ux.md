@@ -41,7 +41,7 @@ The error envelope keeps `code` as the stable machine reason while constraining 
 
 ## Observation and reconciliation boundary
 
-Observation does not implicitly authorize execution. `workspace.get`, `workspace.list`, and `task.list` are projection-only reads over current Workspace/Registry truth: they do not reconcile, dispatch, cancel, or otherwise advance Jobs. Workspace mutation, Patch, and close operations likewise use durable active/held reservations as guards and do not dispatch an accepted Job merely to decide that the Workspace is busy. A projection can therefore temporarily show an unsettled state even when newer physical evidence exists but has not yet been committed by reconciliation.
+Observation does not implicitly authorize execution. `workspace.get`, `workspace.list`, `task.get`, and `task.list` are projection-only reads over current Workspace/Registry truth: they do not reconcile, dispatch, cancel, or otherwise advance Jobs. Workspace mutation, Patch, and close operations likewise use durable active/held reservations as guards and do not dispatch an accepted Job merely to decide that the Workspace is busy. A projection can therefore temporarily show an unsettled state even when newer physical evidence exists but has not yet been committed by reconciliation.
 
 Reconciliation has explicit owners. The service performs startup and bounded background maintenance reconciliation; execution admission may reconcile the same Workspace before admitting new work; and `task.observe(jobId)` performs targeted reconciliation of exactly that Job. If the requested Job is durably `accepted` with `desiredState=run`, `task.observe` may dispatch that already-committed execution intent, so its MCP contract is deliberately not read-only and is open-world because the committed command may have external effects. `workspace.patch.get` is also not read-only because it may advance a durable Patch receipt after inspecting physical file state, though it never applies an uncommitted Patch.
 
@@ -60,6 +60,12 @@ Patch receipt storage is an additive table outside the Registry migration versio
 Reissue an exact committed request only with the same `clientRequestId`, execution request, and foreign references; Runtime then returns the original Job. Do not reuse that identity after changing a Host Assignment generation or digest. When delivery may have committed, filter `task.list` by the exact `clientRequestId`, require one consistent Job identity, then inspect `task.observe` and the terminal-evidence Artifact rather than dispatching new work.
 
 A successful Runtime Job or Runtime Attempt is not a Host completion decision. Required Artifacts, unresolved Effects or `UNKNOWN` state, and semantic acceptance remain above Runtime.
+
+## Capacity backpressure
+
+`CONCURRENCY_LIMIT` is a pre-admission mechanical backpressure signal, not a queued Job state. Runtime returns `commitState=not_started`, `retryClass=safe_same_request`, `retryAfterMs`, the exact capacity scope and `active`/`limit`, plus bounded `holderJobIds`/`holderWorkspaceIds`. The Agent can inspect an exact holder with projection-only `task.get` and decide whether to wait, continue independent work, or later retry the same request. Runtime does not hide that decision behind an internal queue.
+
+This fail-fast boundary protects execution identity. A rejected request owns no reservation and therefore does not freeze a mutable Workspace or preserve pre-materialized foreign-input bytes across the wait. A later retry re-resolves the Workspace source commitment and revalidates current input authority. Persisting rejected work as an internal queue would either make waiting intent a new authority over Workspace mutation or silently re-adjudicate a supposedly durable action against changed reality; neither follows from capacity pressure alone.
 
 ## Workspace recovery
 
