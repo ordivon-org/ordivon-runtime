@@ -483,7 +483,10 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
     cancel_request.execution.budget.tasks_max = Some(8);
     cancel_request.wait_ms = 0;
     let started_cancel = runtime.run_task(&cancel_request).unwrap();
-    assert!(matches!(started_cancel.status.as_str(), "queued" | "working"));
+    assert!(matches!(
+        started_cancel.status.as_str(),
+        "queued" | "working"
+    ));
     let running_deadline = Instant::now() + Duration::from_secs(10);
     let cancel_attempt = loop {
         let attempt = runtime
@@ -528,7 +531,10 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
         "{}",
         String::from_utf8_lossy(&cancel_remaining.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&cancel_remaining.stdout).trim(), "0");
+    assert_eq!(
+        String::from_utf8_lossy(&cancel_remaining.stdout).trim(),
+        "0"
+    );
     println!(
         "RW2_WINDOWS_CANCEL jobId={} attemptId={} remaining=0",
         started_cancel.job_id, cancel_attempt.attempt_id,

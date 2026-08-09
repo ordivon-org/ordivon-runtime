@@ -96,7 +96,7 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 | Workspace lifecycle and cache reclamation | operational |
 | `contained_local` authority reduction | experimental but verified for the declared boundary |
 | Immutable input materialization and `workspace.execBound` read-only contained admission | implemented and public-MCP real-system verified; named authority roots remain operator configuration |
-| `windows_native` execution target and Windows Job Object ownership | experimental opt-in backend; real Runtime Job/Attempt success, replay, timeout, evidence, and descendant cleanup verified on WSL/Windows |
+| `windows_native` execution target and Windows Job Object ownership | experimental opt-in R-W2 backend; real Runtime Job/Attempt success, replay, timeout, explicit cancel, evidence, and descendant cleanup verified on WSL/Windows |
 | hostile multi-tenant sandboxing | not provided |
 | semantic Task completion | outside Runtime |
 | external-world effect verification | structured adapter dependent; not generic |
@@ -110,8 +110,8 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 - arbitrary command execution remains effect-opaque.
 - a successful process exit is not proof of semantic completion or external-world success.
 - real systemd/cgroup integration tests cannot run on ordinary hosted CI and require the explicit local acceptance path.
-- the R-W1 Windows target still uses systemd as the outer WSL launcher supervisor; native Windows child identity is separate evidence, and WSL-restart-independent reconciliation is not yet claimed.
-- R-W1 Windows admission is `trusted_local`, single-command, and explicit-environment only; limited-token default, explicit elevation, durable Windows baseline environment, scoped Power Requests, and immutable-input Windows admission are not yet implemented.
+- the R-W2 Windows target still uses systemd as the outer WSL launcher supervisor; native Windows child identity is separate evidence, and WSL-restart-independent reconciliation is not yet claimed.
+- R-W2 Windows admission is `trusted_local`, single-command, and uses only the request environment frozen into the durable plan; limited-token default, explicit elevation, an operator-owned Windows baseline environment, effective token evidence, Long Paths admission evidence, scoped Power Requests, and immutable-input Windows admission are not yet implemented.
 - the launcher's active-process and committed-memory limits are Windows-native controls and are not claimed to be exact semantic equivalents of cgroup `TasksMax` and `MemoryMax`.
 - public installation and versioning remain pre-1.0.
 

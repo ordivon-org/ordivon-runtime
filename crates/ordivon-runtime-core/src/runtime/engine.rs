@@ -483,7 +483,7 @@ impl Runtime {
     ) -> RuntimeResult<String> {
         if request.execution.execution_target == super::ExecutionTarget::WindowsNative {
             return Err(RuntimeError::invalid(
-                "windows_native immutable input bindings are not implemented in R-W1",
+                "windows_native immutable input bindings are not implemented in R-W2",
                 "execution.executionTarget",
             ));
         }
@@ -3894,13 +3894,13 @@ fn validate_run_request_structure(request: &TaskRunRequest) -> RuntimeResult<()>
     if request.execution.execution_target == super::ExecutionTarget::WindowsNative {
         if request.execution.execution_profile != super::ExecutionProfile::TrustedLocal {
             return Err(RuntimeError::invalid(
-                "windows_native R-W1 currently supports trusted_local only",
+                "windows_native R-W2 currently supports trusted_local only",
                 "execution.executionProfile",
             ));
         }
         if !request.execution.steps.is_empty() {
             return Err(RuntimeError::invalid(
-                "windows_native R-W1 currently supports one command only",
+                "windows_native R-W2 currently supports one command only",
                 "execution.steps",
             ));
         }
