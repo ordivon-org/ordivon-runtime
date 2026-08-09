@@ -383,6 +383,37 @@ impl RuntimeServer {
     }
 
     #[tool(
+        name = "task.get",
+        description = "Read one exact durable Job as a projection-only Runtime inspection. This never reconciles, dispatches, cancels, or otherwise advances the Job. It returns bounded Attempt history, mechanical convergence, Artifact/episode summaries, and a bounded event timeline with event detail omitted; use artifact.read for retained stdout/stderr/results and task.observe only when targeted reconciliation or waiting is intended.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeJobInspection>>(),
+        annotations(
+            title = "Get transactional job",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn task_get(
+        &self,
+        Parameters(request): Parameters<TaskGetRequest>,
+    ) -> ToolOutcome<RuntimeJobInspection> {
+        if request.schema_version != 1 {
+            return ToolOutcome::Error(ToolError::invalid(
+                "schemaVersion must be 1",
+                "schemaVersion",
+            ));
+        }
+        let runtime = self.state.runtime.clone();
+        self.run_core("task.get", move || {
+            runtime
+                .inspect_job(&request.job_id, request.event_limit)
+                .map_err(ToolError::from)
+        })
+        .await
+    }
+
+    #[tool(
         name = "task.observe",
         description = "Observe or briefly await one exact Job and reconcile that Job before projection. If the durable Job is still accepted with desiredState=run, this call may dispatch that already-committed execution intent; it never creates a new Job. Exact Attempt state, terminal execution disposition, delivery certainty, recovery requirement, result availability, and semanticCompletionEvaluated=false are projected explicitly. Omit offsets for tail mode, or pass stdoutOffset/stderrOffset with at least 4 tail bytes to read only new retained UTF-8 text and continue from returned next offsets.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),

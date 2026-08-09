@@ -29,6 +29,7 @@ SCHEMA_VERSION = 1
 EXPECTED_TOOLS = {
     "artifact.read",
     "task.cancel",
+    "task.get",
     "task.list",
     "task.observe",
     "workspace.changes",
@@ -1189,6 +1190,25 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             },
         )
         check("trusted-host-workspace-write", created.get("content") == "created-by-trusted-job\n", created)
+
+        inspected = client.tool(
+            "task.get",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "jobId": job_id,
+                "eventLimit": 50,
+            },
+        )
+        inspected_timeline = inspected.get("timeline", [])
+        check(
+            "task-get-projection",
+            inspected.get("job", {}).get("jobId") == job_id
+            and inspected.get("job", {}).get("workspaceId") == workspace_id
+            and inspected.get("job", {}).get("semanticCompletionEvaluated") is False
+            and isinstance(inspected.get("attempts"), list)
+            and all("detail" not in event for event in inspected_timeline),
+            inspected,
+        )
 
         observed = client.tool(
             "task.observe",

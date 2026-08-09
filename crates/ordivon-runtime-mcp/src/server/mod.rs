@@ -11,7 +11,7 @@ use ordivon_runtime_core::{
     CompactWorkspaceOpenResult, DurableWorkspacePatchRequest, DurableWorkspacePatchResult,
     ExecutionBudget, ExecutionProfile, ExecutionProposal, ExecutionStepProposal, ForeignReference,
     GitWorkspaceCreateRequest, InputAuthority, InputBindingRequest, Runtime, RuntimeCapacity,
-    RuntimeConfig, RuntimeError, RuntimeJobListRequest, RuntimeJobListResult,
+    RuntimeConfig, RuntimeError, RuntimeJobInspection, RuntimeJobListRequest, RuntimeJobListResult,
     RuntimeWorkspaceGetRequest, RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult,
     RuntimeWorkspaceSummary, TaskCancelRequest, TaskObservation, TaskObserveRequest,
     TaskRunProposal, TaskRunRequest, UniversalExecError, UniversalExecutionRequest,
@@ -21,8 +21,8 @@ use ordivon_runtime_core::{
     WorkspaceFilePatch, WorkspaceMutateRequest, WorkspaceMutateResult,
     WorkspacePatchOperationStatus, WorkspacePatchRequest, WorkspacePatchStatusRequest,
     WorkspaceReadRequest as ExecWorkspaceReadRequest, WorkspaceReadSliceRequest,
-    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_CHANGE_PAGE_ENTRIES,
-    MAX_WORKSPACE_IO_BYTES,
+    DEFAULT_INSPECTION_EVENT_LIMIT, MAX_INSPECTION_EVENT_LIMIT, MAX_TASK_TAIL_BYTES,
+    MAX_TASK_WAIT_MS, MAX_WORKSPACE_CHANGE_PAGE_ENTRIES, MAX_WORKSPACE_IO_BYTES,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{IntoCallToolResult, ToolCallContext};
@@ -105,6 +105,21 @@ pub struct WorkspaceDiffRequest {
     pub workspace_id: String,
     #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
     pub max_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskGetRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    pub schema_version: u32,
+    pub job_id: String,
+    #[serde(default = "default_task_get_event_limit")]
+    #[schemars(range(min = 1, max = MAX_INSPECTION_EVENT_LIMIT))]
+    pub event_limit: u32,
+}
+
+fn default_task_get_event_limit() -> u32 {
+    DEFAULT_INSPECTION_EVENT_LIMIT
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]

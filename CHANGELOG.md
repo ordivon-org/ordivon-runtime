@@ -4,6 +4,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ## Unreleased
 
+- added projection-only `task.get` over the existing read-only Runtime Job inspection path, separating ordinary Job reads from `task.observe` reconciliation/dispatch semantics; public timeline detail remains omitted and forensic detail stays operator-local.
+
 ### Added
 
 - experimental Windows Job Object launcher equipment plus repeatable WSL/Windows real-system acceptance for descendant ownership, exit/stdout/stderr propagation, argv/environment fidelity, and native process, memory, and CPU controls; this does not add a public Windows execution backend;

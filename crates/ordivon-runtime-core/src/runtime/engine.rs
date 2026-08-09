@@ -368,6 +368,23 @@ impl Runtime {
         &self.registry
     }
 
+    pub fn inspect_job(
+        &self,
+        job_id: &str,
+        event_limit: u32,
+    ) -> RuntimeResult<super::RuntimeJobInspection> {
+        let registry = self.registry.config();
+        super::inspection::inspect_job(
+            &super::RuntimeInspectionConfig {
+                db_path: registry.db_path.clone(),
+                busy_timeout_ms: registry.busy_timeout_ms,
+            },
+            job_id,
+            event_limit,
+            false,
+        )
+    }
+
     fn lock_lifecycle(&self) -> RuntimeResult<MutexGuard<'_, ()>> {
         self.lifecycle_lock.lock().map_err(|_| {
             RuntimeError::new(

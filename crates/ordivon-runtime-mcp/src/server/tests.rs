@@ -355,6 +355,7 @@ fn tool_effect_annotations_match_runtime_behavior() {
     let expected = [
         ("artifact.read", true, false, true, false),
         ("task.cancel", false, true, true, false),
+        ("task.get", true, false, true, false),
         ("task.list", true, false, true, false),
         ("task.observe", false, true, true, true),
         ("workspace.close", false, true, true, false),
@@ -430,6 +431,7 @@ fn tool_catalog_uses_transactional_job_contract() {
         [
             "artifact.read",
             "task.cancel",
+            "task.get",
             "task.list",
             "task.observe",
             "workspace.changes",
@@ -922,7 +924,7 @@ fn every_public_tool_publishes_structured_output_contract() {
     let sandbox = Sandbox::new("all-output-schemas");
     let server = sandbox.server();
     let tools = server.tool_router.list_all();
-    assert_eq!(tools.len(), 17);
+    assert_eq!(tools.len(), 18);
     for tool in tools {
         let schema = tool
             .output_schema
@@ -982,6 +984,47 @@ fn workspace_open_output_schema_exposes_success_and_error_contract() {
         assert!(
             encoded.contains(expected),
             "output schema omitted {expected}"
+        );
+    }
+}
+
+#[test]
+fn task_get_schema_is_projection_only_and_detail_free() {
+    let sandbox = Sandbox::new("task-get-schema");
+    let server = sandbox.server();
+    let task_get = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .find(|tool| tool.name.as_ref() == "task.get")
+        .unwrap();
+    let input = serde_json::to_value(&task_get.input_schema).unwrap();
+    assert_eq!(
+        input.pointer("/properties/eventLimit/default"),
+        Some(&serde_json::json!(DEFAULT_INSPECTION_EVENT_LIMIT))
+    );
+    assert_eq!(
+        input.pointer("/properties/eventLimit/maximum"),
+        Some(&serde_json::json!(MAX_INSPECTION_EVENT_LIMIT))
+    );
+    assert!(input.pointer("/properties/includeDetail").is_none());
+    assert!(input.pointer("/properties/waitMs").is_none());
+    assert!(input.pointer("/properties/stdoutTailBytes").is_none());
+
+    let output = serde_json::to_value(task_get.output_schema.as_ref().unwrap()).unwrap();
+    let encoded = serde_json::to_string(&output).unwrap();
+    for expected in [
+        "mechanicallyConverged",
+        "semanticCompletionEvaluated",
+        "attemptsTruncated",
+        "eventsTruncated",
+        "timeline",
+        "episodes",
+        "artifacts",
+    ] {
+        assert!(
+            encoded.contains(expected),
+            "task.get output omitted {expected}"
         );
     }
 }

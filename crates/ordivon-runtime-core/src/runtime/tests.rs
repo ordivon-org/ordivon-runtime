@@ -822,6 +822,16 @@ fn projection_and_workspace_guards_do_not_dispatch_accepted_jobs() {
     assert_eq!(listed_jobs.jobs[0].job_id, target.job.job_id);
     assert_still_accepted();
 
+    let inspected_job = runtime.inspect_job(&target.job.job_id, 16).unwrap();
+    assert_eq!(inspected_job.job.job_id, target.job.job_id);
+    assert_eq!(inspected_job.attempts.len(), 1);
+    assert_eq!(inspected_job.attempts[0].state, AttemptState::Accepted);
+    assert!(inspected_job
+        .timeline
+        .iter()
+        .all(|event| event.detail.is_none()));
+    assert_still_accepted();
+
     let mutate_error = runtime
         .mutate_workspace(&WorkspaceMutateRequest {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,

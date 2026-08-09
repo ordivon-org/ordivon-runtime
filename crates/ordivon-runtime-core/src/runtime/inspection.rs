@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -90,7 +91,7 @@ pub struct RuntimeWorkspaceInspectionJob {
     pub artifact_count: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeJobInspection {
     pub schema_version: u32,
@@ -105,7 +106,7 @@ pub struct RuntimeJobInspection {
     pub events_truncated: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInspectionJob {
     pub job_id: String,
@@ -120,7 +121,7 @@ pub struct RuntimeInspectionJob {
     pub semantic_completion_evaluated: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInspectionAttempt {
     pub attempt_id: String,
@@ -146,7 +147,7 @@ pub struct RuntimeInspectionAttempt {
     pub truncated_artifacts: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInspectionCondition {
     pub condition_type: String,
@@ -155,7 +156,7 @@ pub struct RuntimeInspectionCondition {
     pub observed_at_ms: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInspectionArtifactSummary {
     pub count: u64,
@@ -164,7 +165,7 @@ pub struct RuntimeInspectionArtifactSummary {
     pub by_kind: BTreeMap<String, u64>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInspectionEpisodes {
     pub dispatches: u64,
@@ -177,7 +178,7 @@ pub struct RuntimeInspectionEpisodes {
     pub administrative_repairs: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInspectionEvent {
     pub sequence: u64,
