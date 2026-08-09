@@ -337,6 +337,100 @@ fn workspace_content_rejects_final_symlink_and_preserves_bounded_read() {
 }
 
 #[test]
+fn workspace_content_parent_symlink_swap_never_reads_outside_root() {
+    use std::os::unix::fs::symlink;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let sandbox = Sandbox::new("workspace-content-parent-symlink-swap");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-content-parent-symlink-swap";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let workspace = config.workspace_path(workspace_id);
+    let inside_dir = workspace.join("inside");
+    fs::create_dir_all(&inside_dir).unwrap();
+    let inside = b"\x89PNG\r\n\x1a\ninside";
+    fs::write(inside_dir.join("view.png"), inside).unwrap();
+
+    let outside_dir = sandbox.root.join("outside");
+    fs::create_dir_all(&outside_dir).unwrap();
+    let outside = b"\x89PNG\r\n\x1a\noutside";
+    fs::write(outside_dir.join("view.png"), outside).unwrap();
+
+    let alias = workspace.join("alias");
+    symlink("inside", &alias).unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_barrier = Arc::clone(&barrier);
+    let writer_stop = Arc::clone(&stop);
+    let writer_alias = alias.clone();
+    let writer_outside = outside_dir.clone();
+    let writer = thread::spawn(move || {
+        writer_barrier.wait();
+        let mut outside_turn = true;
+        while !writer_stop.load(Ordering::Relaxed) {
+            let replacement = writer_alias.with_extension("swap");
+            let _ = fs::remove_file(&replacement);
+            if outside_turn {
+                let _ = symlink(&writer_outside, &replacement);
+            } else {
+                let _ = symlink("inside", &replacement);
+            }
+            if replacement.exists() {
+                let _ = fs::rename(&replacement, &writer_alias);
+            }
+            outside_turn = !outside_turn;
+        }
+    });
+
+    barrier.wait();
+    let outside_digest = sha256_bytes(outside);
+    let mut denied = 0_u64;
+    let mut mismatches = 0_u64;
+    let mut missing = 0_u64;
+    for _ in 0..20_000 {
+        match read_workspace_content(
+            &config,
+            &WorkspaceContentRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: workspace_id.to_string(),
+                relative_path: "alias/view.png".to_string(),
+                expected_digest: outside_digest.clone(),
+                max_bytes: 1024,
+            },
+        ) {
+            Ok(result) => {
+                panic!(
+                    "workspace.content escaped root under parent-symlink race: {} bytes digest {}",
+                    result.metadata.byte_length, result.metadata.digest
+                );
+            }
+            Err(error) => match error.code {
+                UniversalExecErrorCode::WorkspacePathDenied => denied += 1,
+                UniversalExecErrorCode::RevisionMismatch => mismatches += 1,
+                UniversalExecErrorCode::WorkspacePathNotFound => missing += 1,
+                other => panic!("unexpected race error {other:?}: {}", error.message),
+            },
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+    eprintln!("parent-symlink-race denied={denied} mismatches={mismatches} missing={missing}");
+    assert!(denied + mismatches + missing > 0);
+}
+
+#[test]
 fn workspace_content_reads_exact_verified_png_bytes() {
     let sandbox = Sandbox::new("workspace-content-png");
     let source = sandbox.root.join("source");
