@@ -1451,6 +1451,9 @@ impl Registry {
         let mut connection = self.open_connection()?;
         let transaction = immediate(&mut connection, "runner-bind transaction")?;
         let attempt = load_attempt(&transaction, attempt_id)?;
+        if attempt_runner_identity_matches(&attempt, identity) {
+            return Ok(attempt);
+        }
         if !matches!(
             attempt.state,
             AttemptState::Starting | AttemptState::Recovering
@@ -3462,6 +3465,17 @@ fn validate_plan_budget(budget: &super::ExecutionBudget) -> RuntimeResult<()> {
         ));
     }
     Ok(())
+}
+
+fn attempt_runner_identity_matches(attempt: &AttemptRecord, identity: &RunnerIdentity) -> bool {
+    attempt.unit_name == identity.unit_name
+        && attempt.boot_id.as_deref() == Some(identity.boot_id.as_str())
+        && attempt.invocation_id.as_deref() == Some(identity.invocation_id.as_str())
+        && attempt.control_group.as_deref() == Some(identity.control_group.as_str())
+        && attempt.main_pid == Some(identity.main_pid)
+        && attempt.process_start_identity.as_deref()
+            == Some(identity.process_start_identity.as_str())
+        && attempt.runner_start_digest.as_deref() == Some(identity.runner_start_digest.as_str())
 }
 
 fn validate_runner_identity(identity: &RunnerIdentity) -> RuntimeResult<()> {

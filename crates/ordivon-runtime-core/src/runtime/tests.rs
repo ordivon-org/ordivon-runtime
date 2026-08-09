@@ -2978,6 +2978,81 @@ fn list_rejects_invalid_workspace_filter() {
 }
 
 #[test]
+fn runner_binding_converges_exact_duplicate_identity_without_duplicate_event() {
+    let sandbox = Sandbox::new("runner-bind-idempotent", 5000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:runner-bind-idempotent", 1))
+            .unwrap(),
+    );
+    let ready = sandbox
+        .registry
+        .mark_bundle_ready(&created.attempt.attempt_id, 0, &digest(b"bundle"), 10)
+        .unwrap();
+    let starting = sandbox
+        .registry
+        .mark_dispatch_issued(&ready.attempt_id, ready.row_version, 11)
+        .unwrap();
+    let stale_row_version = starting.row_version;
+    let identity = RunnerIdentity {
+        boot_id: "boot:test".to_string(),
+        unit_name: starting.unit_name.clone(),
+        invocation_id: "invocation:test".to_string(),
+        control_group: "/system.slice/ordivon-test.service".to_string(),
+        main_pid: 42,
+        process_start_identity: "start:42".to_string(),
+        runner_start_digest: digest(b"runner-start"),
+        observed_at_ms: 12,
+    };
+    let first = sandbox
+        .registry
+        .bind_running(&starting.attempt_id, stale_row_version, &identity)
+        .unwrap();
+    assert_eq!(first.state, AttemptState::Running);
+
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    let bound_events_before: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM job_events WHERE job_id=?1 AND event_type='RUNNER_BOUND'",
+            [&created.job.job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+    assert_eq!(bound_events_before, 1);
+
+    let duplicate = sandbox
+        .registry
+        .bind_running(&starting.attempt_id, stale_row_version, &identity)
+        .unwrap();
+    assert_eq!(duplicate, first);
+
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    let bound_events_after: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM job_events WHERE job_id=?1 AND event_type='RUNNER_BOUND'",
+            [&created.job.job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+    assert_eq!(bound_events_after, 1);
+
+    let mut conflicting_identity = identity;
+    conflicting_identity.invocation_id = "invocation:different".to_string();
+    let error = sandbox
+        .registry
+        .bind_running(
+            &starting.attempt_id,
+            stale_row_version,
+            &conflicting_identity,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::AttemptStateConflict);
+}
+
+#[test]
 fn terminal_commit_is_atomic_idempotent_and_releases_capacity() {
     let sandbox = Sandbox::new("terminal", 5000);
     let created = created(
