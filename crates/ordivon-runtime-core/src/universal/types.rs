@@ -816,6 +816,8 @@ pub(crate) struct RunnerStartEvidence {
     pub payload_gid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_workspace_source_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_executable_digest: Option<String>,
     pub observed_unix_ms: u128,
 }
 

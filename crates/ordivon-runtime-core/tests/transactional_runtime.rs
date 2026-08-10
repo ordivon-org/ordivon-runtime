@@ -1949,14 +1949,25 @@ fn runtime_timeout_preserves_result_when_descendants_hold_output_pipes() {
     }
     let context = IntegrationContext::new("timeout-descendant-pipes");
     let runtime = context.runtime(2_000);
+    let runtime_for_call = context.runtime(2_000);
+    let marker = context.root.join("timeout-target-started");
     let mut request = context.request("timeout-descendant-pipes", 10_000);
     request.execution.executable = "/usr/bin/bash".to_string();
-    request.execution.args = vec!["-lc".to_string(), "sleep 5 & wait".to_string()];
-    request.execution.timeout_ms = 100;
-    let started = Instant::now();
-    let result = runtime.run_task(&request).unwrap();
+    request.execution.args = vec![
+        "-lc".to_string(),
+        format!("printf started > '{}'; sleep 30 & wait", marker.display()),
+    ];
+    request.execution.timeout_ms = 1_000;
+    let call = thread::spawn(move || runtime_for_call.run_task(&request));
+    let marker_deadline = Instant::now() + Duration::from_secs(20);
+    while !marker.is_file() && Instant::now() < marker_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(marker.is_file(), "target did not start in time");
+    let target_started = Instant::now();
+    let result = call.join().unwrap().unwrap();
     assert_eq!(result.status, "timed_out");
-    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(target_started.elapsed() < Duration::from_secs(10));
     assert!(result
         .artifacts
         .iter()
@@ -2550,15 +2561,20 @@ fn runtime_cancel_reconciles_a_completed_runner_result_before_stop_intent() {
         return;
     }
     let context = IntegrationContext::new("cancel-completed-result");
+    let gate = context.root.join("cancel-completed-gate");
     context.write(
         "runtime_cancel_completed.py",
-        "import time\ntime.sleep(0.5)\nprint('RESULT_ALREADY_FINISHED', flush=True)\n",
+        &format!(
+            "import pathlib,time\ngate=pathlib.Path({gate:?})\nfor _ in range(1000):\n    if gate.exists(): break\n    time.sleep(0.01)\nprint('RESULT_ALREADY_FINISHED', flush=True)\n",
+            gate = gate.to_string_lossy(),
+        ),
     );
     let runtime = context.runtime(2000);
     let started = runtime
         .run_task(&context.request("runtime_cancel_completed.py", 0))
         .unwrap();
     assert!(matches!(started.status.as_str(), "queued" | "working"));
+    fs::write(&gate, b"go").unwrap();
     let attempt = runtime
         .registry()
         .get_latest_attempt(&started.job_id)
@@ -2601,9 +2617,14 @@ fn runtime_reconcile_all_isolates_one_broken_job_and_converges_another() {
         return;
     }
     let context = IntegrationContext::new("reconcile-isolation");
+    let bad_gate = context.root.join("reconcile-bad-gate");
+    let good_gate = context.root.join("reconcile-good-gate");
     context.write(
         "runtime_isolation_bad.py",
-        "import time\ntime.sleep(0.4)\nprint('BAD_JOB_RESULT', flush=True)\n",
+        &format!(
+            "import pathlib,time\ngate=pathlib.Path({gate:?})\nfor _ in range(1000):\n    if gate.exists(): break\n    time.sleep(0.01)\nprint('BAD_JOB_RESULT', flush=True)\n",
+            gate = bad_gate.to_string_lossy(),
+        ),
     );
     let second_workspace = format!("runtime-reconcile-good-{}", Uuid::now_v7());
     create_git_workspace(
@@ -2622,8 +2643,10 @@ fn runtime_reconcile_all_isolates_one_broken_job_and_converges_another() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: second_workspace.clone(),
             relative_path: "runtime_isolation_good.py".to_string(),
-            content: "import time\ntime.sleep(0.6)\nprint('GOOD_JOB_RESULT', flush=True)\n"
-                .to_string(),
+            content: format!(
+                "import pathlib,time\ngate=pathlib.Path({gate:?})\nfor _ in range(1000):\n    if gate.exists(): break\n    time.sleep(0.01)\nprint('GOOD_JOB_RESULT', flush=True)\n",
+                gate = good_gate.to_string_lossy(),
+            ),
             expected_digest: None,
         },
     )
@@ -2637,6 +2660,10 @@ fn runtime_reconcile_all_isolates_one_broken_job_and_converges_another() {
     good_request.execution.workspace_id = second_workspace;
     good_request.client_request_id = format!("request:isolation-good:{}", Uuid::now_v7());
     let good = runtime.run_task(&good_request).unwrap();
+    assert!(matches!(bad.status.as_str(), "queued" | "working"));
+    assert!(matches!(good.status.as_str(), "queued" | "working"));
+    fs::write(&bad_gate, b"go").unwrap();
+    fs::write(&good_gate, b"go").unwrap();
     let bad_attempt = runtime
         .registry()
         .get_latest_attempt(&bad.job_id)
@@ -2705,14 +2732,20 @@ fn runtime_interactive_close_blocks_until_exact_job_is_reconciled() {
         return;
     }
     let context = IntegrationContext::new("interactive-close");
+    let gate = context.root.join("interactive-close-gate");
     context.write(
         "runtime_interactive_close.py",
-        "import time\ntime.sleep(0.4)\nprint('INTERACTIVE_CLOSE_DONE', flush=True)\n",
+        &format!(
+            "import pathlib,time\ngate=pathlib.Path({gate:?})\nfor _ in range(1000):\n    if gate.exists(): break\n    time.sleep(0.01)\nprint('INTERACTIVE_CLOSE_DONE', flush=True)\n",
+            gate = gate.to_string_lossy(),
+        ),
     );
     let runtime = context.runtime(2000);
     let started = runtime
         .run_task(&context.request("runtime_interactive_close.py", 0))
         .unwrap();
+    assert!(matches!(started.status.as_str(), "queued" | "working"));
+    fs::write(&gate, b"go").unwrap();
     let attempt = runtime
         .registry()
         .get_latest_attempt(&started.job_id)
@@ -2817,14 +2850,20 @@ fn runtime_interactive_list_is_projection_only_and_observe_reconciles_exact_job(
         return;
     }
     let context = IntegrationContext::new("interactive-list");
+    let gate = context.root.join("interactive-list-gate");
     context.write(
         "runtime_interactive_list.py",
-        "import time\ntime.sleep(0.4)\nprint('INTERACTIVE_LIST_DONE', flush=True)\n",
+        &format!(
+            "import pathlib,time\ngate=pathlib.Path({gate:?})\nfor _ in range(1000):\n    if gate.exists(): break\n    time.sleep(0.01)\nprint('INTERACTIVE_LIST_DONE', flush=True)\n",
+            gate = gate.to_string_lossy(),
+        ),
     );
     let runtime = context.runtime(2000);
     let started = runtime
         .run_task(&context.request("runtime_interactive_list.py", 0))
         .unwrap();
+    assert!(matches!(started.status.as_str(), "queued" | "working"));
+    fs::write(&gate, b"go").unwrap();
     let attempt = runtime
         .registry()
         .get_latest_attempt(&started.job_id)
@@ -3817,6 +3856,233 @@ fn runtime_host_dependency_drift_fails_before_dispatch() {
         .output()
         .unwrap();
     assert_ne!(String::from_utf8_lossy(&unit.stdout).trim(), "loaded");
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_host_dependency_runtime_drift_is_witnessed_after_target_start() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("host-dependency-runtime-drift");
+    let dependency = context.root.join("runtime-live-dependency.txt");
+    fs::write(&dependency, b"RUNTIME_V1\n").unwrap();
+    let gate = context.root.join("runtime-live-gate");
+    context.write(
+        "runtime_host_dependency_live.py",
+        &format!(
+            "import pathlib,time\nprint('READY', flush=True)\ngate=pathlib.Path({gate:?})\nfor _ in range(1000):\n    if gate.exists(): break\n    time.sleep(0.01)\nprint(pathlib.Path({dependency:?}).read_text().strip(), flush=True)\n",
+            gate = gate.to_string_lossy(),
+            dependency = dependency.to_string_lossy(),
+        ),
+    );
+    let runtime = context.runtime(2_000);
+    let mut request = context.request("runtime_host_dependency_live.py", 0);
+    request.execution.host_dependencies = vec![HostDependencyBinding {
+        path: dependency.to_string_lossy().into_owned(),
+        expected_digest: file_digest(&dependency),
+    }];
+    let started = runtime.run_task(&request).unwrap();
+    assert!(matches!(started.status.as_str(), "queued" | "working"));
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&started.job_id)
+        .unwrap()
+        .unwrap();
+    let stdout_path = Path::new(&attempt.bundle_path).join("stdout.log");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if fs::read_to_string(&stdout_path)
+            .ok()
+            .is_some_and(|text| text.contains("READY\n"))
+        {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(ready, "target never reached READY after Runner validation");
+    let replacement = dependency.with_extension("txt.new");
+    fs::write(&replacement, b"RUNTIME_V2\n").unwrap();
+    fs::rename(&replacement, &dependency).unwrap();
+    fs::write(&gate, b"go").unwrap();
+    let observed = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: started.job_id.clone(),
+            wait_ms: 10_000,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 8_192,
+            stderr_tail_bytes: 8_192,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert_eq!(observed.status, "failed");
+    assert_eq!(
+        observed.execution_reason_code.as_deref(),
+        Some("HOST_DEPENDENCY_RUNTIME_DRIFT")
+    );
+    assert!(observed.execution_terminal);
+    let terminal = observed
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "terminal_evidence")
+        .unwrap();
+    let evidence = runtime
+        .read_artifact(&ArtifactReadRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: observed.job_id.clone(),
+            artifact_id: terminal.artifact_id.clone(),
+            offset: 0,
+            max_bytes: 65_536,
+        })
+        .unwrap();
+    let evidence: serde_json::Value = serde_json::from_str(&evidence.content).unwrap();
+    assert_eq!(
+        evidence["hostDependencyContinuity"],
+        "runtime_path_drift_detected"
+    );
+    assert_eq!(
+        evidence["hostDependencies"][0]["path"],
+        dependency.to_string_lossy().as_ref()
+    );
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_provider_bound_runner_start_binds_actual_runner_image() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("provider-actual-image");
+    let runtime = context.runtime(5_000);
+    let mut submit = context.direct_submit("request:provider-actual-image", 1);
+    let provider_digest = file_digest(&context.executor.runner_path);
+    submit.execution_provider = Some(ordivon_runtime_core::ExecutionProviderSnapshot {
+        contract: ordivon_runtime_core::ExecutionProviderContract::LocalLinuxRunnerV1,
+        executable_digest: provider_digest.clone(),
+        wsl_distribution: None,
+    });
+    let executable = fs::canonicalize("/usr/bin/sleep").unwrap();
+    submit.plan.executable = executable.to_string_lossy().into_owned();
+    submit.plan.executable_digest = file_digest(&executable);
+    submit.plan.args = vec!["0.75".to_string()];
+    submit.plan.timeout_ms = 5_000;
+    let created = created_admission(runtime.registry().submit(&submit).unwrap());
+    let observed = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: created.job.job_id.clone(),
+            wait_ms: 10_000,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 4_096,
+            stderr_tail_bytes: 4_096,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert_eq!(observed.status, "succeeded");
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&created.job.job_id)
+        .unwrap()
+        .unwrap();
+    assert!(attempt.runner_start_digest.is_some());
+    let runner_start: serde_json::Value = serde_json::from_slice(
+        &fs::read(Path::new(&attempt.bundle_path).join("runner-start.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(runner_start["runnerExecutableDigest"], provider_digest);
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_executable_runtime_drift_is_witnessed_without_rewriting_script_identity() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("executable-runtime-drift");
+    let executable = context.root.join("live-agent-script");
+    let gate = context.root.join("live-agent-gate");
+    fs::write(
+        &executable,
+        format!(
+            "#!/usr/bin/python3\nimport pathlib,time\nprint('FILE='+__file__, flush=True)\ngate=pathlib.Path({gate:?})\nfor _ in range(1000):\n    if gate.exists(): break\n    time.sleep(0.01)\nprint('ORIGINAL_DONE', flush=True)\n",
+            gate = gate.to_string_lossy(),
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    let mut executor = context.executor.clone();
+    executor.allowed_executable_roots.push(context.root.clone());
+    let runtime = Runtime::new(RuntimeConfig {
+        registry: context.registry.clone(),
+        executor,
+        startup_grace_ms: 2_000,
+        windows: None,
+    })
+    .unwrap();
+    let mut request = context.request("unused.py", 0);
+    request.execution.executable = executable.to_string_lossy().into_owned();
+    request.execution.args.clear();
+    let started = runtime.run_task(&request).unwrap();
+    assert!(matches!(started.status.as_str(), "queued" | "working"));
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&started.job_id)
+        .unwrap()
+        .unwrap();
+    let stdout_path = Path::new(&attempt.bundle_path).join("stdout.log");
+    let expected_identity = format!("FILE={}\n", executable.display());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if fs::read_to_string(&stdout_path)
+            .ok()
+            .is_some_and(|text| text.contains(&expected_identity))
+        {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        ready,
+        "script did not observe its original pathname identity"
+    );
+    let replacement = executable.with_extension("new");
+    fs::write(&replacement, "#!/bin/sh\nprintf 'REPLACEMENT\\n'\n").unwrap();
+    let mut permissions = fs::metadata(&replacement).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&replacement, permissions).unwrap();
+    fs::rename(&replacement, &executable).unwrap();
+    fs::write(&gate, b"go").unwrap();
+    let observed = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: started.job_id.clone(),
+            wait_ms: 10_000,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 8_192,
+            stderr_tail_bytes: 8_192,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert_eq!(observed.status, "failed");
+    assert_eq!(
+        observed.execution_reason_code.as_deref(),
+        Some("EXECUTABLE_RUNTIME_DRIFT")
+    );
+    assert!(observed.stdout_tail.contains(&expected_identity));
+    assert!(!observed.stdout_tail.contains("REPLACEMENT"));
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }
 
 #[test]

@@ -67,6 +67,17 @@ pub(crate) fn prepare_runner_terminal_from_bundle(
         {
             (AttemptState::Failed, "INPUT_PRECONDITION_DRIFT")
         }
+        TaskTerminalStatus::Failed
+            if result.infrastructure_error_code.as_deref()
+                == Some("HOST_DEPENDENCY_RUNTIME_DRIFT") =>
+        {
+            (AttemptState::Failed, "HOST_DEPENDENCY_RUNTIME_DRIFT")
+        }
+        TaskTerminalStatus::Failed
+            if result.infrastructure_error_code.as_deref() == Some("EXECUTABLE_RUNTIME_DRIFT") =>
+        {
+            (AttemptState::Failed, "EXECUTABLE_RUNTIME_DRIFT")
+        }
         TaskTerminalStatus::Failed if result.infrastructure_error_code.is_some() => {
             (AttemptState::Failed, "RUNNER_INFRASTRUCTURE_FAILURE")
         }

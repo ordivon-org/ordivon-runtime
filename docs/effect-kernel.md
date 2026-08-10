@@ -177,7 +177,9 @@ Current Ordivon Runtime already proves:
 - first-admission commitment of the Runtime-owned Linux Runner or Windows launcher contract/digest, with pre-dispatch drift rejection and identity-bound terminal evidence;
 - Runtime self-release as a real `RECONCILABLE` external effect: stable principal/client request identity, operation-v5 binding to release side truth, deterministic deployment receipt, exact replay before current-world checks, and projection-only `release.get` reconciliation across Runtime ingress replacement;
 - `workspace.patch` as a second materially different structured effect: stable request identity, durable pre-mutation intent plus complete before/after digest plan, atomic filesystem commit, exact replay, and `workspace.patch.get` reconciliation that preserves mixed physical state as `unknown`;
-- explicit trusted-local Linux Host Dependency commitments for known host runtime prerequisite files: admission-time digest validation, additive Job side truth, operation-v6 identity, pre-dispatch drift rejection, Runner pre-spawn revalidation, and terminal evidence;
+- explicit trusted-local Linux Host Dependency commitments for known host runtime prerequisite files: admission-time digest validation, additive Job side truth, operation-v6 identity, pre-dispatch drift rejection, Runner pre-validation path/topology witnessing through the whole Attempt, explicit `HOST_DEPENDENCY_RUNTIME_DRIFT`, and terminal continuity evidence;
+- target executable realization witnessing on local Linux: Runner establishes a path/topology witness before its final executable hash and keeps it through the step, preserving ordinary pathname semantics while converting runtime pathname replacement/write/delete into `EXECUTABLE_RUNTIME_DRIFT`;
+- current provider-bound Linux Runner start evidence binds the actual `/proc/self/exe` image digest and, while live, Core independently cross-checks the systemd MainPID image against the committed provider;
 - recoverable Workspace closure.
 
 The source-state commitment is deliberately scoped. It excludes ignored caches and build outputs and does not make the trusted host filesystem immutable. Direct host writes after the Runner check remain outside this guarantee; eliminating that race would require executing from an immutable snapshot or stronger isolation and then resolving how intentional command changes return to the working Workspace.
@@ -188,7 +190,7 @@ It does not yet prove:
 
 - the number or identity of external effects performed inside an arbitrary command;
 - a general external effect receipt across arbitrary operations; release and Workspace Patch each own adapter-specific evidence and do not turn opaque commands into structured effects;
-- automatic or complete target environment closure. P2 proved that a dynamically loaded host dependency can change output while target ELF digest and prior operation identity remain unchanged, but Runtime only commits prerequisite files explicitly declared by the Agent rather than pretending to discover every loader, `dlopen`, language-module, driver, network, or service dependency;
+- automatic or complete target environment closure. P2 proved that a dynamically loaded host dependency can change output while target ELF digest and prior operation identity remain unchanged; P3 then proved that pre-spawn revalidation alone still allowed delayed `dlopen()` to consume replacement bytes. Runtime now witnesses declared filesystem paths through execution but still refuses to pretend that this discovers every loader, module, driver, network, service, mount-namespace, or other ambient dependency;
 - generic target/tool-contract continuity beyond the Runtime-owned Runner/Windows launcher and the explicitly committed release/Host Dependency contracts;
 - operation-scoped authority beyond the trusted-local principal;
 - external-world preconditions outside the Git Workspace other than immutable-input bytes and explicitly declared trusted-local Host Dependency prerequisite files;
@@ -226,6 +228,18 @@ A persistent addition to the Effect Kernel must answer all of the following:
 6. Which existing path does the addition replace or strengthen?
 
 A field with no enforcement, an event with no recovery decision, or an abstraction with no real adapter does not enter the kernel.
+
+## P3 physical-realization result
+
+P3 attacked the remaining gap between “Runtime validated this path” and “the Attempt later consumed the same physical world.” A deterministic delayed-`dlopen()` experiment succeeded after all P2 checks and produced V2 while terminal evidence still carried the committed V1 Host Dependency digest. That falsified the claim that pre-spawn validation was sufficient. Runtime therefore now distinguishes three boundaries instead of forcing them into one abstraction:
+
+- declared Host Dependency paths are watched from before final Runner validation through terminal; ordinary filesystem drift makes the Attempt fail instead of allowing a false successful continuity claim;
+- target executable paths are watched from before final Runner hash through each step, while the original pathname remains the executed path so target-visible filename semantics do not change;
+- the Linux Runner provider independently reports its actual `/proc/self/exe` digest and Core cross-checks the live systemd MainPID image whenever it is still observable.
+
+Two stronger-looking mechanisms were tested and rejected. A single-file systemd read-only bind did not stabilize future pathname resolution when the parent directory entry was replaced. Sealed memfd execution did provide exact bytes for ELF and shebang targets, but changed `__file__`, `sys.argv[0]`, and `/proc/self/exe`, so making it the default would silently change the target world to satisfy Runtime's evidence model. P3 keeps the weaker but truthful path-witness contract.
+
+P3 also audited `workspace.close`, cache prune, reclaim, and lifecycle operations as possible third structured effects. None graduated. `workspace.close` physically removes the Git worktree before its closed tombstone is published, so it lacks durable pre-mutation intent; cache/reclaim/lifecycle receipts lack stable effect identity plus exact replay/reconciliation semantics. Runtime therefore still has exactly two structured effects—self-release and Workspace Patch—and P3 adds **no** generic Effect framework.
 
 ## Two-effect result and next implementation gate
 

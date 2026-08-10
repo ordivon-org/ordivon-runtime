@@ -269,6 +269,8 @@ struct TerminalProcessEvidence {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     host_dependencies: Vec<HostDependencyBinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    host_dependency_continuity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     input_set_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     effective_inputs: Vec<EffectiveInputBinding>,
@@ -2602,6 +2604,29 @@ impl Runtime {
                 false,
             ));
         }
+        if let Some(provider) = self.registry.execution_provider(&attempt.job_id)? {
+            if provider.contract == super::ExecutionProviderContract::LocalLinuxRunnerV1 {
+                let observed = evidence.runner_executable_digest.as_deref().ok_or_else(|| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::LaunchIdentityMismatch,
+                        "provider-bound Runner-start evidence omitted the actual Runner image digest",
+                        Some("runnerStart.runnerExecutableDigest"),
+                        false,
+                    )
+                })?;
+                if observed != provider.executable_digest {
+                    return Err(RuntimeError::new(
+                        RuntimeErrorCode::LaunchIdentityMismatch,
+                        format!(
+                            "actual Runner image differs from the committed execution provider: expected {}, observed {}",
+                            provider.executable_digest, observed
+                        ),
+                        Some("runnerStart.runnerExecutableDigest"),
+                        false,
+                    ));
+                }
+            }
+        }
         let properties = systemctl_show(&attempt.unit_name)?;
         require_property(&properties, "InvocationID", &evidence.invocation_id)?;
         require_property(&properties, "ControlGroup", &evidence.control_group)?;
@@ -2626,6 +2651,45 @@ impl Runtime {
                 false,
             )
         })?;
+        if let Some(provider) = self.registry.execution_provider(&attempt.job_id)? {
+            if provider.contract == super::ExecutionProviderContract::LocalLinuxRunnerV1 {
+                let proc_exe = PathBuf::from(format!("/proc/{main_pid}/exe"));
+                match sha256_file(&proc_exe) {
+                    Ok(os_observed) => {
+                        if evidence.runner_executable_digest.as_deref()
+                            != Some(os_observed.as_str())
+                            || os_observed != provider.executable_digest
+                        {
+                            return Err(RuntimeError::new(
+                                RuntimeErrorCode::LaunchIdentityMismatch,
+                                format!(
+                                    "systemd MainPID image differs from committed/self-reported Runner provider: committed {}, runner-start {:?}, OS observed {}",
+                                    provider.executable_digest,
+                                    evidence.runner_executable_digest,
+                                    os_observed
+                                ),
+                                Some("runnerStart.runnerExecutableDigest"),
+                                false,
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        if process_identity(main_pid).as_deref()
+                            == Some(process_start_identity.as_str())
+                        {
+                            return Err(RuntimeError::new(
+                                RuntimeErrorCode::LaunchIdentityMismatch,
+                                format!(
+                                    "cannot independently inspect the live systemd MainPID Runner image: {error}"
+                                ),
+                                Some("mainPid"),
+                                false,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         let runner_start_digest = sha256_bytes(&bytes);
         if runner_start_digest != sha256_file(&path).map_err(map_universal_error)? {
             return Err(RuntimeError::new(
@@ -3950,6 +4014,19 @@ fn append_terminal_evidence_for_commit_with_observation(
         AttemptState::Lost => "unknown",
         _ => "committed",
     };
+    let host_dependencies = registry.host_dependencies(&attempt.job_id)?;
+    let host_dependency_continuity = if host_dependencies.is_empty() {
+        None
+    } else {
+        match terminal.reason_code.as_str() {
+            "HOST_DEPENDENCY_RUNTIME_DRIFT" => Some("runtime_path_drift_detected".to_string()),
+            "PROCESS_EXIT_ZERO"
+            | "PROCESS_EXIT_NONZERO"
+            | "PROCESS_COMPLETED_BEFORE_STOP_EFFECTIVE"
+            | "DEADLINE_EXCEEDED" => Some("no_runtime_path_drift_observed".to_string()),
+            _ => None,
+        }
+    };
     let evidence = TerminalProcessEvidence {
         schema_version: RUNTIME_SCHEMA_VERSION,
         job_id: attempt.job_id.clone(),
@@ -3962,7 +4039,8 @@ fn append_terminal_evidence_for_commit_with_observation(
         windows_authority: plan.windows_authority,
         windows_execution_context: plan.windows_execution_context,
         foreign_references: plan.foreign_references,
-        host_dependencies: registry.host_dependencies(&attempt.job_id)?,
+        host_dependencies,
+        host_dependency_continuity,
         input_set_id: plan.input_set_id,
         effective_inputs: plan.effective_inputs,
         executable: plan.executable,
@@ -5558,9 +5636,10 @@ pub(crate) fn map_universal_error(error: crate::UniversalExecError) -> RuntimeEr
         UniversalCode::WorkspacePathDenied => RuntimeErrorCode::WorkspacePathDenied,
         UniversalCode::RevisionNotFound => RuntimeErrorCode::RevisionNotFound,
         UniversalCode::RevisionMismatch => RuntimeErrorCode::RevisionMismatch,
-        UniversalCode::WorkspaceStateMismatch | UniversalCode::InputStateMismatch => {
-            RuntimeErrorCode::WorkspaceStateMismatch
-        }
+        UniversalCode::WorkspaceStateMismatch
+        | UniversalCode::InputStateMismatch
+        | UniversalCode::HostDependencyRuntimeDrift
+        | UniversalCode::ExecutableRuntimeDrift => RuntimeErrorCode::WorkspaceStateMismatch,
         UniversalCode::WorkspaceMutationIncomplete => RuntimeErrorCode::ReconciliationRequired,
         UniversalCode::TaskExists => RuntimeErrorCode::IdempotencyConflict,
         UniversalCode::TaskNotFound => RuntimeErrorCode::JobNotFound,

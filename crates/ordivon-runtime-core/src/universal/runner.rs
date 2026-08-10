@@ -1,7 +1,10 @@
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -44,8 +47,18 @@ pub fn run_task_runner(task_dir: &Path) -> Result<(), UniversalExecError> {
             observed_workspace_source_digest.as_deref(),
         )?;
         validate_input_commitments(&request)?;
+        let mut host_dependency_watch =
+            PathDriftWatch::new_host_dependencies(&request.host_dependencies)?;
         validate_host_dependency_commitments(&request)?;
-        execute_request(&task_dir, &request, started_unix_ms)
+        if let Some(watch) = host_dependency_watch.as_mut() {
+            watch.check()?;
+        }
+        execute_request(
+            &task_dir,
+            &request,
+            started_unix_ms,
+            host_dependency_watch.as_mut(),
+        )
     });
     let result = execution.unwrap_or_else(|error| {
         let infrastructure_error_code = error.code.as_str().to_string();
@@ -366,6 +379,7 @@ fn execute_request(
     task_dir: &Path,
     request: &RunnerTaskRequest,
     started_unix_ms: u128,
+    mut host_dependency_watch: Option<&mut PathDriftWatch>,
 ) -> Result<RunnerTaskResult, UniversalExecError> {
     validate_request_identity(request)?;
     let workspace = canonical_directory(
@@ -451,9 +465,12 @@ fn execute_request(
             request,
             &workspace,
             step,
-            overall_deadline,
-            stdout_retained,
-            stderr_retained,
+            StepExecutionContext {
+                overall_deadline,
+                stdout_retained_before: stdout_retained,
+                stderr_retained_before: stderr_retained,
+                host_dependency_watch: host_dependency_watch.as_deref_mut(),
+            },
         )?;
         stdout_retained = stdout_retained.saturating_add(outcome.stdout_retained);
         stderr_retained = stderr_retained.saturating_add(outcome.stderr_retained);
@@ -525,6 +542,10 @@ fn execute_request(
         }
     }
 
+    if let Some(watch) = host_dependency_watch.as_mut() {
+        watch.check()?;
+    }
+
     let terminal_status = if cancelled {
         TaskTerminalStatus::Cancelled
     } else if failed_step_id.is_some() || any_timed_out {
@@ -579,6 +600,13 @@ fn execute_request(
     })
 }
 
+struct StepExecutionContext<'a> {
+    overall_deadline: Instant,
+    stdout_retained_before: u64,
+    stderr_retained_before: u64,
+    host_dependency_watch: Option<&'a mut PathDriftWatch>,
+}
+
 struct StepOutcome {
     status: std::process::ExitStatus,
     timed_out: bool,
@@ -593,9 +621,7 @@ fn execute_step(
     request: &RunnerTaskRequest,
     workspace: &Path,
     step: &RunnerExecutionStep,
-    overall_deadline: Instant,
-    stdout_retained_before: u64,
-    stderr_retained_before: u64,
+    mut context: StepExecutionContext<'_>,
 ) -> Result<StepOutcome, UniversalExecError> {
     let cwd_text = if let Some(payload) = &request.payload {
         let relative = Path::new(&step.cwd)
@@ -613,9 +639,12 @@ fn execute_step(
         return Err(runner_error("runner cwd escaped workspace"));
     }
     super::validate_exec_payload(&step.args, &step.env, "steps")?;
-    let executable =
-        validate_executable_identity(&step.executable, &step.executable_digest, "executable")?;
-    let mut command = Command::new(&executable);
+    if let Some(watch) = context.host_dependency_watch.as_mut() {
+        watch.check()?;
+    }
+    let mut executable =
+        prepare_executable_realization(&step.executable, &step.executable_digest, "executable")?;
+    let mut command = Command::new(executable.exec_path());
     command.arg0(&step.executable).args(&step.args);
     if !request.inherit_host_environment {
         command.env_clear();
@@ -662,17 +691,59 @@ fn execute_step(
     let stdout_limit = request.stdout_limit_bytes;
     let stderr_limit = request.stderr_limit_bytes;
     let stdout_thread = thread::spawn(move || {
-        capture_stream_append(stdout, &stdout_path, stdout_limit, stdout_retained_before)
+        capture_stream_append(
+            stdout,
+            &stdout_path,
+            stdout_limit,
+            context.stdout_retained_before,
+        )
     });
     let stderr_thread = thread::spawn(move || {
-        capture_stream_append(stderr, &stderr_path, stderr_limit, stderr_retained_before)
+        capture_stream_append(
+            stderr,
+            &stderr_path,
+            stderr_limit,
+            context.stderr_retained_before,
+        )
     });
     let step_deadline = Instant::now()
         .checked_add(Duration::from_millis(step.timeout_ms))
         .ok_or_else(|| runner_error("step timeout exceeds platform monotonic clock range"))?;
-    let deadline = step_deadline.min(overall_deadline);
+    let deadline = step_deadline.min(context.overall_deadline);
     let mut timed_out = false;
+    let mut runtime_drift = None;
     let status = loop {
+        if let Err(error) = executable.check() {
+            let _ = terminate_process_group(child.id(), &step.id);
+            let status = child.wait().map_err(|wait_error| {
+                UniversalExecError::new(
+                    UniversalExecErrorCode::ToolFailed,
+                    format!(
+                        "cannot reap executable-drifted step {}: {wait_error}",
+                        step.id
+                    ),
+                    None,
+                    false,
+                )
+            })?;
+            runtime_drift = Some(error);
+            break status;
+        }
+        if let Some(watch) = context.host_dependency_watch.as_mut() {
+            if let Err(error) = watch.check() {
+                let _ = terminate_process_group(child.id(), &step.id);
+                let status = child.wait().map_err(|wait_error| {
+                    UniversalExecError::new(
+                        UniversalExecErrorCode::ToolFailed,
+                        format!("cannot reap drifted step {}: {wait_error}", step.id),
+                        None,
+                        false,
+                    )
+                })?;
+                runtime_drift = Some(error);
+                break status;
+            }
+        }
         if let Some(status) = child.try_wait().map_err(|error| {
             UniversalExecError::new(
                 UniversalExecErrorCode::ToolFailed,
@@ -703,6 +774,21 @@ fn execute_step(
     let (stderr_retained, stderr_dropped) = stderr_thread
         .join()
         .map_err(|_| runner_error("stderr capture thread panicked"))??;
+    if runtime_drift.is_none() {
+        if let Err(error) = executable.check() {
+            runtime_drift = Some(error);
+        }
+    }
+    if runtime_drift.is_none() {
+        if let Some(watch) = context.host_dependency_watch.as_mut() {
+            if let Err(error) = watch.check() {
+                runtime_drift = Some(error);
+            }
+        }
+    }
+    if let Some(error) = runtime_drift {
+        return Err(error);
+    }
     Ok(StepOutcome {
         status,
         timed_out,
@@ -877,13 +963,31 @@ fn write_progress(
     )
 }
 
-fn validate_executable_identity(
+struct PreparedExecutable {
+    path: PathBuf,
+    watch: PathDriftWatch,
+}
+
+impl PreparedExecutable {
+    fn exec_path(&self) -> PathBuf {
+        self.path.clone()
+    }
+
+    fn check(&mut self) -> Result<(), UniversalExecError> {
+        self.watch.check()
+    }
+}
+
+fn prepare_executable_realization(
     executable: &str,
     expected_digest: &str,
     field: &str,
-) -> Result<PathBuf, UniversalExecError> {
-    let path = Path::new(executable);
-    let canonical = fs::canonicalize(path).map_err(|error| {
+) -> Result<PreparedExecutable, UniversalExecError> {
+    // Preserve target pathname semantics. The witness is established before the final
+    // canonicalize/hash so any later byte or topology change turns the Attempt into an
+    // explicit physical-realization failure rather than a false success.
+    let mut watch = PathDriftWatch::new_executable(Path::new(executable))?;
+    let canonical = fs::canonicalize(executable).map_err(|error| {
         UniversalExecError::new(
             UniversalExecErrorCode::InvalidRequest,
             format!("cannot canonicalize target executable: {error}"),
@@ -902,13 +1006,248 @@ fn validate_executable_identity(
     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
         return Err(runner_error("target must resolve to an executable file"));
     }
-    let digest = sha256_file(&canonical)?;
-    if digest != expected_digest {
-        return Err(runner_error(
-            "target executable digest changed before launch",
+    let observed_digest = sha256_file(&canonical)?;
+    watch.check()?;
+    if observed_digest != expected_digest {
+        return Err(UniversalExecError::new(
+            UniversalExecErrorCode::InputStateMismatch,
+            format!(
+                "target executable bytes changed before realization: expected {expected_digest}, observed {observed_digest}"
+            ),
+            Some(field),
+            false,
         ));
     }
-    Ok(canonical)
+    Ok(PreparedExecutable {
+        path: canonical,
+        watch,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum PathDriftKind {
+    HostDependency,
+    Executable,
+}
+
+#[derive(Default)]
+struct PathDriftWatchPlan {
+    direct: bool,
+    children: BTreeSet<Vec<u8>>,
+}
+
+struct PathDriftWatchSpec {
+    path: PathBuf,
+    direct: bool,
+    children: BTreeSet<Vec<u8>>,
+}
+
+struct PathDriftWatch {
+    fd: OwnedFd,
+    specs: BTreeMap<i32, PathDriftWatchSpec>,
+    kind: PathDriftKind,
+}
+
+impl PathDriftWatch {
+    fn new_host_dependencies(
+        dependencies: &[super::RunnerHostDependencyCommitment],
+    ) -> Result<Option<Self>, UniversalExecError> {
+        if dependencies.is_empty() {
+            return Ok(None);
+        }
+        let paths = dependencies
+            .iter()
+            .map(|dependency| PathBuf::from(&dependency.path))
+            .collect::<Vec<_>>();
+        Self::new(&paths, PathDriftKind::HostDependency).map(Some)
+    }
+
+    fn new_executable(path: &Path) -> Result<Self, UniversalExecError> {
+        Self::new(&[path.to_path_buf()], PathDriftKind::Executable)
+    }
+
+    fn new(paths: &[PathBuf], kind: PathDriftKind) -> Result<Self, UniversalExecError> {
+        let raw_fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        if raw_fd < 0 {
+            return Err(path_drift_infrastructure_error(
+                kind,
+                format!(
+                    "cannot create path drift witness: {}",
+                    std::io::Error::last_os_error()
+                ),
+            ));
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let mut plans = BTreeMap::<PathBuf, PathDriftWatchPlan>::new();
+        for path in paths {
+            plans.entry(path.clone()).or_default().direct = true;
+            let mut current = path.as_path();
+            while let (Some(parent), Some(name)) = (current.parent(), current.file_name()) {
+                plans
+                    .entry(parent.to_path_buf())
+                    .or_default()
+                    .children
+                    .insert(name.as_bytes().to_vec());
+                if parent == Path::new("/") {
+                    break;
+                }
+                current = parent;
+            }
+        }
+        let mut specs = BTreeMap::new();
+        for (path, plan) in plans {
+            let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+                path_drift_infrastructure_error(kind, "path drift watch contains NUL")
+            })?;
+            let mut mask = libc::IN_ATTRIB
+                | libc::IN_CLOSE_WRITE
+                | libc::IN_DELETE_SELF
+                | libc::IN_MOVE_SELF
+                | libc::IN_UNMOUNT;
+            if plan.direct {
+                mask |= libc::IN_MODIFY;
+            }
+            if !plan.children.is_empty() {
+                mask |= libc::IN_CREATE
+                    | libc::IN_DELETE
+                    | libc::IN_MOVED_FROM
+                    | libc::IN_MOVED_TO
+                    | libc::IN_MODIFY;
+            }
+            let wd = unsafe { libc::inotify_add_watch(fd.as_raw_fd(), c_path.as_ptr(), mask) };
+            if wd < 0 {
+                return Err(path_drift_infrastructure_error(
+                    kind,
+                    format!(
+                        "cannot watch path {}: {}",
+                        path.display(),
+                        std::io::Error::last_os_error()
+                    ),
+                ));
+            }
+            specs.insert(
+                wd,
+                PathDriftWatchSpec {
+                    path,
+                    direct: plan.direct,
+                    children: plan.children,
+                },
+            );
+        }
+        Ok(Self { fd, specs, kind })
+    }
+
+    fn check(&mut self) -> Result<(), UniversalExecError> {
+        let mut buffer = [0_u8; 16 * 1024];
+        loop {
+            let read = unsafe {
+                libc::read(
+                    self.fd.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
+            };
+            if read < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    return Ok(());
+                }
+                return Err(path_drift_infrastructure_error(
+                    self.kind,
+                    format!("cannot read path drift witness: {error}"),
+                ));
+            }
+            if read == 0 {
+                return Ok(());
+            }
+            let mut offset = 0_usize;
+            let read = usize::try_from(read).unwrap_or(buffer.len());
+            while offset + std::mem::size_of::<libc::inotify_event>() <= read {
+                let event = unsafe {
+                    std::ptr::read_unaligned(
+                        buffer.as_ptr().add(offset).cast::<libc::inotify_event>(),
+                    )
+                };
+                let event_size =
+                    std::mem::size_of::<libc::inotify_event>().saturating_add(event.len as usize);
+                if event_size == 0 || offset.saturating_add(event_size) > read {
+                    return Err(path_drift_infrastructure_error(
+                        self.kind,
+                        "path drift witness emitted a malformed event",
+                    ));
+                }
+                if event.mask & libc::IN_Q_OVERFLOW != 0 {
+                    return Err(path_drift_infrastructure_error(
+                        self.kind,
+                        "path drift witness queue overflowed",
+                    ));
+                }
+                if let Some(spec) = self.specs.get(&event.wd) {
+                    let self_mask = libc::IN_ATTRIB
+                        | libc::IN_CLOSE_WRITE
+                        | libc::IN_DELETE_SELF
+                        | libc::IN_MOVE_SELF
+                        | libc::IN_UNMOUNT
+                        | libc::IN_IGNORED;
+                    if event.mask & self_mask != 0 && (spec.direct || event.len == 0) {
+                        return Err(path_runtime_drift(self.kind, &spec.path, event.mask));
+                    }
+                    if event.len > 0 {
+                        let name_start = offset + std::mem::size_of::<libc::inotify_event>();
+                        let name_bytes = &buffer[name_start..offset + event_size];
+                        let name_end = name_bytes
+                            .iter()
+                            .position(|byte| *byte == 0)
+                            .unwrap_or(name_bytes.len());
+                        let name = &name_bytes[..name_end];
+                        let child_mask = libc::IN_ATTRIB
+                            | libc::IN_CLOSE_WRITE
+                            | libc::IN_CREATE
+                            | libc::IN_DELETE
+                            | libc::IN_MOVED_FROM
+                            | libc::IN_MOVED_TO
+                            | libc::IN_MODIFY;
+                        if event.mask & child_mask != 0 && spec.children.contains(name) {
+                            return Err(path_runtime_drift(self.kind, &spec.path, event.mask));
+                        }
+                    }
+                }
+                offset += event_size;
+            }
+        }
+    }
+}
+
+fn path_drift_infrastructure_error(
+    kind: PathDriftKind,
+    message: impl Into<String>,
+) -> UniversalExecError {
+    UniversalExecError::new(
+        match kind {
+            PathDriftKind::HostDependency => UniversalExecErrorCode::HostDependencyRuntimeDrift,
+            PathDriftKind::Executable => UniversalExecErrorCode::ExecutableRuntimeDrift,
+        },
+        message,
+        Some(match kind {
+            PathDriftKind::HostDependency => "hostDependencies",
+            PathDriftKind::Executable => "executable",
+        }),
+        false,
+    )
+}
+
+fn path_runtime_drift(kind: PathDriftKind, path: &Path, mask: u32) -> UniversalExecError {
+    let subject = match kind {
+        PathDriftKind::HostDependency => "declared Host Dependency",
+        PathDriftKind::Executable => "target executable",
+    };
+    path_drift_infrastructure_error(
+        kind,
+        format!(
+            "{subject} path topology or bytes changed during execution near {} (inotify mask 0x{mask:x})",
+            path.display()
+        ),
+    )
 }
 
 fn load_request(task_dir: &Path) -> Result<RunnerTaskRequest, UniversalExecError> {
@@ -1196,6 +1535,7 @@ fn write_runner_start(
                 payload_gid: request.payload.as_ref().map(|payload| payload.gid),
                 observed_workspace_source_digest: observed_workspace_source_digest
                     .map(ToString::to_string),
+                runner_executable_digest: Some(sha256_file(Path::new("/proc/self/exe"))?),
                 observed_unix_ms,
             }
         }

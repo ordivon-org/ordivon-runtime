@@ -1300,7 +1300,9 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         check(
             "host-dependency-terminal-evidence",
             host_dependency_evidence.get("hostDependencies")
-            == [{"path": str(host_dependency), "expectedDigest": host_dependency_v1_digest}],
+            == [{"path": str(host_dependency), "expectedDigest": host_dependency_v1_digest}]
+            and host_dependency_evidence.get("hostDependencyContinuity")
+            == "no_runtime_path_drift_observed",
             host_dependency_evidence,
         )
 
@@ -1731,6 +1733,14 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         check("artifact-content", artifact.get("content") == expected_stdout, artifact)
         check("artifact-digest", artifact.get("digest") == digest_bytes(artifact["content"].encode("utf-8")), artifact)
 
+        cancel_gate = root / f"cancel-gate-{uuid.uuid4()}"
+        cancel_program = (
+            "import pathlib,time\n"
+            f"gate=pathlib.Path({str(cancel_gate)!r})\n"
+            "print('CANCEL_READY', flush=True)\n"
+            "while not gate.exists():\n"
+            "    time.sleep(0.1)\n"
+        )
         long_task = client.tool(
             "workspace.exec",
             {
@@ -1738,8 +1748,8 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
                 "clientRequestId": f"request:{uuid.uuid4()}",
                 "execution": {
                     **execution,
-                    "args": ["-c", "import time; print('CANCEL_READY', flush=True); time.sleep(30)"],
-                    "timeoutMs": 60_000,
+                    "args": ["-c", cancel_program],
+                    "timeoutMs": 600_000,
                 },
                 "waitMs": 0,
                 "stdoutTailBytes": 4096,
@@ -1749,6 +1759,34 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         cancel_job_id = str(long_task["jobId"])
         cancel_attempt_id = str(long_task["attemptId"])
         attempt_ids.append(cancel_attempt_id)
+        cancel_ready = None
+        cancel_ready_deadline = time.monotonic() + 120.0
+        while time.monotonic() < cancel_ready_deadline:
+            cancel_ready = client.tool(
+                "task.observe",
+                {
+                    "schemaVersion": SCHEMA_VERSION,
+                    "jobId": cancel_job_id,
+                    "waitMs": 1_000,
+                    "waitUntil": "change_or_terminal",
+                    "stdoutTailBytes": 4096,
+                    "stderrTailBytes": 4096,
+                },
+            )
+            if cancel_ready.get("status") in TERMINAL:
+                raise AssertionError(
+                    f"cancel target became terminal before cancellation phase: {cancel_ready}"
+                )
+            if "CANCEL_READY\n" in (cancel_ready.get("stdoutTail") or ""):
+                break
+        else:
+            raise TimeoutError(f"cancel target never reached READY phase: {cancel_ready}")
+        check(
+            "cancel-ready-running",
+            cancel_ready.get("executionTerminal") is False
+            and "CANCEL_READY\n" in (cancel_ready.get("stdoutTail") or ""),
+            cancel_ready,
+        )
         active_close = client.tool_result(
             "workspace.close",
             {"schemaVersion": SCHEMA_VERSION, "workspaceId": workspace_id, "force": True},

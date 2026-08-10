@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
@@ -9,7 +9,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 struct Sandbox {
     root: PathBuf,
@@ -1517,6 +1517,178 @@ fn runner_rejects_host_dependency_drift_before_spawning_target() {
         .as_deref()
         .is_some_and(|message| message.contains("Host Dependency")));
     assert!(!workspace.join("effect-marker").exists());
+}
+
+#[test]
+fn runner_fails_when_host_dependency_drifts_after_target_start() {
+    let sandbox = Sandbox::new("runner-host-dependency-runtime-drift");
+    let workspace = sandbox.root.join("workspace-host-dependency-runtime-drift");
+    fs::create_dir_all(&workspace).unwrap();
+    let dependency = sandbox.root.join("runtime-dependency.txt");
+    fs::write(&dependency, b"RUNTIME_V1\n").unwrap();
+    let gate = sandbox.root.join("runtime-gate");
+    let script = workspace.join("delayed-read.py");
+    fs::write(
+        &script,
+        format!(
+            "import pathlib,time\nprint('READY', flush=True)\ngate=pathlib.Path({gate:?})\nfor _ in range(500):\n    if gate.exists(): break\n    time.sleep(0.01)\nprint(pathlib.Path({dependency:?}).read_text().strip(), flush=True)\n",
+            gate = gate.to_string_lossy(),
+            dependency = dependency.to_string_lossy(),
+        ),
+    )
+    .unwrap();
+    let task_dir = sandbox.root.join("task-host-dependency-runtime-drift");
+    fs::create_dir_all(&task_dir).unwrap();
+    let executable = real_executable("/usr/bin/python3");
+    let request = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        payload: None,
+        inherit_host_environment: true,
+        task_id: "task-host-dependency-runtime-drift".to_string(),
+        workspace_id: "workspace-host-dependency-runtime-drift".to_string(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
+        input_presentation_root: None,
+        input_commitments: Vec::new(),
+        host_dependencies: vec![RunnerHostDependencyCommitment {
+            path: dependency.to_string_lossy().into_owned(),
+            digest: sha256_file(&dependency).unwrap(),
+        }],
+        executable: executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&executable).unwrap(),
+        args: vec![script.to_string_lossy().into_owned()],
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        steps: Vec::new(),
+        timeout_ms: 5_000,
+        stdout_limit_bytes: 4_096,
+        stderr_limit_bytes: 4_096,
+    };
+    write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
+    let runner_task_dir = task_dir.clone();
+    let runner = thread::spawn(move || run_task_runner(&runner_task_dir));
+    let stdout = task_dir.join("stdout.log");
+    let mut ready = false;
+    for _ in 0..500 {
+        if fs::read_to_string(&stdout)
+            .ok()
+            .is_some_and(|text| text.contains("READY\n"))
+        {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ready,
+        "target never reached the post-validation READY point"
+    );
+    let replacement = dependency.with_extension("txt.new");
+    fs::write(&replacement, b"RUNTIME_V2\n").unwrap();
+    fs::rename(&replacement, &dependency).unwrap();
+    fs::write(&gate, b"go").unwrap();
+    runner.join().unwrap().unwrap();
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result.status, TaskTerminalStatus::Failed);
+    assert_eq!(
+        result.infrastructure_error_code.as_deref(),
+        Some("HOST_DEPENDENCY_RUNTIME_DRIFT")
+    );
+    assert!(result
+        .infrastructure_error
+        .as_deref()
+        .is_some_and(|message| message.contains("Host Dependency")));
+}
+
+#[test]
+fn runner_preserves_shebang_path_semantics_but_fails_on_runtime_executable_drift() {
+    let sandbox = Sandbox::new("runner-script-runtime-drift");
+    let workspace = sandbox.root.join("workspace-script-runtime-drift");
+    fs::create_dir_all(&workspace).unwrap();
+    let gate = sandbox.root.join("script-gate");
+    let executable = workspace.join("agent-script");
+    fs::write(
+        &executable,
+        format!(
+            "#!/usr/bin/python3\nimport pathlib,time\nprint('FILE='+__file__, flush=True)\ngate=pathlib.Path({gate:?})\nfor _ in range(500):\n    if gate.exists(): break\n    time.sleep(0.01)\nprint('SCRIPT_V1_DONE', flush=True)\n",
+            gate = gate.to_string_lossy(),
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    let expected_digest = sha256_file(&executable).unwrap();
+    let task_dir = sandbox.root.join("task-script-runtime-drift");
+    fs::create_dir_all(&task_dir).unwrap();
+    let request = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        payload: None,
+        inherit_host_environment: true,
+        task_id: "task-script-runtime-drift".to_string(),
+        workspace_id: "workspace-script-runtime-drift".to_string(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
+        input_presentation_root: None,
+        input_commitments: Vec::new(),
+        host_dependencies: Vec::new(),
+        executable: executable.to_string_lossy().into_owned(),
+        executable_digest: expected_digest,
+        args: Vec::new(),
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        steps: Vec::new(),
+        timeout_ms: 5_000,
+        stdout_limit_bytes: 4_096,
+        stderr_limit_bytes: 4_096,
+    };
+    write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
+    let runner_task_dir = task_dir.clone();
+    let runner = thread::spawn(move || run_task_runner(&runner_task_dir));
+    let stdout = task_dir.join("stdout.log");
+    let expected_file_line = format!("FILE={}\n", executable.display());
+    let mut ready = false;
+    for _ in 0..500 {
+        if fs::read_to_string(&stdout)
+            .ok()
+            .is_some_and(|text| text.contains(&expected_file_line))
+        {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ready,
+        "shebang target did not preserve its original file path"
+    );
+    let replacement = executable.with_extension("new");
+    fs::write(&replacement, "#!/bin/sh\nprintf 'SCRIPT_V2\\n'\n").unwrap();
+    let mut permissions = fs::metadata(&replacement).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&replacement, permissions).unwrap();
+    fs::rename(&replacement, &executable).unwrap();
+    fs::write(&gate, b"go").unwrap();
+    runner.join().unwrap().unwrap();
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result.status, TaskTerminalStatus::Failed);
+    assert_eq!(
+        result.infrastructure_error_code.as_deref(),
+        Some("EXECUTABLE_RUNTIME_DRIFT")
+    );
+    assert!(fs::read_to_string(stdout)
+        .unwrap()
+        .contains(&expected_file_line));
 }
 
 #[test]
