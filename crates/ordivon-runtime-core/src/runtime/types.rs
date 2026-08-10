@@ -381,6 +381,101 @@ pub struct ExecutionProviderSnapshot {
     pub wsl_distribution: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeReleaseContract {
+    RuntimeReleaseV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeReleaseRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    pub client_request_id: String,
+    pub principal: String,
+    pub workspace_id: String,
+    pub commit: String,
+    pub candidate_manifest_digest: String,
+    pub expected_tool_count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeReleaseGetRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    pub principal: String,
+    pub client_request_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeReleaseEffectBinding {
+    pub contract: RuntimeReleaseContract,
+    pub effect_id: String,
+    pub request_digest: String,
+    pub workspace_id: String,
+    pub commit: String,
+    pub candidate_manifest_digest: String,
+    pub expected_tool_count: u32,
+    pub receipt_path: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeReleaseDisposition {
+    Admitted,
+    InProgress,
+    Deployed,
+    NotCommitted,
+    RolledBack,
+    ReconciliationRequired,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeReleaseProjection {
+    pub contract: RuntimeReleaseContract,
+    pub effect_id: String,
+    pub client_request_id: String,
+    pub job_id: String,
+    pub workspace_id: String,
+    pub commit: String,
+    pub candidate_manifest_digest: String,
+    pub expected_tool_count: u32,
+    pub effect_disposition: RuntimeReleaseDisposition,
+    pub effect_terminal: bool,
+    pub receipt_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployed_tool_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_catalog_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollback_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciliation_issue: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_state: Option<AttemptState>,
+    pub execution_terminal: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_disposition: Option<JobResolution>,
+    pub delivery_disposition: RuntimeDeliveryDisposition,
+    pub recovery_required: bool,
+    pub semantic_completion_evaluated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeReleaseAdmission {
+    pub replayed: bool,
+    pub release: RuntimeReleaseProjection,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeExecutionTargetCapability {
@@ -558,6 +653,8 @@ pub struct SubmitRequest {
     pub request_identity_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_provider: Option<ExecutionProviderSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_release_effect: Option<RuntimeReleaseEffectBinding>,
     pub plan: RuntimeExecutionPlan,
     pub global_limit: u32,
 }
@@ -566,6 +663,55 @@ pub(crate) const REQUEST_IDENTITY_PREFIX: &str = "runtime-request-v1:";
 pub(crate) const PROPOSAL_IDENTITY_PREFIX: &str = "runtime-request-v2:";
 pub(crate) const INPUT_BOUND_IDENTITY_PREFIX: &str = "runtime-request-input-v1:";
 pub(crate) const INPUT_BOUND_PROPOSAL_IDENTITY_PREFIX: &str = "runtime-request-input-v2:";
+pub(crate) const RUNTIME_RELEASE_IDENTITY_PREFIX: &str = "runtime-release-v1:";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeReleaseRequestIdentity {
+    schema_version: u32,
+    principal: String,
+    workspace_id: String,
+    commit: String,
+    candidate_manifest_digest: String,
+    expected_tool_count: u32,
+}
+
+pub fn runtime_release_request_identity_digest(
+    request: &RuntimeReleaseRequest,
+) -> RuntimeResult<String> {
+    let identity = RuntimeReleaseRequestIdentity {
+        schema_version: request.schema_version,
+        principal: request.principal.clone(),
+        workspace_id: request.workspace_id.clone(),
+        commit: request.commit.clone(),
+        candidate_manifest_digest: request.candidate_manifest_digest.clone(),
+        expected_tool_count: request.expected_tool_count,
+    };
+    let bytes = serde_json::to_vec(&identity).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::InvalidRequest,
+            format!("cannot serialize Runtime release request identity: {error}"),
+            None,
+            false,
+        )
+    })?;
+    Ok(format!(
+        "{RUNTIME_RELEASE_IDENTITY_PREFIX}{}",
+        crate::universal::sha256_bytes(&bytes)
+    ))
+}
+
+pub fn runtime_release_effect_id(request: &RuntimeReleaseRequest) -> String {
+    crate::universal::sha256_bytes(
+        format!(
+            "runtime-release-effect-v1\0{}\0{}",
+            request.principal, request.client_request_id
+        )
+        .as_bytes(),
+    )
+    .trim_start_matches("sha256:")
+    .to_string()
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

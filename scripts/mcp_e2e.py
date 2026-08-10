@@ -29,6 +29,8 @@ LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18")
 SCHEMA_VERSION = 1
 EXPECTED_TOOLS = {
     "artifact.read",
+    "release.apply",
+    "release.get",
     "runtime.describe",
     "task.cancel",
     "task.get",
@@ -361,6 +363,8 @@ def start_server(
     max_runtime_ms: int | None = None,
     max_output_bytes: int | None = None,
     input_authorities: list[dict[str, str]] | None = None,
+    release_source_repo: Path | None = None,
+    release_receipt_root: Path | None = None,
 ) -> ServerProcess:
     log_path = root / "server.log"
     log_handle = log_path.open("a", encoding="utf-8")
@@ -382,6 +386,21 @@ def start_server(
         env["ORDIVON_MAX_OUTPUT_BYTES"] = str(max_output_bytes)
     if input_authorities is not None:
         env["ORDIVON_INPUT_AUTHORITIES_JSON"] = json.dumps(input_authorities, separators=(",", ":"))
+    if release_source_repo is not None:
+        receipt_root = release_receipt_root or (root / "release-receipts")
+        release_env = root / "release-runtime.env"
+        release_env.write_text("ORDIVON_BIND=127.0.0.1:1\n", encoding="utf-8")
+        env.update(
+            {
+                "ORDIVON_RELEASE_SOURCE_REPO": str(release_source_repo),
+                "ORDIVON_RELEASE_INSTALL_DIR": str(root / "release-install"),
+                "ORDIVON_RELEASE_ENV_FILE": str(release_env),
+                "ORDIVON_RELEASE_RECEIPT_ROOT": str(receipt_root),
+                "ORDIVON_RELEASE_REQUIRED_REF": "HEAD",
+                "ORDIVON_RELEASE_TIMEOUT_MS": "10000",
+                "ORDIVON_RECONCILE_INTERVAL_MS": "100",
+            }
+        )
     process = subprocess.Popen(
         [str(target_dir / "debug/ordivon-runtime")],
         cwd=repo,
@@ -407,6 +426,84 @@ def create_source_repo(root: Path) -> tuple[Path, str]:
     command("git", "add", ".", cwd=source)
     command("git", "commit", "-q", "-m", "acceptance source", cwd=source)
     return source, command("git", "rev-parse", "HEAD", cwd=source)
+
+
+def create_fake_release_candidate(source: Path, revision: str) -> tuple[Path, str]:
+    candidate = (
+        source
+        / "target"
+        / "ordivon-release-candidates"
+        / revision
+        / "release"
+    )
+    candidate.mkdir(parents=True)
+    manifest = candidate / "ordivon-deployment-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {"schemaVersion": 2, "commit": revision, "kind": "mcp-e2e-release-candidate"},
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    deployer = candidate / "ordivon-runtime-deploy"
+    deployer.write_text(
+        """#!/usr/bin/python3
+import argparse, json
+from pathlib import Path
+
+p = argparse.ArgumentParser(add_help=False)
+p.add_argument('mode')
+p.add_argument('--commit', required=True)
+p.add_argument('--receipt-root', required=True)
+p.add_argument('--effect-id', required=True)
+p.add_argument('--effect-request-digest', required=True)
+p.add_argument('--candidate-manifest-digest', required=True)
+p.add_argument('--expected-tool-count', required=True, type=int)
+args, _ = p.parse_known_args()
+receipt = Path(args.receipt_root) / f'effect-{args.effect_id}'
+receipt.mkdir(parents=True, exist_ok=True)
+effect = {
+    'contract': 'runtime_release_v1',
+    'effectId': args.effect_id,
+    'requestDigest': args.effect_request_digest,
+    'commit': args.commit,
+    'candidateManifestDigest': args.candidate_manifest_digest,
+    'expectedToolCount': args.expected_tool_count,
+}
+(receipt / 'effect-request.json').write_text(json.dumps(effect, sort_keys=True) + chr(10))
+(receipt / 'result.json').write_text(json.dumps({
+    'schemaVersion': 2,
+    'status': 'deployed',
+    'commit': args.commit,
+    'releaseEffect': effect,
+    'probe': {
+        'toolCount': args.expected_tool_count,
+        'toolCatalogDigest': 'sha256:' + 'a' * 64,
+    },
+}, sort_keys=True) + chr(10))
+print(json.dumps({'status': 'deployed', 'receipt': str(receipt)}, sort_keys=True))
+""",
+        encoding="utf-8",
+    )
+    deployer.chmod(0o755)
+    return manifest, digest_bytes(manifest.read_bytes())
+
+
+def wait_release_terminal(
+    client: McpClient, client_request_id: str, timeout: float = 20.0
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    last: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        last = client.tool(
+            "release.get",
+            {"schemaVersion": SCHEMA_VERSION, "clientRequestId": client_request_id},
+        )
+        if last.get("effectTerminal") is True:
+            return last
+        time.sleep(0.1)
+    raise TimeoutError(f"Runtime Release effect did not become terminal: {last}")
 
 
 def wait_terminal(client: McpClient, job_id: str, timeout: float = 30.0) -> dict[str, Any]:
@@ -451,6 +548,8 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
     root = Path("/root/.local/share/ordivon-acceptance") / f"mcp-e2e-{uuid.uuid4()}"
     root.mkdir(parents=True)
     source, revision = create_source_repo(root)
+    release_manifest, release_manifest_digest = create_fake_release_candidate(source, revision)
+    release_receipt_root = root / "release-receipts"
     token = secrets.token_urlsafe(48)
     input_authority_root = root / "input-authorities/finance-prepared"
     input_authority_root.mkdir(parents=True)
@@ -460,7 +559,14 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
     port = free_port()
     endpoint = f"http://127.0.0.1:{port}/mcp"
     server = start_server(
-        repo, target_dir, root, port, token, input_authorities=input_authorities
+        repo,
+        target_dir,
+        root,
+        port,
+        token,
+        input_authorities=input_authorities,
+        release_source_repo=source,
+        release_receipt_root=release_receipt_root,
     )
     running_executable = Path(f"/proc/{server.process.pid}/exe").resolve()
     running_digest = digest_bytes(running_executable.read_bytes())
@@ -640,7 +746,8 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             and isinstance(linux_description.get("executionProvider"), dict)
             and str(linux_description.get("executionProvider", {}).get("executableDigest", "")).startswith(
                 "sha256:"
-            ),
+            )
+            and runtime_description.get("structuredReleaseConfigured") is True,
             runtime_description,
         )
 
@@ -712,6 +819,70 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             and listed_workspace.get("sourceRevision") == revision
             and listed_workspace.get("currentHeadRevision") == revision,
             workspace_list,
+        )
+
+        release_request_id = f"release:{uuid.uuid4()}"
+        release_apply_args = {
+            "schemaVersion": SCHEMA_VERSION,
+            "clientRequestId": release_request_id,
+            "workspaceId": workspace_id,
+            "commit": revision,
+            "candidateManifestDigest": release_manifest_digest,
+            "expectedToolCount": len(EXPECTED_TOOLS),
+        }
+        admitted_release = client.tool("release.apply", release_apply_args)
+        admitted_projection = admitted_release.get("release", {})
+        release_job_id = admitted_projection.get("jobId")
+        check(
+            "release-apply-admitted-before-background-dispatch",
+            admitted_release.get("replayed") is False
+            and admitted_projection.get("effectDisposition") == "admitted"
+            and admitted_projection.get("effectTerminal") is False
+            and admitted_projection.get("attemptState") == "accepted"
+            and isinstance(release_job_id, str),
+            admitted_release,
+        )
+        released = wait_release_terminal(client, release_request_id)
+        check(
+            "release-get-reconciles-receipt",
+            released.get("effectDisposition") == "deployed"
+            and released.get("effectTerminal") is True
+            and released.get("receiptAvailable") is True
+            and released.get("deployedToolCount") == len(EXPECTED_TOOLS)
+            and released.get("jobId") == release_job_id
+            and released.get("semanticCompletionEvaluated") is False,
+            released,
+        )
+        release_execution = wait_terminal(client, str(release_job_id))
+        check(
+            "release-execution-converges-after-effect-receipt",
+            release_execution.get("status") == "succeeded"
+            and release_execution.get("executionTerminal") is True
+            and release_execution.get("deliveryDisposition") == "committed",
+            release_execution,
+        )
+        effect_id = released.get("effectId")
+        deterministic_receipt = release_receipt_root / f"effect-{effect_id}"
+        check(
+            "release-deterministic-receipt",
+            isinstance(effect_id, str)
+            and len(effect_id) == 64
+            and deterministic_receipt.is_dir()
+            and (deterministic_receipt / "result.json").is_file(),
+            {"effectId": effect_id, "receipt": str(deterministic_receipt)},
+        )
+
+        # Exact replay must return historical release truth before consulting current
+        # candidate bytes; mutate the candidate manifest to prove no physical repeat.
+        release_manifest.write_text("candidate-drift-after-effect\n", encoding="utf-8")
+        replayed_release = client.tool("release.apply", release_apply_args)
+        check(
+            "release-exact-replay-ignores-current-candidate-drift",
+            replayed_release.get("replayed") is True
+            and replayed_release.get("release", {}).get("jobId") == release_job_id
+            and replayed_release.get("release", {}).get("effectDisposition") == "deployed"
+            and len(list(release_receipt_root.glob("effect-*"))) == 1,
+            replayed_release,
         )
 
         full = client.tool(

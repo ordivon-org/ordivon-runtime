@@ -18,8 +18,8 @@ use super::{
     JobResolution, ReservationRecord, ReservationState, RunnerIdentity, RuntimeArtifactRecord,
     RuntimeDeliveryDisposition, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
     RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult,
-    RuntimeJobRecord, RuntimeJobSummary, RuntimeResult, SubmitRequest, TerminalCommit,
-    MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
+    RuntimeJobRecord, RuntimeJobSummary, RuntimeReleaseContract, RuntimeReleaseEffectBinding,
+    RuntimeResult, SubmitRequest, TerminalCommit, MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
 };
 
 const MIGRATION_V1: i64 = 1;
@@ -48,6 +48,9 @@ const WORKSPACE_PATCH_TABLE: &str = "workspace_patch_operations";
 const WORKSPACE_PATCH_INDEX: &str = "idx_workspace_patch_operations_workspace";
 const EXECUTION_PROVIDER_STORAGE_SQL: &str = include_str!("execution_provider_storage.sql");
 const EXECUTION_PROVIDER_TABLE: &str = "job_execution_providers";
+const RUNTIME_RELEASE_STORAGE_SQL: &str = include_str!("runtime_release_storage.sql");
+const RUNTIME_RELEASE_TABLE: &str = "job_runtime_release_effects";
+const RUNTIME_RELEASE_INDEX: &str = "idx_runtime_release_effect_request";
 const JOB_CLIENT_REQUEST_LOOKUP_INDEX: &str = "idx_jobs_client_request_id_created";
 const JOB_CLIENT_REQUEST_LOOKUP_INDEX_SQL: &str =
     "CREATE INDEX IF NOT EXISTS idx_jobs_client_request_id_created ON jobs(client_request_id, created_at_ms, job_id)";
@@ -178,6 +181,7 @@ impl Registry {
         registry.ensure_query_indexes(&mut connection)?;
         registry.ensure_workspace_patch_storage(&mut connection)?;
         registry.ensure_execution_provider_storage(&mut connection)?;
+        registry.ensure_runtime_release_storage(&mut connection)?;
         registry.validate_database(&connection)?;
         set_private_file(&registry.config.db_path)?;
         Ok(registry)
@@ -485,6 +489,41 @@ impl Registry {
         Ok(())
     }
 
+    fn ensure_runtime_release_storage(&self, connection: &mut Connection) -> RuntimeResult<()> {
+        let transaction = immediate(connection, "Runtime Release storage maintenance")?;
+        transaction
+            .execute_batch(RUNTIME_RELEASE_STORAGE_SQL)
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot ensure Runtime Release storage")
+            })?;
+        transaction.commit().map_err(|error| {
+            RuntimeError::from_sql(error, "cannot commit Runtime Release storage maintenance")
+        })?;
+        for (kind, name) in [
+            ("table", RUNTIME_RELEASE_TABLE),
+            ("index", RUNTIME_RELEASE_INDEX),
+        ] {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2)",
+                    params![kind, name],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot verify Runtime Release storage")
+                })?;
+            if !exists {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    format!("Runtime Release {kind} {name} is missing after maintenance"),
+                    None,
+                    false,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_database(&self, connection: &Connection) -> RuntimeResult<()> {
         let quick: String = connection
             .query_row("PRAGMA quick_check(20)", [], |row| row.get(0))
@@ -584,6 +623,22 @@ impl Registry {
         let execution_provider_digest = execution_provider_json
             .as_deref()
             .map(|json| sha256_bytes(json.as_bytes()));
+        let runtime_release_json = request
+            .runtime_release_effect
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::InvalidRequest,
+                    format!("cannot serialize Runtime Release binding: {error}"),
+                    Some("runtimeReleaseEffect"),
+                    false,
+                )
+            })?;
+        let runtime_release_digest = runtime_release_json
+            .as_deref()
+            .map(|json| sha256_bytes(json.as_bytes()));
         let request_json = serde_json::to_vec(request).map_err(|error| {
             RuntimeError::new(
                 RuntimeErrorCode::InvalidRequest,
@@ -608,15 +663,34 @@ impl Registry {
             workspace_snapshot["executionProviderDigest"] =
                 serde_json::Value::String(provider_digest.to_string());
         }
+        if let Some(release_digest) = runtime_release_digest.as_deref() {
+            workspace_snapshot["runtimeReleaseEffectDigest"] =
+                serde_json::Value::String(release_digest.to_string());
+        }
         let workspace_snapshot_json = workspace_snapshot.to_string();
-        let operation_digest = match execution_provider_digest.as_deref() {
-            Some(provider_digest) => sha256_bytes(
+        let operation_digest = match (
+            execution_provider_digest.as_deref(),
+            runtime_release_digest.as_deref(),
+        ) {
+            (Some(provider_digest), Some(release_digest)) => sha256_bytes(
+                format!(
+                    "runtime-operation-v5\0{request_digest}\0{plan_digest}\0{provider_digest}\0{release_digest}"
+                )
+                .as_bytes(),
+            ),
+            (Some(provider_digest), None) => sha256_bytes(
                 format!("runtime-operation-v4\0{request_digest}\0{plan_digest}\0{provider_digest}")
                     .as_bytes(),
             ),
-            None => sha256_bytes(
+            (None, None) => sha256_bytes(
                 format!("runtime-operation-v3\0{request_digest}\0{plan_digest}").as_bytes(),
             ),
+            (None, Some(_)) => {
+                return Err(RuntimeError::invalid(
+                    "Runtime Release effect requires a committed execution provider",
+                    "executionProvider",
+                ));
+            }
         };
         let job_id = ids.job_id.clone();
         let attempt_id = ids.attempt_id.clone();
@@ -809,6 +883,28 @@ impl Registry {
                     RuntimeError::from_sql(error, "cannot bind Job execution provider")
                 })?;
         }
+        if let (Some(release), Some(binding_digest)) = (
+            request.runtime_release_effect.as_ref(),
+            runtime_release_digest.as_deref(),
+        ) {
+            transaction
+                .execute(
+                    "INSERT INTO job_runtime_release_effects(job_id,effect_id,contract,request_digest,workspace_id,commit_revision,candidate_manifest_digest,expected_tool_count,receipt_path,binding_digest) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    params![
+                        job_id,
+                        release.effect_id,
+                        "runtime_release_v1",
+                        release.request_digest,
+                        release.workspace_id,
+                        release.commit,
+                        release.candidate_manifest_digest,
+                        release.expected_tool_count,
+                        release.receipt_path,
+                        binding_digest,
+                    ],
+                )
+                .map_err(|error| RuntimeError::from_sql(error, "cannot bind Job Runtime Release effect"))?;
+        }
         transaction
             .execute(
                 "INSERT INTO attempts(attempt_id,job_id,attempt_number,state,termination_intent,launch_token_digest,bundle_path,bundle_digest,boot_id,unit_name,invocation_id,control_group,main_pid,process_start_identity,runner_start_digest,result_digest,exit_code,infrastructure_error_digest,created_at_ms,started_at_ms,finished_at_ms,row_version) VALUES(?1,?2,1,?3,?4,?5,?6,NULL,NULL,?7,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,?8,NULL,NULL,0)",
@@ -984,6 +1080,66 @@ impl Registry {
                 ));
             }
         };
+        let release_committed_digest = match workspace_snapshot.get("runtimeReleaseEffectDigest") {
+            None => None,
+            Some(serde_json::Value::String(value)) => {
+                if validate_digest(value, "runtimeReleaseEffectDigest").is_err() {
+                    return Err(RuntimeError::new(
+                        RuntimeErrorCode::RegistryCorrupt,
+                        "stored Runtime Release commitment digest is invalid",
+                        Some("workspaceSnapshot.runtimeReleaseEffectDigest"),
+                        false,
+                    ));
+                }
+                Some(value.as_str())
+            }
+            Some(_) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "stored Runtime Release commitment digest is not text",
+                    Some("workspaceSnapshot.runtimeReleaseEffectDigest"),
+                    false,
+                ));
+            }
+        };
+        let release_row_digest: Option<String> = connection
+            .query_row(
+                "SELECT binding_digest FROM job_runtime_release_effects WHERE job_id=?1",
+                [job_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot read Runtime Release commitment")
+            })?;
+        let release_digest = match (release_committed_digest, release_row_digest.as_deref()) {
+            (None, None) => None,
+            (None, Some(_)) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Runtime Release row exists without a committed Job marker",
+                    Some("runtimeReleaseEffect"),
+                    false,
+                ));
+            }
+            (Some(_), None) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "committed Runtime Release row is missing",
+                    Some("runtimeReleaseEffect"),
+                    false,
+                ));
+            }
+            (Some(committed), Some(row_digest)) if committed == row_digest => Some(committed),
+            (Some(_), Some(_)) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Runtime Release row digest does not match the Job commitment",
+                    Some("runtimeReleaseEffect"),
+                    false,
+                ));
+            }
+        };
         let row: Option<(String, String)> = connection
             .query_row(
                 "SELECT snapshot_json,snapshot_digest FROM job_execution_providers WHERE job_id=?1",
@@ -1022,13 +1178,22 @@ impl Registry {
                 false,
             ));
         }
-        let expected_operation_digest = sha256_bytes(
-            format!(
-                "runtime-operation-v4\0{}\0{}\0{}",
-                job.request_digest, job.execution_plan_digest, committed_digest
-            )
-            .as_bytes(),
-        );
+        let expected_operation_digest = match release_digest {
+            Some(release_digest) => sha256_bytes(
+                format!(
+                    "runtime-operation-v5\0{}\0{}\0{}\0{}",
+                    job.request_digest, job.execution_plan_digest, committed_digest, release_digest
+                )
+                .as_bytes(),
+            ),
+            None => sha256_bytes(
+                format!(
+                    "runtime-operation-v4\0{}\0{}\0{}",
+                    job.request_digest, job.execution_plan_digest, committed_digest
+                )
+                .as_bytes(),
+            ),
+        };
         if job.operation_digest != expected_operation_digest {
             return Err(RuntimeError::new(
                 RuntimeErrorCode::RegistryCorrupt,
@@ -1563,6 +1728,169 @@ impl Registry {
                 false,
             )
         })
+    }
+
+    pub fn runtime_release_effect_for_job(
+        &self,
+        job_id: &str,
+    ) -> RuntimeResult<Option<RuntimeReleaseEffectBinding>> {
+        let connection = self.open_connection()?;
+        let job = load_job(&connection, job_id)?;
+        let workspace_snapshot: serde_json::Value =
+            serde_json::from_str(&job.workspace_snapshot_json).map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    format!("stored Workspace snapshot is invalid: {error}"),
+                    Some("workspaceSnapshot"),
+                    false,
+                )
+            })?;
+        let committed_digest = match workspace_snapshot.get("runtimeReleaseEffectDigest") {
+            None => None,
+            Some(serde_json::Value::String(value)) => {
+                validate_digest(value, "runtimeReleaseEffectDigest").map_err(|_| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::RegistryCorrupt,
+                        "stored Runtime Release commitment digest is invalid",
+                        Some("workspaceSnapshot.runtimeReleaseEffectDigest"),
+                        false,
+                    )
+                })?;
+                Some(value.clone())
+            }
+            Some(_) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "stored Runtime Release commitment digest is not text",
+                    Some("workspaceSnapshot.runtimeReleaseEffectDigest"),
+                    false,
+                ));
+            }
+        };
+        let row = connection
+            .query_row(
+                "SELECT effect_id,contract,request_digest,workspace_id,commit_revision,candidate_manifest_digest,expected_tool_count,receipt_path,binding_digest FROM job_runtime_release_effects WHERE job_id=?1",
+                [job_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?, row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?, row.get::<_, String>(5)?,
+                        row.get::<_, u32>(6)?, row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| RuntimeError::from_sql(error, "cannot read Runtime Release effect"))?;
+        let row = match (committed_digest.as_deref(), row) {
+            (None, None) => return Ok(None),
+            (None, Some(_)) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Runtime Release row exists without a committed Job marker",
+                    Some("runtimeReleaseEffect"),
+                    false,
+                ));
+            }
+            (Some(_), None) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "committed Runtime Release row is missing",
+                    Some("runtimeReleaseEffect"),
+                    false,
+                ));
+            }
+            (Some(committed), Some(row)) if committed == row.8 => row,
+            (Some(_), Some(_)) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Runtime Release row digest does not match the Job commitment",
+                    Some("runtimeReleaseEffect"),
+                    false,
+                ));
+            }
+        };
+        let (
+            effect_id,
+            contract,
+            request_digest,
+            workspace_id,
+            commit,
+            candidate_manifest_digest,
+            expected_tool_count,
+            receipt_path,
+            binding_digest,
+        ) = row;
+        if contract != "runtime_release_v1" {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "stored Runtime Release contract is unsupported",
+                Some("runtimeReleaseEffect.contract"),
+                false,
+            ));
+        }
+        let binding = RuntimeReleaseEffectBinding {
+            contract: RuntimeReleaseContract::RuntimeReleaseV1,
+            effect_id,
+            request_digest,
+            workspace_id,
+            commit,
+            candidate_manifest_digest,
+            expected_tool_count,
+            receipt_path,
+        };
+        let encoded = serde_json::to_string(&binding).map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                format!("cannot serialize stored Runtime Release effect: {error}"),
+                None,
+                false,
+            )
+        })?;
+        if sha256_bytes(encoded.as_bytes()) != binding_digest {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "stored Runtime Release effect digest does not match side truth",
+                Some("runtimeReleaseEffect"),
+                false,
+            ));
+        }
+        Ok(Some(binding))
+    }
+
+    pub fn find_runtime_release_effect(
+        &self,
+        principal: &str,
+        client_request_id: &str,
+    ) -> RuntimeResult<Option<(RuntimeJobRecord, RuntimeReleaseEffectBinding)>> {
+        validate_identifier(principal, "principal")?;
+        validate_identifier(client_request_id, "clientRequestId")?;
+        let connection = self.open_connection()?;
+        let job_id: Option<String> = connection
+            .query_row(
+                "SELECT j.job_id FROM jobs j JOIN job_runtime_release_effects r ON r.job_id=j.job_id WHERE j.principal=?1 AND j.client_request_id=?2",
+                params![principal, client_request_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| RuntimeError::from_sql(error, "cannot find Runtime Release effect"))?;
+        let Some(job_id) = job_id else {
+            return Ok(None);
+        };
+        let job = load_job(&connection, &job_id)?;
+        drop(connection);
+        let release = self
+            .runtime_release_effect_for_job(&job_id)?
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Runtime Release Job lost its side truth",
+                    Some("runtimeReleaseEffect"),
+                    false,
+                )
+            })?;
+        Ok(Some((job, release)))
     }
 
     pub fn launch_token(&self, attempt_id: &str) -> RuntimeResult<String> {
@@ -3499,6 +3827,9 @@ fn job_request_identity_digest(job: &RuntimeJobRecord) -> RuntimeResult<String> 
         || job
             .request_digest
             .starts_with(super::INPUT_BOUND_PROPOSAL_IDENTITY_PREFIX)
+        || job
+            .request_digest
+            .starts_with(super::RUNTIME_RELEASE_IDENTITY_PREFIX)
     {
         validate_request_identity_digest(&job.request_digest)?;
         return Ok(job.request_digest.clone());
@@ -3521,6 +3852,7 @@ fn validate_request_identity_digest(value: &str) -> RuntimeResult<()> {
         .or_else(|| value.strip_prefix(super::PROPOSAL_IDENTITY_PREFIX))
         .or_else(|| value.strip_prefix(super::INPUT_BOUND_IDENTITY_PREFIX))
         .or_else(|| value.strip_prefix(super::INPUT_BOUND_PROPOSAL_IDENTITY_PREFIX))
+        .or_else(|| value.strip_prefix(super::RUNTIME_RELEASE_IDENTITY_PREFIX))
         .ok_or_else(|| {
             RuntimeError::invalid(
                 "unsupported request identity digest",
@@ -3578,6 +3910,95 @@ fn validate_execution_provider_snapshot(
     Ok(())
 }
 
+fn validate_runtime_release_effect_binding(
+    release: &RuntimeReleaseEffectBinding,
+    request: &SubmitRequest,
+) -> RuntimeResult<()> {
+    if release.contract != RuntimeReleaseContract::RuntimeReleaseV1 {
+        return Err(RuntimeError::invalid(
+            "unsupported Runtime Release contract",
+            "runtimeReleaseEffect.contract",
+        ));
+    }
+    if release.effect_id.len() != 64
+        || !release
+            .effect_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(RuntimeError::invalid(
+            "Runtime Release effectId must be 64 lowercase hexadecimal characters",
+            "runtimeReleaseEffect.effectId",
+        ));
+    }
+    if !release
+        .request_digest
+        .starts_with(super::RUNTIME_RELEASE_IDENTITY_PREFIX)
+    {
+        return Err(RuntimeError::invalid(
+            "Runtime Release request digest has the wrong contract prefix",
+            "runtimeReleaseEffect.requestDigest",
+        ));
+    }
+    validate_request_identity_digest(&release.request_digest)?;
+    if request.request_identity_digest.as_deref() != Some(release.request_digest.as_str()) {
+        return Err(RuntimeError::invalid(
+            "Runtime Release side truth must match the committed request identity",
+            "runtimeReleaseEffect.requestDigest",
+        ));
+    }
+    if release.workspace_id != request.plan.workspace_id {
+        return Err(RuntimeError::invalid(
+            "Runtime Release workspace does not match the execution plan",
+            "runtimeReleaseEffect.workspaceId",
+        ));
+    }
+    if release.commit.len() != 40
+        || !release
+            .commit
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(RuntimeError::invalid(
+            "Runtime Release commit must be exactly 40 lowercase hexadecimal characters",
+            "runtimeReleaseEffect.commit",
+        ));
+    }
+    validate_digest(
+        &release.candidate_manifest_digest,
+        "runtimeReleaseEffect.candidateManifestDigest",
+    )?;
+    if !Path::new(&release.receipt_path).is_absolute()
+        || release.receipt_path.as_bytes().contains(&0)
+    {
+        return Err(RuntimeError::invalid(
+            "Runtime Release receipt path must be absolute and NUL-free",
+            "runtimeReleaseEffect.receiptPath",
+        ));
+    }
+    if request.plan.execution_target != super::ExecutionTarget::LocalLinux
+        || request.plan.execution_profile != super::ExecutionProfile::TrustedLocal
+    {
+        return Err(RuntimeError::invalid(
+            "Runtime Release v1 requires trusted_local local_linux execution",
+            "runtimeReleaseEffect.contract",
+        ));
+    }
+    if !matches!(
+        request
+            .execution_provider
+            .as_ref()
+            .map(|provider| provider.contract),
+        Some(ExecutionProviderContract::LocalLinuxRunnerV1)
+    ) {
+        return Err(RuntimeError::invalid(
+            "Runtime Release v1 requires a committed local Linux Runner",
+            "executionProvider",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
     if request.schema_version != RUNTIME_SCHEMA_VERSION
         || request.plan.schema_version != RUNTIME_SCHEMA_VERSION
@@ -3617,6 +4038,18 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
                 "executionProvider.contract",
             ));
         }
+    }
+    if let Some(release) = request.runtime_release_effect.as_ref() {
+        validate_runtime_release_effect_binding(release, request)?;
+    } else if request
+        .request_identity_digest
+        .as_deref()
+        .is_some_and(|digest| digest.starts_with(super::RUNTIME_RELEASE_IDENTITY_PREFIX))
+    {
+        return Err(RuntimeError::invalid(
+            "Runtime Release request identity requires Runtime Release side truth",
+            "runtimeReleaseEffect",
+        ));
     }
 
     for (path, field) in [

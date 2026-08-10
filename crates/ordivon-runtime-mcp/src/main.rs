@@ -15,7 +15,9 @@ use axum::Router;
 use ordivon_runtime_core::{
     InputAuthority, RegistryConfig, RuntimeConfig, UniversalExecutorConfig, WindowsExecutionConfig,
 };
-use ordivon_runtime_mcp::server::{ExecutionContext, RuntimeServer, ServerConfig};
+use ordivon_runtime_mcp::server::{
+    ExecutionContext, RuntimeReleaseExecutionConfig, RuntimeServer, ServerConfig,
+};
 use ordivon_runtime_mcp::{append_rotating_jsonl, DEFAULT_TRACE_ROTATION_BYTES};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -397,6 +399,36 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     if max_output_bytes == 0 {
         return Err("ORDIVON_MAX_OUTPUT_BYTES must be positive".into());
     }
+    let release = optional_env("ORDIVON_RELEASE_SOURCE_REPO")?
+        .map(|source_repo| -> Result<RuntimeReleaseExecutionConfig, Box<dyn std::error::Error>> {
+            let timeout_ms: u64 = optional_env("ORDIVON_RELEASE_TIMEOUT_MS")?
+                .map(|value| value.parse())
+                .transpose()?
+                .unwrap_or(300_000);
+            if timeout_ms == 0 || timeout_ms > max_runtime_ms {
+                return Err("ORDIVON_RELEASE_TIMEOUT_MS must be positive and no greater than ORDIVON_MAX_RUNTIME_MS".into());
+            }
+            Ok(RuntimeReleaseExecutionConfig {
+                source_repo: PathBuf::from(source_repo),
+                install_dir: PathBuf::from(
+                    optional_env("ORDIVON_RELEASE_INSTALL_DIR")?
+                        .unwrap_or_else(|| "/usr/local/libexec/ordivon".to_string()),
+                ),
+                database: registry_root.join("registry.sqlite3"),
+                env_file: PathBuf::from(
+                    optional_env("ORDIVON_RELEASE_ENV_FILE")?
+                        .unwrap_or_else(|| "/etc/ordivon/ordivon-runtime.env".to_string()),
+                ),
+                receipt_root: PathBuf::from(
+                    optional_env("ORDIVON_RELEASE_RECEIPT_ROOT")?
+                        .unwrap_or_else(|| "/var/lib/ordivon/deployments".to_string()),
+                ),
+                required_ref: optional_env("ORDIVON_RELEASE_REQUIRED_REF")?
+                    .unwrap_or_else(|| "main".to_string()),
+                timeout_ms,
+            })
+        })
+        .transpose()?;
     let principal =
         std::env::var("ORDIVON_PRINCIPAL").unwrap_or_else(|_| "principal:local-owner".to_string());
     let (workspace_root, workspace_uid, workspace_gid) = (None, None, None);
@@ -433,6 +465,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                 principal,
                 global_limit,
             },
+            release,
             trace_path,
         },
     })

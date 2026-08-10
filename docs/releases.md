@@ -93,7 +93,8 @@ A releasable commit must have:
 6. a deployment candidate manifest binding toolchain identity and binary digests;
 7. a successful deployment plan;
 8. after deployment, a receipt binding the complete installed release-artifact digests and modes, protocol lifecycle, supported versions, and Tool catalog digest;
-9. a verified previous-binary rollback path while that rollback window remains supported.
+9. for a release that changes the structured self-release contract, an exact `release.apply` → Runtime ingress replacement → reconnect → `release.get` acceptance proving the same effect identity/receipt is reconciled without a second physical deployment;
+10. a verified previous-binary rollback path while that rollback window remains supported.
 
 Documentation-only changes do not require redeploying identical binaries, but public canonical documents must pass the documentation contract and identify when production behavior remains on an earlier code-equivalent commit.
 

@@ -55,6 +55,7 @@ impl Sandbox {
                 principal: "principal:mcp-test".to_string(),
                 global_limit: 4,
             },
+            release: None,
             trace_path: None,
         })
         .unwrap()
@@ -363,6 +364,8 @@ fn tool_effect_annotations_match_runtime_behavior() {
     let tools = server.tool_router.list_all();
     let expected = [
         ("artifact.read", true, false, true, false),
+        ("release.apply", false, true, true, true),
+        ("release.get", true, false, true, false),
         ("runtime.describe", true, false, true, false),
         ("task.cancel", false, true, true, false),
         ("task.get", true, false, true, false),
@@ -446,6 +449,14 @@ fn tool_inputs_default_missing_schema_version_to_pinned_version() {
     assert_eq!(diff.schema_version, 1);
     let describe: RuntimeDescribeRequest = serde_json::from_str("{}").unwrap();
     assert_eq!(describe.schema_version, 1);
+    let release_apply: RuntimeReleaseApplyToolRequest = serde_json::from_str(
+        r#"{"clientRequestId":"release-1","workspaceId":"ws-1","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","candidateManifestDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expectedToolCount":22}"#,
+    )
+    .unwrap();
+    assert_eq!(release_apply.schema_version, 1);
+    let release_get: RuntimeReleaseGetToolRequest =
+        serde_json::from_str(r#"{"clientRequestId":"release-1"}"#).unwrap();
+    assert_eq!(release_get.schema_version, 1);
     // Explicit non-pinned versions survive deserialization and are rejected
     // by the handler gate ("schemaVersion must be 1") — the pin keeps teeth.
     let wrong: TaskGetRequest =
@@ -478,6 +489,8 @@ fn tool_catalog_uses_transactional_job_contract() {
         names,
         [
             "artifact.read",
+            "release.apply",
+            "release.get",
             "runtime.describe",
             "task.cancel",
             "task.get",
@@ -1082,7 +1095,7 @@ fn every_public_tool_publishes_structured_output_contract() {
     let sandbox = Sandbox::new("all-output-schemas");
     let server = sandbox.server();
     let tools = server.tool_router.list_all();
-    assert_eq!(tools.len(), 20);
+    assert_eq!(tools.len(), 22);
     for tool in tools {
         let schema = tool
             .output_schema
@@ -1461,8 +1474,11 @@ fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
     let sandbox = Sandbox::new("runtime-describe");
     let server = sandbox.server();
     let capabilities = server.state.runtime.capabilities();
-    let result =
-        RuntimeDescribeResult::from_capabilities(capabilities, server.state.execution.global_limit);
+    let result = RuntimeDescribeResult::from_capabilities(
+        capabilities,
+        server.state.execution.global_limit,
+        server.state.release.is_some(),
+    );
     assert_eq!(result.schema_version, 1);
     assert_eq!(result.global_execution_limit, 4);
     assert_eq!(result.max_runtime_ms, 10_000);
@@ -1470,6 +1486,7 @@ fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
     assert_eq!(result.allowed_executable_roots, vec!["/usr/bin"]);
     assert!(result.input_authorities.is_empty());
     assert_eq!(result.targets.len(), 2);
+    assert!(!result.structured_release_configured);
     let linux = result
         .targets
         .iter()

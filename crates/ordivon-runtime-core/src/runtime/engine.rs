@@ -23,14 +23,17 @@ use super::supervisor::{
 use super::systemd::*;
 use super::windows::*;
 use super::{
-    AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
-    ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent,
-    DurableWorkspacePatchRequest, DurableWorkspacePatchResult, EffectiveInputBinding,
-    ExecutionProviderContract, ExecutionProviderSnapshot, InputAccessMode, InputAuthority,
-    InputBindingRequest, JobDesiredState, JobResolution, Registry, RegistryConfig, RunnerIdentity,
+    runtime_release_effect_id, runtime_release_request_identity_digest, AdmissionOutcome,
+    ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult, ArtifactRegistration,
+    AttemptRecord, AttemptState, AttemptTerminationIntent, DurableWorkspacePatchRequest,
+    DurableWorkspacePatchResult, EffectiveInputBinding, ExecutionProviderContract,
+    ExecutionProviderSnapshot, InputAccessMode, InputAuthority, InputBindingRequest,
+    JobDesiredState, JobResolution, Registry, RegistryConfig, RunnerIdentity,
     RuntimeArtifactRecord, RuntimeCapabilities, RuntimeError, RuntimeErrorCode,
     RuntimeExecutionPlan, RuntimeExecutionStep, RuntimeExecutionTargetCapability,
-    RuntimeJobListRequest, RuntimeJobListResult, RuntimeResult, RuntimeWorkspaceGetRequest,
+    RuntimeJobListRequest, RuntimeJobListResult, RuntimeReleaseAdmission, RuntimeReleaseContract,
+    RuntimeReleaseDisposition, RuntimeReleaseEffectBinding, RuntimeReleaseGetRequest,
+    RuntimeReleaseProjection, RuntimeReleaseRequest, RuntimeResult, RuntimeWorkspaceGetRequest,
     RuntimeWorkspaceIssue, RuntimeWorkspaceIssueStage, RuntimeWorkspaceListRequest,
     RuntimeWorkspaceListResult, RuntimeWorkspaceSummary, SubmitRequest, TaskCancelRequest,
     TaskObservation, TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest, TerminalCommit,
@@ -534,6 +537,7 @@ impl Runtime {
             execution_provider: Some(
                 self.current_execution_provider_snapshot(request.execution.execution_target)?,
             ),
+            runtime_release_effect: None,
             plan,
             global_limit: request.global_limit,
         };
@@ -638,6 +642,7 @@ impl Runtime {
             execution_provider: Some(
                 self.current_execution_provider_snapshot(request.execution.execution_target)?,
             ),
+            runtime_release_effect: None,
             plan,
             global_limit: request.global_limit,
         };
@@ -721,6 +726,188 @@ impl Runtime {
             stdout_tail_bytes: proposal.stdout_tail_bytes,
             stderr_tail_bytes: proposal.stderr_tail_bytes,
         }
+    }
+
+    pub fn find_runtime_release_for_apply(
+        &self,
+        request: &RuntimeReleaseRequest,
+    ) -> RuntimeResult<Option<RuntimeReleaseAdmission>> {
+        validate_runtime_release_request(request)?;
+        let request_digest = runtime_release_request_identity_digest(request)?;
+        let Some(job) = self.registry.find_idempotent_job(
+            &request.principal,
+            &request.client_request_id,
+            &request_digest,
+        )?
+        else {
+            return Ok(None);
+        };
+        let binding = self
+            .registry
+            .runtime_release_effect_for_job(&job.job_id)?
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Runtime Release request identity is missing its release side truth",
+                    Some("runtimeReleaseEffect"),
+                    false,
+                )
+            })?;
+        validate_release_binding_matches_request(&binding, request)?;
+        let release = self.runtime_release_projection(&job.job_id, &binding)?;
+        Ok(Some(RuntimeReleaseAdmission {
+            replayed: true,
+            release,
+        }))
+    }
+
+    pub fn admit_runtime_release_effect(
+        &self,
+        request: &RuntimeReleaseRequest,
+        proposal: &super::TaskRunProposal,
+        receipt_path: &Path,
+    ) -> RuntimeResult<RuntimeReleaseAdmission> {
+        validate_runtime_release_request(request)?;
+        validate_run_proposal_structure(proposal)?;
+        if proposal.client_request_id != request.client_request_id
+            || proposal.principal != request.principal
+            || proposal.execution.workspace_id != request.workspace_id
+        {
+            return Err(RuntimeError::invalid(
+                "Runtime Release proposal identity does not match the structured release request",
+                "clientRequestId",
+            ));
+        }
+        if !receipt_path.is_absolute() {
+            return Err(RuntimeError::invalid(
+                "Runtime Release receipt path must be absolute",
+                "receiptPath",
+            ));
+        }
+        let request_digest = runtime_release_request_identity_digest(request)?;
+        let binding = RuntimeReleaseEffectBinding {
+            contract: RuntimeReleaseContract::RuntimeReleaseV1,
+            effect_id: runtime_release_effect_id(request),
+            request_digest: request_digest.clone(),
+            workspace_id: request.workspace_id.clone(),
+            commit: request.commit.clone(),
+            candidate_manifest_digest: request.candidate_manifest_digest.clone(),
+            expected_tool_count: request.expected_tool_count,
+            receipt_path: receipt_path.to_string_lossy().into_owned(),
+        };
+        let _guard = self.lock_lifecycle()?;
+        if let Some(job) = self.registry.find_idempotent_job(
+            &request.principal,
+            &request.client_request_id,
+            &request_digest,
+        )? {
+            let committed = self
+                .registry
+                .runtime_release_effect_for_job(&job.job_id)?
+                .ok_or_else(|| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::RegistryCorrupt,
+                        "Runtime Release replay lost its release side truth",
+                        Some("runtimeReleaseEffect"),
+                        false,
+                    )
+                })?;
+            validate_release_binding_matches_request(&committed, request)?;
+            return Ok(RuntimeReleaseAdmission {
+                replayed: true,
+                release: self.runtime_release_projection(&job.job_id, &committed)?,
+            });
+        }
+
+        let resolved = self.resolve_proposal(proposal);
+        validate_run_request_structure(&resolved)?;
+        validate_new_admission_policy(
+            &resolved,
+            self.executor.max_runtime_ms,
+            self.executor.max_output_bytes,
+        )?;
+        self.reconcile_recoverable_orphans()?;
+        let _ = self.reconcile_workspace(&request.workspace_id)?;
+        let plan = self.resolve_plan(&resolved)?;
+        let submit = SubmitRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            client_request_id: request.client_request_id.clone(),
+            request_identity_digest: Some(request_digest),
+            execution_provider: Some(
+                self.current_execution_provider_snapshot(resolved.execution.execution_target)?,
+            ),
+            runtime_release_effect: Some(binding.clone()),
+            plan,
+            global_limit: resolved.global_limit,
+        };
+        let job_id = match self.registry.submit(&submit)? {
+            AdmissionOutcome::Created(created) => created.job.job_id.clone(),
+            AdmissionOutcome::Existing { job } => job.job_id.clone(),
+        };
+        // Intentionally do not dispatch here. The durable Accepted Job is visible before any
+        // self-replacing release can remove the initiating MCP connection. Normal Runtime
+        // reconciliation owns the later at-most-once physical dispatch.
+        Ok(RuntimeReleaseAdmission {
+            replayed: false,
+            release: self.runtime_release_projection(&job_id, &binding)?,
+        })
+    }
+
+    pub fn get_runtime_release_effect(
+        &self,
+        request: &RuntimeReleaseGetRequest,
+    ) -> RuntimeResult<RuntimeReleaseProjection> {
+        if request.schema_version != RUNTIME_SCHEMA_VERSION {
+            return Err(RuntimeError::invalid(
+                "unsupported runtime schema version",
+                "schemaVersion",
+            ));
+        }
+        let Some((job, binding)) = self
+            .registry
+            .find_runtime_release_effect(&request.principal, &request.client_request_id)?
+        else {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::JobNotFound,
+                "Runtime Release effect not found",
+                Some("clientRequestId"),
+                false,
+            ));
+        };
+        self.runtime_release_projection(&job.job_id, &binding)
+    }
+
+    fn runtime_release_projection(
+        &self,
+        job_id: &str,
+        binding: &RuntimeReleaseEffectBinding,
+    ) -> RuntimeResult<RuntimeReleaseProjection> {
+        let snapshot = self.registry.job_snapshot(job_id)?;
+        let receipt = inspect_runtime_release_receipt(binding, &snapshot)?;
+        Ok(RuntimeReleaseProjection {
+            contract: binding.contract,
+            effect_id: binding.effect_id.clone(),
+            client_request_id: snapshot.job.client_request_id,
+            job_id: snapshot.job.job_id,
+            workspace_id: binding.workspace_id.clone(),
+            commit: binding.commit.clone(),
+            candidate_manifest_digest: binding.candidate_manifest_digest.clone(),
+            expected_tool_count: binding.expected_tool_count,
+            effect_disposition: receipt.disposition,
+            effect_terminal: receipt.terminal,
+            receipt_available: receipt.available,
+            receipt_digest: receipt.digest,
+            deployed_tool_count: receipt.deployed_tool_count,
+            tool_catalog_digest: receipt.tool_catalog_digest,
+            rollback_status: receipt.rollback_status,
+            reconciliation_issue: receipt.issue,
+            attempt_state: snapshot.attempt.as_ref().map(|attempt| attempt.state),
+            execution_terminal: snapshot.projection.execution_terminal,
+            execution_disposition: snapshot.projection.execution_disposition,
+            delivery_disposition: snapshot.projection.delivery_disposition,
+            recovery_required: snapshot.projection.recovery_required,
+            semantic_completion_evaluated: false,
+        })
     }
 
     pub fn open_workspace(
@@ -4096,6 +4283,320 @@ fn effective_input_requests_from_plan(
             })
             .collect::<Vec<_>>(),
     )
+}
+
+const MAX_RUNTIME_RELEASE_RECEIPT_BYTES: u64 = 1_048_576;
+
+struct RuntimeReleaseReceiptProjection {
+    disposition: RuntimeReleaseDisposition,
+    terminal: bool,
+    available: bool,
+    digest: Option<String>,
+    deployed_tool_count: Option<u32>,
+    tool_catalog_digest: Option<String>,
+    rollback_status: Option<String>,
+    issue: Option<String>,
+}
+
+fn validate_runtime_release_request(request: &RuntimeReleaseRequest) -> RuntimeResult<()> {
+    if request.schema_version != RUNTIME_SCHEMA_VERSION {
+        return Err(RuntimeError::invalid(
+            "unsupported runtime schema version",
+            "schemaVersion",
+        ));
+    }
+    if request.expected_tool_count == 0 {
+        return Err(RuntimeError::invalid(
+            "Runtime Release expectedToolCount must be positive",
+            "expectedToolCount",
+        ));
+    }
+    if request.commit.len() != 40
+        || !request
+            .commit
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(RuntimeError::invalid(
+            "Runtime Release commit must be exactly 40 lowercase hexadecimal characters",
+            "commit",
+        ));
+    }
+    let manifest = request
+        .candidate_manifest_digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| {
+            RuntimeError::invalid(
+                "candidate manifest digest must use sha256",
+                "candidateManifestDigest",
+            )
+        })?;
+    if manifest.len() != 64
+        || !manifest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(RuntimeError::invalid(
+            "candidate manifest digest must contain 64 lowercase hexadecimal characters",
+            "candidateManifestDigest",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_release_binding_matches_request(
+    binding: &RuntimeReleaseEffectBinding,
+    request: &RuntimeReleaseRequest,
+) -> RuntimeResult<()> {
+    let expected_request_digest = runtime_release_request_identity_digest(request)?;
+    let expected_effect_id = runtime_release_effect_id(request);
+    if binding.contract != RuntimeReleaseContract::RuntimeReleaseV1
+        || binding.effect_id != expected_effect_id
+        || binding.request_digest != expected_request_digest
+        || binding.workspace_id != request.workspace_id
+        || binding.commit != request.commit
+        || binding.candidate_manifest_digest != request.candidate_manifest_digest
+        || binding.expected_tool_count != request.expected_tool_count
+    {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
+            "stored Runtime Release side truth does not match the request identity",
+            Some("runtimeReleaseEffect"),
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn release_receipt_json(path: &Path) -> Result<Option<(serde_json::Value, String)>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("RELEASE_RECEIPT_METADATA_UNAVAILABLE".to_string()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("RELEASE_RECEIPT_FILE_UNSAFE".to_string());
+    }
+    if metadata.len() > MAX_RUNTIME_RELEASE_RECEIPT_BYTES {
+        return Err("RELEASE_RECEIPT_FILE_TOO_LARGE".to_string());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| "RELEASE_RECEIPT_OPEN_FAILED".to_string())?;
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut file)
+        .take(MAX_RUNTIME_RELEASE_RECEIPT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "RELEASE_RECEIPT_READ_FAILED".to_string())?;
+    if bytes.len() as u64 > MAX_RUNTIME_RELEASE_RECEIPT_BYTES {
+        return Err("RELEASE_RECEIPT_FILE_TOO_LARGE".to_string());
+    }
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|_| "RELEASE_RECEIPT_JSON_INVALID".to_string())?;
+    if !value.is_object() {
+        return Err("RELEASE_RECEIPT_JSON_INVALID".to_string());
+    }
+    Ok(Some((value, sha256_bytes(&bytes))))
+}
+
+fn release_effect_json_matches(
+    value: &serde_json::Value,
+    binding: &RuntimeReleaseEffectBinding,
+) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.get("contract").and_then(|value| value.as_str()) == Some("runtime_release_v1")
+        && object.get("effectId").and_then(|value| value.as_str())
+            == Some(binding.effect_id.as_str())
+        && object.get("requestDigest").and_then(|value| value.as_str())
+            == Some(binding.request_digest.as_str())
+        && object.get("commit").and_then(|value| value.as_str()) == Some(binding.commit.as_str())
+        && object
+            .get("candidateManifestDigest")
+            .and_then(|value| value.as_str())
+            == Some(binding.candidate_manifest_digest.as_str())
+        && object
+            .get("expectedToolCount")
+            .and_then(|value| value.as_u64())
+            == Some(u64::from(binding.expected_tool_count))
+}
+
+fn unresolved_release_projection(snapshot: &JobSnapshot) -> RuntimeReleaseReceiptProjection {
+    let admitted = snapshot
+        .attempt
+        .as_ref()
+        .is_some_and(|attempt| attempt.state == AttemptState::Accepted);
+    RuntimeReleaseReceiptProjection {
+        disposition: if admitted {
+            RuntimeReleaseDisposition::Admitted
+        } else {
+            RuntimeReleaseDisposition::InProgress
+        },
+        terminal: false,
+        available: false,
+        digest: None,
+        deployed_tool_count: None,
+        tool_catalog_digest: None,
+        rollback_status: None,
+        issue: None,
+    }
+}
+
+fn release_reconciliation_projection(issue: &str) -> RuntimeReleaseReceiptProjection {
+    RuntimeReleaseReceiptProjection {
+        disposition: RuntimeReleaseDisposition::ReconciliationRequired,
+        terminal: false,
+        available: false,
+        digest: None,
+        deployed_tool_count: None,
+        tool_catalog_digest: None,
+        rollback_status: None,
+        issue: Some(issue.to_string()),
+    }
+}
+
+fn inspect_runtime_release_receipt(
+    binding: &RuntimeReleaseEffectBinding,
+    snapshot: &JobSnapshot,
+) -> RuntimeResult<RuntimeReleaseReceiptProjection> {
+    let receipt = Path::new(&binding.receipt_path);
+    let directory = match fs::symlink_metadata(receipt) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => {
+            return Ok(release_reconciliation_projection(
+                "RELEASE_RECEIPT_DIRECTORY_UNAVAILABLE",
+            ));
+        }
+    };
+    let Some(directory) = directory else {
+        return if snapshot.job.resolution.is_none() {
+            Ok(unresolved_release_projection(snapshot))
+        } else {
+            Ok(release_reconciliation_projection(
+                "RELEASE_RECEIPT_MISSING_AFTER_JOB_TERMINAL",
+            ))
+        };
+    };
+    if directory.file_type().is_symlink() || !directory.is_dir() {
+        return Ok(release_reconciliation_projection(
+            "RELEASE_RECEIPT_DIRECTORY_UNSAFE",
+        ));
+    }
+
+    let effect_request = match release_receipt_json(&receipt.join("effect-request.json")) {
+        Ok(Some((value, _))) => value,
+        Ok(None) if snapshot.job.resolution.is_none() => {
+            return Ok(unresolved_release_projection(snapshot))
+        }
+        Ok(None) => {
+            return Ok(release_reconciliation_projection(
+                "RELEASE_EFFECT_REQUEST_MISSING_AFTER_JOB_TERMINAL",
+            ));
+        }
+        Err(issue) => return Ok(release_reconciliation_projection(&issue)),
+    };
+    if !release_effect_json_matches(&effect_request, binding) {
+        return Ok(release_reconciliation_projection(
+            "RELEASE_EFFECT_REQUEST_MISMATCH",
+        ));
+    }
+
+    let result = match release_receipt_json(&receipt.join("result.json")) {
+        Ok(Some(value)) => value,
+        Ok(None) if snapshot.job.resolution.is_none() => {
+            return Ok(unresolved_release_projection(snapshot))
+        }
+        Ok(None) => {
+            return Ok(release_reconciliation_projection(
+                "RELEASE_RESULT_MISSING_AFTER_JOB_TERMINAL",
+            ));
+        }
+        Err(issue) => return Ok(release_reconciliation_projection(&issue)),
+    };
+    let (result, result_digest) = result;
+    if result.get("commit").and_then(|value| value.as_str()) != Some(binding.commit.as_str())
+        || !result
+            .get("releaseEffect")
+            .is_some_and(|value| release_effect_json_matches(value, binding))
+    {
+        return Ok(release_reconciliation_projection("RELEASE_RESULT_MISMATCH"));
+    }
+
+    let rollback = match release_receipt_json(&receipt.join("rollback-result.json")) {
+        Ok(Some((value, _))) => value
+            .get("status")
+            .and_then(|status| status.as_str())
+            .map(str::to_string),
+        Ok(None) => None,
+        Err(issue) => return Ok(release_reconciliation_projection(&issue)),
+    };
+    if rollback.as_deref() == Some("restored_previous") {
+        return Ok(RuntimeReleaseReceiptProjection {
+            disposition: RuntimeReleaseDisposition::RolledBack,
+            terminal: true,
+            available: true,
+            digest: Some(result_digest),
+            deployed_tool_count: result
+                .pointer("/probe/toolCount")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u32::try_from(value).ok()),
+            tool_catalog_digest: result
+                .pointer("/probe/toolCatalogDigest")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            rollback_status: rollback,
+            issue: None,
+        });
+    }
+
+    let status = result.get("status").and_then(|value| value.as_str());
+    let deployed_tool_count = result
+        .pointer("/probe/toolCount")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok());
+    let tool_catalog_digest = result
+        .pointer("/probe/toolCatalogDigest")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    if status == Some("deployed") && deployed_tool_count != Some(binding.expected_tool_count) {
+        return Ok(release_reconciliation_projection(
+            "RELEASE_RESULT_TOOL_COUNT_MISMATCH",
+        ));
+    }
+    let (disposition, terminal, issue) = match status {
+        Some("deployed") => (RuntimeReleaseDisposition::Deployed, true, None),
+        Some("not_committed") => (RuntimeReleaseDisposition::NotCommitted, true, None),
+        Some("rolled_back") => (RuntimeReleaseDisposition::RolledBack, true, None),
+        Some("rollback_failed") => (
+            RuntimeReleaseDisposition::ReconciliationRequired,
+            false,
+            Some("RELEASE_ROLLBACK_FAILED".to_string()),
+        ),
+        Some("recovery_failed") => (
+            RuntimeReleaseDisposition::ReconciliationRequired,
+            false,
+            Some("RELEASE_RECOVERY_FAILED".to_string()),
+        ),
+        _ => (
+            RuntimeReleaseDisposition::ReconciliationRequired,
+            false,
+            Some("RELEASE_RESULT_STATUS_UNKNOWN".to_string()),
+        ),
+    };
+    Ok(RuntimeReleaseReceiptProjection {
+        disposition,
+        terminal,
+        available: true,
+        digest: Some(result_digest),
+        deployed_tool_count,
+        tool_catalog_digest,
+        rollback_status: rollback,
+        issue,
+    })
 }
 
 fn validate_run_request_structure(request: &TaskRunRequest) -> RuntimeResult<()> {

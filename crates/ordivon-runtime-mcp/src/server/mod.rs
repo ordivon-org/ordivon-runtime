@@ -14,7 +14,8 @@ use ordivon_runtime_core::{
     ExecutionStepProposal, ExecutionTarget, ForeignReference, GitWorkspaceCreateRequest,
     InputAuthority, InputBindingRequest, Runtime, RuntimeCapabilities, RuntimeCapacity,
     RuntimeConfig, RuntimeError, RuntimeExecutionTargetCapability, RuntimeJobInspection,
-    RuntimeJobListRequest, RuntimeJobListResult, RuntimeWorkspaceGetRequest,
+    RuntimeJobListRequest, RuntimeJobListResult, RuntimeReleaseAdmission, RuntimeReleaseGetRequest,
+    RuntimeReleaseProjection, RuntimeReleaseRequest, RuntimeWorkspaceGetRequest,
     RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
     TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunProposal, TaskRunRequest,
     UniversalExecError, UniversalExecutionRequest, UniversalExecutionStep, UniversalExecutorConfig,
@@ -156,10 +157,15 @@ pub struct RuntimeDescribeResult {
     pub allowed_executable_roots: Vec<String>,
     pub input_authorities: Vec<String>,
     pub targets: Vec<RuntimeExecutionTargetCapability>,
+    pub structured_release_configured: bool,
 }
 
 impl RuntimeDescribeResult {
-    fn from_capabilities(capabilities: RuntimeCapabilities, global_execution_limit: u32) -> Self {
+    fn from_capabilities(
+        capabilities: RuntimeCapabilities,
+        global_execution_limit: u32,
+        structured_release_configured: bool,
+    ) -> Self {
         Self {
             schema_version: capabilities.schema_version,
             global_execution_limit,
@@ -168,7 +174,52 @@ impl RuntimeDescribeResult {
             allowed_executable_roots: capabilities.allowed_executable_roots,
             input_authorities: capabilities.input_authorities,
             targets: capabilities.targets,
+            structured_release_configured,
         }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeReleaseApplyToolRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    pub client_request_id: String,
+    pub workspace_id: String,
+    pub commit: String,
+    pub candidate_manifest_digest: String,
+    #[schemars(range(min = 1))]
+    pub expected_tool_count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeReleaseGetToolRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    pub client_request_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeReleaseExecutionConfig {
+    pub source_repo: PathBuf,
+    pub install_dir: PathBuf,
+    pub database: PathBuf,
+    pub env_file: PathBuf,
+    pub receipt_root: PathBuf,
+    pub required_ref: String,
+    pub timeout_ms: u64,
+}
+
+impl RuntimeReleaseExecutionConfig {
+    fn candidate_dir(&self, commit: &str) -> PathBuf {
+        self.source_repo
+            .join("target")
+            .join("ordivon-release-candidates")
+            .join(commit)
+            .join("release")
     }
 }
 
@@ -602,6 +653,7 @@ pub struct ServerConfig {
     pub runtime: RuntimeConfig,
     pub input_authorities: Vec<InputAuthority>,
     pub execution: ExecutionContext,
+    pub release: Option<RuntimeReleaseExecutionConfig>,
     pub trace_path: Option<PathBuf>,
 }
 
@@ -616,6 +668,7 @@ struct ServerState {
     runtime: Runtime,
     executor: UniversalExecutorConfig,
     execution: ExecutionContext,
+    release: Option<RuntimeReleaseExecutionConfig>,
     trace_path: Option<PathBuf>,
 }
 
@@ -625,10 +678,33 @@ impl RuntimeServer {
         executor.ensure_store().map_err(ToolError::from)?;
         let runtime = Runtime::new_with_input_authorities(config.runtime, config.input_authorities)
             .map_err(ToolError::from)?;
+        if let Some(release) = config.release.as_ref() {
+            for (path, field) in [
+                (&release.source_repo, "release.sourceRepo"),
+                (&release.install_dir, "release.installDir"),
+                (&release.database, "release.database"),
+                (&release.env_file, "release.envFile"),
+                (&release.receipt_root, "release.receiptRoot"),
+            ] {
+                if !path.is_absolute() {
+                    return Err(ToolError::invalid(
+                        "Runtime Release paths must be absolute",
+                        field,
+                    ));
+                }
+            }
+            if release.timeout_ms == 0 || release.timeout_ms > executor.max_runtime_ms {
+                return Err(ToolError::invalid(
+                    "Runtime Release timeout must fit inside Runtime maxRuntimeMs",
+                    "release.timeoutMs",
+                ));
+            }
+        }
         let state = Arc::new(ServerState {
             runtime,
             executor,
             execution: config.execution,
+            release: config.release,
             trace_path: config.trace_path,
         });
         Ok(Self {

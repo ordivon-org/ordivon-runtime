@@ -26,11 +26,242 @@ impl RuntimeServer {
         }
         let runtime = self.state.runtime.clone();
         let global_execution_limit = self.state.execution.global_limit;
+        let structured_release_configured = self.state.release.is_some();
         self.run_core("runtime.describe", move || {
             Ok(RuntimeDescribeResult::from_capabilities(
                 runtime.capabilities(),
                 global_execution_limit,
+                structured_release_configured,
             ))
+        })
+        .await
+    }
+
+    #[tool(
+        name = "release.apply",
+        description = "Admit one exact Runtime self-release as a structured reconciliable effect. The caller chooses a Workspace commit and exact candidate-manifest digest; operator configuration owns source/install/Registry/environment/receipt authority. Exact clientRequestId replay is resolved before consulting current Workspace or candidate state. New admission commits a durable release effect and an Accepted Runtime Job, then returns without directly dispatching it; normal Runtime reconciliation owns later at-most-once execution. A connection loss during self-replacement is not failure evidence: reconnect with release.get using the same clientRequestId. The deployment receipt, not process exit alone, is authoritative for whether the external release effect committed.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeReleaseAdmission>>(),
+        annotations(
+            title = "Apply structured Runtime release",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn release_apply(
+        &self,
+        Parameters(request): Parameters<RuntimeReleaseApplyToolRequest>,
+    ) -> ToolOutcome<RuntimeReleaseAdmission> {
+        let runtime = self.state.runtime.clone();
+        let release_config = self.state.release.clone();
+        let principal = self.state.execution.principal.clone();
+        let global_limit = self.state.execution.global_limit;
+        self.run_core("release.apply", move || {
+            let release_request = RuntimeReleaseRequest {
+                schema_version: request.schema_version,
+                client_request_id: request.client_request_id.clone(),
+                principal: principal.clone(),
+                workspace_id: request.workspace_id.clone(),
+                commit: request.commit.clone(),
+                candidate_manifest_digest: request.candidate_manifest_digest.clone(),
+                expected_tool_count: request.expected_tool_count,
+            };
+
+            // Exact replay is intentionally resolved before current operator/world state.
+            if let Some(replay) = runtime
+                .find_runtime_release_for_apply(&release_request)
+                .map_err(ToolError::from)?
+            {
+                return Ok(replay);
+            }
+
+            let release = release_config.ok_or_else(|| {
+                ToolError::invalid(
+                    "structured Runtime release is not configured on this node",
+                    "release",
+                )
+            })?;
+            let workspace = runtime
+                .get_workspace(&RuntimeWorkspaceGetRequest {
+                    schema_version: RUNTIME_SCHEMA_VERSION,
+                    workspace_id: request.workspace_id.clone(),
+                })
+                .map_err(ToolError::from)?;
+            let configured_source = std::fs::canonicalize(&release.source_repo).map_err(|error| {
+                ToolError::invalid(
+                    format!("configured release source repository is unavailable: {error}"),
+                    "release.sourceRepo",
+                )
+            })?;
+            if workspace.source_repo != configured_source.to_string_lossy() {
+                return Err(ToolError::invalid(
+                    "Workspace source repository does not match operator-owned Runtime release source",
+                    "workspaceId",
+                ));
+            }
+            if workspace.current_head_revision != request.commit {
+                return Err(ToolError::invalid(
+                    "Workspace HEAD does not match the requested Runtime release commit",
+                    "commit",
+                ));
+            }
+            if workspace.dirty {
+                return Err(ToolError::invalid(
+                    "Runtime release Workspace must be clean",
+                    "workspaceId",
+                ));
+            }
+
+            let candidate_dir = release.candidate_dir(&request.commit);
+            let candidate_manifest = candidate_dir.join("ordivon-deployment-manifest.json");
+            let candidate_deployer = candidate_dir.join("ordivon-runtime-deploy");
+            let manifest_metadata = std::fs::symlink_metadata(&candidate_manifest).map_err(|error| {
+                ToolError::invalid(
+                    format!("Runtime release candidate manifest is unavailable: {error}"),
+                    "candidateManifestDigest",
+                )
+            })?;
+            if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
+                return Err(ToolError::invalid(
+                    "Runtime release candidate manifest must be a regular non-symlink file",
+                    "candidateManifestDigest",
+                ));
+            }
+            if manifest_metadata.len() > 4 * 1024 * 1024 {
+                return Err(ToolError::invalid(
+                    "Runtime release candidate manifest is too large",
+                    "candidateManifestDigest",
+                ));
+            }
+            let manifest_bytes = std::fs::read(&candidate_manifest).map_err(|error| {
+                ToolError::invalid(
+                    format!("cannot read Runtime release candidate manifest: {error}"),
+                    "candidateManifestDigest",
+                )
+            })?;
+            let manifest_digest = format!("sha256:{:x}", Sha256::digest(&manifest_bytes));
+            if manifest_digest != request.candidate_manifest_digest {
+                return Err(ToolError::invalid(
+                    "Runtime release candidate manifest digest does not match current bytes",
+                    "candidateManifestDigest",
+                ));
+            }
+            let deployer_metadata = std::fs::symlink_metadata(&candidate_deployer).map_err(|error| {
+                ToolError::invalid(
+                    format!("Runtime release candidate deployer is unavailable: {error}"),
+                    "commit",
+                )
+            })?;
+            if deployer_metadata.file_type().is_symlink() || !deployer_metadata.is_file() {
+                return Err(ToolError::invalid(
+                    "Runtime release candidate deployer must be a regular non-symlink file",
+                    "commit",
+                ));
+            }
+
+            let effect_id = ordivon_runtime_core::runtime_release_effect_id(&release_request);
+            let request_digest =
+                ordivon_runtime_core::runtime_release_request_identity_digest(&release_request)
+                    .map_err(ToolError::from)?;
+            let receipt_path = release.receipt_root.join(format!("effect-{effect_id}"));
+            let args = vec![
+                "apply".to_string(),
+                "--source-repo".to_string(),
+                configured_source.to_string_lossy().into_owned(),
+                "--commit".to_string(),
+                request.commit.clone(),
+                "--confirm-commit".to_string(),
+                request.commit.clone(),
+                "--candidate-dir".to_string(),
+                candidate_dir.to_string_lossy().into_owned(),
+                "--candidate-manifest".to_string(),
+                candidate_manifest.to_string_lossy().into_owned(),
+                "--install-dir".to_string(),
+                release.install_dir.to_string_lossy().into_owned(),
+                "--database".to_string(),
+                release.database.to_string_lossy().into_owned(),
+                "--env-file".to_string(),
+                release.env_file.to_string_lossy().into_owned(),
+                "--receipt-root".to_string(),
+                release.receipt_root.to_string_lossy().into_owned(),
+                "--expected-tool-count".to_string(),
+                request.expected_tool_count.to_string(),
+                "--require-ref".to_string(),
+                release.required_ref.clone(),
+                "--effect-id".to_string(),
+                effect_id.clone(),
+                "--effect-request-digest".to_string(),
+                request_digest,
+                "--candidate-manifest-digest".to_string(),
+                request.candidate_manifest_digest.clone(),
+                "--drain-seconds".to_string(),
+                "30".to_string(),
+            ];
+            let proposal = TaskRunProposal {
+                schema_version: RUNTIME_SCHEMA_VERSION,
+                client_request_id: request.client_request_id.clone(),
+                principal: principal.clone(),
+                global_limit,
+                execution: ExecutionProposal {
+                    workspace_id: request.workspace_id.clone(),
+                    executable: candidate_deployer.to_string_lossy().into_owned(),
+                    args,
+                    cwd_relative: ".".to_string(),
+                    env: BTreeMap::new(),
+                    timeout_ms: Some(release.timeout_ms),
+                    stdout_limit_bytes: Some(262_144),
+                    stderr_limit_bytes: Some(262_144),
+                    steps: Vec::new(),
+                    budget: ExecutionBudget::default(),
+                    execution_profile: ExecutionProfile::TrustedLocal,
+                    execution_target: ExecutionTarget::LocalLinux,
+                    windows_authority: WindowsAuthority::Limited,
+                    foreign_references: vec![ForeignReference {
+                        namespace: "ordivon.runtime".to_string(),
+                        reference_type: "runtime_release".to_string(),
+                        id: effect_id,
+                        generation: Some(request.commit.clone()),
+                        digest: Some(request.candidate_manifest_digest.clone()),
+                    }],
+                },
+                wait_ms: 0,
+                stdout_tail_bytes: 0,
+                stderr_tail_bytes: 0,
+            };
+            runtime
+                .admit_runtime_release_effect(&release_request, &proposal, &receipt_path)
+                .map_err(ToolError::from)
+        })
+        .await
+    }
+
+    #[tool(
+        name = "release.get",
+        description = "Project one exact structured Runtime release effect by clientRequestId without reconciling, dispatching, retrying, or changing the external world. Joins durable Job/Attempt truth with the deterministic deployment receipt. Receipt truth is authoritative for deployed/not-committed/rolled-back release effects even when the generic execution channel was interrupted by Runtime self-replacement. Use this after any uncertain release.apply response; never infer release completion from transport loss or process status alone.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeReleaseProjection>>(),
+        annotations(
+            title = "Get structured Runtime release",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn release_get(
+        &self,
+        Parameters(request): Parameters<RuntimeReleaseGetToolRequest>,
+    ) -> ToolOutcome<RuntimeReleaseProjection> {
+        let runtime = self.state.runtime.clone();
+        let principal = self.state.execution.principal.clone();
+        self.run_core("release.get", move || {
+            runtime
+                .get_runtime_release_effect(&RuntimeReleaseGetRequest {
+                    schema_version: request.schema_version,
+                    principal,
+                    client_request_id: request.client_request_id,
+                })
+                .map_err(ToolError::from)
         })
         .await
     }

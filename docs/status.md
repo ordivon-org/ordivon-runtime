@@ -93,6 +93,7 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 | observation, cancellation, reconciliation | operational |
 | doctor, repair, backup, restore | operational |
 | receipted deploy and rollback | operational |
+| structured Runtime self-release (`release.apply` / `release.get`) | implemented; operator-configured, exact-replay-safe admission binds a deterministic release effect to the ordinary Job/Attempt lifecycle, while `release.get` reads deployment receipt truth without redispatch |
 | Workspace lifecycle and cache reclamation | operational |
 | `contained_local` authority reduction | experimental but verified for the declared boundary |
 | Immutable input materialization and `workspace.execBound` read-only contained admission | implemented and public-MCP real-system verified; named authority roots remain operator configuration |
@@ -110,7 +111,7 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 - source commitment is checked before spawn but is not an immutable filesystem snapshot.
 - ignored files, wall-clock time, network state, and ambient external services are not included in source-state commitment.
 - execution-provider commitment covers Runtime's own Linux Runner or Windows launcher, not shared-library/toolchain closure, kernel semantics, network responses, or an arbitrary target's external provider contract.
-- arbitrary command execution remains effect-opaque.
+- arbitrary command execution remains effect-opaque. Runtime self-release is the first dedicated reconciliable effect contract and does not make arbitrary commands or external APIs idempotent/reconcilable by analogy.
 - a successful process exit is not proof of semantic completion or external-world success.
 - real systemd/cgroup integration tests cannot run on ordinary hosted CI and require the explicit local acceptance path.
 - the R-W5 Windows target still uses systemd as the outer WSL launcher supervisor, and `systemd-run` environment expansion is explicitly disabled so Agent `$...` arguments remain literal. Recovery semantics are now physically closed for Runtime reconstruction, launcher death, and WSL distro termination. Runtime reconstruction while the launcher lives reattaches the same Attempt. Natural Windows execution whose launcher unit/process lineage is gone with no result is a deterministic `failed` execution because `KILL_ON_JOB_CLOSE` means the native tree cannot still be running; exact replay never redispatches it. WSL2 kernel `boot_id` is not treated as a distro-instance identity because two real terminate/restart experiments kept it unchanged.

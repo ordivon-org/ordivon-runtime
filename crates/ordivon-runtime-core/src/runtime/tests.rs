@@ -178,6 +178,7 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
         client_request_id: client_request_id.to_string(),
         request_identity_digest: None,
         execution_provider: None,
+        runtime_release_effect: None,
         plan: RuntimeExecutionPlan {
             schema_version: RUNTIME_SCHEMA_VERSION,
             workspace_id: "workspace:test".to_string(),
@@ -5542,6 +5543,168 @@ fn execution_provider_storage_is_recreated_without_advancing_schema_version() {
         )
         .unwrap();
     assert!(table_exists);
+    let max_version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(max_version, 4);
+}
+
+#[test]
+fn runtime_release_effect_binds_operation_and_receipt_truth_overrides_job_progress() {
+    let sandbox = Sandbox::new("runtime-release-effect", 5_000);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let release_request = RuntimeReleaseRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        client_request_id: "request:runtime-release-effect".to_string(),
+        principal: "principal:test".to_string(),
+        workspace_id: "workspace:test".to_string(),
+        commit: "a".repeat(40),
+        candidate_manifest_digest: digest(b"candidate-manifest"),
+        expected_tool_count: 22,
+    };
+    let request_digest = runtime_release_request_identity_digest(&release_request).unwrap();
+    let effect_id = runtime_release_effect_id(&release_request);
+    let receipt = sandbox.root.join(format!("effect-{effect_id}"));
+    let binding = RuntimeReleaseEffectBinding {
+        contract: RuntimeReleaseContract::RuntimeReleaseV1,
+        effect_id: effect_id.clone(),
+        request_digest: request_digest.clone(),
+        workspace_id: release_request.workspace_id.clone(),
+        commit: release_request.commit.clone(),
+        candidate_manifest_digest: release_request.candidate_manifest_digest.clone(),
+        expected_tool_count: release_request.expected_tool_count,
+        receipt_path: receipt.to_string_lossy().into_owned(),
+    };
+    let provider = ExecutionProviderSnapshot {
+        contract: ExecutionProviderContract::LocalLinuxRunnerV1,
+        executable_digest: file_digest(Path::new("/usr/bin/true")),
+        wsl_distribution: None,
+    };
+    let mut submission = request(&sandbox, &release_request.client_request_id, 4);
+    submission.request_identity_digest = Some(request_digest.clone());
+    submission.execution_provider = Some(provider.clone());
+    submission.runtime_release_effect = Some(binding.clone());
+    let created = created(sandbox.registry.submit(&submission).unwrap());
+
+    assert_eq!(
+        sandbox
+            .registry
+            .runtime_release_effect_for_job(&created.job.job_id)
+            .unwrap(),
+        Some(binding.clone())
+    );
+    let provider_digest = digest(serde_json::to_string(&provider).unwrap().as_bytes());
+    let release_digest = digest(serde_json::to_string(&binding).unwrap().as_bytes());
+    assert_eq!(
+        created.job.operation_digest,
+        digest(
+            format!(
+                "runtime-operation-v5\0{}\0{}\0{}\0{}",
+                request_digest, created.job.execution_plan_digest, provider_digest, release_digest
+            )
+            .as_bytes()
+        )
+    );
+
+    fs::create_dir_all(&receipt).unwrap();
+    let release_effect_json = serde_json::json!({
+        "contract": "runtime_release_v1",
+        "effectId": effect_id,
+        "requestDigest": request_digest,
+        "commit": release_request.commit,
+        "candidateManifestDigest": release_request.candidate_manifest_digest,
+        "expectedToolCount": release_request.expected_tool_count,
+        "operatorOwnedExtra": "ignored-by-projection",
+    });
+    fs::write(
+        receipt.join("effect-request.json"),
+        serde_json::to_vec_pretty(&release_effect_json).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        receipt.join("result.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schemaVersion": 2,
+            "status": "deployed",
+            "commit": release_request.commit,
+            "releaseEffect": release_effect_json,
+            "probe": {
+                "toolCount": release_request.expected_tool_count,
+                "toolCatalogDigest": digest(b"catalog"),
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let projection = runtime
+        .get_runtime_release_effect(&RuntimeReleaseGetRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            principal: release_request.principal.clone(),
+            client_request_id: release_request.client_request_id.clone(),
+        })
+        .unwrap();
+    assert_eq!(
+        projection.effect_disposition,
+        RuntimeReleaseDisposition::Deployed
+    );
+    assert!(projection.effect_terminal);
+    assert!(projection.receipt_available);
+    assert!(projection.receipt_digest.is_some());
+    assert_eq!(projection.deployed_tool_count, Some(22));
+    assert_eq!(projection.attempt_state, Some(AttemptState::Accepted));
+    assert!(!projection.execution_terminal);
+    assert!(!projection.semantic_completion_evaluated);
+
+    let replay = runtime
+        .find_runtime_release_for_apply(&release_request)
+        .unwrap()
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.release.job_id, created.job.job_id);
+    assert_eq!(
+        replay.release.effect_disposition,
+        RuntimeReleaseDisposition::Deployed
+    );
+
+    let mut conflict = release_request.clone();
+    conflict.candidate_manifest_digest = digest(b"different-manifest");
+    let error = runtime
+        .find_runtime_release_for_apply(&conflict)
+        .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::IdempotencyConflict);
+}
+
+#[test]
+fn runtime_release_storage_is_recreated_without_advancing_schema_version() {
+    let sandbox = Sandbox::new("runtime-release-storage", 5_000);
+    let config = sandbox.registry.config().clone();
+    let connection = Connection::open(&config.db_path).unwrap();
+    connection
+        .execute("DROP TABLE job_runtime_release_effects", [])
+        .unwrap();
+    drop(connection);
+
+    let registry = Registry::initialize(config).unwrap();
+    let connection = Connection::open(&registry.config().db_path).unwrap();
+    let table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_runtime_release_effects')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(table_exists);
+    let index_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_runtime_release_effect_request')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(index_exists);
     let max_version: i64 = connection
         .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
             row.get(0)

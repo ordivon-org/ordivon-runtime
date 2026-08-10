@@ -77,6 +77,7 @@ Current implementation mapping:
 | Physical ownership | cgroup-owned process tree |
 | Execution evidence | Runner Result and Artifacts |
 | Recovery | Registry, Runner evidence, and systemd/cgroup reconciliation |
+| First structured external effect | `release.apply`/`release.get`, a release-bound Job, additive Runtime Release side truth, and the canonical deployment receipt |
 
 The model must not grow merely to resemble a workflow engine, scheduler, policy platform, or Agent framework.
 
@@ -157,7 +158,7 @@ These classes are recovery contracts, not caller labels.
 
 The public API must not accept a caller-asserted `effectClass` for arbitrary execution. Doing so would create a false guarantee.
 
-A non-opaque class is allowed only through a structured operation whose adapter owns and tests the complete Effect Contract. Examples may eventually include a Git operation bound to an expected revision, or an external API operation bound to a provider-supported idempotency key and receipt query.
+A non-opaque class is allowed only through a structured operation whose adapter owns and tests the complete Effect Contract. Runtime's first such operation is its own release effect: `release.apply` binds an exact Workspace commit, candidate-manifest digest, operator-owned deployment authority, deterministic effect identity, candidate deployer executable, and durable Job; `release.get` joins that Job with the deterministic deployment receipt without dispatching or retrying. A lost MCP response during self-replacement is therefore reconciled by querying the same effect rather than repeating the release. Other examples may eventually include a Git operation bound to an expected revision, or an external API operation bound to a provider-supported idempotency key and receipt query.
 
 ## Current proof and current gap
 
@@ -174,6 +175,7 @@ Current Ordivon Runtime already proves:
 - a Git source-state commitment covering `HEAD`, the semantic Git index, actual tracked source bytes, recursively initialized submodule source state, and nonignored untracked source;
 - pre-spawn source-state revalidation and exclusion of Runtime-mediated mutation while a Job is active or held;
 - first-admission commitment of the Runtime-owned Linux Runner or Windows launcher contract/digest, with pre-dispatch drift rejection and identity-bound terminal evidence;
+- one real `RECONCILABLE` external effect: Runtime self-release has a stable principal/client request identity, an operation-v5 binding to release side truth, a deterministic deployment receipt, exact replay before current-world checks, and projection-only `release.get` reconciliation across Runtime ingress replacement;
 - recoverable Workspace closure.
 
 The source-state commitment is deliberately scoped. It excludes ignored caches and build outputs and does not make the trusted host filesystem immutable. Direct host writes after the Runner check remain outside this guarantee; eliminating that race would require executing from an immutable snapshot or stronger isolation and then resolving how intentional command changes return to the working Workspace.
@@ -183,12 +185,12 @@ The source-state commitment is deliberately scoped. It excludes ignored caches a
 It does not yet prove:
 
 - the number or identity of external effects performed inside an arbitrary command;
-- a general external effect receipt;
-- generic target/tool-contract continuity beyond the Runtime-owned Runner/Windows launcher commitment, including dynamic environment closure and external provider semantics;
+- a general external effect receipt across arbitrary operations; the Runtime release receipt is deliberately one adapter-specific proof, not a generic effect claim;
+- generic target/tool-contract continuity beyond the Runtime-owned Runner/Windows launcher and structured Runtime-release commitments, including dynamic environment closure and external provider semantics;
 - operation-scoped authority beyond the trusted-local principal;
 - external-world preconditions outside the Git Workspace other than bytes explicitly admitted through the immutable-input binding contract;
 - wall-clock time, network responses, ignored Workspace inputs, or other ambient process dependencies; target processes receive a committed configured execution environment plus explicit request overrides rather than inheriting the Runtime service environment;
-- effect-aware retry or reconciliation through a structured adapter.
+- generic effect-aware retry or reconciliation across arbitrary adapters. The self-release adapter reconciles by receipt and exact request identity, but it does not authorize automatic generalization to other effects.
 
 These are real gaps. They must not be hidden by process success, Artifact presence, tracing, or additional orchestration layers.
 
@@ -224,7 +226,7 @@ A field with no enforcement, an event with no recovery decision, or an abstracti
 
 ## Next implementation gate
 
-The next code change is not a generic `effectClass` field. It must begin with one real structured operation and demonstrate the complete contract:
+The first real structured operation is now Runtime self-release. It demonstrates the complete contract below across a self-replacing service boundary; this is evidence for the kernel shape, not permission to introduce a generic effect framework. A reusable adapter abstraction should wait for a second materially different structured effect and then factor only the invariants proven common by both:
 
 ```text
 canonical effect identity

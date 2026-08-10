@@ -47,6 +47,8 @@ DEFAULT_OPERATOR_ARTIFACTS = (
     ("mcp_probe.py", "scripts/mcp_probe.py", 0o644, "support"),
 )
 DEFAULT_REQUIRED_TOOLS = (
+    "release.apply",
+    "release.get",
     "runtime.describe",
     "workspace.content",
     "workspace.execPlan",
@@ -56,6 +58,9 @@ DEFAULT_REQUIRED_TOOLS = (
     "workspace.patch.get",
 )
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+RELEASE_EFFECT_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+RELEASE_REQUEST_DIGEST_PATTERN = re.compile(r"^runtime-release-v1:sha256:[0-9a-f]{64}$")
 ATTEMPT_UNIT_PATTERN = re.compile(r"/ordivon-(attempt-[^.\s/]+)\.service(?:$|/)")
 
 
@@ -81,6 +86,9 @@ def parse_args() -> argparse.Namespace:
     apply = subparsers.add_parser("apply", help="atomically drain admission, install, restart, probe, and receipt")
     add_deployment_arguments(apply, require_confirmation=True)
     apply.add_argument("--drain-seconds", type=positive_float, default=30.0)
+    apply.add_argument("--effect-id", type=exact_release_effect_id)
+    apply.add_argument("--effect-request-digest", type=exact_release_request_digest)
+    apply.add_argument("--candidate-manifest-digest", type=exact_sha256_digest)
 
     rollback = subparsers.add_parser(
         "rollback", help="restore release artifacts retained by one deployment receipt"
@@ -130,6 +138,26 @@ def absolute_path(value: str) -> Path:
 def exact_commit(value: str) -> str:
     if not COMMIT_PATTERN.fullmatch(value):
         raise argparse.ArgumentTypeError("commit must be exactly 40 lowercase hexadecimal characters")
+    return value
+
+
+def exact_sha256_digest(value: str) -> str:
+    if not SHA256_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError("digest must be sha256 followed by 64 lowercase hexadecimal characters")
+    return value
+
+
+def exact_release_effect_id(value: str) -> str:
+    if not RELEASE_EFFECT_ID_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError("effect-id must be exactly 64 lowercase hexadecimal characters")
+    return value
+
+
+def exact_release_request_digest(value: str) -> str:
+    if not RELEASE_REQUEST_DIGEST_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            "effect-request-digest must be runtime-release-v1:sha256:<64 lowercase hex>"
+        )
     return value
 
 
@@ -545,9 +573,13 @@ def validate_candidate_manifest(
     }
     if manifest_binary_names != expected_binary_names:
         blockers.append("candidate manifest binary subset does not match release artifacts")
+    observed_manifest_digest = sha256(args.candidate_manifest)
+    expected_manifest_digest = getattr(args, "candidate_manifest_digest", None)
+    if expected_manifest_digest is not None and observed_manifest_digest != expected_manifest_digest:
+        blockers.append("candidate manifest digest does not match structured release request")
     summary = {
         "path": str(args.candidate_manifest.resolve()),
-        "digest": sha256(args.candidate_manifest),
+        "digest": observed_manifest_digest,
         "commit": manifest.get("commit"),
         "sourceRepo": manifest.get("sourceRepo"),
         "candidateDir": manifest.get("candidateDir"),
@@ -753,6 +785,79 @@ def receipt_path(root: Path, commit: str) -> Path:
     return candidate
 
 
+def structured_release_effect(args: argparse.Namespace) -> dict[str, object] | None:
+    values = (
+        getattr(args, "effect_id", None),
+        getattr(args, "effect_request_digest", None),
+        getattr(args, "candidate_manifest_digest", None),
+    )
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise RuntimeError(
+            "structured release requires effect-id, effect-request-digest, and candidate-manifest-digest together"
+        )
+    return {
+        "contract": "runtime_release_v1",
+        "effectId": values[0],
+        "requestDigest": values[1],
+        "commit": args.commit,
+        "candidateManifestDigest": values[2],
+        "sourceRepo": str(args.source_repo.resolve()),
+        "candidateDir": str(args.candidate_dir.resolve()),
+        "candidateManifest": str(args.candidate_manifest.resolve()),
+        "installDir": str(args.install_dir.resolve()),
+        "database": str(args.database.resolve()),
+        "envFile": str(args.env_file.resolve()),
+        "receiptRoot": str(args.receipt_root.resolve()),
+        "service": args.service,
+        "requiredRef": args.require_ref,
+        "requiredTools": list(required_tools(args)),
+        "expectedToolCount": args.expected_tool_count,
+        "releaseArtifacts": [
+            {
+                "name": str(spec["name"]),
+                "kind": str(spec["kind"]),
+                "mode": int(spec["mode"]),
+            }
+            for spec in release_artifact_specs(args)
+        ],
+    }
+
+
+def structured_receipt_path(root: Path, effect_id: str) -> Path:
+    return root / f"effect-{effect_id}"
+
+
+def existing_structured_release_result(
+    receipt: Path, expected: dict[str, object]
+) -> dict[str, object] | None:
+    if not receipt.exists():
+        return None
+    if receipt.is_symlink() or not receipt.is_dir():
+        raise RuntimeError("structured release receipt path is not a safe directory")
+    request_path = receipt / "effect-request.json"
+    if request_path.is_symlink() or not request_path.is_file():
+        raise RuntimeError("structured release receipt lacks its effect request")
+    recorded = json.loads(request_path.read_text(encoding="utf-8"))
+    if recorded != expected:
+        raise RuntimeError("effect-id is already bound to a different release request")
+    result_path = receipt / "result.json"
+    if not result_path.exists():
+        raise RuntimeError(
+            "structured release effect exists without a terminal result; reconcile it instead of repeating apply"
+        )
+    if result_path.is_symlink() or not result_path.is_file():
+        raise RuntimeError("structured release terminal result is unsafe")
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    if not isinstance(result, dict):
+        raise RuntimeError("structured release terminal result is invalid")
+    release_effect = result.get("releaseEffect")
+    if release_effect != expected:
+        raise RuntimeError("structured release terminal result does not match its effect request")
+    return {**result, "replayed": True}
+
+
 def receipt_record_mode(record: dict[str, object]) -> int:
     mode = record.get("mode")
     if mode is None:
@@ -853,18 +958,45 @@ def prune_candidate_artifacts(
 def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
     if args.confirm_commit != args.commit:
         raise RuntimeError("confirm-commit must exactly equal commit")
+    release_effect = structured_release_effect(args)
     with exclusive_lock(args.lock_file):
-        initial_plan = deployment_plan(args)
-        non_job_blockers = [
-            blocker
-            for blocker in initial_plan["blockers"]
-            if blocker != "active or held Jobs exist other than the deployment Job"
-        ]
-        if non_job_blockers:
-            raise RuntimeError("deployment is not eligible: " + "; ".join(non_job_blockers))
+        if release_effect is not None:
+            receipt = structured_receipt_path(args.receipt_root, str(release_effect["effectId"]))
+            replay = existing_structured_release_result(receipt, release_effect)
+            if replay is not None:
+                return replay
+            receipt.mkdir(parents=True, exist_ok=False)
+            write_json_atomic(receipt / "effect-request.json", release_effect)
+        else:
+            receipt = receipt_path(args.receipt_root, args.commit)
+
+        try:
+            initial_plan = deployment_plan(args)
+            non_job_blockers = [
+                blocker
+                for blocker in initial_plan["blockers"]
+                if blocker != "active or held Jobs exist other than the deployment Job"
+            ]
+            if non_job_blockers:
+                raise RuntimeError("deployment is not eligible: " + "; ".join(non_job_blockers))
+        except Exception as setup_error:
+            if release_effect is not None:
+                write_json_atomic(
+                    receipt / "result.json",
+                    {
+                        "schemaVersion": SCHEMA_VERSION,
+                        "status": "not_committed",
+                        "commit": args.commit,
+                        "finishedAtMs": int(time.time() * 1000),
+                        "deploymentError": str(setup_error),
+                        "receipt": str(receipt),
+                        "releaseEffect": release_effect,
+                    },
+                )
+            raise
+
         plan = initial_plan
         specs = release_artifact_specs(args)
-        receipt = receipt_path(args.receipt_root, args.commit)
         previous = receipt / "previous"
         previous.mkdir(parents=True)
         installed_by_name = {str(item["name"]): item for item in plan["installed"]}
@@ -912,6 +1044,7 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                     "envFile": str(args.env_file),
                     "previous": previous_records,
                     "candidate": plan["candidate"],
+                    "releaseEffect": release_effect,
                 },
             )
             admission_fence_handle = acquire_exclusive_admission_fence(args.database)
@@ -982,6 +1115,7 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                 "installed": installed,
                 "candidatePrune": candidate_prune,
                 "receipt": str(receipt),
+                "releaseEffect": release_effect,
             }
             write_json_atomic(receipt / "result.json", result)
             return result
@@ -1041,6 +1175,7 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                 "rollback": rollback,
                 "serviceWasStopped": stopped,
                 "receipt": str(receipt),
+                "releaseEffect": release_effect,
             }
             write_json_atomic(receipt / "result.json", result)
             raise RuntimeError(

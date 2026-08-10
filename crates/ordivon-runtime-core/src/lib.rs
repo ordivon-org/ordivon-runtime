@@ -35,7 +35,8 @@ pub use universal::{
 
 #[cfg(feature = "transactional-runtime")]
 pub use runtime::{
-    apply_runtime_repair, inspect_job, inspect_runtime, inspect_workspace, summarize_experience,
+    apply_runtime_repair, inspect_job, inspect_runtime, inspect_workspace,
+    runtime_release_effect_id, runtime_release_request_identity_digest, summarize_experience,
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,
     CreatedAdmission, DurableWorkspacePatchRequest, DurableWorkspacePatchResult,
@@ -57,7 +58,9 @@ pub use runtime::{
     RuntimeInspectionCondition, RuntimeInspectionConfig, RuntimeInspectionEpisodes,
     RuntimeInspectionEvent, RuntimeInspectionJob, RuntimeInvariantViolation, RuntimeJobInspection,
     RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord,
-    RuntimeJobSummary, RuntimeRepairAction, RuntimeRepairActionKind, RuntimeRepairConfig,
+    RuntimeJobSummary, RuntimeReleaseAdmission, RuntimeReleaseContract, RuntimeReleaseDisposition,
+    RuntimeReleaseEffectBinding, RuntimeReleaseGetRequest, RuntimeReleaseProjection,
+    RuntimeReleaseRequest, RuntimeRepairAction, RuntimeRepairActionKind, RuntimeRepairConfig,
     RuntimeRepairReport, RuntimeRepairRequest, RuntimeResult, RuntimeWorkspaceGetRequest,
     RuntimeWorkspaceInspection, RuntimeWorkspaceInspectionConfig, RuntimeWorkspaceInspectionJob,
     RuntimeWorkspaceIssue, RuntimeWorkspaceIssueStage, RuntimeWorkspaceListCursor,

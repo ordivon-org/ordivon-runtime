@@ -1606,6 +1606,120 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual((install / "runtime").read_text(), "old-runtime\n")
             self.assertTrue(Path(rollback["currentBackup"]).is_dir())
 
+    def test_structured_deploy_effect_has_deterministic_receipt_and_exact_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            commit = initialize_git_repository(repo, remote=True)
+            candidate = repo / "target" / "release"
+            install = root / "install"
+            candidate.mkdir(parents=True)
+            install.mkdir()
+            for name in ("runtime", "runner"):
+                write_executable(candidate / name, f"new-{name}\n")
+                write_executable(install / name, f"old-{name}\n")
+            manifest = root / "candidate-manifest.json"
+            write_candidate_manifest(manifest, candidate, commit, ("runtime", "runner"), repo)
+            manifest_digest = "sha256:" + hashlib.sha256(manifest.read_bytes()).hexdigest()
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            systemctl = fake_systemctl(root)
+            effect_id = "e" * 64
+            request_digest = "runtime-release-v1:sha256:" + "f" * 64
+
+            with mcp_server(["workspace.get", "workspace.execPlan"]) as port:
+                env_file = root / "runtime.env"
+                env_file.write_text(
+                    f"ORDIVON_BIND=127.0.0.1:{port}\nORDIVON_BEARER_TOKEN=test\n",
+                    encoding="utf-8",
+                )
+                command = [
+                    sys.executable,
+                    "scripts/ordivon-runtime-deploy",
+                    "apply",
+                    "--source-repo",
+                    str(repo),
+                    "--commit",
+                    commit,
+                    "--confirm-commit",
+                    commit,
+                    "--candidate-dir",
+                    str(candidate),
+                    "--candidate-manifest",
+                    str(manifest),
+                    "--install-dir",
+                    str(install),
+                    "--database",
+                    str(database),
+                    "--env-file",
+                    str(env_file),
+                    "--receipt-root",
+                    str(root / "receipts"),
+                    "--systemctl",
+                    str(systemctl),
+                    "--git",
+                    shutil.which("git") or "/usr/bin/git",
+                    "--lock-file",
+                    str(root / "deploy.lock"),
+                    "--binary",
+                    "runtime",
+                    "--binary",
+                    "runner",
+                    "--required-tool",
+                    "workspace.get",
+                    "--required-tool",
+                    "workspace.execPlan",
+                    "--expected-tool-count",
+                    "2",
+                    "--wait-seconds",
+                    "2",
+                    "--drain-seconds",
+                    "2",
+                    "--effect-id",
+                    effect_id,
+                    "--effect-request-digest",
+                    request_digest,
+                    "--candidate-manifest-digest",
+                    manifest_digest,
+                ]
+                first = subprocess.run(
+                    command, cwd=REPO, check=True, text=True, capture_output=True
+                )
+                first_result = json.loads(first.stdout)
+                receipt = root / "receipts" / f"effect-{effect_id}"
+                self.assertEqual(Path(first_result["receipt"]), receipt)
+                self.assertFalse(first_result.get("replayed", False))
+                self.assertEqual(first_result["releaseEffect"]["effectId"], effect_id)
+                self.assertEqual(
+                    json.loads((receipt / "effect-request.json").read_text()),
+                    first_result["releaseEffect"],
+                )
+                self.assertEqual(len(list((root / "receipts").iterdir())), 1)
+
+                # Exact replay returns the historical effect receipt before consulting the
+                # current installed world. It must not repeat physical replacement.
+                write_executable(install / "runtime", "manual-after-effect\n")
+                replayed = subprocess.run(
+                    command, cwd=REPO, check=True, text=True, capture_output=True
+                )
+                replay_result = json.loads(replayed.stdout)
+                self.assertTrue(replay_result["replayed"])
+                self.assertEqual(Path(replay_result["receipt"]), receipt)
+                self.assertEqual((install / "runtime").read_text(), "manual-after-effect\n")
+                self.assertEqual(len(list((root / "receipts").iterdir())), 1)
+
+                conflicting = command.copy()
+                digest_index = conflicting.index("--effect-request-digest") + 1
+                conflicting[digest_index] = "runtime-release-v1:sha256:" + "a" * 64
+                conflict = subprocess.run(
+                    conflicting, cwd=REPO, check=False, text=True, capture_output=True
+                )
+                self.assertEqual(conflict.returncode, 1)
+                self.assertIn(
+                    "effect-id is already bound to a different release request",
+                    conflict.stderr,
+                )
+
     def test_candidate_prune_keeps_current_and_previous_deployments(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

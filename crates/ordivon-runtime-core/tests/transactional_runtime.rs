@@ -2970,6 +2970,7 @@ impl IntegrationContext {
             client_request_id: client_request_id.to_string(),
             request_identity_digest: None,
             execution_provider: None,
+            runtime_release_effect: None,
             plan: RuntimeExecutionPlan {
                 schema_version: RUNTIME_SCHEMA_VERSION,
                 workspace_id: self.workspace_id.clone(),
