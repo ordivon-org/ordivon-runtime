@@ -128,7 +128,7 @@ scripts/ordivon-runtime-deploy plan \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --env-file /etc/ordivon/ordivon-runtime.env \
   --receipt-root /var/lib/ordivon/deployments \
-  --expected-tool-count 19 \
+  --expected-tool-count 20 \
   --pretty
 
 scripts/ordivon-runtime-deploy apply \
@@ -141,7 +141,7 @@ scripts/ordivon-runtime-deploy apply \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --env-file /etc/ordivon/ordivon-runtime.env \
   --receipt-root /var/lib/ordivon/deployments \
-  --expected-tool-count 19 \
+  --expected-tool-count 20 \
   --drain-seconds 30
 ```
 
@@ -160,7 +160,7 @@ Eligibility requires:
 - `plan` reports any active or held Job (except a provable deployment Job) as an eligibility blocker; `apply` may proceed past that single blocker only to stage a reversible candidate and acquire the Registry admission fence, then it must drain those Jobs naturally within `--drain-seconds`;
 - the confirmation commit exactly matches the requested commit.
 
-The tool first stages `.next` files and receipt-local previous artifacts without replacing the running release. It then takes an exclusive Registry `admission.lock`. Runtime new admission takes a shared lock only after exact replay has been checked, so a deployed Runtime returns retryable `DEPLOYMENT_IN_PROGRESS` for new work while already committed requests remain replayable. Under the exclusive fence, `apply` waits for active/held reservations to drain naturally and then stops MCP ingress immediately. It rechecks the Registry with ingress closed, reruns the complete deployment plan, and writes that final plan to the receipt before any release replacement. Only then are installed `.previous` artifacts refreshed and the staged set atomically committed. The new service must become `active`, complete modern discovery, expose the expected 19-Tool catalog including `workspace.content`, and match the bound candidate identities.
+The tool first stages `.next` files and receipt-local previous artifacts without replacing the running release. It then takes an exclusive Registry `admission.lock`. Runtime new admission takes a shared lock only after exact replay has been checked, so a deployed Runtime returns retryable `DEPLOYMENT_IN_PROGRESS` for new work while already committed requests remain replayable. Under the exclusive fence, `apply` waits for active/held reservations to drain naturally and then stops MCP ingress immediately. It rechecks the Registry with ingress closed, reruns the complete deployment plan, and writes that final plan to the receipt before any release replacement. Only then are installed `.previous` artifacts refreshed and the staged set atomically committed. The new service must become `active`, complete modern discovery, expose the expected 20-Tool catalog including `runtime.describe` and `workspace.content`, and match the bound candidate identities.
 
 A drain timeout removes staged `.next` files and leaves the running installed release untouched; it does not cancel another Agent's work. For the one-time bootstrap from an older Runtime that does not yet participate in `admission.lock`, moving full plan revalidation after ingress stop reduces the unavoidable zero-active→stop race to the `systemctl stop` transition itself; the post-stop Registry check still fails closed and restarts the original service if a Job entered that window. After the fenced Runtime is deployed, future cutovers no longer depend on winning a plan→apply idle-window race. Successful standard-layout deployment keeps the current and immediately previous candidate build trees and removes older exact-commit candidate directories; rollback remains receipt-owned and does not depend on those build trees. A newly installed candidate may not pass through the legacy fallback. Recovery of an uncommitted replacement and explicit rollback probe modern discovery first but may use the previous service's 2025 `initialize` Session lifecycle. A failure after replacement automatically restores the receipt-local previous artifact set. There is no cancel-active-work override in the normal deployment contract.
 
@@ -173,10 +173,12 @@ scripts/ordivon-runtime-deploy rollback \
   --receipt "$receipt" \
   --confirm-receipt "$receipt" \
   --install-dir /usr/local/libexec/ordivon \
-  --env-file /etc/ordivon/ordivon-runtime.env
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --env-file /etc/ordivon/ordivon-runtime.env \
+  --drain-seconds 30
 ```
 
-Rollback validates the receipt-bound install directory, service, environment file, artifact set, previous digests, and recorded modes. It preserves the displaced current artifacts inside the same receipt before restoring the previous set. If restoring the previous set fails, it attempts to restore the displaced current set and receipts both outcomes. A successful `rollback-result.json` is itself a later release-state event: `ordivon-runtime-status` verifies the restored artifact set against it instead of continuing to compare physical state with the superseded forward deployment. At apply time the deployer records `previousCommit` only when the complete pre-deployment artifact fingerprint exactly matches an earlier receipted release event. A later rollback may therefore recover that exact commit; when the restored bytes predate unified release authority, their artifact truth remains exact but `commitKnown=false`, and status reports `DEPLOYMENT_COMMIT_UNKNOWN` rather than inventing revision identity. Release schema v2 owns the complete artifact set; the deployer deliberately retains rollback support for schema-v1 binary-only receipts, whose historical `0755` install mode is explicit compatibility knowledge. Its MCP probe accepts either the modern lifecycle or the prior legacy Session lifecycle, because rollback must be able to prove a genuinely old Runtime rather than require it to implement the new protocol. Additive query indexes and the isolated Workspace Patch receipt table are maintained outside `schema_migrations`; neither changes existing Job, Attempt, or repair semantics.
+Rollback validates the receipt-bound install directory, service, environment file, artifact set, previous digests, and recorded modes. Before any artifact replacement it resolves the Registry database from explicit `--database` or `ORDIVON_REGISTRY_ROOT`, acquires the same exclusive `admission.lock` used by forward deployment, and waits for active/held Jobs to drain naturally within `--drain-seconds`; there is no cancel-active-work escape hatch. The fence remains held through previous-artifact restoration and service probing, so an older binary cannot receive a newly admitted Job during the cutover. It preserves the displaced current artifacts inside the same receipt before restoring the previous set. If restoring the previous set fails, it attempts to restore the displaced current set and receipts both outcomes. A successful `rollback-result.json` is itself a later release-state event: `ordivon-runtime-status` verifies the restored artifact set against it instead of continuing to compare physical state with the superseded forward deployment. At apply time the deployer records `previousCommit` only when the complete pre-deployment artifact fingerprint exactly matches an earlier receipted release event. A later rollback may therefore recover that exact commit; when the restored bytes predate unified release authority, their artifact truth remains exact but `commitKnown=false`, and status reports `DEPLOYMENT_COMMIT_UNKNOWN` rather than inventing revision identity. Release schema v2 owns the complete artifact set; the deployer deliberately retains rollback support for schema-v1 binary-only receipts, whose historical `0755` install mode is explicit compatibility knowledge. Its MCP probe accepts either the modern lifecycle or the prior legacy Session lifecycle, because rollback must be able to prove a genuinely old Runtime rather than require it to implement the new protocol. Additive query indexes and the isolated Workspace Patch receipt table are maintained outside `schema_migrations`; neither changes existing Job, Attempt, or repair semantics.
 
 ### MCP probe module placement
 

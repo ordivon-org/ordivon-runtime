@@ -97,6 +97,8 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 | `contained_local` authority reduction | experimental but verified for the declared boundary |
 | Immutable input materialization and `workspace.execBound` read-only contained admission | implemented and public-MCP real-system verified; named authority roots remain operator configuration |
 | `windows_native` execution target and Windows Job Object ownership | experimental opt-in backend; real Runtime Job/Attempt success, frozen Windows baseline environment, limited-token execution, replay, timeout/cancel, evidence, and descendant cleanup verified on WSL/Windows |
+| Runtime-owned execution-provider commitment | implemented and physically falsified on Linux Runner and Windows launcher drift; new Jobs bind provider contract/digest and fail before dispatch on mismatch |
+| `runtime.describe` Agent affordance projection | implemented; projection-only discovery exposes current ceilings, executable roots, named input authorities, target/profile support, provider identity, and current Windows authority availability without selecting or dispatching work |
 | hostile multi-tenant sandboxing | not provided |
 | semantic Task completion | outside Runtime |
 | external-world effect verification | structured adapter dependent; not generic |
@@ -107,6 +109,7 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 - `contained_local` reduces ambient authority but does not provide kernel-grade hostile-code isolation.
 - source commitment is checked before spawn but is not an immutable filesystem snapshot.
 - ignored files, wall-clock time, network state, and ambient external services are not included in source-state commitment.
+- execution-provider commitment covers Runtime's own Linux Runner or Windows launcher, not shared-library/toolchain closure, kernel semantics, network responses, or an arbitrary target's external provider contract.
 - arbitrary command execution remains effect-opaque.
 - a successful process exit is not proof of semantic completion or external-world success.
 - real systemd/cgroup integration tests cannot run on ordinary hosted CI and require the explicit local acceptance path.

@@ -363,6 +363,7 @@ fn tool_effect_annotations_match_runtime_behavior() {
     let tools = server.tool_router.list_all();
     let expected = [
         ("artifact.read", true, false, true, false),
+        ("runtime.describe", true, false, true, false),
         ("task.cancel", false, true, true, false),
         ("task.get", true, false, true, false),
         ("task.list", true, false, true, false),
@@ -443,6 +444,8 @@ fn tool_inputs_default_missing_schema_version_to_pinned_version() {
     let diff: WorkspaceDiffRequest =
         serde_json::from_str(r#"{"workspaceId":"ws-1","maxBytes":10}"#).unwrap();
     assert_eq!(diff.schema_version, 1);
+    let describe: RuntimeDescribeRequest = serde_json::from_str("{}").unwrap();
+    assert_eq!(describe.schema_version, 1);
     // Explicit non-pinned versions survive deserialization and are rejected
     // by the handler gate ("schemaVersion must be 1") — the pin keeps teeth.
     let wrong: TaskGetRequest =
@@ -475,6 +478,7 @@ fn tool_catalog_uses_transactional_job_contract() {
         names,
         [
             "artifact.read",
+            "runtime.describe",
             "task.cancel",
             "task.get",
             "task.list",
@@ -1078,7 +1082,7 @@ fn every_public_tool_publishes_structured_output_contract() {
     let sandbox = Sandbox::new("all-output-schemas");
     let server = sandbox.server();
     let tools = server.tool_router.list_all();
-    assert_eq!(tools.len(), 19);
+    assert_eq!(tools.len(), 20);
     for tool in tools {
         let schema = tool
             .output_schema
@@ -1450,4 +1454,73 @@ fn tool_catalog_digest_is_deterministic_and_discovery_visible() {
     );
     assert!(result.capabilities.tools.is_some());
     assert!(result.capabilities.extensions.is_none());
+}
+
+#[test]
+fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
+    let sandbox = Sandbox::new("runtime-describe");
+    let server = sandbox.server();
+    let capabilities = server.state.runtime.capabilities();
+    let result =
+        RuntimeDescribeResult::from_capabilities(capabilities, server.state.execution.global_limit);
+    assert_eq!(result.schema_version, 1);
+    assert_eq!(result.global_execution_limit, 4);
+    assert_eq!(result.max_runtime_ms, 10_000);
+    assert_eq!(result.max_output_bytes, 1024 * 1024);
+    assert_eq!(result.allowed_executable_roots, vec!["/usr/bin"]);
+    assert!(result.input_authorities.is_empty());
+    assert_eq!(result.targets.len(), 2);
+    let linux = result
+        .targets
+        .iter()
+        .find(|target| target.target == ExecutionTarget::LocalLinux)
+        .unwrap();
+    assert!(linux.configured);
+    assert!(linux.available);
+    assert!(linux.structured_plan);
+    assert!(linux.immutable_inputs);
+    let windows = result
+        .targets
+        .iter()
+        .find(|target| target.target == ExecutionTarget::WindowsNative)
+        .unwrap();
+    assert!(!windows.configured);
+    assert!(!windows.available);
+    assert!(!windows.structured_plan);
+    assert!(!windows.immutable_inputs);
+
+    let tool = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .find(|tool| tool.name.as_ref() == "runtime.describe")
+        .unwrap();
+    let input = serde_json::to_value(&tool.input_schema).unwrap();
+    assert_eq!(
+        input.pointer("/properties/schemaVersion/default"),
+        Some(&serde_json::json!(1))
+    );
+    let required = input
+        .pointer("/required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(required.is_empty());
+    let output = serde_json::to_string(tool.output_schema.as_ref().unwrap()).unwrap();
+    for expected in [
+        "globalExecutionLimit",
+        "maxRuntimeMs",
+        "maxOutputBytes",
+        "allowedExecutableRoots",
+        "inputAuthorities",
+        "executionProvider",
+        "availabilityIssue",
+        "structuredPlan",
+        "immutableInputs",
+    ] {
+        assert!(
+            output.contains(expected),
+            "runtime.describe omitted {expected}"
+        );
+    }
 }

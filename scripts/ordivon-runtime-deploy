@@ -47,6 +47,7 @@ DEFAULT_OPERATOR_ARTIFACTS = (
     ("mcp_probe.py", "scripts/mcp_probe.py", 0o644, "support"),
 )
 DEFAULT_REQUIRED_TOOLS = (
+    "runtime.describe",
     "workspace.content",
     "workspace.execPlan",
     "workspace.get",
@@ -88,9 +89,11 @@ def parse_args() -> argparse.Namespace:
     rollback.add_argument("--install-dir", type=absolute_path, required=True)
     rollback.add_argument("--service", default="ordivon-runtime.service")
     rollback.add_argument("--env-file", type=absolute_path, required=True)
+    rollback.add_argument("--database", type=absolute_path)
     rollback.add_argument("--systemctl", type=absolute_path, default=Path("/usr/bin/systemctl"))
     rollback.add_argument("--lock-file", type=absolute_path, default=Path("/run/ordivon-runtime-deploy.lock"))
     rollback.add_argument("--wait-seconds", type=positive_float, default=15.0)
+    rollback.add_argument("--drain-seconds", type=positive_float, default=30.0)
     rollback.add_argument("--confirm-receipt", type=absolute_path, required=True)
     return parser.parse_args()
 
@@ -687,6 +690,21 @@ def admission_fence_path(database: Path) -> Path:
     return database.parent / "admission.lock"
 
 
+def rollback_database(args: argparse.Namespace) -> Path:
+    if args.database is not None:
+        return args.database
+    environment = load_environment_file(args.env_file)
+    registry_root = environment.get("ORDIVON_REGISTRY_ROOT")
+    if not registry_root:
+        raise RuntimeError(
+            "rollback requires --database or ORDIVON_REGISTRY_ROOT in the environment file"
+        )
+    root = Path(registry_root)
+    if not root.is_absolute():
+        raise RuntimeError("ORDIVON_REGISTRY_ROOT must be absolute for rollback")
+    return root / "registry.sqlite3"
+
+
 def acquire_exclusive_admission_fence(database: Path):
     path = admission_fence_path(database)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -708,6 +726,21 @@ def wait_for_execution_drain(database: Path, timeout_seconds: float) -> list[str
         if time.monotonic() >= deadline:
             return jobs
         time.sleep(0.1)
+
+
+@contextmanager
+def fenced_execution_drain(database: Path, timeout_seconds: float):
+    handle = acquire_exclusive_admission_fence(database)
+    try:
+        remaining_jobs = wait_for_execution_drain(database, timeout_seconds)
+        if remaining_jobs:
+            raise RuntimeError(
+                "rollback drain timed out with active or held Jobs: "
+                + ", ".join(remaining_jobs)
+            )
+        yield
+    finally:
+        handle.close()
 
 
 def receipt_path(root: Path, commit: str) -> Path:
@@ -1055,7 +1088,8 @@ def rollback_deployment(args: argparse.Namespace) -> dict[str, object]:
         if not isinstance(expected, str) or sha256(previous) != expected:
             raise RuntimeError(f"previous artifact digest does not match receipt: {name}")
         receipt_record_mode(previous_by_name[name])
-    with exclusive_lock(args.lock_file):
+    database = rollback_database(args)
+    with exclusive_lock(args.lock_file), fenced_execution_drain(database, args.drain_seconds):
         current = receipt / f"rollback-current-{int(time.time() * 1000)}"
         current.mkdir()
         current_records: list[dict[str, object]] = []

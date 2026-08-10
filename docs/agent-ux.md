@@ -4,6 +4,7 @@ Ordivon Runtime keeps a small universal execution surface in the core and leaves
 
 ## Core primitives
 
+- `runtime.describe`: projection-only Runtime affordance discovery. It reports operator ceilings, allowed executable roots, named immutable-input authorities without their host roots, and per-target configured/available state, supported profiles/features, current Runtime-owned provider identity, and currently provable Windows authority classes. It does not select a target, reconcile or dispatch Jobs, or become admission authority; every new Job independently binds current provider truth at admission.
 - `workspace.mutate`: one digest-guarded atomic batch for writes, appends, and exact replacements. Existing targets require the complete-file digest. It remains a low-level synchronous mutation without durable replay identity.
 - `workspace.patch`: one multi-file, multi-hunk text patch under a stable `clientRequestId`. Every existing file binds its complete before digest; every edit binds an exact one-based line, zero-based Unicode-column range and `expectedText`. Exact replay returns the committed receipt instead of writing again.
 - `workspace.patch.get`: reconcile one Patch receipt. It does not apply an uncommitted Patch, but it may advance Runtime receipt state from `prepared` to `committed` or `unknown` after inspecting physical file state.

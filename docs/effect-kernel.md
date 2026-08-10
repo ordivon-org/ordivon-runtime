@@ -88,7 +88,7 @@ Model output, a tool-call draft, or an Agent plan is only a candidate action. A 
 
 ### 2. Stable operation identity
 
-The committed operation identity must bind every fact whose change would create a materially different action. Today this includes the authenticated principal, client request identity, Git Workspace source-state digest, executable identity, arguments, explicit request environment, working directory, physical budgets, and execution-limit intent. For supported mechanical limits, an explicit value and an omitted/delegated value are different request facts: omission is not rewritten into the current operator value before request identity is formed.
+The committed operation identity must bind every fact whose change would create a materially different action. Today this includes the authenticated principal, client request identity, Git Workspace source-state digest, executable identity, arguments, explicit request environment, working directory, physical budgets, execution-limit intent, and the Runtime-owned execution provider that will cross the dispatch boundary. For supported mechanical limits, an explicit value and an omitted/delegated value are different request facts: omission is not rewritten into the current operator value before request identity is formed.
 
 On first admission, Runtime resolves any delegated mechanical limits into one concrete Execution Plan and binds that plan to the physical world snapshot. The durable plan therefore records what actually governed execution even when the Agent intentionally left a limit to Runtime. Future facts may enter identity only when they have enforceable semantics, not because they are useful metadata.
 
@@ -173,6 +173,7 @@ Current Ordivon Runtime already proves:
 - late-result correction when identity-bound evidence appears;
 - a Git source-state commitment covering `HEAD`, the semantic Git index, actual tracked source bytes, recursively initialized submodule source state, and nonignored untracked source;
 - pre-spawn source-state revalidation and exclusion of Runtime-mediated mutation while a Job is active or held;
+- first-admission commitment of the Runtime-owned Linux Runner or Windows launcher contract/digest, with pre-dispatch drift rejection and identity-bound terminal evidence;
 - recoverable Workspace closure.
 
 The source-state commitment is deliberately scoped. It excludes ignored caches and build outputs and does not make the trusted host filesystem immutable. Direct host writes after the Runner check remain outside this guarantee; eliminating that race would require executing from an immutable snapshot or stronger isolation and then resolving how intentional command changes return to the working Workspace.
@@ -183,7 +184,7 @@ It does not yet prove:
 
 - the number or identity of external effects performed inside an arbitrary command;
 - a general external effect receipt;
-- tool-contract continuity between Agent decision and effect execution;
+- generic target/tool-contract continuity beyond the Runtime-owned Runner/Windows launcher commitment, including dynamic environment closure and external provider semantics;
 - operation-scoped authority beyond the trusted-local principal;
 - external-world preconditions outside the Git Workspace other than bytes explicitly admitted through the immutable-input binding contract;
 - wall-clock time, network responses, ignored Workspace inputs, or other ambient process dependencies; target processes receive a committed configured execution environment plus explicit request overrides rather than inheriting the Runtime service environment;

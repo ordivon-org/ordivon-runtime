@@ -93,6 +93,7 @@ The Job expresses desired state and final resolution. The Attempt expresses one 
 - A candidate Agent action is not physical commitment until durably admitted.
 - One Attempt crosses the physical dispatch boundary at most once.
 - An ambiguous dispatch is never speculatively repeated.
+- A newly admitted Job binds the exact Runtime-owned execution provider contract and executable digest; provider drift before dispatch fails closed instead of changing the machinery that realizes an already committed operation.
 - One Attempt owns the complete command process tree through one cgroup.
 - After that process tree is proven gone, a complete identity-bound Runner Result is terminal execution truth.
 - Execution truth is not automatically an external-effect receipt or semantic-completion proof.
@@ -156,6 +157,14 @@ Current policy gates only new admission. Runtime performs idempotent existing-Jo
 Runtime no longer adds a separate 24-hour/64-MiB product law. A caller may also commit optional positive physical budgets for memory, process count, and CPU quota. These values participate in the operation Digest and are applied by systemd to the Attempt cgroup through `MemoryMax=`, `TasksMax=`, and `CPUQuota=`. Runtime validates representability and positivity, while the operator and systemd/kernel own the actual resource policy. An empty budget is omitted from canonical serialization so requests admitted before this contract remain idempotently replayable.
 
 Budgets constrain physical consumption; they are not a scheduler, priority system, sandbox, or approval policy. The trusted-local authority model remains unchanged.
+
+## Execution provider commitment
+
+First admission commits the Runtime-owned machinery that will cross the physical dispatch boundary. `local_linux` binds the validated Runtime Runner contract plus its executable SHA-256. `windows_native` binds the Windows launcher contract, launcher executable SHA-256, and configured WSL distribution used for path projection. The snapshot is stored in an additive Job-owned Registry table and its digest is bound into the Job's `runtime-operation-v4` identity; the strict `RuntimeExecutionPlan` JSON shape remains unchanged so the receipt-bound previous binary can still decode retained plans.
+
+Dispatch re-observes the configured provider before bundle/target launch. An exact mismatch terminates the committed Attempt with `EXECUTION_PROVIDER_PRECONDITION_DRIFT` before a systemd unit or Windows child is created. A missing, extra, digest-mismatched, or contract-invalid side record is Registry corruption rather than a reason to reinterpret a provider-bound Job as historical. Jobs admitted before this contract have no provider commitment marker and preserve their historical behavior. Exact request replay is resolved before the current provider is inspected, so a terminal or already committed Job never becomes unreplayable merely because Runtime itself was upgraded later.
+
+This commitment is deliberately narrow. It proves continuity of Runtime's own Linux Runner or Windows launcher and their declared dispatch contract; it does not freeze shared libraries, kernel behavior, compiler/package closure, network responses, wall clock, external services, or the semantic contract of an arbitrary target command. Those require separate evidence before they may enter operation identity.
 
 ## Windows-native execution target
 

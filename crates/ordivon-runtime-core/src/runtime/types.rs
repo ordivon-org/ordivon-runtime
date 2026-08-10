@@ -367,6 +367,50 @@ pub struct InputBindingRequest {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ExecutionProviderContract {
+    LocalLinuxRunnerV1,
+    WindowsNativeLauncherV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionProviderSnapshot {
+    pub contract: ExecutionProviderContract,
+    pub executable_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wsl_distribution: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeExecutionTargetCapability {
+    pub target: ExecutionTarget,
+    pub configured: bool,
+    pub available: bool,
+    pub execution_profiles: Vec<ExecutionProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows_authorities: Vec<WindowsAuthority>,
+    pub structured_plan: bool,
+    pub immutable_inputs: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_provider: Option<ExecutionProviderSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub availability_issue: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCapabilities {
+    pub schema_version: u32,
+    pub max_runtime_ms: u64,
+    pub max_output_bytes: u64,
+    pub allowed_executable_roots: Vec<String>,
+    pub input_authorities: Vec<String>,
+    pub targets: Vec<RuntimeExecutionTargetCapability>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InputAccessMode {
     ReadOnly,
 }
@@ -512,6 +556,8 @@ pub struct SubmitRequest {
     pub client_request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_identity_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_provider: Option<ExecutionProviderSnapshot>,
     pub plan: RuntimeExecutionPlan,
     pub global_limit: u32,
 }

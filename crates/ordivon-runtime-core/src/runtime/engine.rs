@@ -26,15 +26,16 @@ use super::{
     AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent,
     DurableWorkspacePatchRequest, DurableWorkspacePatchResult, EffectiveInputBinding,
-    InputAccessMode, InputAuthority, InputBindingRequest, JobDesiredState, JobResolution, Registry,
-    RegistryConfig, RunnerIdentity, RuntimeArtifactRecord, RuntimeError, RuntimeErrorCode,
-    RuntimeExecutionPlan, RuntimeExecutionStep, RuntimeJobListRequest, RuntimeJobListResult,
-    RuntimeResult, RuntimeWorkspaceGetRequest, RuntimeWorkspaceIssue, RuntimeWorkspaceIssueStage,
-    RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
-    SubmitRequest, TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskObserveWaitUntil,
-    TaskRunRequest, TerminalCommit, WorkspacePatchOperationState, WorkspacePatchOperationStatus,
-    WorkspacePatchStatusRequest, MAX_ARTIFACT_READ_BYTES, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
-    RUNTIME_SCHEMA_VERSION,
+    ExecutionProviderContract, ExecutionProviderSnapshot, InputAccessMode, InputAuthority,
+    InputBindingRequest, JobDesiredState, JobResolution, Registry, RegistryConfig, RunnerIdentity,
+    RuntimeArtifactRecord, RuntimeCapabilities, RuntimeError, RuntimeErrorCode,
+    RuntimeExecutionPlan, RuntimeExecutionStep, RuntimeExecutionTargetCapability,
+    RuntimeJobListRequest, RuntimeJobListResult, RuntimeResult, RuntimeWorkspaceGetRequest,
+    RuntimeWorkspaceIssue, RuntimeWorkspaceIssueStage, RuntimeWorkspaceListRequest,
+    RuntimeWorkspaceListResult, RuntimeWorkspaceSummary, SubmitRequest, TaskCancelRequest,
+    TaskObservation, TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest, TerminalCommit,
+    WorkspacePatchOperationState, WorkspacePatchOperationStatus, WorkspacePatchStatusRequest,
+    MAX_ARTIFACT_READ_BYTES, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
 };
 use crate::universal::{
     canonical_directory, create_git_workspace_compact, inspect_workspace_patch_plan,
@@ -254,6 +255,8 @@ struct TerminalProcessEvidence {
     execution_profile: super::ExecutionProfile,
     #[serde(default, skip_serializing_if = "super::ExecutionTarget::is_default")]
     execution_target: super::ExecutionTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    execution_provider: Option<ExecutionProviderSnapshot>,
     #[serde(default)]
     windows_authority: super::WindowsAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -528,6 +531,9 @@ impl Runtime {
             schema_version: RUNTIME_SCHEMA_VERSION,
             client_request_id: request.client_request_id.clone(),
             request_identity_digest: Some(request_identity_digest),
+            execution_provider: Some(
+                self.current_execution_provider_snapshot(request.execution.execution_target)?,
+            ),
             plan,
             global_limit: request.global_limit,
         };
@@ -629,6 +635,9 @@ impl Runtime {
             schema_version: RUNTIME_SCHEMA_VERSION,
             client_request_id: request.client_request_id.clone(),
             request_identity_digest: Some(request_identity_digest),
+            execution_provider: Some(
+                self.current_execution_provider_snapshot(request.execution.execution_target)?,
+            ),
             plan,
             global_limit: request.global_limit,
         };
@@ -1132,6 +1141,142 @@ impl Runtime {
         remove_git_workspace(&self.executor, request).map_err(map_universal_error)
     }
 
+    fn current_execution_provider_snapshot(
+        &self,
+        target: super::ExecutionTarget,
+    ) -> RuntimeResult<ExecutionProviderSnapshot> {
+        match target {
+            super::ExecutionTarget::LocalLinux => {
+                let runner = validate_runner(&self.executor.runner_path)?;
+                Ok(ExecutionProviderSnapshot {
+                    contract: ExecutionProviderContract::LocalLinuxRunnerV1,
+                    executable_digest: sha256_file(&runner).map_err(map_universal_error)?,
+                    wsl_distribution: None,
+                })
+            }
+            super::ExecutionTarget::WindowsNative => {
+                let windows = self.windows.as_ref().ok_or_else(|| {
+                    RuntimeError::invalid(
+                        "windows_native target is not configured on this Runtime",
+                        "execution.executionTarget",
+                    )
+                })?;
+                windows.validate()?;
+                let launcher = fs::canonicalize(&windows.launcher_path).map_err(|error| {
+                    io_error("canonicalize Windows execution provider launcher", error)
+                })?;
+                Ok(ExecutionProviderSnapshot {
+                    contract: ExecutionProviderContract::WindowsNativeLauncherV1,
+                    executable_digest: sha256_file(&launcher).map_err(map_universal_error)?,
+                    wsl_distribution: Some(windows.wsl_distribution.clone()),
+                })
+            }
+        }
+    }
+
+    pub fn capabilities(&self) -> RuntimeCapabilities {
+        let mut allowed_executable_roots = self
+            .executor
+            .allowed_executable_roots
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        allowed_executable_roots.sort();
+        allowed_executable_roots.dedup();
+        let input_authorities = self.input_authorities.keys().cloned().collect::<Vec<_>>();
+
+        let linux_provider = self
+            .current_execution_provider_snapshot(super::ExecutionTarget::LocalLinux)
+            .ok();
+        let linux = RuntimeExecutionTargetCapability {
+            target: super::ExecutionTarget::LocalLinux,
+            configured: true,
+            available: linux_provider.is_some(),
+            execution_profiles: vec![
+                super::ExecutionProfile::TrustedLocal,
+                super::ExecutionProfile::ContainedLocal,
+            ],
+            windows_authorities: Vec::new(),
+            structured_plan: true,
+            immutable_inputs: true,
+            availability_issue: linux_provider
+                .is_none()
+                .then(|| "EXECUTION_PROVIDER_UNAVAILABLE".to_string()),
+            execution_provider: linux_provider,
+        };
+
+        let windows_configured = self.windows.is_some();
+        let (windows_provider, windows_authorities, windows_issue) = if let Some(windows) =
+            &self.windows
+        {
+            match self.current_execution_provider_snapshot(super::ExecutionTarget::WindowsNative) {
+                Ok(provider) => {
+                    let mut authorities = Vec::new();
+                    for authority in [
+                        super::WindowsAuthority::Limited,
+                        super::WindowsAuthority::Elevated,
+                    ] {
+                        if snapshot_windows_runtime_context(windows, authority).is_ok() {
+                            authorities.push(authority);
+                        }
+                    }
+                    let issue = authorities
+                        .is_empty()
+                        .then(|| "WINDOWS_AUTHORITY_UNAVAILABLE".to_string());
+                    (Some(provider), authorities, issue)
+                }
+                Err(_) => (
+                    None,
+                    Vec::new(),
+                    Some("EXECUTION_PROVIDER_UNAVAILABLE".to_string()),
+                ),
+            }
+        } else {
+            (None, Vec::new(), None)
+        };
+        let windows = RuntimeExecutionTargetCapability {
+            target: super::ExecutionTarget::WindowsNative,
+            configured: windows_configured,
+            available: windows_provider.is_some() && !windows_authorities.is_empty(),
+            execution_profiles: vec![super::ExecutionProfile::TrustedLocal],
+            windows_authorities,
+            structured_plan: false,
+            immutable_inputs: false,
+            execution_provider: windows_provider,
+            availability_issue: windows_issue,
+        };
+
+        RuntimeCapabilities {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            max_runtime_ms: self.executor.max_runtime_ms,
+            max_output_bytes: self.executor.max_output_bytes,
+            allowed_executable_roots,
+            input_authorities,
+            targets: vec![linux, windows],
+        }
+    }
+
+    fn verify_committed_execution_provider(&self, job_id: &str) -> RuntimeResult<()> {
+        let plan = self.registry.execution_plan(job_id)?;
+        let Some(expected) = self.registry.execution_provider(job_id)? else {
+            // Historical Jobs predate provider commitment and retain their original semantics.
+            return Ok(());
+        };
+        let observed = self.current_execution_provider_snapshot(plan.execution_target)?;
+        if observed != expected {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ProviderStateMismatch,
+                format!(
+                    "execution provider changed after operation admission: expected {:?}, observed {:?}",
+                    expected, observed
+                ),
+                Some("executionProvider"),
+                false,
+            ));
+        }
+        Ok(())
+    }
+
     fn resolve_plan(&self, request: &TaskRunRequest) -> RuntimeResult<RuntimeExecutionPlan> {
         let record = load_workspace_record(&self.executor, &request.execution.workspace_id)
             .map_err(map_universal_error)?;
@@ -1426,6 +1571,18 @@ impl Runtime {
     }
 
     fn ensure_attempt_dispatched(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
+        if let Err(error) = self.verify_committed_execution_provider(&attempt.job_id) {
+            if error.code == RuntimeErrorCode::ProviderStateMismatch {
+                self.commit_control_terminal(
+                    attempt,
+                    AttemptState::Failed,
+                    "EXECUTION_PROVIDER_PRECONDITION_DRIFT",
+                    Some(error.to_string()),
+                )?;
+                return Ok(());
+            }
+            return Err(error);
+        }
         if let Err(error) = self.ensure_job_input_ownership(&attempt.job_id) {
             if matches!(
                 error.code,
@@ -3458,6 +3615,7 @@ fn append_terminal_evidence_for_commit_with_observation(
         source_revision: plan.source_revision,
         execution_profile: plan.execution_profile,
         execution_target: plan.execution_target,
+        execution_provider: registry.execution_provider(&attempt.job_id)?,
         windows_authority: plan.windows_authority,
         windows_execution_context: plan.windows_execution_context,
         foreign_references: plan.foreign_references,

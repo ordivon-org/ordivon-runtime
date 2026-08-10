@@ -14,11 +14,12 @@ use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::{
     operation_request_identity_digest_from_plan, AdmissionOutcome, ArtifactRegistration,
     AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate, CreatedAdmission,
-    JobDesiredState, JobProjection, JobResolution, ReservationRecord, ReservationState,
-    RunnerIdentity, RuntimeArtifactRecord, RuntimeDeliveryDisposition, RuntimeError,
-    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeInvariantViolation, RuntimeJobListCursor,
-    RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary,
-    RuntimeResult, SubmitRequest, TerminalCommit, MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
+    ExecutionProviderContract, ExecutionProviderSnapshot, JobDesiredState, JobProjection,
+    JobResolution, ReservationRecord, ReservationState, RunnerIdentity, RuntimeArtifactRecord,
+    RuntimeDeliveryDisposition, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
+    RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult,
+    RuntimeJobRecord, RuntimeJobSummary, RuntimeResult, SubmitRequest, TerminalCommit,
+    MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
 };
 
 const MIGRATION_V1: i64 = 1;
@@ -45,6 +46,8 @@ pub(crate) const MAX_MIGRATION_VERSION: i64 = 4;
 const WORKSPACE_PATCH_STORAGE_SQL: &str = include_str!("workspace_patch_storage.sql");
 const WORKSPACE_PATCH_TABLE: &str = "workspace_patch_operations";
 const WORKSPACE_PATCH_INDEX: &str = "idx_workspace_patch_operations_workspace";
+const EXECUTION_PROVIDER_STORAGE_SQL: &str = include_str!("execution_provider_storage.sql");
+const EXECUTION_PROVIDER_TABLE: &str = "job_execution_providers";
 const JOB_CLIENT_REQUEST_LOOKUP_INDEX: &str = "idx_jobs_client_request_id_created";
 const JOB_CLIENT_REQUEST_LOOKUP_INDEX_SQL: &str =
     "CREATE INDEX IF NOT EXISTS idx_jobs_client_request_id_created ON jobs(client_request_id, created_at_ms, job_id)";
@@ -174,6 +177,7 @@ impl Registry {
         registry.apply_migrations(&mut connection)?;
         registry.ensure_query_indexes(&mut connection)?;
         registry.ensure_workspace_patch_storage(&mut connection)?;
+        registry.ensure_execution_provider_storage(&mut connection)?;
         registry.validate_database(&connection)?;
         set_private_file(&registry.config.db_path)?;
         Ok(registry)
@@ -448,6 +452,39 @@ impl Registry {
         Ok(())
     }
 
+    fn ensure_execution_provider_storage(&self, connection: &mut Connection) -> RuntimeResult<()> {
+        let transaction = immediate(connection, "Execution Provider storage maintenance")?;
+        transaction
+            .execute_batch(EXECUTION_PROVIDER_STORAGE_SQL)
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot ensure Execution Provider storage")
+            })?;
+        transaction.commit().map_err(|error| {
+            RuntimeError::from_sql(
+                error,
+                "cannot commit Execution Provider storage maintenance",
+            )
+        })?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [EXECUTION_PROVIDER_TABLE],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot verify Execution Provider storage")
+            })?;
+        if !exists {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "Execution Provider storage is missing after maintenance",
+                None,
+                false,
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_database(&self, connection: &Connection) -> RuntimeResult<()> {
         let quick: String = connection
             .query_row("PRAGMA quick_check(20)", [], |row| row.get(0))
@@ -531,6 +568,22 @@ impl Registry {
                 false,
             )
         })?;
+        let execution_provider_json = request
+            .execution_provider
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::InvalidRequest,
+                    format!("cannot serialize execution provider snapshot: {error}"),
+                    Some("executionProvider"),
+                    false,
+                )
+            })?;
+        let execution_provider_digest = execution_provider_json
+            .as_deref()
+            .map(|json| sha256_bytes(json.as_bytes()));
         let request_json = serde_json::to_vec(request).map_err(|error| {
             RuntimeError::new(
                 RuntimeErrorCode::InvalidRequest,
@@ -545,16 +598,26 @@ impl Registry {
             .clone()
             .unwrap_or(legacy_request_digest);
         let plan_digest = sha256_bytes(plan_json.as_bytes());
-        let workspace_snapshot_json = serde_json::json!({
+        let mut workspace_snapshot = serde_json::json!({
             "workspaceId": request.plan.workspace_id,
             "workspacePath": request.plan.workspace_path,
             "sourceRevision": request.plan.source_revision,
             "workspaceSourceDigest": request.plan.workspace_source_digest,
-        })
-        .to_string();
-        let operation_digest = sha256_bytes(
-            format!("runtime-operation-v3\0{request_digest}\0{plan_digest}").as_bytes(),
-        );
+        });
+        if let Some(provider_digest) = execution_provider_digest.as_deref() {
+            workspace_snapshot["executionProviderDigest"] =
+                serde_json::Value::String(provider_digest.to_string());
+        }
+        let workspace_snapshot_json = workspace_snapshot.to_string();
+        let operation_digest = match execution_provider_digest.as_deref() {
+            Some(provider_digest) => sha256_bytes(
+                format!("runtime-operation-v4\0{request_digest}\0{plan_digest}\0{provider_digest}")
+                    .as_bytes(),
+            ),
+            None => sha256_bytes(
+                format!("runtime-operation-v3\0{request_digest}\0{plan_digest}").as_bytes(),
+            ),
+        };
         let job_id = ids.job_id.clone();
         let attempt_id = ids.attempt_id.clone();
         let reservation_id = ids.reservation_id.clone();
@@ -733,6 +796,19 @@ impl Registry {
                 ],
             )
             .map_err(|error| RuntimeError::from_sql(error, "cannot insert Job"))?;
+        if let (Some(snapshot_json), Some(snapshot_digest)) = (
+            execution_provider_json.as_deref(),
+            execution_provider_digest.as_deref(),
+        ) {
+            transaction
+                .execute(
+                    "INSERT INTO job_execution_providers(job_id,snapshot_json,snapshot_digest) VALUES(?1,?2,?3)",
+                    params![job_id, snapshot_json, snapshot_digest],
+                )
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot bind Job execution provider")
+                })?;
+        }
         transaction
             .execute(
                 "INSERT INTO attempts(attempt_id,job_id,attempt_number,state,termination_intent,launch_token_digest,bundle_path,bundle_digest,boot_id,unit_name,invocation_id,control_group,main_pid,process_start_identity,runner_start_digest,result_digest,exit_code,infrastructure_error_digest,created_at_ms,started_at_ms,finished_at_ms,row_version) VALUES(?1,?2,1,?3,?4,?5,?6,NULL,NULL,?7,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,?8,NULL,NULL,0)",
@@ -869,6 +945,124 @@ impl Registry {
     pub fn get_job(&self, job_id: &str) -> RuntimeResult<RuntimeJobRecord> {
         let connection = self.open_connection()?;
         load_job(&connection, job_id)
+    }
+
+    pub(crate) fn execution_provider(
+        &self,
+        job_id: &str,
+    ) -> RuntimeResult<Option<ExecutionProviderSnapshot>> {
+        let connection = self.open_connection()?;
+        let job = load_job(&connection, job_id)?;
+        let workspace_snapshot: serde_json::Value =
+            serde_json::from_str(&job.workspace_snapshot_json).map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    format!("stored Workspace snapshot is invalid: {error}"),
+                    Some("workspaceSnapshot"),
+                    false,
+                )
+            })?;
+        let committed_digest = match workspace_snapshot.get("executionProviderDigest") {
+            None => None,
+            Some(serde_json::Value::String(value)) => {
+                if validate_digest(value, "executionProviderDigest").is_err() {
+                    return Err(RuntimeError::new(
+                        RuntimeErrorCode::RegistryCorrupt,
+                        "stored execution provider commitment digest is invalid",
+                        Some("workspaceSnapshot.executionProviderDigest"),
+                        false,
+                    ));
+                }
+                Some(value.as_str())
+            }
+            Some(_) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "stored execution provider commitment digest is not text",
+                    Some("workspaceSnapshot.executionProviderDigest"),
+                    false,
+                ));
+            }
+        };
+        let row: Option<(String, String)> = connection
+            .query_row(
+                "SELECT snapshot_json,snapshot_digest FROM job_execution_providers WHERE job_id=?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| RuntimeError::from_sql(error, "cannot read Job execution provider"))?;
+        let (committed_digest, snapshot_json, snapshot_digest) = match (committed_digest, row) {
+            (None, None) => return Ok(None),
+            (None, Some(_)) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "execution provider row exists without a committed Job marker",
+                    Some("executionProvider"),
+                    false,
+                ));
+            }
+            (Some(_), None) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "committed Job execution provider row is missing",
+                    Some("executionProvider"),
+                    false,
+                ));
+            }
+            (Some(committed_digest), Some((snapshot_json, snapshot_digest))) => {
+                (committed_digest, snapshot_json, snapshot_digest)
+            }
+        };
+        if snapshot_digest != committed_digest {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "execution provider row digest does not match the Job commitment",
+                Some("executionProvider"),
+                false,
+            ));
+        }
+        let expected_operation_digest = sha256_bytes(
+            format!(
+                "runtime-operation-v4\0{}\0{}\0{}",
+                job.request_digest, job.execution_plan_digest, committed_digest
+            )
+            .as_bytes(),
+        );
+        if job.operation_digest != expected_operation_digest {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "execution provider commitment does not match the Job operation identity",
+                Some("executionProvider"),
+                false,
+            ));
+        }
+        if sha256_bytes(snapshot_json.as_bytes()) != snapshot_digest {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "stored execution provider snapshot digest does not match its bytes",
+                Some("executionProvider"),
+                false,
+            ));
+        }
+        let snapshot: ExecutionProviderSnapshot =
+            serde_json::from_str(&snapshot_json).map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    format!("stored execution provider snapshot is invalid: {error}"),
+                    Some("executionProvider"),
+                    false,
+                )
+            })?;
+        validate_execution_provider_snapshot(&snapshot, "executionProvider").map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                format!("stored execution provider snapshot violates its contract: {error}"),
+                Some("executionProvider"),
+                false,
+            )
+        })?;
+        Ok(Some(snapshot))
     }
 
     pub fn get_attempt(&self, attempt_id: &str) -> RuntimeResult<AttemptRecord> {
@@ -3345,6 +3539,45 @@ fn idempotency_conflict() -> RuntimeError {
     )
 }
 
+fn validate_execution_provider_snapshot(
+    snapshot: &ExecutionProviderSnapshot,
+    field: &str,
+) -> RuntimeResult<()> {
+    validate_digest(
+        &snapshot.executable_digest,
+        &format!("{field}.executableDigest"),
+    )?;
+    match snapshot.contract {
+        ExecutionProviderContract::LocalLinuxRunnerV1 => {
+            if snapshot.wsl_distribution.is_some() {
+                return Err(RuntimeError::invalid(
+                    "local Linux execution provider cannot carry a WSL distribution",
+                    &format!("{field}.wslDistribution"),
+                ));
+            }
+        }
+        ExecutionProviderContract::WindowsNativeLauncherV1 => {
+            let distribution = snapshot.wsl_distribution.as_deref().ok_or_else(|| {
+                RuntimeError::invalid(
+                    "Windows execution provider requires a WSL distribution",
+                    &format!("{field}.wslDistribution"),
+                )
+            })?;
+            if distribution.is_empty()
+                || !distribution
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return Err(RuntimeError::invalid(
+                    "Windows execution provider has an invalid WSL distribution",
+                    &format!("{field}.wslDistribution"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
     if request.schema_version != RUNTIME_SCHEMA_VERSION
         || request.plan.schema_version != RUNTIME_SCHEMA_VERSION
@@ -3365,6 +3598,25 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
             "globalLimit must be positive",
             "globalLimit",
         ));
+    }
+    if let Some(provider) = request.execution_provider.as_ref() {
+        validate_execution_provider_snapshot(provider, "executionProvider")?;
+        let target_matches = matches!(
+            (request.plan.execution_target, provider.contract),
+            (
+                super::ExecutionTarget::LocalLinux,
+                ExecutionProviderContract::LocalLinuxRunnerV1
+            ) | (
+                super::ExecutionTarget::WindowsNative,
+                ExecutionProviderContract::WindowsNativeLauncherV1
+            )
+        );
+        if !target_matches {
+            return Err(RuntimeError::invalid(
+                "execution provider contract does not match execution target",
+                "executionProvider.contract",
+            ));
+        }
     }
 
     for (path, field) in [

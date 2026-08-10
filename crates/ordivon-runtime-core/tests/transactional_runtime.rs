@@ -2969,6 +2969,7 @@ impl IntegrationContext {
             schema_version: RUNTIME_SCHEMA_VERSION,
             client_request_id: client_request_id.to_string(),
             request_identity_digest: None,
+            execution_provider: None,
             plan: RuntimeExecutionPlan {
                 schema_version: RUNTIME_SCHEMA_VERSION,
                 workspace_id: self.workspace_id.clone(),
@@ -3574,4 +3575,271 @@ fn runtime_finance_i8_graduation_matches_canonical_semantics_with_job_owned_inpu
     )
     .unwrap();
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_legacy_plan_without_provider_snapshot_can_dispatch_through_changed_linux_runner() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+
+    let mut context = IntegrationContext::new("provider-drift-linux");
+    let original_runner = context.executor.runner_path.clone();
+    let staged_runner = context.root.join("provider-runner");
+    fs::copy(&original_runner, &staged_runner).unwrap();
+    fs::set_permissions(&staged_runner, fs::Permissions::from_mode(0o755)).unwrap();
+    context.executor.runner_path = staged_runner.clone();
+
+    let runtime = context.runtime(1_000);
+    let created = created_admission(
+        runtime
+            .registry()
+            .submit(&context.direct_submit("request:provider-drift-linux", 1))
+            .unwrap(),
+    );
+    assert_eq!(created.attempt.state, AttemptState::Accepted);
+
+    let committed_plan: serde_json::Value =
+        serde_json::from_str(&created.job.execution_plan_json).unwrap();
+    assert_eq!(committed_plan["executable"], "/usr/bin/true");
+    assert!(committed_plan.get("executionProvider").is_none());
+    assert!(committed_plan.get("runnerDigest").is_none());
+
+    let marker = context.root.join("drifted-provider-executed.txt");
+    let replacement = format!(
+        "#!/bin/sh\nprintf 'DRIFTED_PROVIDER_EXECUTED\\n' > '{}'\nexit 91\n",
+        marker.display()
+    );
+    fs::write(&staged_runner, replacement).unwrap();
+    fs::set_permissions(&staged_runner, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let _ = runtime.observe_task(&TaskObserveRequest {
+        schema_version: RUNTIME_SCHEMA_VERSION,
+        job_id: created.job.job_id.clone(),
+        wait_ms: 5_000,
+        wait_until: TaskObserveWaitUntil::Terminal,
+        stdout_tail_bytes: 4_096,
+        stderr_tail_bytes: 4_096,
+        stdout_offset: None,
+        stderr_offset: None,
+    });
+
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap().trim(),
+        "DRIFTED_PROVIDER_EXECUTED",
+        "the post-admission replacement Runner did not cross the physical dispatch boundary"
+    );
+    assert_ne!(file_digest(&staged_runner), file_digest(&original_runner));
+
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&created.job.job_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        attempt.runner_start_digest.is_none(),
+        "a replacement that never emitted committed Runner start evidence unexpectedly bound as the admitted provider"
+    );
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_provider_bound_job_rejects_linux_runner_drift_before_dispatch() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+
+    let mut context = IntegrationContext::new("provider-bound-linux");
+    let original_runner = context.executor.runner_path.clone();
+    let staged_runner = context.root.join("provider-runner");
+    fs::copy(&original_runner, &staged_runner).unwrap();
+    fs::set_permissions(&staged_runner, fs::Permissions::from_mode(0o755)).unwrap();
+    context.executor.runner_path = staged_runner.clone();
+
+    let runtime = context.runtime(1_000);
+    let mut submit = context.direct_submit("request:provider-bound-linux", 1);
+    submit.execution_provider = Some(ordivon_runtime_core::ExecutionProviderSnapshot {
+        contract: ordivon_runtime_core::ExecutionProviderContract::LocalLinuxRunnerV1,
+        executable_digest: file_digest(&staged_runner),
+        wsl_distribution: None,
+    });
+    let created = created_admission(runtime.registry().submit(&submit).unwrap());
+    assert_eq!(created.attempt.state, AttemptState::Accepted);
+
+    let marker = context.root.join("drifted-provider-must-not-run.txt");
+    let replacement = format!(
+        "#!/bin/sh\nprintf 'PROVIDER_DRIFT_CROSSED_DISPATCH\\n' > '{}'\nexit 91\n",
+        marker.display()
+    );
+    fs::write(&staged_runner, replacement).unwrap();
+    fs::set_permissions(&staged_runner, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_ne!(file_digest(&staged_runner), file_digest(&original_runner));
+
+    let observed = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: created.job.job_id.clone(),
+            wait_ms: 5_000,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 4_096,
+            stderr_tail_bytes: 4_096,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+
+    assert_eq!(observed.status, "failed");
+    assert_eq!(
+        observed.execution_reason_code.as_deref(),
+        Some("EXECUTION_PROVIDER_PRECONDITION_DRIFT")
+    );
+    assert!(observed.execution_terminal);
+    assert!(
+        !marker.exists(),
+        "drifted Runner crossed the dispatch boundary"
+    );
+
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&created.job.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(attempt.state, AttemptState::Failed);
+    assert!(attempt.runner_start_digest.is_none());
+    let unit = Command::new("systemctl")
+        .args([
+            "show",
+            &attempt.unit_name,
+            "--property=LoadState",
+            "--value",
+        ])
+        .output()
+        .unwrap();
+    assert_ne!(String::from_utf8_lossy(&unit.stdout).trim(), "loaded");
+
+    let terminal = observed
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "terminal_evidence")
+        .unwrap();
+    let evidence = runtime
+        .read_artifact(&ArtifactReadRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: observed.job_id.clone(),
+            artifact_id: terminal.artifact_id.clone(),
+            offset: 0,
+            max_bytes: 65_536,
+        })
+        .unwrap();
+    let evidence: serde_json::Value = serde_json::from_str(&evidence.content).unwrap();
+    assert_eq!(
+        evidence["executionProvider"]["contract"],
+        "local_linux_runner_v1"
+    );
+    assert_eq!(
+        evidence["executionProvider"]["executableDigest"],
+        submit
+            .execution_provider
+            .as_ref()
+            .unwrap()
+            .executable_digest
+    );
+}
+
+#[test]
+#[ignore = "requires WSL/Windows, root/systemd, a staged launcher source, and explicit local opt-in"]
+fn runtime_provider_bound_job_rejects_windows_launcher_drift_before_dispatch() {
+    if std::env::var("ORDIVON_RUN_WINDOWS_PROVIDER_DRIFT").as_deref() != Ok("1") {
+        return;
+    }
+
+    let source_launcher = PathBuf::from(
+        std::env::var("ORDIVON_WINDOWS_LAUNCHER_PATH").expect("ORDIVON_WINDOWS_LAUNCHER_PATH"),
+    );
+    let wsl_distribution = std::env::var("ORDIVON_WINDOWS_WSL_DISTRIBUTION")
+        .unwrap_or_else(|_| "archlinux".to_string());
+    let public_root = PathBuf::from("/mnt/c/Users/Public")
+        .join(format!("ordivon-provider-drift-{}", Uuid::now_v7()));
+    fs::create_dir(&public_root).unwrap();
+    let staged_launcher = public_root.join("ordivon-windows-job-launcher.exe");
+    fs::copy(&source_launcher, &staged_launcher).unwrap();
+
+    let context = IntegrationContext::new("provider-bound-windows");
+    let mut executor = context.executor.clone();
+    executor
+        .allowed_executable_roots
+        .push(PathBuf::from("/mnt/c/Windows/System32"));
+    let runtime = Runtime::new(RuntimeConfig {
+        registry: context.registry.clone(),
+        executor,
+        startup_grace_ms: 1_000,
+        windows: Some(WindowsExecutionConfig {
+            launcher_path: staged_launcher.clone(),
+            wsl_distribution: wsl_distribution.clone(),
+        }),
+    })
+    .unwrap();
+
+    let powershell = PathBuf::from("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe");
+    let mut submit = context.direct_submit("request:provider-bound-windows", 1);
+    submit.plan.execution_target = ordivon_runtime_core::ExecutionTarget::WindowsNative;
+    submit.plan.executable = powershell.to_string_lossy().into_owned();
+    submit.plan.executable_digest = file_digest(&powershell);
+    submit.execution_provider = Some(ordivon_runtime_core::ExecutionProviderSnapshot {
+        contract: ordivon_runtime_core::ExecutionProviderContract::WindowsNativeLauncherV1,
+        executable_digest: file_digest(&staged_launcher),
+        wsl_distribution: Some(wsl_distribution),
+    });
+    let created = created_admission(runtime.registry().submit(&submit).unwrap());
+    assert_eq!(created.attempt.state, AttemptState::Accepted);
+
+    fs::copy("/mnt/c/Windows/System32/cmd.exe", &staged_launcher).unwrap();
+    assert_ne!(
+        file_digest(&staged_launcher),
+        submit
+            .execution_provider
+            .as_ref()
+            .unwrap()
+            .executable_digest
+    );
+
+    let observed = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: created.job.job_id.clone(),
+            wait_ms: 5_000,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 4_096,
+            stderr_tail_bytes: 4_096,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert_eq!(observed.status, "failed");
+    assert_eq!(
+        observed.execution_reason_code.as_deref(),
+        Some("EXECUTION_PROVIDER_PRECONDITION_DRIFT")
+    );
+    assert!(!observed
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.kind == "windows_start"));
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&created.job.job_id)
+        .unwrap()
+        .unwrap();
+    let unit = Command::new("systemctl")
+        .args([
+            "show",
+            &attempt.unit_name,
+            "--property=LoadState",
+            "--value",
+        ])
+        .output()
+        .unwrap();
+    assert_ne!(String::from_utf8_lossy(&unit.stdout).trim(), "loaded");
+
+    fs::remove_dir_all(public_root).unwrap();
 }

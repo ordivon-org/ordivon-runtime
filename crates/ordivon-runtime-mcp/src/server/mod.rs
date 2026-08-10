@@ -12,8 +12,9 @@ use ordivon_runtime_core::{
     CompactWorkspaceDiffResult, CompactWorkspaceOpenResult, DurableWorkspacePatchRequest,
     DurableWorkspacePatchResult, ExecutionBudget, ExecutionProfile, ExecutionProposal,
     ExecutionStepProposal, ExecutionTarget, ForeignReference, GitWorkspaceCreateRequest,
-    InputAuthority, InputBindingRequest, Runtime, RuntimeCapacity, RuntimeConfig, RuntimeError,
-    RuntimeJobInspection, RuntimeJobListRequest, RuntimeJobListResult, RuntimeWorkspaceGetRequest,
+    InputAuthority, InputBindingRequest, Runtime, RuntimeCapabilities, RuntimeCapacity,
+    RuntimeConfig, RuntimeError, RuntimeExecutionTargetCapability, RuntimeJobInspection,
+    RuntimeJobListRequest, RuntimeJobListResult, RuntimeWorkspaceGetRequest,
     RuntimeWorkspaceListRequest, RuntimeWorkspaceListResult, RuntimeWorkspaceSummary,
     TaskCancelRequest, TaskObservation, TaskObserveRequest, TaskRunProposal, TaskRunRequest,
     UniversalExecError, UniversalExecutionRequest, UniversalExecutionStep, UniversalExecutorConfig,
@@ -25,7 +26,7 @@ use ordivon_runtime_core::{
     WorkspacePatchStatusRequest, WorkspaceReadRequest as ExecWorkspaceReadRequest,
     WorkspaceReadSliceRequest, DEFAULT_INSPECTION_EVENT_LIMIT, MAX_INSPECTION_EVENT_LIMIT,
     MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_CHANGE_PAGE_ENTRIES,
-    MAX_WORKSPACE_IO_BYTES,
+    MAX_WORKSPACE_IO_BYTES, RUNTIME_SCHEMA_VERSION,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{IntoCallToolResult, ToolCallContext};
@@ -135,6 +136,40 @@ pub struct TaskGetRequest {
 
 fn default_task_get_event_limit() -> u32 {
     DEFAULT_INSPECTION_EVENT_LIMIT
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeDescribeRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDescribeResult {
+    pub schema_version: u32,
+    pub global_execution_limit: u32,
+    pub max_runtime_ms: u64,
+    pub max_output_bytes: u64,
+    pub allowed_executable_roots: Vec<String>,
+    pub input_authorities: Vec<String>,
+    pub targets: Vec<RuntimeExecutionTargetCapability>,
+}
+
+impl RuntimeDescribeResult {
+    fn from_capabilities(capabilities: RuntimeCapabilities, global_execution_limit: u32) -> Self {
+        Self {
+            schema_version: capabilities.schema_version,
+            global_execution_limit,
+            max_runtime_ms: capabilities.max_runtime_ms,
+            max_output_bytes: capabilities.max_output_bytes,
+            allowed_executable_roots: capabilities.allowed_executable_roots,
+            input_authorities: capabilities.input_authorities,
+            targets: capabilities.targets,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]

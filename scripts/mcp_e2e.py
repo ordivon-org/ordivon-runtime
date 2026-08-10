@@ -29,6 +29,7 @@ LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18")
 SCHEMA_VERSION = 1
 EXPECTED_TOOLS = {
     "artifact.read",
+    "runtime.describe",
     "task.cancel",
     "task.get",
     "task.list",
@@ -611,6 +612,36 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             "mutation-digest-contract",
             "Required when the target already exists" in mutate_schema_text,
             mutate_schema_text,
+        )
+
+        runtime_description = client.tool(
+            "runtime.describe",
+            {"schemaVersion": SCHEMA_VERSION},
+        )
+        described_targets = {
+            target.get("target"): target
+            for target in runtime_description.get("targets", [])
+            if isinstance(target, dict)
+        }
+        linux_description = described_targets.get("local_linux", {})
+        check(
+            "runtime-describe",
+            runtime_description.get("schemaVersion") == SCHEMA_VERSION
+            and isinstance(runtime_description.get("globalExecutionLimit"), int)
+            and runtime_description.get("globalExecutionLimit", 0) > 0
+            and isinstance(runtime_description.get("allowedExecutableRoots"), list)
+            and isinstance(runtime_description.get("inputAuthorities"), list)
+            and linux_description.get("configured") is True
+            and linux_description.get("available") is True
+            and set(linux_description.get("executionProfiles", []))
+            == {"trusted_local", "contained_local"}
+            and linux_description.get("structuredPlan") is True
+            and linux_description.get("immutableInputs") is True
+            and isinstance(linux_description.get("executionProvider"), dict)
+            and str(linux_description.get("executionProvider", {}).get("executableDigest", "")).startswith(
+                "sha256:"
+            ),
+            runtime_description,
         )
 
         missing_revision_workspace_id = f"acceptance-missing-revision-{uuid.uuid4()}"

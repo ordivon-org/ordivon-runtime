@@ -3,6 +3,39 @@ use super::*;
 #[tool_router(vis = "pub(super)")]
 impl RuntimeServer {
     #[tool(
+        name = "runtime.describe",
+        description = "Project the current Runtime node's execution affordances without reconciling, dispatching, selecting, or mutating work. Returns operator ceilings, allowed executable roots, named immutable-input authorities without host authority paths, and per-target configured/available state including current Runtime-owned provider identity. Windows authority availability is probed read-only; this projection never becomes admission authority, and new Jobs independently bind current provider truth at admission.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeDescribeResult>>(),
+        annotations(
+            title = "Describe runtime affordances",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn runtime_describe(
+        &self,
+        Parameters(request): Parameters<RuntimeDescribeRequest>,
+    ) -> ToolOutcome<RuntimeDescribeResult> {
+        if request.schema_version != RUNTIME_SCHEMA_VERSION {
+            return ToolOutcome::Error(ToolError::invalid(
+                "schemaVersion must be 1",
+                "schemaVersion",
+            ));
+        }
+        let runtime = self.state.runtime.clone();
+        let global_execution_limit = self.state.execution.global_limit;
+        self.run_core("runtime.describe", move || {
+            Ok(RuntimeDescribeResult::from_capabilities(
+                runtime.capabilities(),
+                global_execution_limit,
+            ))
+        })
+        .await
+    }
+
+    #[tool(
         name = "workspace.open",
         description = "Resolve a local revision and create one detached Git Workspace. Omit workspaceId for a server-generated immutable ws-* handle; provide an explicit unique workspaceId when deterministic response-loss reconciliation matters. Repeating workspace.open is not an idempotent replay: after an uncertain response, use workspace.get on the explicit ID. This tool does not fetch remote refs.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<CompactWorkspaceOpenResult>>(),

@@ -177,6 +177,7 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
         schema_version: RUNTIME_SCHEMA_VERSION,
         client_request_id: client_request_id.to_string(),
         request_identity_digest: None,
+        execution_provider: None,
         plan: RuntimeExecutionPlan {
             schema_version: RUNTIME_SCHEMA_VERSION,
             workspace_id: "workspace:test".to_string(),
@@ -5420,4 +5421,201 @@ fn existing_v1_registry_upgrades_and_ensures_lookup_index() {
     assert_eq!(workspace_lookup_index, "idx_jobs_workspace_created");
     drop(connection);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn execution_provider_commitment_binds_operation_without_changing_plan_shape() {
+    let sandbox = Sandbox::new("execution-provider-commitment", 5_000);
+    let provider = ExecutionProviderSnapshot {
+        contract: ExecutionProviderContract::LocalLinuxRunnerV1,
+        executable_digest: digest(b"runner-v1"),
+        wsl_distribution: None,
+    };
+    let mut submission = request(&sandbox, "request:execution-provider", 4);
+    submission.request_identity_digest = Some(format!(
+        "{}{}",
+        REQUEST_IDENTITY_PREFIX,
+        digest(b"provider-bound-proposal")
+    ));
+    submission.execution_provider = Some(provider.clone());
+
+    let created = created(sandbox.registry.submit(&submission).unwrap());
+    let plan: serde_json::Value = serde_json::from_str(&created.job.execution_plan_json).unwrap();
+    assert!(plan.get("executionProvider").is_none());
+    assert_eq!(
+        sandbox
+            .registry
+            .execution_provider(&created.job.job_id)
+            .unwrap(),
+        Some(provider.clone())
+    );
+
+    let provider_json = serde_json::to_string(&provider).unwrap();
+    let provider_digest = digest(provider_json.as_bytes());
+    let workspace_snapshot: serde_json::Value =
+        serde_json::from_str(&created.job.workspace_snapshot_json).unwrap();
+    assert_eq!(
+        workspace_snapshot["executionProviderDigest"],
+        provider_digest
+    );
+    let expected_operation = digest(
+        format!(
+            "runtime-operation-v4\0{}\0{}\0{}",
+            created.job.request_digest, created.job.execution_plan_digest, provider_digest
+        )
+        .as_bytes(),
+    );
+    assert_eq!(created.job.operation_digest, expected_operation);
+}
+
+#[test]
+fn committed_execution_provider_missing_or_tampered_side_truth_fails_closed() {
+    for mode in ["missing", "tampered"] {
+        let sandbox = Sandbox::new(&format!("execution-provider-{mode}"), 5_000);
+        let provider = ExecutionProviderSnapshot {
+            contract: ExecutionProviderContract::LocalLinuxRunnerV1,
+            executable_digest: digest(b"runner-v1"),
+            wsl_distribution: None,
+        };
+        let mut submission = request(&sandbox, &format!("request:provider-{mode}"), 4);
+        submission.execution_provider = Some(provider);
+        let created = created(sandbox.registry.submit(&submission).unwrap());
+        let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+        match mode {
+            "missing" => {
+                connection
+                    .execute(
+                        "DELETE FROM job_execution_providers WHERE job_id=?1",
+                        [&created.job.job_id],
+                    )
+                    .unwrap();
+            }
+            "tampered" => {
+                connection
+                    .execute(
+                        "UPDATE job_execution_providers SET snapshot_json='{}' WHERE job_id=?1",
+                        [&created.job.job_id],
+                    )
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let error = sandbox
+            .registry
+            .execution_provider(&created.job.job_id)
+            .unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt, "{mode}");
+    }
+}
+
+#[test]
+fn execution_provider_contract_must_match_execution_target() {
+    let sandbox = Sandbox::new("execution-provider-target", 5_000);
+    let mut submission = request(&sandbox, "request:provider-target", 4);
+    submission.execution_provider = Some(ExecutionProviderSnapshot {
+        contract: ExecutionProviderContract::WindowsNativeLauncherV1,
+        executable_digest: digest(b"launcher"),
+        wsl_distribution: Some("archlinux".to_string()),
+    });
+    let error = sandbox.registry.submit(&submission).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert_eq!(error.field.as_deref(), Some("executionProvider.contract"));
+}
+
+#[test]
+fn execution_provider_storage_is_recreated_without_advancing_schema_version() {
+    let sandbox = Sandbox::new("execution-provider-storage", 5_000);
+    let config = sandbox.registry.config().clone();
+    let connection = Connection::open(&config.db_path).unwrap();
+    connection
+        .execute("DROP TABLE job_execution_providers", [])
+        .unwrap();
+    drop(connection);
+
+    let registry = Registry::initialize(config).unwrap();
+    let connection = Connection::open(&registry.config().db_path).unwrap();
+    let table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_execution_providers')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(table_exists);
+    let max_version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(max_version, 4);
+}
+
+#[test]
+fn runtime_capabilities_project_current_affordances_without_input_authority_paths() {
+    let sandbox = Sandbox::new("runtime-capabilities", 5_000);
+    let input_root = sandbox.root.join("private-input-authority");
+    fs::create_dir_all(&input_root).unwrap();
+    let runtime = Runtime::new_with_input_authorities(
+        runtime_config(&sandbox),
+        vec![InputAuthority {
+            name: "finance-state".to_string(),
+            root: input_root.clone(),
+        }],
+    )
+    .unwrap();
+
+    let capabilities = runtime.capabilities();
+    assert_eq!(capabilities.schema_version, RUNTIME_SCHEMA_VERSION);
+    assert_eq!(capabilities.max_runtime_ms, 60_000);
+    assert_eq!(capabilities.max_output_bytes, 1_048_576);
+    assert_eq!(capabilities.allowed_executable_roots, vec!["/".to_string()]);
+    assert_eq!(capabilities.input_authorities, vec!["finance-state"]);
+    assert_eq!(capabilities.targets.len(), 2);
+
+    let linux = capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == ExecutionTarget::LocalLinux)
+        .unwrap();
+    assert!(linux.configured);
+    assert!(linux.available);
+    assert_eq!(
+        linux.execution_profiles,
+        vec![
+            ExecutionProfile::TrustedLocal,
+            ExecutionProfile::ContainedLocal
+        ]
+    );
+    assert!(linux.structured_plan);
+    assert!(linux.immutable_inputs);
+    assert!(linux.windows_authorities.is_empty());
+    assert_eq!(
+        linux.execution_provider.as_ref().unwrap().contract,
+        ExecutionProviderContract::LocalLinuxRunnerV1
+    );
+    assert_eq!(
+        linux.execution_provider.as_ref().unwrap().executable_digest,
+        file_digest(Path::new("/usr/bin/true"))
+    );
+
+    let windows = capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == ExecutionTarget::WindowsNative)
+        .unwrap();
+    assert!(!windows.configured);
+    assert!(!windows.available);
+    assert_eq!(
+        windows.execution_profiles,
+        vec![ExecutionProfile::TrustedLocal]
+    );
+    assert!(windows.windows_authorities.is_empty());
+    assert!(!windows.structured_plan);
+    assert!(!windows.immutable_inputs);
+    assert!(windows.execution_provider.is_none());
+    assert!(windows.availability_issue.is_none());
+
+    let serialized = serde_json::to_string(&capabilities).unwrap();
+    assert!(serialized.contains("finance-state"));
+    assert!(!serialized.contains(input_root.to_string_lossy().as_ref()));
 }

@@ -553,6 +553,8 @@ class DeployReclaimTests(unittest.TestCase):
                         str(receipt),
                         "--install-dir",
                         str(install),
+                        "--database",
+                        str(database),
                         "--env-file",
                         str(env_file),
                         "--systemctl",
@@ -588,6 +590,8 @@ class DeployReclaimTests(unittest.TestCase):
             write_executable(previous / "runtime", "legacy-previous\n")
             previous_digest = "sha256:" + hashlib.sha256((previous / "runtime").read_bytes()).hexdigest()
             env_file = root / "runtime.env"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
             systemctl = fake_systemctl(root)
             with mcp_server(["workspace.get"]) as port:
                 env_file.write_text(
@@ -624,6 +628,8 @@ class DeployReclaimTests(unittest.TestCase):
                         str(receipt),
                         "--install-dir",
                         str(install),
+                        "--database",
+                        str(database),
                         "--env-file",
                         str(env_file),
                         "--systemctl",
@@ -658,7 +664,7 @@ class DeployReclaimTests(unittest.TestCase):
 
             def release_job() -> None:
                 time.sleep(0.15)
-                with sqlite3.connect(database) as connection:
+                with closing(sqlite3.connect(database)) as connection:
                     connection.execute("UPDATE jobs SET resolution='succeeded' WHERE job_id='job-active'")
                     connection.execute("UPDATE concurrency_reservations SET state='released' WHERE attempt_id='attempt-active'")
                     connection.commit()
@@ -1489,7 +1495,7 @@ class DeployReclaimTests(unittest.TestCase):
 
             def release_drain_job() -> None:
                 time.sleep(0.2)
-                with sqlite3.connect(database) as connection:
+                with closing(sqlite3.connect(database)) as connection:
                     connection.execute("UPDATE jobs SET resolution='succeeded' WHERE job_id='job-active'")
                     connection.execute("UPDATE concurrency_reservations SET state='released' WHERE attempt_id='attempt-active'")
                     connection.commit()
@@ -1579,6 +1585,8 @@ class DeployReclaimTests(unittest.TestCase):
                         str(receipt),
                         "--install-dir",
                         str(install),
+                        "--database",
+                        str(database),
                         "--env-file",
                         str(env_file),
                         "--systemctl",
@@ -1723,6 +1731,8 @@ class DeployReclaimTests(unittest.TestCase):
                         str(receipt),
                         "--install-dir",
                         str(install),
+                        "--database",
+                        str(database),
                         "--env-file",
                         str(env_file),
                         "--systemctl",
@@ -1913,6 +1923,24 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual(len(receipts), 1)
             status = json.loads((receipts[0] / "result.json").read_text())["status"]
             self.assertEqual(status, "rolled_back")
+
+
+    def test_rollback_fence_refuses_to_cross_active_or_held_job(self) -> None:
+        scripts_path = str(REPO / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
+        finally:
+            sys.path.remove(scripts_path)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "registry.sqlite3"
+            initialize_registry(database, active_workspace="rollback-busy")
+            with self.assertRaisesRegex(RuntimeError, "rollback drain timed out"):
+                with module["fenced_execution_drain"](database, 0.05):
+                    self.fail("rollback crossed an active Runtime Job")
+            handle = module["acquire_exclusive_admission_fence"](database)
+            handle.close()
 
 
 if __name__ == "__main__":
