@@ -44,10 +44,19 @@ use crate::{append_rotating_jsonl, DEFAULT_TRACE_ROTATION_BYTES};
 static GLOBAL_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static GLOBAL_TRACE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+/// Pinned MCP tool-input schema version. Omitted `schemaVersion` defaults to
+/// the current pinned version so external clients (which do not read the
+/// `const` pin) can call tools without carrying an internal version field;
+/// explicit non-pinned values are still rejected by handlers.
+fn default_schema_version() -> u32 {
+    1
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceOpenRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
@@ -79,6 +88,7 @@ pub enum WorkspaceReadMode {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceReadRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub workspace_id: String,
     pub relative_path: String,
@@ -104,6 +114,7 @@ pub struct WorkspaceReadResult {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceDiffRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub workspace_id: String,
     #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
@@ -114,6 +125,7 @@ pub struct WorkspaceDiffRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskGetRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub job_id: String,
     #[serde(default = "default_task_get_event_limit")]
@@ -129,6 +141,7 @@ fn default_task_get_event_limit() -> u32 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceChangesRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub workspace_id: String,
     #[serde(default = "default_change_page_limit")]
@@ -153,6 +166,7 @@ fn default_change_page_bytes() -> u64 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspacePatchToolRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub client_request_id: String,
     pub workspace_id: String,
@@ -167,6 +181,7 @@ pub struct WorkspacePatchToolRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspacePatchStatusToolRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub client_request_id: String,
 }
@@ -175,6 +190,7 @@ pub struct WorkspacePatchStatusToolRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceExecRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub client_request_id: String,
     pub execution: ExecutionProposal,
@@ -226,6 +242,7 @@ pub struct WorkspaceExecBoundExecution {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceExecBoundRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub client_request_id: String,
     pub execution: WorkspaceExecBoundExecution,
@@ -275,6 +292,7 @@ pub struct WorkspaceExecPlanInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceExecPlanRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub client_request_id: String,
     pub execution: WorkspaceExecPlanInput,

@@ -65,6 +65,7 @@ pub struct CompactWorkspaceOpenResult {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceCloseRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub workspace_id: String,
     #[serde(default)]
@@ -156,6 +157,7 @@ pub struct WorkspaceReadResult {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceContentRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub workspace_id: String,
     pub relative_path: String,
@@ -483,6 +485,7 @@ impl WorkspaceMutation {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceMutateRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub workspace_id: String,
     #[schemars(length(min = 1))]
@@ -895,6 +898,10 @@ pub(crate) struct RunnerTaskResult {
     pub failed_step_index: Option<u32>,
     pub stdout: CapturedOutput,
     pub stderr: CapturedOutput,
+}
+
+fn default_schema_version() -> u32 {
+    UNIVERSAL_EXEC_SCHEMA_VERSION
 }
 
 fn require_schema(version: u32) -> Result<(), UniversalExecError> {

@@ -416,6 +416,41 @@ fn tool_effect_annotations_match_runtime_behavior() {
 }
 
 #[test]
+fn tool_inputs_default_missing_schema_version_to_pinned_version() {
+    use ordivon_runtime_core::{
+        RuntimeWorkspaceListRequest, TaskCancelRequest, WorkspaceCloseRequest,
+        WorkspaceContentRequest, WorkspaceMutateRequest,
+    };
+    // Core-crate request structs used by MCP tools: omitted schemaVersion
+    // must deserialize to the pinned version instead of failing.
+    let list: RuntimeWorkspaceListRequest = serde_json::from_str(r#"{"limit": 5}"#).unwrap();
+    assert_eq!(list.schema_version, 1);
+    let cancel: TaskCancelRequest = serde_json::from_str(r#"{"jobId":"job-1"}"#).unwrap();
+    assert_eq!(cancel.schema_version, 1);
+    let close: WorkspaceCloseRequest = serde_json::from_str(r#"{"workspaceId":"ws-1"}"#).unwrap();
+    assert_eq!(close.schema_version, 1);
+    let content: WorkspaceContentRequest = serde_json::from_str(
+        r#"{"workspaceId":"ws-1","relativePath":"a.txt","expectedDigest":"x","maxBytes":10}"#,
+    )
+    .unwrap();
+    assert_eq!(content.schema_version, 1);
+    let mutate: WorkspaceMutateRequest =
+        serde_json::from_str(r#"{"workspaceId":"ws-1","mutations":[]}"#).unwrap();
+    assert_eq!(mutate.schema_version, 1);
+    // MCP-crate request structs.
+    let get: TaskGetRequest = serde_json::from_str(r#"{"jobId":"job-1"}"#).unwrap();
+    assert_eq!(get.schema_version, 1);
+    let diff: WorkspaceDiffRequest =
+        serde_json::from_str(r#"{"workspaceId":"ws-1","maxBytes":10}"#).unwrap();
+    assert_eq!(diff.schema_version, 1);
+    // Explicit non-pinned versions survive deserialization and are rejected
+    // by the handler gate ("schemaVersion must be 1") — the pin keeps teeth.
+    let wrong: TaskGetRequest =
+        serde_json::from_str(r#"{"jobId":"job-1","schemaVersion":2}"#).unwrap();
+    assert_eq!(wrong.schema_version, 2);
+}
+
+#[test]
 fn server_identity_names_the_runtime_component() {
     let sandbox = Sandbox::new("identity");
     let info = serde_json::to_value(sandbox.server().get_info()).unwrap();

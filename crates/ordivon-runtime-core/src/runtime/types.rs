@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 use super::{RuntimeError, RuntimeErrorCode, RuntimeResult};
 
 pub const RUNTIME_SCHEMA_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    RUNTIME_SCHEMA_VERSION
+}
+
 pub const MAX_RUNTIME_LIST_LIMIT: u32 = 100;
 pub const MAX_TASK_WAIT_MS: u64 = 30_000;
 pub const MAX_TASK_TAIL_BYTES: u64 = 64 * 1024;
@@ -1068,6 +1073,7 @@ pub struct JobProjection {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeWorkspaceGetRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub workspace_id: String,
 }
@@ -1083,6 +1089,7 @@ pub struct RuntimeWorkspaceListCursor {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeWorkspaceListRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     #[serde(default = "default_runtime_list_limit")]
     #[schemars(range(min = 1, max = MAX_RUNTIME_LIST_LIMIT))]
@@ -1384,6 +1391,7 @@ pub enum TaskObserveWaitUntil {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskObserveRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub job_id: String,
     #[serde(default)]
@@ -1407,6 +1415,7 @@ pub struct TaskObserveRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskCancelRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub job_id: String,
 }
@@ -1523,6 +1532,7 @@ pub struct TaskObservation {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArtifactReadRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub job_id: String,
     pub artifact_id: String,
