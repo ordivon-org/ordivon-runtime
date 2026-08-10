@@ -370,5 +370,77 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual((quarantined / "important.txt").read_text(), "preserve me\n")
 
 
+    def test_dirty_review_records_exact_evidence_without_mutating_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            records = runtime / "workspace-records"
+            workspaces = runtime / "workspaces"
+            records.mkdir(parents=True)
+            workspaces.mkdir()
+            workspace_id = "dirty-review"
+            workspace = workspaces / workspace_id
+            revision = init_repository(workspace)
+            (workspace / "README.md").write_text("changed\n", encoding="utf-8")
+            (workspace / "new.txt").write_text("untracked\n", encoding="utf-8")
+            record = records / f"{workspace_id}.json"
+            record.write_text(
+                json.dumps({
+                    "schemaVersion": 1,
+                    "workspaceId": workspace_id,
+                    "sourceRepo": str(workspace),
+                    "sourceRevision": revision,
+                    "workspacePath": str(workspace),
+                    "createdUnixMs": 1,
+                }),
+                encoding="utf-8",
+            )
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            fake_reclaim = root / "fake-reclaim"
+            fake_reclaim.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                f"print(json.dumps({{'schemaVersion': 1, 'summary': {{'counts': {{'blocked_dirty': 1}}}}, 'candidates': [{{'workspaceId': '{workspace_id}', 'classification': 'blocked_dirty', 'createdUnixMs': 1, 'lastActivityUnixMs': 1}}]}}))\n",
+                encoding="utf-8",
+            )
+            fake_reclaim.chmod(0o755)
+            environment = os.environ.copy()
+            environment["ORDIVON_RUNTIME_RECLAIM"] = str(fake_reclaim)
+            before = subprocess.run(
+                ["git", "-C", str(workspace), "status", "--porcelain=v1", "--untracked-files=all"],
+                check=True, text=True, capture_output=True,
+            ).stdout
+            result = subprocess.run(
+                [
+                    sys.executable, "scripts/ordivon-runtime-lifecycle", "dirty-review",
+                    "--database", str(database),
+                    "--runtime-store-root", str(runtime),
+                    "--receipt-root", str(root / "receipts"),
+                    "--lock-file", str(root / "lifecycle.lock"),
+                    "--workspace-id", workspace_id,
+                ],
+                cwd=REPO, env=environment, check=False, text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["status"], "completed")
+            action = report["actions"][0]
+            self.assertEqual(action["workspaceId"], workspace_id)
+            self.assertEqual(action["currentHeadRevision"], revision)
+            self.assertEqual(action["recommendedOwnerAction"], "quarantine_review")
+            self.assertFalse(action["automaticDeletionAllowed"])
+            self.assertGreater(action["trackedDiffBytes"], 0)
+            self.assertEqual([item["path"] for item in action["untracked"]], ["new.txt"])
+            after = subprocess.run(
+                ["git", "-C", str(workspace), "status", "--porcelain=v1", "--untracked-files=all"],
+                check=True, text=True, capture_output=True,
+            ).stdout
+            self.assertEqual(after, before)
+            receipt = Path(report["receipt"]) / "result.json"
+            self.assertTrue(receipt.is_file())
+            self.assertEqual(json.loads(receipt.read_text())["actions"][0]["statusDigest"], action["statusDigest"])
+
+
 if __name__ == "__main__":
     unittest.main()

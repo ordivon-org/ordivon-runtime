@@ -22,6 +22,7 @@ SCHEMA_VERSION = 1
 SWEEP_CONFIRMATION = "APPLY_WORKSPACE_RETENTION_POLICY"
 REPAIR_CONFIRMATION = "REPAIR_WORKSPACE_IDENTITIES"
 QUARANTINE_CONFIRMATION = "QUARANTINE_BROKEN_WORKSPACES"
+MAX_DIRTY_PATHS = 10_000
 DEFAULT_POLICY = {
     "schemaVersion": 1,
     "defaultClass": "ephemeral",
@@ -94,6 +95,16 @@ def parse_args() -> argparse.Namespace:
     repair.add_argument("--quarantine-root", type=absolute_path)
     repair.add_argument("--confirm-quarantine")
     repair.add_argument("--pretty", action="store_true")
+
+    dirty_review = sub.add_parser("dirty-review", help="record exact dirty Workspace evidence and owner action guidance")
+    add_common(dirty_review)
+    dirty_review.add_argument("--receipt-root", type=absolute_path, required=True)
+    dirty_review.add_argument("--lock-file", type=absolute_path, required=True)
+    dirty_review.add_argument("--workspace-id", action="append", dest="workspace_ids", required=True)
+    dirty_review.add_argument("--checkpoint-after-hours", type=nonnegative_float, default=24.0)
+    dirty_review.add_argument("--review-after-hours", type=nonnegative_float, default=72.0)
+    dirty_review.add_argument("--quarantine-review-after-hours", type=nonnegative_float, default=168.0)
+    dirty_review.add_argument("--pretty", action="store_true")
     return parser.parse_args()
 
 
@@ -529,6 +540,106 @@ def quarantine_one(
     }
 
 
+def dirty_action(age_hours: float | None, args: argparse.Namespace) -> str:
+    if age_hours is None:
+        return "identity_review"
+    if age_hours >= args.quarantine_review_after_hours:
+        return "quarantine_review"
+    if age_hours >= args.review_after_hours:
+        return "owner_review"
+    if age_hours >= args.checkpoint_after_hours:
+        return "checkpoint_or_export"
+    return "recent_dirty"
+
+
+def untracked_manifest(workspace: Path) -> list[dict[str, object]]:
+    result = git(workspace, ["ls-files", "--others", "--exclude-standard", "-z"])
+    names = [name for name in result.stdout.split("\0") if name]
+    if len(names) > MAX_DIRTY_PATHS:
+        raise RuntimeError(f"dirty Workspace has more than {MAX_DIRTY_PATHS} untracked paths")
+    manifest: list[dict[str, object]] = []
+    for name in names:
+        path = workspace / name
+        if path.is_symlink():
+            target = os.readlink(path)
+            manifest.append({"path": name, "kind": "symlink", "byteLength": len(target.encode()), "digest": "sha256:" + hashlib.sha256(target.encode()).hexdigest()})
+        elif path.is_file():
+            manifest.append({"path": name, "kind": "file", "byteLength": path.stat().st_size, "digest": sha256_file(path)})
+        else:
+            manifest.append({"path": name, "kind": "other", "byteLength": None, "digest": None})
+    return manifest
+
+
+def dirty_review_one(args: argparse.Namespace, item: dict[str, object], now_ms: int) -> dict[str, object]:
+    workspace_id = str(item["workspaceId"])
+    workspace_root = args.workspace_root or args.runtime_store_root / "workspaces"
+    workspace = workspace_root / workspace_id
+    record_path = args.runtime_store_root / "workspace-records" / f"{workspace_id}.json"
+    if item.get("classification") != "blocked_dirty":
+        raise RuntimeError(f"Workspace is not blocked_dirty: {item.get('classification')}")
+    if active_jobs(args.database, args.busy_timeout_ms, workspace_id):
+        raise RuntimeError("workspace acquired an active or held Job")
+    record_digest = sha256_file(record_path)
+    record = load_open_record(record_path, workspace_id, workspace)
+    head = git(workspace, ["rev-parse", "HEAD"]).stdout.strip()
+    status = git(workspace, ["status", "--porcelain=v1", "--untracked-files=all"]).stdout
+    if not status.strip():
+        raise RuntimeError("Workspace is no longer dirty")
+    diff = git(workspace, ["diff", "--binary", "HEAD"]).stdout.encode()
+    untracked = untracked_manifest(workspace)
+    basis = item.get("lastActivityUnixMs") or item.get("createdUnixMs")
+    age_hours = max(0.0, (now_ms - int(basis)) / 3_600_000) if isinstance(basis, int) else None
+    if sha256_file(record_path) != record_digest:
+        raise RuntimeError("workspace record changed during dirty review")
+    return {
+        "workspaceId": workspace_id,
+        "sourceRepo": record.get("sourceRepo"),
+        "sourceRevision": record.get("sourceRevision"),
+        "currentHeadRevision": head,
+        "recordDigest": record_digest,
+        "ageHours": age_hours,
+        "recommendedOwnerAction": dirty_action(age_hours, args),
+        "automaticDeletionAllowed": False,
+        "statusDigest": "sha256:" + hashlib.sha256(status.encode()).hexdigest(),
+        "trackedDiffDigest": "sha256:" + hashlib.sha256(diff).hexdigest(),
+        "trackedDiffBytes": len(diff),
+        "untracked": untracked,
+    }
+
+
+def dirty_review(args: argparse.Namespace) -> dict[str, object]:
+    requested = list(dict.fromkeys(args.workspace_ids or []))
+    if not (args.checkpoint_after_hours <= args.review_after_hours <= args.quarantine_review_after_hours):
+        raise RuntimeError("dirty aging thresholds must be monotonic")
+    with exclusive_lock(args.lock_file):
+        report = enrich_report(args)
+        by_id = {str(item["workspaceId"]): item for item in report.get("candidates", []) if isinstance(item, dict)}
+        now_ms = int(time.time() * 1000)
+        receipt = receipt_path(args.receipt_root, "dirty-review")
+        actions: list[dict[str, object]] = []
+        failures: list[dict[str, object]] = []
+        for workspace_id in requested:
+            item = by_id.get(workspace_id)
+            if item is None:
+                failures.append({"workspaceId": workspace_id, "error": "Workspace is absent from current lifecycle candidates"})
+                continue
+            try:
+                actions.append(dirty_review_one(args, item, now_ms))
+            except Exception as error:
+                failures.append({"workspaceId": workspace_id, "error": str(error)})
+        result = {
+            "schemaVersion": SCHEMA_VERSION,
+            "status": "completed" if not failures else "partial",
+            "truthRole": "evidence-only-owner-review",
+            "automaticDeletionAllowed": False,
+            "actions": actions,
+            "failures": failures,
+            "receipt": str(receipt),
+        }
+        write_json_atomic(receipt / "result.json", result)
+        return result
+
+
 def repair(args: argparse.Namespace) -> dict[str, object]:
     if args.confirm_policy != REPAIR_CONFIRMATION:
         raise RuntimeError(f"confirm-policy must equal {REPAIR_CONFIRMATION}")
@@ -594,6 +705,8 @@ def main() -> int:
             value = sweep(args)
         elif args.command == "repair":
             value = repair(args)
+        elif args.command == "dirty-review":
+            value = dirty_review(args)
         else:
             raise RuntimeError(f"unsupported command: {args.command}")
         print(json.dumps(value, indent=2 if args.pretty else None, sort_keys=args.pretty))
