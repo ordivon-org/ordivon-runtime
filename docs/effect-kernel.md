@@ -77,7 +77,7 @@ Current implementation mapping:
 | Physical ownership | cgroup-owned process tree |
 | Execution evidence | Runner Result and Artifacts |
 | Recovery | Registry, Runner evidence, and systemd/cgroup reconciliation |
-| First structured external effect | `release.apply`/`release.get`, a release-bound Job, additive Runtime Release side truth, and the canonical deployment receipt |
+| Structured effects | Runtime self-release uses a release-bound Job plus deterministic deployment receipt; `workspace.patch` uses a direct atomic filesystem transaction plus prepared/committed/unknown Patch receipt without a Job/Runner |
 
 The model must not grow merely to resemble a workflow engine, scheduler, policy platform, or Agent framework.
 
@@ -89,7 +89,7 @@ Model output, a tool-call draft, or an Agent plan is only a candidate action. A 
 
 ### 2. Stable operation identity
 
-The committed operation identity must bind every fact whose change would create a materially different action. Today this includes the authenticated principal, client request identity, Git Workspace source-state digest, executable identity, arguments, explicit request environment, working directory, physical budgets, execution-limit intent, and the Runtime-owned execution provider that will cross the dispatch boundary. For supported mechanical limits, an explicit value and an omitted/delegated value are different request facts: omission is not rewritten into the current operator value before request identity is formed.
+The committed operation identity must bind every enforceable fact whose change would create a materially different action. Today this includes the authenticated principal, client request identity, Git Workspace source-state digest, executable identity, arguments, explicit request environment, working directory, physical budgets, execution-limit intent, the Runtime-owned execution provider that will cross the dispatch boundary, and any Agent-declared exact Host Dependency prerequisite files. For supported mechanical limits, an explicit value and an omitted/delegated value are different request facts: omission is not rewritten into the current operator value before request identity is formed. Host Dependencies are intentionally explicit and partial: Runtime does not claim it can infer a complete dynamic environment closure.
 
 On first admission, Runtime resolves any delegated mechanical limits into one concrete Execution Plan and binds that plan to the physical world snapshot. The durable plan therefore records what actually governed execution even when the Agent intentionally left a limit to Runtime. Future facts may enter identity only when they have enforceable semantics, not because they are useful metadata.
 
@@ -158,7 +158,7 @@ These classes are recovery contracts, not caller labels.
 
 The public API must not accept a caller-asserted `effectClass` for arbitrary execution. Doing so would create a false guarantee.
 
-A non-opaque class is allowed only through a structured operation whose adapter owns and tests the complete Effect Contract. Runtime's first such operation is its own release effect: `release.apply` binds an exact Workspace commit, candidate-manifest digest, operator-owned deployment authority, deterministic effect identity, candidate deployer executable, and durable Job; `release.get` joins that Job with the deterministic deployment receipt without dispatching or retrying. A lost MCP response during self-replacement is therefore reconciled by querying the same effect rather than repeating the release. Other examples may eventually include a Git operation bound to an expected revision, or an external API operation bound to a provider-supported idempotency key and receipt query.
+A non-opaque class is allowed only through a structured operation whose implementation owns and tests the complete Effect Contract. Two materially different Runtime effects now meet that bar. Runtime self-release binds an exact Workspace commit, candidate-manifest digest, operator-owned deployment authority, deterministic effect identity, candidate deployer executable, and durable Job; `release.get` joins that Job with the deterministic deployment receipt without dispatching or retrying. `workspace.patch` binds an exact text-mutation request, complete before/after file digests, and a durable Patch operation before direct filesystem mutation; exact replay returns the original committed receipt, while `workspace.patch.get` reconciles prepared state to committed or `unknown` without creating a Job or repeating a mixed mutation. These implementations share a contract shape, not a common execution mechanism.
 
 ## Current proof and current gap
 
@@ -175,7 +175,9 @@ Current Ordivon Runtime already proves:
 - a Git source-state commitment covering `HEAD`, the semantic Git index, actual tracked source bytes, recursively initialized submodule source state, and nonignored untracked source;
 - pre-spawn source-state revalidation and exclusion of Runtime-mediated mutation while a Job is active or held;
 - first-admission commitment of the Runtime-owned Linux Runner or Windows launcher contract/digest, with pre-dispatch drift rejection and identity-bound terminal evidence;
-- one real `RECONCILABLE` external effect: Runtime self-release has a stable principal/client request identity, an operation-v5 binding to release side truth, a deterministic deployment receipt, exact replay before current-world checks, and projection-only `release.get` reconciliation across Runtime ingress replacement;
+- Runtime self-release as a real `RECONCILABLE` external effect: stable principal/client request identity, operation-v5 binding to release side truth, deterministic deployment receipt, exact replay before current-world checks, and projection-only `release.get` reconciliation across Runtime ingress replacement;
+- `workspace.patch` as a second materially different structured effect: stable request identity, durable pre-mutation intent plus complete before/after digest plan, atomic filesystem commit, exact replay, and `workspace.patch.get` reconciliation that preserves mixed physical state as `unknown`;
+- explicit trusted-local Linux Host Dependency commitments for known host runtime prerequisite files: admission-time digest validation, additive Job side truth, operation-v6 identity, pre-dispatch drift rejection, Runner pre-spawn revalidation, and terminal evidence;
 - recoverable Workspace closure.
 
 The source-state commitment is deliberately scoped. It excludes ignored caches and build outputs and does not make the trusted host filesystem immutable. Direct host writes after the Runner check remain outside this guarantee; eliminating that race would require executing from an immutable snapshot or stronger isolation and then resolving how intentional command changes return to the working Workspace.
@@ -185,12 +187,13 @@ The source-state commitment is deliberately scoped. It excludes ignored caches a
 It does not yet prove:
 
 - the number or identity of external effects performed inside an arbitrary command;
-- a general external effect receipt across arbitrary operations; the Runtime release receipt is deliberately one adapter-specific proof, not a generic effect claim;
-- generic target/tool-contract continuity beyond the Runtime-owned Runner/Windows launcher and structured Runtime-release commitments, including dynamic environment closure and external provider semantics;
+- a general external effect receipt across arbitrary operations; release and Workspace Patch each own adapter-specific evidence and do not turn opaque commands into structured effects;
+- automatic or complete target environment closure. P2 proved that a dynamically loaded host dependency can change output while target ELF digest and prior operation identity remain unchanged, but Runtime only commits prerequisite files explicitly declared by the Agent rather than pretending to discover every loader, `dlopen`, language-module, driver, network, or service dependency;
+- generic target/tool-contract continuity beyond the Runtime-owned Runner/Windows launcher and the explicitly committed release/Host Dependency contracts;
 - operation-scoped authority beyond the trusted-local principal;
-- external-world preconditions outside the Git Workspace other than bytes explicitly admitted through the immutable-input binding contract;
+- external-world preconditions outside the Git Workspace other than immutable-input bytes and explicitly declared trusted-local Host Dependency prerequisite files;
 - wall-clock time, network responses, ignored Workspace inputs, or other ambient process dependencies; target processes receive a committed configured execution environment plus explicit request overrides rather than inheriting the Runtime service environment;
-- generic effect-aware retry or reconciliation across arbitrary adapters. The self-release adapter reconciles by receipt and exact request identity, but it does not authorize automatic generalization to other effects.
+- generic effect-aware retry or reconciliation across arbitrary adapters. Release and Workspace Patch prove a shared contract vocabulary, but they do not justify a generic `EffectAdapter`, caller `effectClass`, or common physical dispatcher.
 
 These are real gaps. They must not be hidden by process success, Artifact presence, tracing, or additional orchestration layers.
 
@@ -224,20 +227,21 @@ A persistent addition to the Effect Kernel must answer all of the following:
 
 A field with no enforcement, an event with no recovery decision, or an abstraction with no real adapter does not enter the kernel.
 
-## Next implementation gate
+## Two-effect result and next implementation gate
 
-The first real structured operation is now Runtime self-release. It demonstrates the complete contract below across a self-replacing service boundary; this is evidence for the kernel shape, not permission to introduce a generic effect framework. A reusable adapter abstraction should wait for a second materially different structured effect and then factor only the invariants proven common by both:
+Runtime now has two materially different structured effects: self-release and Workspace Patch. Their implementations prove seven shared contract-level invariants without proving that a shared code framework is useful:
 
 ```text
-canonical effect identity
-+ enforceable precondition
-+ committed authority
-+ provider-owned receipt or state proof
-+ deterministic reconciliation
-+ tested ambiguity behavior
+stable request/effect identity
++ durable intent and enforceable preconditions before mutation
++ one physical commit owner
++ identity-bound receipt/evidence
++ exact replay before current-world reinterpretation
++ explicit reconciliation query
++ preserved uncertainty instead of guessed completion
 ```
 
-Until such an operation is selected, the current execution path remains deliberately opaque and fail-closed.
+The mechanisms remain deliberately different: release is an asynchronous Job/Runner operation whose external receipt may become terminal before the generic Job lifecycle converges; Workspace Patch is a direct atomic filesystem transaction with no Job/Runner and may reconcile a prepared receipt to `unknown` when physical files are mixed. P2 therefore records the shared contract but does **not** introduce a generic `EffectAdapter`, `EffectRegistry`, or caller-supplied class. A common code abstraction requires demonstrated duplicated implementation burden, not merely conceptual similarity. Arbitrary execution remains opaque and fail-closed.
 
 ## Boundary
 

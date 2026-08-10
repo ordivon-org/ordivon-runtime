@@ -91,6 +91,7 @@ fn exec_tool_request(
             execution_target: ExecutionTarget::LocalLinux,
             windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -140,6 +141,13 @@ fn workspace_exec_schema_exposes_mechanical_limits_as_optional() {
     assert!(!required.contains(&"timeoutMs"));
     assert!(!required.contains(&"stdoutLimitBytes"));
     assert!(!required.contains(&"stderrLimitBytes"));
+    assert!(schema
+        .pointer("/$defs/ExecutionProposal/properties/hostDependencies")
+        .is_some());
+    let dependency = schema
+        .pointer("/$defs/HostDependencyBinding/properties/expectedDigest")
+        .expect("HostDependencyBinding.expectedDigest schema");
+    assert!(dependency.is_object());
 }
 
 #[test]
@@ -282,6 +290,21 @@ fn workspace_exec_preserves_legacy_v1_only_for_fully_explicit_requests() {
 }
 
 #[test]
+fn workspace_exec_plan_schema_exposes_job_wide_host_dependencies() {
+    let server = Sandbox::new("plan-host-dependency-schema").server();
+    let tool = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .find(|tool| tool.name.as_ref() == "workspace.execPlan")
+        .expect("workspace.execPlan");
+    let schema = serde_json::to_value(&tool.input_schema).unwrap();
+    assert!(schema
+        .pointer("/$defs/WorkspaceExecPlanInput/properties/hostDependencies")
+        .is_some());
+}
+
+#[test]
 fn workspace_exec_plan_keeps_legacy_sum_only_for_legacy_shape() {
     let server = Sandbox::new("proposal-plan-bind").server();
     let legacy = WorkspaceExecPlanRequest {
@@ -298,6 +321,7 @@ fn workspace_exec_plan_keeps_legacy_sum_only_for_legacy_shape() {
             execution_target: ExecutionTarget::LocalLinux,
             windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -333,6 +357,7 @@ fn workspace_exec_plan_keeps_legacy_sum_only_for_legacy_shape() {
             execution_target: ExecutionTarget::LocalLinux,
             windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -1496,6 +1521,7 @@ fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
     assert!(linux.available);
     assert!(linux.structured_plan);
     assert!(linux.immutable_inputs);
+    assert!(linux.host_dependency_commitments);
     let windows = result
         .targets
         .iter()
@@ -1505,6 +1531,7 @@ fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
     assert!(!windows.available);
     assert!(!windows.structured_plan);
     assert!(!windows.immutable_inputs);
+    assert!(!windows.host_dependency_commitments);
 
     let tool = server
         .tool_router
@@ -1534,6 +1561,7 @@ fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
         "availabilityIssue",
         "structuredPlan",
         "immutableInputs",
+        "hostDependencyCommitments",
     ] {
         assert!(
             output.contains(expected),

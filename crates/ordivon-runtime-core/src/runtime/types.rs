@@ -347,6 +347,17 @@ pub struct ForeignReference {
     pub digest: Option<String>,
 }
 
+/// Agent-declared exact host file whose bytes are a known physical prerequisite of trusted-local execution.
+/// Runtime validates the digest at admission and again at the target-spawn boundary; it does not infer
+/// undeclared dynamic dependencies or claim that this list is a complete environment closure.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostDependencyBinding {
+    /// Absolute host path to one regular non-symlink prerequisite file.
+    pub path: String,
+    pub expected_digest: String,
+}
+
 /// Operator-owned root from which Runtime may resolve immutable input objects.
 /// This is Core configuration/authority, not Agent-authored path authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -487,6 +498,8 @@ pub struct RuntimeExecutionTargetCapability {
     pub windows_authorities: Vec<WindowsAuthority>,
     pub structured_plan: bool,
     pub immutable_inputs: bool,
+    /// Whether trusted-local Jobs on this target may bind Agent-declared exact host file prerequisites.
+    pub host_dependency_commitments: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_provider: Option<ExecutionProviderSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -655,6 +668,8 @@ pub struct SubmitRequest {
     pub execution_provider: Option<ExecutionProviderSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_release_effect: Option<RuntimeReleaseEffectBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_dependencies: Vec<HostDependencyBinding>,
     pub plan: RuntimeExecutionPlan,
     pub global_limit: u32,
 }
@@ -736,6 +751,8 @@ struct OperationRequestIdentity {
     windows_authority: Option<WindowsAuthority>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     foreign_references: Vec<ForeignReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    host_dependencies: Vec<HostDependencyBinding>,
 }
 
 #[derive(Serialize)]
@@ -787,6 +804,8 @@ struct ProposalRequestIdentity {
     windows_authority: Option<WindowsAuthority>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     foreign_references: Vec<ForeignReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    host_dependencies: Vec<HostDependencyBinding>,
 }
 
 fn identity_windows_authority(
@@ -797,6 +816,16 @@ fn identity_windows_authority(
         (ExecutionTarget::WindowsNative, WindowsAuthority::Elevated) => Some(authority),
         _ => None,
     }
+}
+
+fn host_dependency_identities(
+    dependencies: &[HostDependencyBinding],
+) -> Vec<HostDependencyBinding> {
+    let mut dependencies = dependencies.to_vec();
+    dependencies.sort_by(|left, right| {
+        (&left.path, &left.expected_digest).cmp(&(&right.path, &right.expected_digest))
+    });
+    dependencies
 }
 
 pub(crate) fn operation_request_identity_digest(request: &TaskRunRequest) -> RuntimeResult<String> {
@@ -824,6 +853,7 @@ fn operation_request_identity(request: &TaskRunRequest) -> OperationRequestIdent
             request.execution.windows_authority,
         ),
         foreign_references: request.execution.foreign_references.clone(),
+        host_dependencies: host_dependency_identities(&request.execution.host_dependencies),
     }
 }
 
@@ -910,6 +940,7 @@ fn proposal_request_identity(proposal: &TaskRunProposal) -> ProposalRequestIdent
             proposal.execution.windows_authority,
         ),
         foreign_references: proposal.execution.foreign_references.clone(),
+        host_dependencies: host_dependency_identities(&proposal.execution.host_dependencies),
     }
 }
 
@@ -1000,6 +1031,7 @@ pub(crate) fn operation_request_identity_digest_from_plan(
             plan.windows_authority,
         ),
         foreign_references: plan.foreign_references.clone(),
+        host_dependencies: Vec::new(),
     })
 }
 
@@ -1499,6 +1531,8 @@ pub struct ExecutionProposal {
     pub windows_authority: WindowsAuthority,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_dependencies: Vec<HostDependencyBinding>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
@@ -1549,6 +1583,8 @@ pub struct UniversalExecutionRequest {
     pub windows_authority: WindowsAuthority,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_references: Vec<ForeignReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_dependencies: Vec<HostDependencyBinding>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

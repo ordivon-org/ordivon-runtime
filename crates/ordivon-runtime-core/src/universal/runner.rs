@@ -44,6 +44,7 @@ pub fn run_task_runner(task_dir: &Path) -> Result<(), UniversalExecError> {
             observed_workspace_source_digest.as_deref(),
         )?;
         validate_input_commitments(&request)?;
+        validate_host_dependency_commitments(&request)?;
         execute_request(&task_dir, &request, started_unix_ms)
     });
     let result = execution.unwrap_or_else(|error| {
@@ -255,6 +256,50 @@ fn validate_input_tree_exact(
             Some("inputPresentationRoot"),
             false,
         ));
+    }
+    Ok(())
+}
+
+fn validate_host_dependency_commitments(
+    request: &RunnerTaskRequest,
+) -> Result<(), UniversalExecError> {
+    for (index, dependency) in request.host_dependencies.iter().enumerate() {
+        let field = format!("hostDependencies[{index}]");
+        let path = Path::new(&dependency.path);
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            UniversalExecError::new(
+                UniversalExecErrorCode::InputStateMismatch,
+                format!(
+                    "declared Host Dependency {} is unavailable at target-spawn boundary: {error}",
+                    dependency.path
+                ),
+                Some(&format!("{field}.path")),
+                false,
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::InputStateMismatch,
+                format!(
+                    "declared Host Dependency {} is not a regular non-symlink file",
+                    dependency.path
+                ),
+                Some(&format!("{field}.path")),
+                false,
+            ));
+        }
+        let observed = sha256_file(path)?;
+        if observed != dependency.digest {
+            return Err(UniversalExecError::new(
+                UniversalExecErrorCode::InputStateMismatch,
+                format!(
+                    "declared Host Dependency {} changed after admission: expected {}, observed {}",
+                    dependency.path, dependency.digest, observed
+                ),
+                Some(&format!("{field}.digest")),
+                false,
+            ));
+        }
     }
     Ok(())
 }
@@ -930,6 +975,36 @@ fn validate_request_identity(request: &RunnerTaskRequest) -> Result<(), Universa
                 "inputCommitments[{index}].digest must be 32-byte SHA-256 hex"
             )));
         }
+    }
+    let mut previous_host_dependency_path: Option<&str> = None;
+    for (index, dependency) in request.host_dependencies.iter().enumerate() {
+        if !Path::new(&dependency.path).is_absolute() || dependency.path.as_bytes().contains(&0) {
+            return Err(runner_error(format!(
+                "hostDependencies[{index}].path must be an absolute NUL-free path"
+            )));
+        }
+        let Some(hex) = dependency.digest.strip_prefix("sha256:") else {
+            return Err(runner_error(format!(
+                "hostDependencies[{index}].digest must use sha256:<hex>"
+            )));
+        };
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(runner_error(format!(
+                "hostDependencies[{index}].digest must be lowercase 32-byte SHA-256 hex"
+            )));
+        }
+        if previous_host_dependency_path
+            .is_some_and(|previous| previous >= dependency.path.as_str())
+        {
+            return Err(runner_error(
+                "hostDependencies must be sorted by unique path",
+            ));
+        }
+        previous_host_dependency_path = Some(&dependency.path);
     }
     if let Some(payload) = &request.payload {
         if payload.uid == 0 || payload.gid == 0 {

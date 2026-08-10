@@ -746,6 +746,13 @@ pub(crate) struct RunnerExecutionStep {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RunnerHostDependencyCommitment {
+    pub path: String,
+    pub digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RunnerInputCommitment {
     pub presentation_path: String,
     pub digest: String,
@@ -777,6 +784,8 @@ pub(crate) struct RunnerTaskRequest {
     pub input_presentation_root: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_commitments: Vec<RunnerInputCommitment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_dependencies: Vec<RunnerHostDependencyCommitment>,
     pub executable: String,
     pub executable_digest: String,
     pub args: Vec<String>,

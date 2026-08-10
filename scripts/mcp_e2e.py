@@ -685,7 +685,10 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         exec_schema_text = json.dumps(tool_entries["workspace.exec"].get("inputSchema", {}), sort_keys=True)
         check(
             "exec-path-contract",
-            "Absolute host path" in exec_schema_text and "Workspace root" in exec_schema_text,
+            "Absolute host path" in exec_schema_text
+            and "Workspace root" in exec_schema_text
+            and "hostDependencies" in exec_schema_text
+            and "expectedDigest" in exec_schema_text,
             exec_schema_text,
         )
         bound_schema = tool_entries["workspace.execBound"].get("inputSchema", {})
@@ -743,6 +746,8 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             == {"trusted_local", "contained_local"}
             and linux_description.get("structuredPlan") is True
             and linux_description.get("immutableInputs") is True
+            and linux_description.get("hostDependencyCommitments") is True
+            and described_targets.get("windows_native", {}).get("hostDependencyCommitments") is False
             and isinstance(linux_description.get("executionProvider"), dict)
             and str(linux_description.get("executionProvider", {}).get("executableDigest", "")).startswith(
                 "sha256:"
@@ -1240,6 +1245,134 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         attempt_id = str(submitted["attemptId"])
         attempt_ids.append(attempt_id)
         check("exec-stdout", submitted.get("stdoutTail") == expected_stdout, submitted)
+
+        host_dependency = root / "host-runtime-prerequisite.txt"
+        host_dependency.write_bytes(b"HOST_DEP_V1\n")
+        host_dependency_v1_digest = digest_bytes(host_dependency.read_bytes())
+        host_dependency_request_id = f"request:host-dependency:{uuid.uuid4()}"
+        host_dependency_execution = {
+            "workspaceId": workspace_id,
+            "executable": "/usr/bin/cat",
+            "args": [str(host_dependency)],
+            "cwdRelative": ".",
+            "env": {},
+            "hostDependencies": [{"path": str(host_dependency), "expectedDigest": host_dependency_v1_digest}],
+        }
+        host_dependency_first = client.tool(
+            "workspace.exec",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "clientRequestId": host_dependency_request_id,
+                "execution": host_dependency_execution,
+                "waitMs": 30_000,
+                "stdoutTailBytes": 4096,
+                "stderrTailBytes": 4096,
+            },
+        )
+        host_dependency_first_job = str(host_dependency_first["jobId"])
+        check(
+            "host-dependency-v1-exec",
+            host_dependency_first.get("status") == "succeeded"
+            and host_dependency_first.get("stdoutTail") == "HOST_DEP_V1\n",
+            host_dependency_first,
+        )
+        host_dependency_first_inspection = client.tool(
+            "task.get",
+            {"schemaVersion": SCHEMA_VERSION, "jobId": host_dependency_first_job, "eventLimit": 10},
+        )
+        host_dependency_v1_operation = host_dependency_first_inspection.get("job", {}).get("operationDigest")
+        host_dependency_terminal_descriptor = next(
+            artifact
+            for artifact in host_dependency_first.get("artifacts", [])
+            if artifact.get("kind") == "terminal_evidence"
+        )
+        host_dependency_terminal = client.tool(
+            "artifact.read",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "jobId": host_dependency_first_job,
+                "artifactId": host_dependency_terminal_descriptor["artifactId"],
+                "offset": 0,
+                "maxBytes": 65_536,
+            },
+        )
+        host_dependency_evidence = json.loads(host_dependency_terminal.get("content", "{}"))
+        check(
+            "host-dependency-terminal-evidence",
+            host_dependency_evidence.get("hostDependencies")
+            == [{"path": str(host_dependency), "expectedDigest": host_dependency_v1_digest}],
+            host_dependency_evidence,
+        )
+
+        host_dependency.write_bytes(b"HOST_DEP_V2\n")
+        host_dependency_v2_digest = digest_bytes(host_dependency.read_bytes())
+        host_dependency_replay = client.tool(
+            "workspace.exec",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "clientRequestId": host_dependency_request_id,
+                "execution": host_dependency_execution,
+                "waitMs": 30_000,
+                "stdoutTailBytes": 4096,
+                "stderrTailBytes": 4096,
+            },
+        )
+        check(
+            "host-dependency-exact-replay-before-current-world",
+            host_dependency_replay.get("jobId") == host_dependency_first_job
+            and host_dependency_replay.get("status") == "succeeded"
+            and host_dependency_replay.get("stdoutTail") == "HOST_DEP_V1\n",
+            host_dependency_replay,
+        )
+
+        stale_host_dependency = client.tool_result(
+            "workspace.exec",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "clientRequestId": f"request:host-dependency-stale:{uuid.uuid4()}",
+                "execution": host_dependency_execution,
+                "waitMs": 0,
+                "stdoutTailBytes": 4,
+                "stderrTailBytes": 4,
+            },
+        )
+        stale_host_dependency_error = stale_host_dependency.get("structuredContent", {}).get("error", {})
+        check(
+            "host-dependency-stale-new-admission-fails",
+            stale_host_dependency.get("isError") is True
+            and stale_host_dependency_error.get("code") == "INVALID_REQUEST"
+            and stale_host_dependency_error.get("commitState") == "not_committed",
+            stale_host_dependency,
+        )
+
+        host_dependency_execution_v2 = json.loads(json.dumps(host_dependency_execution))
+        host_dependency_execution_v2["hostDependencies"][0]["expectedDigest"] = host_dependency_v2_digest
+        host_dependency_v2 = client.tool(
+            "workspace.exec",
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "clientRequestId": f"request:host-dependency-v2:{uuid.uuid4()}",
+                "execution": host_dependency_execution_v2,
+                "waitMs": 30_000,
+                "stdoutTailBytes": 4096,
+                "stderrTailBytes": 4096,
+            },
+        )
+        host_dependency_v2_job = str(host_dependency_v2["jobId"])
+        host_dependency_v2_inspection = client.tool(
+            "task.get",
+            {"schemaVersion": SCHEMA_VERSION, "jobId": host_dependency_v2_job, "eventLimit": 10},
+        )
+        host_dependency_v2_operation = host_dependency_v2_inspection.get("job", {}).get("operationDigest")
+        check(
+            "host-dependency-v2-binds-distinct-operation",
+            host_dependency_v2.get("status") == "succeeded"
+            and host_dependency_v2.get("stdoutTail") == "HOST_DEP_V2\n"
+            and isinstance(host_dependency_v1_operation, str)
+            and isinstance(host_dependency_v2_operation, str)
+            and host_dependency_v1_operation != host_dependency_v2_operation,
+            {"v1": host_dependency_first_inspection, "v2": host_dependency_v2_inspection},
+        )
 
         bound_request_id = f"request:{uuid.uuid4()}"
         bound_expected_digest = digest_bytes(b"S0\n")

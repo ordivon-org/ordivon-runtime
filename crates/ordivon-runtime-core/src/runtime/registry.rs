@@ -14,12 +14,13 @@ use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::{
     operation_request_identity_digest_from_plan, AdmissionOutcome, ArtifactRegistration,
     AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate, CreatedAdmission,
-    ExecutionProviderContract, ExecutionProviderSnapshot, JobDesiredState, JobProjection,
-    JobResolution, ReservationRecord, ReservationState, RunnerIdentity, RuntimeArtifactRecord,
-    RuntimeDeliveryDisposition, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
-    RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest, RuntimeJobListResult,
-    RuntimeJobRecord, RuntimeJobSummary, RuntimeReleaseContract, RuntimeReleaseEffectBinding,
-    RuntimeResult, SubmitRequest, TerminalCommit, MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
+    ExecutionProviderContract, ExecutionProviderSnapshot, HostDependencyBinding, JobDesiredState,
+    JobProjection, JobResolution, ReservationRecord, ReservationState, RunnerIdentity,
+    RuntimeArtifactRecord, RuntimeDeliveryDisposition, RuntimeError, RuntimeErrorCode,
+    RuntimeExecutionPlan, RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest,
+    RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary, RuntimeReleaseContract,
+    RuntimeReleaseEffectBinding, RuntimeResult, SubmitRequest, TerminalCommit,
+    MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
 };
 
 const MIGRATION_V1: i64 = 1;
@@ -48,6 +49,8 @@ const WORKSPACE_PATCH_TABLE: &str = "workspace_patch_operations";
 const WORKSPACE_PATCH_INDEX: &str = "idx_workspace_patch_operations_workspace";
 const EXECUTION_PROVIDER_STORAGE_SQL: &str = include_str!("execution_provider_storage.sql");
 const EXECUTION_PROVIDER_TABLE: &str = "job_execution_providers";
+const HOST_DEPENDENCY_STORAGE_SQL: &str = include_str!("host_dependency_storage.sql");
+const HOST_DEPENDENCY_TABLE: &str = "job_host_dependencies";
 const RUNTIME_RELEASE_STORAGE_SQL: &str = include_str!("runtime_release_storage.sql");
 const RUNTIME_RELEASE_TABLE: &str = "job_runtime_release_effects";
 const RUNTIME_RELEASE_INDEX: &str = "idx_runtime_release_effect_request";
@@ -181,6 +184,7 @@ impl Registry {
         registry.ensure_query_indexes(&mut connection)?;
         registry.ensure_workspace_patch_storage(&mut connection)?;
         registry.ensure_execution_provider_storage(&mut connection)?;
+        registry.ensure_host_dependency_storage(&mut connection)?;
         registry.ensure_runtime_release_storage(&mut connection)?;
         registry.validate_database(&connection)?;
         set_private_file(&registry.config.db_path)?;
@@ -489,6 +493,36 @@ impl Registry {
         Ok(())
     }
 
+    fn ensure_host_dependency_storage(&self, connection: &mut Connection) -> RuntimeResult<()> {
+        let transaction = immediate(connection, "Host Dependency storage maintenance")?;
+        transaction
+            .execute_batch(HOST_DEPENDENCY_STORAGE_SQL)
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot ensure Host Dependency storage")
+            })?;
+        transaction.commit().map_err(|error| {
+            RuntimeError::from_sql(error, "cannot commit Host Dependency storage maintenance")
+        })?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [HOST_DEPENDENCY_TABLE],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot verify Host Dependency storage")
+            })?;
+        if !exists {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "Host Dependency storage is missing after maintenance",
+                None,
+                false,
+            ));
+        }
+        Ok(())
+    }
+
     fn ensure_runtime_release_storage(&self, connection: &mut Connection) -> RuntimeResult<()> {
         let transaction = immediate(connection, "Runtime Release storage maintenance")?;
         transaction
@@ -623,6 +657,23 @@ impl Registry {
         let execution_provider_digest = execution_provider_json
             .as_deref()
             .map(|json| sha256_bytes(json.as_bytes()));
+        let host_dependencies_json = if request.host_dependencies.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&request.host_dependencies).map_err(|error| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::InvalidRequest,
+                        format!("cannot serialize Host Dependency bindings: {error}"),
+                        Some("hostDependencies"),
+                        false,
+                    )
+                })?,
+            )
+        };
+        let host_dependencies_digest = host_dependencies_json
+            .as_deref()
+            .map(|json| sha256_bytes(json.as_bytes()));
         let runtime_release_json = request
             .runtime_release_effect
             .as_ref()
@@ -663,6 +714,10 @@ impl Registry {
             workspace_snapshot["executionProviderDigest"] =
                 serde_json::Value::String(provider_digest.to_string());
         }
+        if let Some(host_digest) = host_dependencies_digest.as_deref() {
+            workspace_snapshot["hostDependenciesDigest"] =
+                serde_json::Value::String(host_digest.to_string());
+        }
         if let Some(release_digest) = runtime_release_digest.as_deref() {
             workspace_snapshot["runtimeReleaseEffectDigest"] =
                 serde_json::Value::String(release_digest.to_string());
@@ -670,22 +725,41 @@ impl Registry {
         let workspace_snapshot_json = workspace_snapshot.to_string();
         let operation_digest = match (
             execution_provider_digest.as_deref(),
+            host_dependencies_digest.as_deref(),
             runtime_release_digest.as_deref(),
         ) {
-            (Some(provider_digest), Some(release_digest)) => sha256_bytes(
+            (Some(provider_digest), Some(host_digest), None) => sha256_bytes(
+                format!(
+                    "runtime-operation-v6\0{request_digest}\0{plan_digest}\0{provider_digest}\0{host_digest}"
+                )
+                .as_bytes(),
+            ),
+            (Some(provider_digest), None, Some(release_digest)) => sha256_bytes(
                 format!(
                     "runtime-operation-v5\0{request_digest}\0{plan_digest}\0{provider_digest}\0{release_digest}"
                 )
                 .as_bytes(),
             ),
-            (Some(provider_digest), None) => sha256_bytes(
+            (Some(provider_digest), None, None) => sha256_bytes(
                 format!("runtime-operation-v4\0{request_digest}\0{plan_digest}\0{provider_digest}")
                     .as_bytes(),
             ),
-            (None, None) => sha256_bytes(
+            (None, None, None) => sha256_bytes(
                 format!("runtime-operation-v3\0{request_digest}\0{plan_digest}").as_bytes(),
             ),
-            (None, Some(_)) => {
+            (Some(_), Some(_), Some(_)) => {
+                return Err(RuntimeError::invalid(
+                    "Runtime Release effect and Host Dependencies cannot share one Job",
+                    "hostDependencies",
+                ));
+            }
+            (None, Some(_), _) => {
+                return Err(RuntimeError::invalid(
+                    "Host Dependencies require a committed execution provider",
+                    "executionProvider",
+                ));
+            }
+            (None, None, Some(_)) => {
                 return Err(RuntimeError::invalid(
                     "Runtime Release effect requires a committed execution provider",
                     "executionProvider",
@@ -882,6 +956,17 @@ impl Registry {
                 .map_err(|error| {
                     RuntimeError::from_sql(error, "cannot bind Job execution provider")
                 })?;
+        }
+        if let (Some(bindings_json), Some(bindings_digest)) = (
+            host_dependencies_json.as_deref(),
+            host_dependencies_digest.as_deref(),
+        ) {
+            transaction
+                .execute(
+                    "INSERT INTO job_host_dependencies(job_id,bindings_json,bindings_digest) VALUES(?1,?2,?3)",
+                    params![job_id, bindings_json, bindings_digest],
+                )
+                .map_err(|error| RuntimeError::from_sql(error, "cannot bind Job Host Dependencies"))?;
         }
         if let (Some(release), Some(binding_digest)) = (
             request.runtime_release_effect.as_ref(),
@@ -1080,6 +1165,66 @@ impl Registry {
                 ));
             }
         };
+        let host_committed_digest = match workspace_snapshot.get("hostDependenciesDigest") {
+            None => None,
+            Some(serde_json::Value::String(value)) => {
+                if validate_digest(value, "hostDependenciesDigest").is_err() {
+                    return Err(RuntimeError::new(
+                        RuntimeErrorCode::RegistryCorrupt,
+                        "stored Host Dependency commitment digest is invalid",
+                        Some("workspaceSnapshot.hostDependenciesDigest"),
+                        false,
+                    ));
+                }
+                Some(value.as_str())
+            }
+            Some(_) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "stored Host Dependency commitment digest is not text",
+                    Some("workspaceSnapshot.hostDependenciesDigest"),
+                    false,
+                ));
+            }
+        };
+        let host_row_digest: Option<String> = connection
+            .query_row(
+                "SELECT bindings_digest FROM job_host_dependencies WHERE job_id=?1",
+                [job_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot read Host Dependency commitment")
+            })?;
+        let host_digest = match (host_committed_digest, host_row_digest.as_deref()) {
+            (None, None) => None,
+            (None, Some(_)) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Host Dependency row exists without a committed Job marker",
+                    Some("hostDependencies"),
+                    false,
+                ));
+            }
+            (Some(_), None) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "committed Host Dependency row is missing",
+                    Some("hostDependencies"),
+                    false,
+                ));
+            }
+            (Some(committed), Some(row_digest)) if committed == row_digest => Some(committed),
+            (Some(_), Some(_)) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Host Dependency row digest does not match the Job commitment",
+                    Some("hostDependencies"),
+                    false,
+                ));
+            }
+        };
         let release_committed_digest = match workspace_snapshot.get("runtimeReleaseEffectDigest") {
             None => None,
             Some(serde_json::Value::String(value)) => {
@@ -1178,21 +1323,36 @@ impl Registry {
                 false,
             ));
         }
-        let expected_operation_digest = match release_digest {
-            Some(release_digest) => sha256_bytes(
+        let expected_operation_digest = match (host_digest, release_digest) {
+            (Some(host_digest), None) => sha256_bytes(
+                format!(
+                    "runtime-operation-v6\0{}\0{}\0{}\0{}",
+                    job.request_digest, job.execution_plan_digest, committed_digest, host_digest
+                )
+                .as_bytes(),
+            ),
+            (None, Some(release_digest)) => sha256_bytes(
                 format!(
                     "runtime-operation-v5\0{}\0{}\0{}\0{}",
                     job.request_digest, job.execution_plan_digest, committed_digest, release_digest
                 )
                 .as_bytes(),
             ),
-            None => sha256_bytes(
+            (None, None) => sha256_bytes(
                 format!(
                     "runtime-operation-v4\0{}\0{}\0{}",
                     job.request_digest, job.execution_plan_digest, committed_digest
                 )
                 .as_bytes(),
             ),
+            (Some(_), Some(_)) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Job cannot bind both Host Dependencies and Runtime Release side truth",
+                    Some("hostDependencies"),
+                    false,
+                ));
+            }
         };
         if job.operation_digest != expected_operation_digest {
             return Err(RuntimeError::new(
@@ -1228,6 +1388,107 @@ impl Registry {
             )
         })?;
         Ok(Some(snapshot))
+    }
+
+    pub(crate) fn host_dependencies(
+        &self,
+        job_id: &str,
+    ) -> RuntimeResult<Vec<HostDependencyBinding>> {
+        let connection = self.open_connection()?;
+        let job = load_job(&connection, job_id)?;
+        let workspace_snapshot: serde_json::Value =
+            serde_json::from_str(&job.workspace_snapshot_json).map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    format!("stored Workspace snapshot is invalid: {error}"),
+                    Some("workspaceSnapshot"),
+                    false,
+                )
+            })?;
+        let committed_digest = match workspace_snapshot.get("hostDependenciesDigest") {
+            None => None,
+            Some(serde_json::Value::String(value)) => {
+                validate_digest(value, "hostDependenciesDigest").map_err(|_| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::RegistryCorrupt,
+                        "stored Host Dependency commitment digest is invalid",
+                        Some("workspaceSnapshot.hostDependenciesDigest"),
+                        false,
+                    )
+                })?;
+                Some(value.clone())
+            }
+            Some(_) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "stored Host Dependency commitment digest is not text",
+                    Some("workspaceSnapshot.hostDependenciesDigest"),
+                    false,
+                ));
+            }
+        };
+        let row: Option<(String, String)> = connection
+            .query_row(
+                "SELECT bindings_json,bindings_digest FROM job_host_dependencies WHERE job_id=?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| RuntimeError::from_sql(error, "cannot read Job Host Dependencies"))?;
+        let (json, digest) = match (committed_digest.as_deref(), row) {
+            (None, None) => return Ok(Vec::new()),
+            (None, Some(_)) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Host Dependency row exists without a committed Job marker",
+                    Some("hostDependencies"),
+                    false,
+                ));
+            }
+            (Some(_), None) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "committed Host Dependency row is missing",
+                    Some("hostDependencies"),
+                    false,
+                ));
+            }
+            (Some(committed), Some((json, digest))) if committed == digest => (json, digest),
+            (Some(_), Some(_)) => {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Host Dependency row digest does not match the Job commitment",
+                    Some("hostDependencies"),
+                    false,
+                ));
+            }
+        };
+        if sha256_bytes(json.as_bytes()) != digest {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "stored Host Dependency digest does not match its bytes",
+                Some("hostDependencies"),
+                false,
+            ));
+        }
+        let bindings: Vec<HostDependencyBinding> =
+            serde_json::from_str(&json).map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    format!("stored Host Dependency bindings are invalid: {error}"),
+                    Some("hostDependencies"),
+                    false,
+                )
+            })?;
+        validate_host_dependency_bindings(&bindings, "hostDependencies").map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                format!("stored Host Dependency bindings violate their contract: {error}"),
+                Some("hostDependencies"),
+                false,
+            )
+        })?;
+        Ok(bindings)
     }
 
     pub fn get_attempt(&self, attempt_id: &str) -> RuntimeResult<AttemptRecord> {
@@ -3910,6 +4171,35 @@ fn validate_execution_provider_snapshot(
     Ok(())
 }
 
+fn validate_host_dependency_bindings(
+    bindings: &[HostDependencyBinding],
+    field: &str,
+) -> RuntimeResult<()> {
+    let mut previous_path: Option<&str> = None;
+    for (index, binding) in bindings.iter().enumerate() {
+        let binding_field = format!("{field}[{index}]");
+        let path = Path::new(&binding.path);
+        if !path.is_absolute() || binding.path.as_bytes().contains(&0) {
+            return Err(RuntimeError::invalid(
+                "Host Dependency path must be absolute and NUL-free",
+                &format!("{binding_field}.path"),
+            ));
+        }
+        validate_digest(
+            &binding.expected_digest,
+            &format!("{binding_field}.expectedDigest"),
+        )?;
+        if previous_path.is_some_and(|previous| previous >= binding.path.as_str()) {
+            return Err(RuntimeError::invalid(
+                "Host Dependencies must be sorted by unique path",
+                field,
+            ));
+        }
+        previous_path = Some(&binding.path);
+    }
+    Ok(())
+}
+
 fn validate_runtime_release_effect_binding(
     release: &RuntimeReleaseEffectBinding,
     request: &SubmitRequest,
@@ -4036,6 +4326,35 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
             return Err(RuntimeError::invalid(
                 "execution provider contract does not match execution target",
                 "executionProvider.contract",
+            ));
+        }
+    }
+    validate_host_dependency_bindings(&request.host_dependencies, "hostDependencies")?;
+    if !request.host_dependencies.is_empty() {
+        if request.plan.execution_target != super::ExecutionTarget::LocalLinux
+            || request.plan.execution_profile != super::ExecutionProfile::TrustedLocal
+        {
+            return Err(RuntimeError::invalid(
+                "Host Dependencies require trusted_local local_linux execution",
+                "hostDependencies",
+            ));
+        }
+        if request.runtime_release_effect.is_some() {
+            return Err(RuntimeError::invalid(
+                "Host Dependencies cannot be attached to Runtime Release Jobs",
+                "hostDependencies",
+            ));
+        }
+        if !matches!(
+            request
+                .execution_provider
+                .as_ref()
+                .map(|provider| provider.contract),
+            Some(ExecutionProviderContract::LocalLinuxRunnerV1)
+        ) {
+            return Err(RuntimeError::invalid(
+                "Host Dependencies require a committed local Linux Runner",
+                "executionProvider",
             ));
         }
     }

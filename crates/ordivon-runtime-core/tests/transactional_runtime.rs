@@ -2,12 +2,12 @@
 
 use ordivon_runtime_core::{
     create_git_workspace, remove_git_workspace, write_workspace_text, ArtifactReadRequest,
-    AttemptState, ExecutionBudget, ForeignReference, GitWorkspaceCreateRequest, InputAuthority,
-    InputBindingRequest, RegistryConfig, Runtime, RuntimeConfig, RuntimeExecutionPlan,
-    RuntimeJobListRequest, SubmitRequest, TaskCancelRequest, TaskObserveRequest,
-    TaskObserveWaitUntil, TaskRunRequest, UniversalExecutionRequest, UniversalExecutorConfig,
-    WindowsExecutionConfig, WorkspaceCloseRequest, WorkspaceMutateRequest, WorkspaceMutation,
-    WorkspaceMutationMode, WorkspaceWriteRequest, RUNTIME_SCHEMA_VERSION,
+    AttemptState, ExecutionBudget, ForeignReference, GitWorkspaceCreateRequest,
+    HostDependencyBinding, InputAuthority, InputBindingRequest, RegistryConfig, Runtime,
+    RuntimeConfig, RuntimeExecutionPlan, RuntimeJobListRequest, SubmitRequest, TaskCancelRequest,
+    TaskObserveRequest, TaskObserveWaitUntil, TaskRunRequest, UniversalExecutionRequest,
+    UniversalExecutorConfig, WindowsExecutionConfig, WorkspaceCloseRequest, WorkspaceMutateRequest,
+    WorkspaceMutation, WorkspaceMutationMode, WorkspaceWriteRequest, RUNTIME_SCHEMA_VERSION,
     UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 use rusqlite::Connection;
@@ -131,6 +131,7 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
             execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
             windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 30_000,
         stdout_tail_bytes: 4096,
@@ -400,6 +401,7 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
             execution_target: ordivon_runtime_core::ExecutionTarget::WindowsNative,
             windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 30_000,
         stdout_tail_bytes: 16_384,
@@ -1331,6 +1333,7 @@ fn runtime_windows_native_wsl_restart_prepare_or_recover() {
                 execution_target: ordivon_runtime_core::ExecutionTarget::WindowsNative,
                 windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
                 foreign_references: Vec::new(),
+                host_dependencies: Vec::new(),
             },
             wait_ms: 0,
             stdout_tail_bytes: 4096,
@@ -1448,6 +1451,7 @@ fn runtime_windows_native_wsl_restart_prepare_or_recover() {
             execution_target: ordivon_runtime_core::ExecutionTarget::WindowsNative,
             windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 4096,
@@ -1841,6 +1845,7 @@ impl IntegrationContext {
                 execution_target: ordivon_runtime_core::ExecutionTarget::LocalLinux,
                 windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
                 foreign_references: Vec::new(),
+                host_dependencies: Vec::new(),
             },
             wait_ms,
             stdout_tail_bytes: 8192,
@@ -2067,6 +2072,7 @@ print("WRITE_OK=" + pathlib.Path("contained-output.txt").read_text(), flush=True
                 generation: Some("1".to_string()),
                 digest: None,
             }],
+            host_dependencies: Vec::new(),
         },
         wait_ms: 30_000,
         stdout_tail_bytes: 8192,
@@ -2998,6 +3004,7 @@ impl IntegrationContext {
                 principal: "principal:integration".to_string(),
             },
             global_limit,
+            host_dependencies: Vec::new(),
         }
     }
 }
@@ -3459,6 +3466,7 @@ fn runtime_finance_i8_graduation_matches_canonical_semantics_with_job_owned_inpu
                 generation: Some(finance_revision.clone()),
                 digest: None,
             }],
+            host_dependencies: Vec::new(),
         },
         wait_ms: 30_000,
         stdout_tail_bytes: 64 * 1024,
@@ -3746,6 +3754,69 @@ fn runtime_provider_bound_job_rejects_linux_runner_drift_before_dispatch() {
             .unwrap()
             .executable_digest
     );
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_host_dependency_drift_fails_before_dispatch() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("host-dependency-drift");
+    let runtime = context.runtime(1_000);
+    let dependency = context.root.join("runtime-prerequisite.bin");
+    fs::write(&dependency, b"HOST_DEP_V1").unwrap();
+    let expected_digest = file_digest(&dependency);
+    let mut submit = context.direct_submit("request:host-dependency-drift", 1);
+    submit.execution_provider = Some(ordivon_runtime_core::ExecutionProviderSnapshot {
+        contract: ordivon_runtime_core::ExecutionProviderContract::LocalLinuxRunnerV1,
+        executable_digest: file_digest(&context.executor.runner_path),
+        wsl_distribution: None,
+    });
+    submit.host_dependencies = vec![HostDependencyBinding {
+        path: dependency.to_string_lossy().into_owned(),
+        expected_digest: expected_digest.clone(),
+    }];
+    let created = created_admission(runtime.registry().submit(&submit).unwrap());
+    assert_eq!(created.attempt.state, AttemptState::Accepted);
+    fs::write(&dependency, b"HOST_DEP_V2").unwrap();
+    assert_ne!(file_digest(&dependency), expected_digest);
+    let observed = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: created.job.job_id.clone(),
+            wait_ms: 5_000,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 4_096,
+            stderr_tail_bytes: 4_096,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
+    assert_eq!(observed.status, "failed");
+    assert_eq!(
+        observed.execution_reason_code.as_deref(),
+        Some("HOST_DEPENDENCY_PRECONDITION_DRIFT")
+    );
+    assert!(observed.execution_terminal);
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&created.job.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(attempt.state, AttemptState::Failed);
+    assert!(attempt.bundle_digest.is_none());
+    assert!(attempt.runner_start_digest.is_none());
+    let unit = Command::new("systemctl")
+        .args([
+            "show",
+            &attempt.unit_name,
+            "--property=LoadState",
+            "--value",
+        ])
+        .output()
+        .unwrap();
+    assert_ne!(String::from_utf8_lossy(&unit.stdout).trim(), "loaded");
 }
 
 #[test]

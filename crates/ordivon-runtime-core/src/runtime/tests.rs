@@ -206,6 +206,7 @@ fn request(sandbox: &Sandbox, client_request_id: &str, global_limit: u32) -> Sub
             principal: "principal:test".to_string(),
         },
         global_limit,
+        host_dependencies: Vec::new(),
     }
 }
 
@@ -1202,6 +1203,7 @@ fn representation_cardinality_is_not_runtime_admission_policy() {
             execution_target: ExecutionTarget::LocalLinux,
             windows_authority: super::WindowsAuthority::Limited,
             foreign_references,
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -1235,6 +1237,7 @@ fn operator_runtime_and_output_ceilings_are_enforced_before_admission() {
             execution_target: super::ExecutionTarget::LocalLinux,
             windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -1278,6 +1281,7 @@ fn oversized_exec_string_is_rejected_before_admission() {
             execution_target: super::ExecutionTarget::LocalLinux,
             windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -1328,6 +1332,7 @@ fn request_identity_excludes_observation_preferences_and_capacity_policy() {
             execution_target: super::ExecutionTarget::LocalLinux,
             windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -1378,6 +1383,30 @@ fn request_identity_excludes_observation_preferences_and_capacity_policy() {
         digest
     );
 
+    let mut host_bound = base.clone();
+    host_bound.execution.host_dependencies = vec![
+        HostDependencyBinding {
+            path: "/opt/runtime/b.so".to_string(),
+            expected_digest: self::digest(b"b-v1"),
+        },
+        HostDependencyBinding {
+            path: "/opt/runtime/a.so".to_string(),
+            expected_digest: self::digest(b"a-v1"),
+        },
+    ];
+    let host_bound_digest = operation_request_identity_digest(&host_bound).unwrap();
+    assert_ne!(host_bound_digest, digest);
+    host_bound.execution.host_dependencies.reverse();
+    assert_eq!(
+        operation_request_identity_digest(&host_bound).unwrap(),
+        host_bound_digest
+    );
+    host_bound.execution.host_dependencies[0].expected_digest = self::digest(b"changed");
+    assert_ne!(
+        operation_request_identity_digest(&host_bound).unwrap(),
+        host_bound_digest
+    );
+
     let mut changed = base;
     changed.execution.args.push("different".to_string());
     assert_ne!(operation_request_identity_digest(&changed).unwrap(), digest);
@@ -1407,6 +1436,7 @@ fn elevated_windows_authority_is_rejected_for_local_linux_before_admission() {
             execution_target: super::ExecutionTarget::LocalLinux,
             windows_authority: super::WindowsAuthority::Elevated,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -1439,6 +1469,7 @@ fn input_bound_task_request(workspace_id: &str, client_request_id: &str) -> Task
             execution_target: super::ExecutionTarget::LocalLinux,
             windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -1512,6 +1543,7 @@ fn input_bound_proposal_identity_preserves_proposal_and_binding_semantics() {
             execution_target: super::ExecutionTarget::LocalLinux,
             windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -1698,6 +1730,7 @@ fn execution_profile_and_foreign_references_are_part_of_request_identity() {
             execution_target: super::ExecutionTarget::LocalLinux,
             windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -1777,6 +1810,7 @@ fn duplicate_foreign_references_are_rejected_before_admission() {
             execution_target: super::ExecutionTarget::LocalLinux,
             windows_authority: super::WindowsAuthority::Limited,
             foreign_references: vec![reference.clone(), reference],
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -2168,6 +2202,7 @@ fn proposal_identity_preserves_omission_and_normalizes_equivalent_paths() {
             execution_target: super::ExecutionTarget::LocalLinux,
             windows_authority: super::WindowsAuthority::Limited,
             foreign_references: Vec::new(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: 0,
         stdout_tail_bytes: 0,
@@ -5507,6 +5542,135 @@ fn committed_execution_provider_missing_or_tampered_side_truth_fails_closed() {
             .unwrap_err();
         assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt, "{mode}");
     }
+}
+
+#[test]
+fn host_dependency_commitment_binds_operation_v6_without_changing_plan_shape() {
+    let sandbox = Sandbox::new("host-dependency-commitment", 5_000);
+    let provider = ExecutionProviderSnapshot {
+        contract: ExecutionProviderContract::LocalLinuxRunnerV1,
+        executable_digest: digest(b"runner-v1"),
+        wsl_distribution: None,
+    };
+    let dependency = HostDependencyBinding {
+        path: "/opt/ordivon/runtime-dependency.so".to_string(),
+        expected_digest: digest(b"dependency-v1"),
+    };
+    let mut submission = request(&sandbox, "request:host-dependency", 4);
+    submission.request_identity_digest = Some(format!(
+        "{}{}",
+        REQUEST_IDENTITY_PREFIX,
+        digest(b"host-dependency-proposal")
+    ));
+    submission.execution_provider = Some(provider.clone());
+    submission.host_dependencies = vec![dependency.clone()];
+    let created = created(sandbox.registry.submit(&submission).unwrap());
+    let plan: serde_json::Value = serde_json::from_str(&created.job.execution_plan_json).unwrap();
+    assert!(plan.get("hostDependencies").is_none());
+    assert_eq!(
+        sandbox
+            .registry
+            .host_dependencies(&created.job.job_id)
+            .unwrap(),
+        vec![dependency.clone()]
+    );
+    let provider_digest = digest(serde_json::to_string(&provider).unwrap().as_bytes());
+    let host_digest = digest(serde_json::to_string(&vec![dependency]).unwrap().as_bytes());
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&created.job.workspace_snapshot_json).unwrap();
+    assert_eq!(snapshot["hostDependenciesDigest"], host_digest);
+    assert_eq!(
+        created.job.operation_digest,
+        digest(
+            format!(
+                "runtime-operation-v6\0{}\0{}\0{}\0{}",
+                created.job.request_digest,
+                created.job.execution_plan_digest,
+                provider_digest,
+                host_digest
+            )
+            .as_bytes()
+        )
+    );
+}
+
+#[test]
+fn committed_host_dependency_missing_or_tampered_side_truth_fails_closed() {
+    for mode in ["missing", "tampered"] {
+        let sandbox = Sandbox::new(&format!("host-dependency-{mode}"), 5_000);
+        let mut submission = request(&sandbox, &format!("request:host-dependency-{mode}"), 4);
+        submission.execution_provider = Some(ExecutionProviderSnapshot {
+            contract: ExecutionProviderContract::LocalLinuxRunnerV1,
+            executable_digest: digest(b"runner-v1"),
+            wsl_distribution: None,
+        });
+        submission.host_dependencies = vec![HostDependencyBinding {
+            path: "/opt/ordivon/runtime-dependency.so".to_string(),
+            expected_digest: digest(b"dependency-v1"),
+        }];
+        let created = created(sandbox.registry.submit(&submission).unwrap());
+        let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+        match mode {
+            "missing" => {
+                connection
+                    .execute(
+                        "DELETE FROM job_host_dependencies WHERE job_id=?1",
+                        [&created.job.job_id],
+                    )
+                    .unwrap();
+            }
+            "tampered" => {
+                connection
+                    .execute(
+                        "UPDATE job_host_dependencies SET bindings_json='[]' WHERE job_id=?1",
+                        [&created.job.job_id],
+                    )
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let error = sandbox
+            .registry
+            .host_dependencies(&created.job.job_id)
+            .unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt, "{mode}");
+        if mode == "missing" {
+            let error = sandbox
+                .registry
+                .execution_provider(&created.job.job_id)
+                .unwrap_err();
+            assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt, "{mode}");
+        } else {
+            assert!(sandbox
+                .registry
+                .execution_provider(&created.job.job_id)
+                .unwrap()
+                .is_some());
+        }
+    }
+}
+
+#[test]
+fn host_dependency_storage_is_recreated_without_advancing_schema_version() {
+    let sandbox = Sandbox::new("host-dependency-storage", 5_000);
+    let config = sandbox.registry.config().clone();
+    let connection = Connection::open(&config.db_path).unwrap();
+    connection
+        .execute("DROP TABLE job_host_dependencies", [])
+        .unwrap();
+    drop(connection);
+    let registry = Registry::initialize(config).unwrap();
+    let connection = Connection::open(&registry.config().db_path).unwrap();
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_host_dependencies')",
+        [], |row| row.get(0)).unwrap();
+    assert!(exists);
+    let max_version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(max_version, 4);
 }
 
 #[test]

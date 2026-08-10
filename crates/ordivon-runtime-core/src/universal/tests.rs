@@ -1439,6 +1439,7 @@ fn runner_rejects_workspace_source_drift_before_spawning_target() {
         timeout_ms: 2_000,
         stdout_limit_bytes: 1_024,
         stderr_limit_bytes: 1_024,
+        host_dependencies: Vec::new(),
     };
     write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
     run_task_runner(&task_dir).unwrap();
@@ -1455,6 +1456,66 @@ fn runner_rejects_workspace_source_drift_before_spawning_target() {
         .infrastructure_error
         .as_deref()
         .is_some_and(|message| message.contains("WorkspaceStateMismatch")));
+    assert!(!workspace.join("effect-marker").exists());
+}
+
+#[test]
+fn runner_rejects_host_dependency_drift_before_spawning_target() {
+    let sandbox = Sandbox::new("runner-host-dependency-drift");
+    let workspace = sandbox.root.join("workspace-host-dependency-drift");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        workspace.join("effect.py"),
+        "from pathlib import Path\nPath('effect-marker').write_text('spawned')\n",
+    )
+    .unwrap();
+    let dependency = sandbox.root.join("host-dependency.so");
+    fs::write(&dependency, b"CHANGED").unwrap();
+    let task_dir = sandbox.root.join("task-host-dependency-drift");
+    fs::create_dir_all(&task_dir).unwrap();
+    let executable = real_executable("/usr/bin/python3");
+    let request = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        payload: None,
+        inherit_host_environment: true,
+        task_id: "task-host-dependency-drift".to_string(),
+        workspace_id: "workspace-host-dependency-drift".to_string(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
+        input_presentation_root: None,
+        input_commitments: Vec::new(),
+        host_dependencies: vec![RunnerHostDependencyCommitment {
+            path: dependency.to_string_lossy().into_owned(),
+            digest: sha256_bytes(b"ORIGINAL"),
+        }],
+        executable: executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&executable).unwrap(),
+        args: vec!["effect.py".to_string()],
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        steps: Vec::new(),
+        timeout_ms: 2_000,
+        stdout_limit_bytes: 1_024,
+        stderr_limit_bytes: 1_024,
+    };
+    write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
+    run_task_runner(&task_dir).unwrap();
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result.status, TaskTerminalStatus::Failed);
+    assert!(result.exit_code.is_none());
+    assert_eq!(
+        result.infrastructure_error_code.as_deref(),
+        Some("INPUT_STATE_MISMATCH")
+    );
+    assert!(result
+        .infrastructure_error
+        .as_deref()
+        .is_some_and(|message| message.contains("Host Dependency")));
     assert!(!workspace.join("effect-marker").exists());
 }
 
@@ -1503,6 +1564,7 @@ fn runner_rejects_immutable_input_drift_before_spawning_target() {
         timeout_ms: 2_000,
         stdout_limit_bytes: 1_024,
         stderr_limit_bytes: 1_024,
+        host_dependencies: Vec::new(),
     };
     write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
     run_task_runner(&task_dir).unwrap();
@@ -1568,6 +1630,7 @@ fn runner_rejects_undeclared_input_directory_before_spawning_target() {
         timeout_ms: 2_000,
         stdout_limit_bytes: 1_024,
         stderr_limit_bytes: 1_024,
+        host_dependencies: Vec::new(),
     };
     write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
     run_task_runner(&task_dir).unwrap();
@@ -2454,6 +2517,7 @@ fn runner_executes_model_authored_script_and_bounds_output() {
         timeout_ms: 2000,
         stdout_limit_bytes: 8,
         stderr_limit_bytes: 9,
+        host_dependencies: Vec::new(),
     };
     write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
     run_task_runner(&task_dir).unwrap();
@@ -2516,6 +2580,7 @@ fn runner_shared_overall_deadline_is_independent_of_step_timeout_sum() {
         timeout_ms: 500,
         stdout_limit_bytes: 1024,
         stderr_limit_bytes: 1024,
+        host_dependencies: Vec::new(),
     };
     assert!(fast.steps.iter().map(|step| step.timeout_ms).sum::<u64>() > fast.timeout_ms);
     write_json_atomic(&fast_dir.join("request.json"), &fast).unwrap();
@@ -2581,6 +2646,7 @@ fn runner_timeout_is_a_durable_failed_result() {
         timeout_ms: 50,
         stdout_limit_bytes: 1024,
         stderr_limit_bytes: 1024,
+        host_dependencies: Vec::new(),
     };
     write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
     run_task_runner(&task_dir).unwrap();
@@ -2621,6 +2687,7 @@ fn runner_timeout_terminates_descendant_pipe_holders_before_result() {
         timeout_ms: 50,
         stdout_limit_bytes: 1024,
         stderr_limit_bytes: 1024,
+        host_dependencies: Vec::new(),
     };
     write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
     let started = std::time::Instant::now();

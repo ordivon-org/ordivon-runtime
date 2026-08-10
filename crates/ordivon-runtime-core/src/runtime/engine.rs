@@ -27,8 +27,8 @@ use super::{
     ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult, ArtifactRegistration,
     AttemptRecord, AttemptState, AttemptTerminationIntent, DurableWorkspacePatchRequest,
     DurableWorkspacePatchResult, EffectiveInputBinding, ExecutionProviderContract,
-    ExecutionProviderSnapshot, InputAccessMode, InputAuthority, InputBindingRequest,
-    JobDesiredState, JobResolution, Registry, RegistryConfig, RunnerIdentity,
+    ExecutionProviderSnapshot, HostDependencyBinding, InputAccessMode, InputAuthority,
+    InputBindingRequest, JobDesiredState, JobResolution, Registry, RegistryConfig, RunnerIdentity,
     RuntimeArtifactRecord, RuntimeCapabilities, RuntimeError, RuntimeErrorCode,
     RuntimeExecutionPlan, RuntimeExecutionStep, RuntimeExecutionTargetCapability,
     RuntimeJobListRequest, RuntimeJobListResult, RuntimeReleaseAdmission, RuntimeReleaseContract,
@@ -48,11 +48,11 @@ use crate::universal::{
     workspace_cleanup_dependents, workspace_git_common_dir_at, workspace_head_and_dirty_at,
     workspace_head_revision, workspace_source_state_digest, write_bytes_atomic, write_json_atomic,
     CompactWorkspaceOpenResult, GitWorkspaceCreateRequest, RunnerExecutionStep,
-    RunnerInputCommitment, RunnerPayloadConfig, RunnerStartEvidence, RunnerTaskProgress,
-    RunnerTaskRequest, RunnerTaskResult, UniversalExecutorConfig, WorkspaceCloseRequest,
-    WorkspaceCloseResult, WorkspaceDiffRequest, WorkspaceMutateRequest, WorkspaceMutateResult,
-    WorkspacePatchPlanState, WorkspacePatchRequest, WorkspacePatchResult,
-    UNIVERSAL_EXEC_SCHEMA_VERSION,
+    RunnerHostDependencyCommitment, RunnerInputCommitment, RunnerPayloadConfig,
+    RunnerStartEvidence, RunnerTaskProgress, RunnerTaskRequest, RunnerTaskResult,
+    UniversalExecutorConfig, WorkspaceCloseRequest, WorkspaceCloseResult, WorkspaceDiffRequest,
+    WorkspaceMutateRequest, WorkspaceMutateResult, WorkspacePatchPlanState, WorkspacePatchRequest,
+    WorkspacePatchResult, UNIVERSAL_EXEC_SCHEMA_VERSION,
 };
 
 const RUNNER_REQUEST_FILE: &str = "request.json";
@@ -266,6 +266,8 @@ struct TerminalProcessEvidence {
     windows_execution_context: Option<super::WindowsExecutionContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     foreign_references: Vec<super::ForeignReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    host_dependencies: Vec<HostDependencyBinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     input_set_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -538,6 +540,7 @@ impl Runtime {
                 self.current_execution_provider_snapshot(request.execution.execution_target)?,
             ),
             runtime_release_effect: None,
+            host_dependencies: Vec::new(),
             plan,
             global_limit: request.global_limit,
         };
@@ -634,6 +637,7 @@ impl Runtime {
     ) -> RuntimeResult<String> {
         self.reconcile_recoverable_orphans()?;
         let _ = self.reconcile_workspace(&request.execution.workspace_id)?;
+        let host_dependencies = self.validate_host_dependencies(request)?;
         let plan = self.resolve_plan(request)?;
         let submit = SubmitRequest {
             schema_version: RUNTIME_SCHEMA_VERSION,
@@ -643,6 +647,7 @@ impl Runtime {
                 self.current_execution_provider_snapshot(request.execution.execution_target)?,
             ),
             runtime_release_effect: None,
+            host_dependencies,
             plan,
             global_limit: request.global_limit,
         };
@@ -721,6 +726,7 @@ impl Runtime {
                 execution_target: proposal.execution.execution_target,
                 windows_authority: proposal.execution.windows_authority,
                 foreign_references: proposal.execution.foreign_references.clone(),
+                host_dependencies: proposal.execution.host_dependencies.clone(),
             },
             wait_ms: proposal.wait_ms,
             stdout_tail_bytes: proposal.stdout_tail_bytes,
@@ -837,6 +843,7 @@ impl Runtime {
                 self.current_execution_provider_snapshot(resolved.execution.execution_target)?,
             ),
             runtime_release_effect: Some(binding.clone()),
+            host_dependencies: Vec::new(),
             plan,
             global_limit: resolved.global_limit,
         };
@@ -1386,6 +1393,7 @@ impl Runtime {
             windows_authorities: Vec::new(),
             structured_plan: true,
             immutable_inputs: true,
+            host_dependency_commitments: true,
             availability_issue: linux_provider
                 .is_none()
                 .then(|| "EXECUTION_PROVIDER_UNAVAILABLE".to_string()),
@@ -1429,6 +1437,7 @@ impl Runtime {
             windows_authorities,
             structured_plan: false,
             immutable_inputs: false,
+            host_dependency_commitments: false,
             execution_provider: windows_provider,
             availability_issue: windows_issue,
         };
@@ -1460,6 +1469,129 @@ impl Runtime {
                 Some("executionProvider"),
                 false,
             ));
+        }
+        Ok(())
+    }
+
+    fn validate_host_dependencies(
+        &self,
+        request: &TaskRunRequest,
+    ) -> RuntimeResult<Vec<HostDependencyBinding>> {
+        if request.execution.host_dependencies.is_empty() {
+            return Ok(Vec::new());
+        }
+        if request.execution.execution_target != super::ExecutionTarget::LocalLinux
+            || request.execution.execution_profile != super::ExecutionProfile::TrustedLocal
+        {
+            return Err(RuntimeError::invalid(
+                "Host Dependencies require trusted_local local_linux execution",
+                "execution.hostDependencies",
+            ));
+        }
+        let mut bindings = request.execution.host_dependencies.clone();
+        bindings.sort_by(|left, right| left.path.cmp(&right.path));
+        let mut previous: Option<&str> = None;
+        for (index, binding) in bindings.iter().enumerate() {
+            let path = Path::new(&binding.path);
+            if !path.is_absolute() || binding.path.as_bytes().contains(&0) {
+                return Err(RuntimeError::invalid(
+                    "Host Dependency path must be absolute and NUL-free",
+                    &format!("execution.hostDependencies[{index}].path"),
+                ));
+            }
+            if previous == Some(binding.path.as_str()) {
+                return Err(RuntimeError::invalid(
+                    "Host Dependency paths must be unique",
+                    "execution.hostDependencies",
+                ));
+            }
+            previous = Some(&binding.path);
+            let expected = binding
+                .expected_digest
+                .strip_prefix("sha256:")
+                .ok_or_else(|| {
+                    RuntimeError::invalid(
+                        "Host Dependency expectedDigest must use sha256",
+                        &format!("execution.hostDependencies[{index}].expectedDigest"),
+                    )
+                })?;
+            if expected.len() != 64
+                || !expected
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(RuntimeError::invalid(
+                    "Host Dependency expectedDigest must contain 64 lowercase hexadecimal characters",
+                    &format!("execution.hostDependencies[{index}].expectedDigest"),
+                ));
+            }
+            let metadata = fs::symlink_metadata(path).map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::InvalidRequest,
+                    format!("Host Dependency {} is unavailable: {error}", binding.path),
+                    Some("execution.hostDependencies"),
+                    false,
+                )
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(RuntimeError::invalid(
+                    "Host Dependency must be a regular non-symlink file",
+                    &format!("execution.hostDependencies[{index}].path"),
+                ));
+            }
+            let observed = sha256_file(path).map_err(map_universal_error)?;
+            if observed != binding.expected_digest {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::InvalidRequest,
+                    format!(
+                        "Host Dependency {} does not match expected digest: expected {}, observed {}",
+                        binding.path, binding.expected_digest, observed
+                    ),
+                    Some("execution.hostDependencies"),
+                    false,
+                ));
+            }
+        }
+        Ok(bindings)
+    }
+
+    fn verify_committed_host_dependencies(&self, job_id: &str) -> RuntimeResult<()> {
+        for binding in self.registry.host_dependencies(job_id)?.iter() {
+            let path = Path::new(&binding.path);
+            let metadata = fs::symlink_metadata(path).map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::WorkspaceStateMismatch,
+                    format!(
+                        "committed Host Dependency {} is unavailable before dispatch: {error}",
+                        binding.path
+                    ),
+                    Some("hostDependencies"),
+                    false,
+                )
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::WorkspaceStateMismatch,
+                    format!(
+                        "committed Host Dependency {} is not a regular non-symlink file",
+                        binding.path
+                    ),
+                    Some("hostDependencies"),
+                    false,
+                ));
+            }
+            let observed = sha256_file(path).map_err(map_universal_error)?;
+            if observed != binding.expected_digest {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::WorkspaceStateMismatch,
+                    format!(
+                        "committed Host Dependency {} changed after admission: expected {}, observed {}",
+                        binding.path, binding.expected_digest, observed
+                    ),
+                    Some("hostDependencies"),
+                    false,
+                ));
+            }
         }
         Ok(())
     }
@@ -1770,6 +1902,21 @@ impl Runtime {
             }
             return Err(error);
         }
+        if let Err(error) = self.verify_committed_host_dependencies(&attempt.job_id) {
+            if matches!(
+                error.code,
+                RuntimeErrorCode::WorkspaceStateMismatch | RuntimeErrorCode::InvalidRequest
+            ) {
+                self.commit_control_terminal(
+                    attempt,
+                    AttemptState::Failed,
+                    "HOST_DEPENDENCY_PRECONDITION_DRIFT",
+                    Some(error.to_string()),
+                )?;
+                return Ok(());
+            }
+            return Err(error);
+        }
         if let Err(error) = self.ensure_job_input_ownership(&attempt.job_id) {
             if matches!(
                 error.code,
@@ -2005,6 +2152,15 @@ impl Runtime {
                         .into_owned(),
                     digest: input.digest.clone(),
                     byte_length: input.byte_length,
+                })
+                .collect(),
+            host_dependencies: self
+                .registry
+                .host_dependencies(&attempt.job_id)?
+                .into_iter()
+                .map(|dependency| RunnerHostDependencyCommitment {
+                    path: dependency.path,
+                    digest: dependency.expected_digest,
                 })
                 .collect(),
             executable: plan.executable.clone(),
@@ -3806,6 +3962,7 @@ fn append_terminal_evidence_for_commit_with_observation(
         windows_authority: plan.windows_authority,
         windows_execution_context: plan.windows_execution_context,
         foreign_references: plan.foreign_references,
+        host_dependencies: registry.host_dependencies(&attempt.job_id)?,
         input_set_id: plan.input_set_id,
         effective_inputs: plan.effective_inputs,
         executable: plan.executable,
@@ -4799,6 +4956,7 @@ fn validate_run_proposal_structure(proposal: &super::TaskRunProposal) -> Runtime
             execution_target: proposal.execution.execution_target,
             windows_authority: proposal.execution.windows_authority,
             foreign_references: proposal.execution.foreign_references.clone(),
+            host_dependencies: Vec::new(),
         },
         wait_ms: proposal.wait_ms,
         stdout_tail_bytes: proposal.stdout_tail_bytes,
@@ -5524,6 +5682,7 @@ mod trusted_systemd_command_tests {
                 execution_target: crate::runtime::ExecutionTarget::LocalLinux,
                 windows_authority: crate::runtime::WindowsAuthority::Limited,
                 foreign_references: Vec::new(),
+                host_dependencies: Vec::new(),
             },
             wait_ms: 0,
             stdout_tail_bytes: 0,
@@ -5799,6 +5958,7 @@ mod trusted_systemd_command_tests {
                 execution_target: crate::runtime::ExecutionTarget::LocalLinux,
                 windows_authority: crate::runtime::WindowsAuthority::Limited,
                 foreign_references: Vec::new(),
+                host_dependencies: Vec::new(),
             },
             wait_ms: 0,
             stdout_tail_bytes: 0,
@@ -5958,6 +6118,7 @@ mod trusted_systemd_command_tests {
                 execution_target: crate::runtime::ExecutionTarget::LocalLinux,
                 windows_authority: crate::runtime::WindowsAuthority::Limited,
                 foreign_references: Vec::new(),
+                host_dependencies: Vec::new(),
             },
             wait_ms: 0,
             stdout_tail_bytes: 0,
@@ -5991,6 +6152,7 @@ mod trusted_systemd_command_tests {
                 execution_target: crate::runtime::ExecutionTarget::LocalLinux,
                 windows_authority: crate::runtime::WindowsAuthority::Limited,
                 foreign_references: Vec::new(),
+                host_dependencies: Vec::new(),
             },
             wait_ms: 0,
             stdout_tail_bytes: 0,

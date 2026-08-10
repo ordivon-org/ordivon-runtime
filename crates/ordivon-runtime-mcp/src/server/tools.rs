@@ -4,7 +4,7 @@ use super::*;
 impl RuntimeServer {
     #[tool(
         name = "runtime.describe",
-        description = "Project the current Runtime node's execution affordances without reconciling, dispatching, selecting, or mutating work. Returns operator ceilings, allowed executable roots, named immutable-input authorities without host authority paths, and per-target configured/available state including current Runtime-owned provider identity. Windows authority availability is probed read-only; this projection never becomes admission authority, and new Jobs independently bind current provider truth at admission.",
+        description = "Project the current Runtime node's execution affordances without reconciling, dispatching, selecting, or mutating work. Returns operator ceilings, allowed executable roots, named immutable-input authorities without host authority paths, and per-target configured/available state including current Runtime-owned provider identity and whether explicit Host Dependency commitments are supported. Windows authority availability is probed read-only; this projection never becomes admission authority, and new Jobs independently bind current provider truth at admission.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<RuntimeDescribeResult>>(),
         annotations(
             title = "Describe runtime affordances",
@@ -224,6 +224,7 @@ impl RuntimeServer {
                         generation: Some(request.commit.clone()),
                         digest: Some(request.candidate_manifest_digest.clone()),
                     }],
+                    host_dependencies: Vec::new(),
                 },
                 wait_ms: 0,
                 stdout_tail_bytes: 0,
@@ -590,7 +591,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.exec",
-        description = "Run one effect-opaque command inside a workspace with the installed service user's trusted-local authority. execution.executable must be an absolute host path and execution.cwdRelative must be relative to the Workspace root. Duplicate clientRequestId admission is idempotent and current Git source state is bound. Omitted waitMs performs only a brief 2-second observation after durable admission; long work returns the same Job for task.observe rather than holding the MCP request open. Results expose exact Attempt state, execution and delivery disposition, recovery requirement, and explicitly do not claim semantic completion or external-effect idempotency.",
+        description = "Run one effect-opaque command inside a workspace with the installed service user's trusted-local authority. execution.executable must be an absolute host path and execution.cwdRelative must be relative to the Workspace root. For trusted_local local_linux only, execution.hostDependencies may declare known absolute regular host prerequisite files with exact SHA-256 digests; Runtime binds them into operation identity and revalidates them at admission, before dispatch, and Runner pre-spawn. This is an explicit partial prerequisite commitment, not automatic dependency discovery or a complete environment snapshot. Duplicate clientRequestId admission is idempotent and exact replay resolves the existing Job before consulting current dependency bytes. Omitted waitMs performs only a brief 2-second observation after durable admission; long work returns the same Job for task.observe rather than holding the MCP request open. Results expose exact Attempt state, execution and delivery disposition, recovery requirement, and explicitly do not claim semantic completion or external-effect idempotency.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),
         annotations(
             title = "Execute transactional workspace job",
@@ -643,7 +644,7 @@ impl RuntimeServer {
 
     #[tool(
         name = "workspace.execPlan",
-        description = "Run an ordered structured execution plan inside one Workspace. Steps use absolute executables and explicit args, run sequentially, stop on the first failure by default, and continue only when that step explicitly sets continueOnError. Omitted waitMs performs only a brief 2-second observation after durable admission; long work returns the same Job for task.observe. The Job exposes step progress plus exact Attempt state, execution and delivery disposition, and recovery requirement without asking the caller to infer them from output.",
+        description = "Run an ordered structured execution plan inside one Workspace. Steps use absolute executables and explicit args, run sequentially, stop on the first failure by default, and continue only when that step explicitly sets continueOnError. For trusted_local local_linux only, execution.hostDependencies may bind known absolute regular host prerequisite files by exact SHA-256 across the whole Job; Runtime validates them at admission, before dispatch, and Runner pre-spawn without pretending to infer a complete environment closure. Exact replay resolves the committed Job before current dependency checks. Omitted waitMs performs only a brief 2-second observation after durable admission; long work returns the same Job for task.observe. The Job exposes step progress plus exact Attempt state, execution and delivery disposition, and recovery requirement without asking the caller to infer them from output.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),
         annotations(
             title = "Execute fail-fast workspace plan",
