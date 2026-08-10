@@ -747,7 +747,10 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             and linux_description.get("structuredPlan") is True
             and linux_description.get("immutableInputs") is True
             and linux_description.get("hostDependencyCommitments") is True
+            and linux_description.get("hostDependencyContinuityScope")
+            == "runtime_host_namespace_path_witness"
             and described_targets.get("windows_native", {}).get("hostDependencyCommitments") is False
+            and described_targets.get("windows_native", {}).get("hostDependencyContinuityScope") is None
             and isinstance(linux_description.get("executionProvider"), dict)
             and str(linux_description.get("executionProvider", {}).get("executableDigest", "")).startswith(
                 "sha256:"
@@ -1302,7 +1305,9 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             host_dependency_evidence.get("hostDependencies")
             == [{"path": str(host_dependency), "expectedDigest": host_dependency_v1_digest}]
             and host_dependency_evidence.get("hostDependencyContinuity")
-            == "no_runtime_path_drift_observed",
+            == "no_runtime_path_drift_observed"
+            and host_dependency_evidence.get("hostDependencyContinuityScope")
+            == "runtime_host_namespace_path_witness",
             host_dependency_evidence,
         )
 

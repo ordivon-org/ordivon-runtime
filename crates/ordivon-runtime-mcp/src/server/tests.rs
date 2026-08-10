@@ -1522,6 +1522,10 @@ fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
     assert!(linux.structured_plan);
     assert!(linux.immutable_inputs);
     assert!(linux.host_dependency_commitments);
+    assert_eq!(
+        linux.host_dependency_continuity_scope.as_deref(),
+        Some("runtime_host_namespace_path_witness")
+    );
     let windows = result
         .targets
         .iter()
@@ -1532,6 +1536,7 @@ fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
     assert!(!windows.structured_plan);
     assert!(!windows.immutable_inputs);
     assert!(!windows.host_dependency_commitments);
+    assert!(windows.host_dependency_continuity_scope.is_none());
 
     let tool = server
         .tool_router
@@ -1562,6 +1567,7 @@ fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
         "structuredPlan",
         "immutableInputs",
         "hostDependencyCommitments",
+        "hostDependencyContinuityScope",
     ] {
         assert!(
             output.contains(expected),

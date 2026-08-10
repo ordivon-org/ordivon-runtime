@@ -3945,8 +3945,85 @@ fn runtime_host_dependency_runtime_drift_is_witnessed_after_target_start() {
         "runtime_path_drift_detected"
     );
     assert_eq!(
+        evidence["hostDependencyContinuityScope"],
+        "runtime_host_namespace_path_witness"
+    );
+    assert_eq!(
         evidence["hostDependencies"][0]["path"],
         dependency.to_string_lossy().as_ref()
+    );
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_host_dependency_scope_does_not_claim_target_private_mount_view() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("host-dependency-private-mount-view");
+    let dependency = context.root.join("runtime-mounted-dependency.txt");
+    let alternate = context.root.join("runtime-mounted-alternate.txt");
+    fs::write(&dependency, b"MOUNT_VIEW_V1\n").unwrap();
+    fs::write(&alternate, b"MOUNT_VIEW_V2\n").unwrap();
+    let expected_digest = file_digest(&dependency);
+    let runtime = context.runtime(5_000);
+    let mut request = context.request("unused.py", 10_000);
+    request.execution.executable = fs::canonicalize("/usr/bin/unshare")
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    request.execution.args = vec![
+        "-m".to_string(),
+        "--propagation".to_string(),
+        "private".to_string(),
+        "/usr/bin/bash".to_string(),
+        "-lc".to_string(),
+        format!(
+            "mount --bind {alternate} {dependency}; cat {dependency}",
+            alternate = alternate.to_string_lossy(),
+            dependency = dependency.to_string_lossy(),
+        ),
+    ];
+    request.execution.host_dependencies = vec![HostDependencyBinding {
+        path: dependency.to_string_lossy().into_owned(),
+        expected_digest: expected_digest.clone(),
+    }];
+    let observed = runtime.run_task(&request).unwrap();
+    assert_eq!(observed.status, "succeeded");
+    assert_eq!(
+        observed.execution_reason_code.as_deref(),
+        Some("PROCESS_EXIT_ZERO")
+    );
+    assert_eq!(observed.stdout_tail, "MOUNT_VIEW_V2\n");
+    assert_eq!(fs::read(&dependency).unwrap(), b"MOUNT_VIEW_V1\n");
+    assert_eq!(file_digest(&dependency), expected_digest);
+    let terminal = observed
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "terminal_evidence")
+        .unwrap();
+    let evidence = runtime
+        .read_artifact(&ArtifactReadRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: observed.job_id.clone(),
+            artifact_id: terminal.artifact_id.clone(),
+            offset: 0,
+            max_bytes: 65_536,
+        })
+        .unwrap();
+    let evidence: serde_json::Value = serde_json::from_str(&evidence.content).unwrap();
+    assert_eq!(
+        evidence["hostDependencyContinuity"],
+        "no_runtime_path_drift_observed"
+    );
+    assert_eq!(
+        evidence["hostDependencyContinuityScope"],
+        "runtime_host_namespace_path_witness"
+    );
+    assert_eq!(
+        evidence["hostDependencies"][0]["expectedDigest"],
+        expected_digest
     );
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }

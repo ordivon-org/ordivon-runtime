@@ -73,6 +73,7 @@ const ADAPTIVE_POLL_DELAYS_MS: [u64; 5] = [2, 5, 10, 20, 50];
 const DEFAULT_EXECUTION_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const DEFAULT_EXECUTION_HOME: &str = "/root";
 const STALE_PREPARED_INPUT_AGE_MS: u64 = 60_000;
+const HOST_DEPENDENCY_CONTINUITY_SCOPE: &str = "runtime_host_namespace_path_witness";
 const CONTAINED_RUNTIME_ENVIRONMENT: [&str; 15] = [
     "HOME",
     "TMPDIR",
@@ -270,6 +271,8 @@ struct TerminalProcessEvidence {
     host_dependencies: Vec<HostDependencyBinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     host_dependency_continuity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_dependency_continuity_scope: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     input_set_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1396,6 +1399,7 @@ impl Runtime {
             structured_plan: true,
             immutable_inputs: true,
             host_dependency_commitments: true,
+            host_dependency_continuity_scope: Some(HOST_DEPENDENCY_CONTINUITY_SCOPE.to_string()),
             availability_issue: linux_provider
                 .is_none()
                 .then(|| "EXECUTION_PROVIDER_UNAVAILABLE".to_string()),
@@ -1440,6 +1444,7 @@ impl Runtime {
             structured_plan: false,
             immutable_inputs: false,
             host_dependency_commitments: false,
+            host_dependency_continuity_scope: None,
             execution_provider: windows_provider,
             availability_issue: windows_issue,
         };
@@ -4027,6 +4032,9 @@ fn append_terminal_evidence_for_commit_with_observation(
             _ => None,
         }
     };
+    let host_dependency_continuity_scope = host_dependency_continuity
+        .as_ref()
+        .map(|_| HOST_DEPENDENCY_CONTINUITY_SCOPE.to_string());
     let evidence = TerminalProcessEvidence {
         schema_version: RUNTIME_SCHEMA_VERSION,
         job_id: attempt.job_id.clone(),
@@ -4041,6 +4049,7 @@ fn append_terminal_evidence_for_commit_with_observation(
         foreign_references: plan.foreign_references,
         host_dependencies,
         host_dependency_continuity,
+        host_dependency_continuity_scope,
         input_set_id: plan.input_set_id,
         effective_inputs: plan.effective_inputs,
         executable: plan.executable,

@@ -500,6 +500,11 @@ pub struct RuntimeExecutionTargetCapability {
     pub immutable_inputs: bool,
     /// Whether trusted-local Jobs on this target may bind Agent-declared exact host file prerequisites.
     pub host_dependency_commitments: bool,
+    /// Machine-readable boundary for Host Dependency continuity evidence on this target.
+    /// This describes what Runtime witnesses; it is not a claim that target code cannot
+    /// intentionally establish another mount/root namespace view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_dependency_continuity_scope: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_provider: Option<ExecutionProviderSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
