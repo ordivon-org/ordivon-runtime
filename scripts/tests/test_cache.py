@@ -321,6 +321,170 @@ class CacheMigrationTests(unittest.TestCase):
             self.assertEqual(report["actions"][0]["action"], "cache_removed")
             self.assertTrue(Path(report["receipt"], "plan.json").is_file())
 
+    def test_prune_uses_operator_env_watermarks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            stale = runtime / "cache" / "build" / "workspace-stale"
+            stale.mkdir(parents=True)
+            (stale / "artifact").write_bytes(b"s" * 120)
+            env_file = root / "runtime.env"
+            env_file.write_text(
+                "ORDIVON_CACHE_HIGH_WATERMARK_BYTES=50\n"
+                "ORDIVON_CACHE_LOW_WATERMARK_BYTES=10\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-cache",
+                    "prune",
+                    "--database",
+                    str(database),
+                    "--runtime-store-root",
+                    str(runtime),
+                    "--receipt-root",
+                    str(root / "receipts"),
+                    "--lock-file",
+                    str(root / "cache.lock"),
+                    "--env-file",
+                    str(env_file),
+                    "--confirm-policy",
+                    "PRUNE_EXECUTION_CACHES",
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["highWatermarkBytes"], 50)
+            self.assertEqual(report["lowWatermarkBytes"], 10)
+            self.assertFalse(stale.exists())
+
+    def test_explicit_prune_watermarks_override_operator_env(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            stale = runtime / "cache" / "build" / "workspace-stale"
+            stale.mkdir(parents=True)
+            (stale / "artifact").write_bytes(b"s" * 120)
+            env_file = root / "runtime.env"
+            env_file.write_text(
+                "ORDIVON_CACHE_HIGH_WATERMARK_BYTES=500\n"
+                "ORDIVON_CACHE_LOW_WATERMARK_BYTES=400\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-cache",
+                    "prune",
+                    "--database",
+                    str(database),
+                    "--runtime-store-root",
+                    str(runtime),
+                    "--receipt-root",
+                    str(root / "receipts"),
+                    "--lock-file",
+                    str(root / "cache.lock"),
+                    "--env-file",
+                    str(env_file),
+                    "--high-watermark-bytes",
+                    "50",
+                    "--low-watermark-bytes",
+                    "10",
+                    "--confirm-policy",
+                    "PRUNE_EXECUTION_CACHES",
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["highWatermarkBytes"], 50)
+            self.assertEqual(report["lowWatermarkBytes"], 10)
+            self.assertFalse(stale.exists())
+
+    def test_prune_env_policy_fails_closed_when_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            stale = runtime / "cache" / "build" / "workspace-stale"
+            stale.mkdir(parents=True)
+            (stale / "artifact").write_bytes(b"s" * 120)
+            env_file = root / "runtime.env"
+            env_file.write_text("ORDIVON_CACHE_HIGH_WATERMARK_BYTES=50\n", encoding="utf-8")
+
+            failed = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-cache",
+                    "prune",
+                    "--database",
+                    str(database),
+                    "--runtime-store-root",
+                    str(runtime),
+                    "--receipt-root",
+                    str(root / "receipts"),
+                    "--lock-file",
+                    str(root / "cache.lock"),
+                    "--env-file",
+                    str(env_file),
+                    "--confirm-policy",
+                    "PRUNE_EXECUTION_CACHES",
+                ],
+                cwd=REPO,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(failed.returncode, 2)
+            self.assertIn("ORDIVON_CACHE_LOW_WATERMARK_BYTES", failed.stderr)
+            self.assertTrue(stale.is_dir())
+
+    def test_prune_without_policy_inputs_keeps_standalone_defaults(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
+        args = type(
+            "Args",
+            (),
+            {"high_watermark_bytes": None, "low_watermark_bytes": None, "env_file": None},
+        )()
+        self.assertEqual(
+            module["resolve_prune_watermarks"](args),
+            (64 * 1024**3, 48 * 1024**3),
+        )
+
+    def test_explicit_prune_policy_does_not_depend_on_env_file_contents(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / "runtime.env"
+            env_file.write_text("this is deliberately malformed\n", encoding="utf-8")
+            args = type(
+                "Args",
+                (),
+                {"high_watermark_bytes": 50, "low_watermark_bytes": 10, "env_file": env_file},
+            )()
+            self.assertEqual(module["resolve_prune_watermarks"](args), (50, 10))
+
+    def test_packaged_lifecycle_uses_operator_cache_policy(self) -> None:
+        unit = (REPO / "packaging/systemd/ordivon-runtime-lifecycle.service").read_text(
+            encoding="utf-8"
+        )
+        cache_line = next(line for line in unit.splitlines() if "ordivon-runtime-cache prune" in line)
+        self.assertIn("--env-file /etc/ordivon/ordivon-runtime.env", cache_line)
+        self.assertNotIn("--high-watermark-bytes", cache_line)
+        self.assertNotIn("--low-watermark-bytes", cache_line)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ## Unreleased
 
+- Packaged cache maintenance now resolves its high/low watermark from the same `ORDIVON_CACHE_HIGH_WATERMARK_BYTES` / `ORDIVON_CACHE_LOW_WATERMARK_BYTES` operator environment used by Runtime health/status instead of embedding a second 64 GiB / 48 GiB policy in the lifecycle unit. Explicit cache-prune CLI values still override the environment, standalone defaults remain available, and an incomplete environment policy fails before deletion.
+
 - Runtime admission now holds the Workspace lifecycle lock only through durable admission, then performs physical dispatch after releasing that lock. Capacity remains Registry-reservation truth rather than a mutex side effect: multi-client pressure, cancellation, natural completion, and daemon reconstruction may interleave without admitting above the configured global limit or duplicating `DISPATCH_ISSUED`.
 
 - Cancellation/reconciliation now treats persisted termination intent as part of terminal truth when a supervisor unit has disappeared and the recorded process identity is gone. `stop_requested` converges to `cancelled`, deadline intent converges to `timed_out`, and natural disappearance remains a lost/failure case. Control-side terminalization is serialized across the short result/evidence/Registry commit section so concurrent cancel and generic reconciliation cannot overwrite the shared control-result identity before terminal CAS decides the winner.

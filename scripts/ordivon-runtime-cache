@@ -16,6 +16,12 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from mcp_probe import load_environment_file
+
 SCHEMA_VERSION = 1
 MIGRATION_CONFIRMATION = "MIGRATE_SHARED_EXECUTION_CACHES"
 PRUNE_CONFIRMATION = "PRUNE_EXECUTION_CACHES"
@@ -68,13 +74,10 @@ def parse_args() -> argparse.Namespace:
     prune.add_argument("--runtime-store-root", type=absolute_path, required=True)
     prune.add_argument("--receipt-root", type=absolute_path, required=True)
     prune.add_argument("--lock-file", type=absolute_path, required=True)
+    prune.add_argument("--env-file", type=absolute_path)
     prune.add_argument("--confirm-policy", required=True)
-    prune.add_argument(
-        "--high-watermark-bytes", type=positive_bytes, default=DEFAULT_HIGH_WATERMARK_BYTES
-    )
-    prune.add_argument(
-        "--low-watermark-bytes", type=positive_bytes, default=DEFAULT_LOW_WATERMARK_BYTES
-    )
+    prune.add_argument("--high-watermark-bytes", type=positive_bytes)
+    prune.add_argument("--low-watermark-bytes", type=positive_bytes)
     prune.add_argument("--pretty", action="store_true")
     return parser.parse_args()
 
@@ -302,18 +305,48 @@ def cache_prune_candidates(database: Path, store_root: Path) -> tuple[int, list[
     return total_bytes, candidates
 
 
+def configured_positive_bytes(environment: dict[str, str], key: str) -> int:
+    raw = environment.get(key)
+    if raw is None:
+        raise RuntimeError(f"cache policy environment is missing {key}")
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise RuntimeError(f"cache policy {key} must be an integer") from error
+    if value < 1:
+        raise RuntimeError(f"cache policy {key} must be positive")
+    return value
+
+
+def resolve_prune_watermarks(args: argparse.Namespace) -> tuple[int, int]:
+    high = args.high_watermark_bytes
+    low = args.low_watermark_bytes
+    if args.env_file is not None and (high is None or low is None):
+        environment = load_environment_file(args.env_file)
+        if high is None:
+            high = configured_positive_bytes(environment, "ORDIVON_CACHE_HIGH_WATERMARK_BYTES")
+        if low is None:
+            low = configured_positive_bytes(environment, "ORDIVON_CACHE_LOW_WATERMARK_BYTES")
+    if high is None:
+        high = DEFAULT_HIGH_WATERMARK_BYTES
+    if low is None:
+        low = DEFAULT_LOW_WATERMARK_BYTES
+    if low >= high:
+        raise RuntimeError("low-watermark-bytes must be smaller than high-watermark-bytes")
+    return high, low
+
+
 def prune(args: argparse.Namespace) -> dict[str, object]:
     if args.confirm_policy != PRUNE_CONFIRMATION:
         raise RuntimeError(f"--confirm-policy must equal {PRUNE_CONFIRMATION}")
-    if args.low_watermark_bytes >= args.high_watermark_bytes:
-        raise RuntimeError("low-watermark-bytes must be smaller than high-watermark-bytes")
+    high_watermark_bytes, low_watermark_bytes = resolve_prune_watermarks(args)
     with exclusive_lock(args.lock_file):
         before_bytes, candidates = cache_prune_candidates(args.database, args.runtime_store_root)
         selected: list[dict[str, object]] = []
         retained = before_bytes
-        if before_bytes > args.high_watermark_bytes:
+        if before_bytes > high_watermark_bytes:
             for candidate in candidates:
-                if retained <= args.low_watermark_bytes:
+                if retained <= low_watermark_bytes:
                     break
                 selected.append(candidate)
                 retained = max(0, retained - int(candidate["bytes"]))
@@ -324,8 +357,8 @@ def prune(args: argparse.Namespace) -> dict[str, object]:
             "generatedAtMs": int(time.time() * 1000),
             "cacheRoot": str(args.runtime_store_root / "cache"),
             "beforeBytes": before_bytes,
-            "highWatermarkBytes": args.high_watermark_bytes,
-            "lowWatermarkBytes": args.low_watermark_bytes,
+            "highWatermarkBytes": high_watermark_bytes,
+            "lowWatermarkBytes": low_watermark_bytes,
             "candidateCount": len(candidates),
             "selected": selected,
         }
@@ -345,7 +378,7 @@ def prune(args: argparse.Namespace) -> dict[str, object]:
             except (OSError, RuntimeError) as error:
                 failures.append({**candidate, "error": str(error)})
         after_bytes = directory_bytes(args.runtime_store_root / "cache")
-        status = "completed" if not failures and after_bytes <= args.high_watermark_bytes else "partial"
+        status = "completed" if not failures and after_bytes <= high_watermark_bytes else "partial"
         result = {
             "schemaVersion": SCHEMA_VERSION,
             "status": status,
@@ -353,8 +386,8 @@ def prune(args: argparse.Namespace) -> dict[str, object]:
             "confirmation": args.confirm_policy,
             "beforeBytes": before_bytes,
             "afterBytes": after_bytes,
-            "highWatermarkBytes": args.high_watermark_bytes,
-            "lowWatermarkBytes": args.low_watermark_bytes,
+            "highWatermarkBytes": high_watermark_bytes,
+            "lowWatermarkBytes": low_watermark_bytes,
             "actions": actions,
             "failures": failures,
             "receipt": str(receipt),

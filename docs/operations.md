@@ -253,7 +253,7 @@ scripts/ordivon-runtime-lifecycle sweep \
   --confirm-policy APPLY_WORKSPACE_RETENTION_POLICY --pretty
 ```
 
-The packaged timer runs the Runtime lifecycle service daily with a randomized delay. The Workspace phase can only select policy-expired `closable` and `stale_record` entries; dirty, active, pinned, unknown, and orphan-directory cases remain excluded. The subordinate reclaim receipt is linked from the lifecycle receipt. The same oneshot then runs terminal Windows immutable-input presentation reclamation and finally cache pruning; these remain separate receipt domains and do not turn Workspace retention into input or cache authority.
+The packaged timer runs the Runtime lifecycle service daily with a randomized delay. The Workspace phase can only select policy-expired `closable` and `stale_record` entries; dirty, active, pinned, unknown, and orphan-directory cases remain excluded. The subordinate reclaim receipt is linked from the lifecycle receipt. The same oneshot then runs terminal Windows immutable-input presentation reclamation and finally cache pruning; these remain separate receipt domains and do not turn Workspace retention into input or cache authority. Packaged cache pruning reads `ORDIVON_CACHE_HIGH_WATERMARK_BYTES` and `ORDIVON_CACHE_LOW_WATERMARK_BYTES` from the same Runtime operator environment used by health/status. An explicit `ordivon-runtime-cache prune` invocation may override those values with CLI watermarks; without either an environment file or explicit values, the standalone command retains its 64 GiB / 48 GiB defaults.
 
 ### Terminal Windows immutable-input presentations
 
@@ -333,7 +333,7 @@ scripts/ordivon-runtime-cache migrate \
   --confirm-policy MIGRATE_SHARED_EXECUTION_CACHES --pretty
 ```
 
-Cache reclamation is capacity-driven rather than a blind age sweep. The packaged daily lifecycle service uses a 64 GiB high watermark and removes least-recently-modified reclaimable cache directories until 48 GiB. Open or active Workspace caches and source-build caches referenced by any open Workspace are protected. Global package-manager caches are measured but not interpreted or deleted by Runtime; mature package-manager-native pruning remains their owner.
+Cache reclamation is capacity-driven rather than a blind age sweep. The packaged daily lifecycle service resolves its watermarks from `ORDIVON_CACHE_HIGH_WATERMARK_BYTES` and `ORDIVON_CACHE_LOW_WATERMARK_BYTES` in `/etc/ordivon/ordivon-runtime.env`; the packaged example remains 64 GiB / 48 GiB, while an installation may deliberately choose another pair. Open or active Workspace caches and source-build caches referenced by any open Workspace are protected. Global package-manager caches are measured but not interpreted or deleted by Runtime; mature package-manager-native pruning remains their owner.
 
 ```bash
 scripts/ordivon-runtime-cache prune \
