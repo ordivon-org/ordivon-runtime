@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import argparse
+import re
 import fcntl
 import hashlib
 import json
@@ -22,6 +23,8 @@ SCHEMA_VERSION = 1
 SWEEP_CONFIRMATION = "APPLY_WORKSPACE_RETENTION_POLICY"
 REPAIR_CONFIRMATION = "REPAIR_WORKSPACE_IDENTITIES"
 QUARANTINE_CONFIRMATION = "QUARANTINE_BROKEN_WORKSPACES"
+INPUT_SWEEP_CONFIRMATION = "RECLAIM_TERMINAL_WINDOWS_INPUT_PRESENTATIONS"
+TERMINAL_ATTEMPT_STATES = {"succeeded", "failed", "cancelled", "lost"}
 MAX_DIRTY_PATHS = 10_000
 DEFAULT_POLICY = {
     "schemaVersion": 1,
@@ -105,6 +108,31 @@ def parse_args() -> argparse.Namespace:
     dirty_review.add_argument("--review-after-hours", type=nonnegative_float, default=72.0)
     dirty_review.add_argument("--quarantine-review-after-hours", type=nonnegative_float, default=168.0)
     dirty_review.add_argument("--pretty", action="store_true")
+
+    inputs_inspect = sub.add_parser(
+        "inputs-inspect",
+        help="inspect terminal Windows immutable-input presentation retention",
+    )
+    inputs_inspect.add_argument("--database", type=absolute_path, required=True)
+    inputs_inspect.add_argument("--env-file", type=absolute_path, required=True)
+    inputs_inspect.add_argument("--busy-timeout-ms", type=positive_timeout, default=5_000)
+    inputs_inspect.add_argument("--minimum-terminal-age-hours", type=nonnegative_float, default=24.0)
+    inputs_inspect.add_argument("--job-id", action="append", dest="job_ids")
+    inputs_inspect.add_argument("--pretty", action="store_true")
+
+    inputs_sweep = sub.add_parser(
+        "inputs-sweep",
+        help="reclaim exact terminal Windows immutable-input presentations",
+    )
+    inputs_sweep.add_argument("--database", type=absolute_path, required=True)
+    inputs_sweep.add_argument("--env-file", type=absolute_path, required=True)
+    inputs_sweep.add_argument("--busy-timeout-ms", type=positive_timeout, default=5_000)
+    inputs_sweep.add_argument("--minimum-terminal-age-hours", type=nonnegative_float, default=24.0)
+    inputs_sweep.add_argument("--job-id", action="append", dest="job_ids")
+    inputs_sweep.add_argument("--receipt-root", type=absolute_path, required=True)
+    inputs_sweep.add_argument("--lock-file", type=absolute_path, required=True)
+    inputs_sweep.add_argument("--confirm-policy", required=True)
+    inputs_sweep.add_argument("--pretty", action="store_true")
     return parser.parse_args()
 
 
@@ -389,6 +417,392 @@ def sweep(args: argparse.Namespace) -> dict[str, object]:
             "actions": subordinate.get("actions", []),
             "failures": subordinate.get("failures", []),
             "reclaimReceipt": subordinate.get("receipt"),
+            "receipt": str(receipt),
+        }
+        write_json_atomic(receipt / "result.json", result)
+        return result
+
+
+def load_environment_value(path: Path, name: str) -> str:
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() != name:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if not value:
+            raise RuntimeError(f"{name} is empty in {path}")
+        return value
+    raise RuntimeError(f"{name} is absent from {path}")
+
+
+def windows_launcher(env_file: Path) -> Path:
+    path = Path(load_environment_value(env_file, "ORDIVON_WINDOWS_LAUNCHER_PATH"))
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"configured Windows launcher is missing or unsafe: {path}")
+    return path
+
+
+def describe_windows_program_data(launcher: Path) -> str:
+    value = run_json(
+        [
+            str(launcher),
+            "--describe-runtime-context",
+            "--authority",
+            "limited",
+            "--context-env",
+            "ProgramData",
+        ]
+    )
+    environment = value.get("environment")
+    if not isinstance(environment, dict):
+        raise RuntimeError("Windows launcher context has no environment object")
+    program_data = environment.get("ProgramData")
+    if not isinstance(program_data, str) or not re.fullmatch(r"[A-Za-z]:\\[^\x00]*", program_data):
+        raise RuntimeError("Windows launcher returned an unsupported ProgramData path")
+    return program_data.rstrip("\\/")
+
+
+def windows_path_to_wsl(path: str) -> Path:
+    match = re.fullmatch(r"([A-Za-z]):\\(.*)", path)
+    if match is None:
+        raise RuntimeError(f"cannot project Windows provider path into WSL: {path}")
+    components = [component for component in re.split(r"[\\/]+", match.group(2)) if component]
+    if any(component in {".", ".."} for component in components):
+        raise RuntimeError("Windows provider path contains traversal components")
+    return Path("/mnt") / match.group(1).lower() / Path(*components)
+
+
+def windows_input_bindings_digest(inputs: object) -> str:
+    if not isinstance(inputs, list) or not inputs:
+        raise RuntimeError("Windows immutable-input plan has no effectiveInputs")
+    normalized: list[tuple[str, str, int]] = []
+    directories: set[str] = set()
+    for raw in inputs:
+        if not isinstance(raw, dict):
+            raise RuntimeError("Windows immutable-input binding is not an object")
+        path = raw.get("presentationRelativePath")
+        digest = raw.get("digest")
+        byte_length = raw.get("byteLength")
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.startswith("/")
+            or "\\" in path
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or not isinstance(digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+            or not isinstance(byte_length, int)
+            or isinstance(byte_length, bool)
+            or byte_length < 0
+        ):
+            raise RuntimeError("Windows immutable-input binding is invalid")
+        parts = path.split("/")
+        for end in range(1, len(parts)):
+            directories.add("/".join(parts[:end]))
+        normalized.append((path, digest, byte_length))
+    paths = [item[0] for item in normalized]
+    if len(set(path.casefold() for path in paths)) != len(paths):
+        raise RuntimeError("Windows immutable-input bindings collide case-insensitively")
+    data = bytearray(b"windows-immutable-input-tree-v2\0")
+    for directory in sorted(directories, key=lambda value: value.encode("utf-8")):
+        data.extend(b"D\0")
+        data.extend(directory.encode("utf-8"))
+        data.append(0)
+    for path, digest, byte_length in sorted(normalized, key=lambda item: item[0].encode("utf-8")):
+        data.extend(b"F\0")
+        data.extend(path.encode("utf-8"))
+        data.append(0)
+        data.extend(digest.encode("ascii"))
+        data.append(0)
+        data.extend(str(byte_length).encode("ascii"))
+        data.append(0)
+    return "sha256:" + hashlib.sha256(bytes(data)).hexdigest()
+
+
+def discover_windows_input_presentations(env_file: Path) -> tuple[Path, str, Path, set[str], set[str]]:
+    launcher = windows_launcher(env_file)
+    program_data = describe_windows_program_data(launcher)
+    parent = windows_path_to_wsl(program_data) / "OrdivonImmutableInputs"
+    exact: set[str] = set()
+    reclaiming: set[str] = set()
+    if parent.is_dir():
+        for entry in parent.iterdir():
+            if re.fullmatch(r"[0-9a-f]{64}", entry.name):
+                exact.add(entry.name)
+                continue
+            match = re.fullmatch(r"\.([0-9a-f]{64})\.reclaiming", entry.name)
+            if match is not None:
+                reclaiming.add(match.group(1))
+    return launcher, program_data, parent, exact, reclaiming
+
+
+def verify_windows_start_artifact(
+    row: sqlite3.Row,
+    *,
+    job_id: str,
+    attempt_id: str,
+    input_set_id: str,
+    input_bindings_digest: str,
+    expected_presentation: str,
+) -> dict[str, object] | None:
+    relative_path = row["windows_start_relative_path"]
+    if relative_path is None:
+        return None
+    bundle = Path(str(row["bundle_path"]))
+    relative = Path(str(relative_path))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RuntimeError("windows-start artifact path is invalid")
+    artifact = bundle / relative
+    if artifact.is_symlink() or not artifact.is_file():
+        raise RuntimeError("windows-start artifact is missing or unsafe")
+    expected_artifact_digest = str(row["windows_start_digest"])
+    if sha256_file(artifact) != expected_artifact_digest:
+        raise RuntimeError("windows-start artifact digest differs from Registry")
+    value = json.loads(artifact.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise RuntimeError("windows-start artifact is not an object")
+    checks = {
+        "jobId": job_id,
+        "attemptId": attempt_id,
+        "inputSetId": input_set_id,
+        "inputBindingsDigest": input_bindings_digest,
+        "inputPresentationRoot": expected_presentation,
+    }
+    for key, expected in checks.items():
+        if value.get(key) != expected:
+            raise RuntimeError(f"windows-start {key} differs from committed plan")
+    return {
+        "artifactId": str(row["windows_start_artifact_id"]),
+        "artifactDigest": expected_artifact_digest,
+    }
+
+
+def inspect_input_presentations(args: argparse.Namespace) -> dict[str, object]:
+    launcher, program_data, parent, exact, reclaiming = discover_windows_input_presentations(args.env_file)
+    now_ms = int(time.time() * 1000)
+    cutoff_ms = int(now_ms - args.minimum_terminal_age_hours * 3_600_000)
+    connection = open_registry(args.database, args.busy_timeout_ms)
+    connection.row_factory = sqlite3.Row
+    try:
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(jobs)")}
+        required = {"job_id", "resolution", "execution_plan_json"}
+        if not required.issubset(columns):
+            raise RuntimeError("Registry lacks immutable-input lifecycle Job columns")
+        attempt_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(attempts)")}
+        if not {"attempt_id", "job_id", "attempt_number", "state", "finished_at_ms", "bundle_path"}.issubset(attempt_columns):
+            raise RuntimeError("Registry lacks immutable-input lifecycle Attempt columns")
+        rows = connection.execute(
+            """
+            SELECT jobs.job_id,jobs.resolution,jobs.execution_plan_json,
+                   attempts.attempt_id,attempts.state AS attempt_state,
+                   attempts.finished_at_ms,attempts.bundle_path,
+                   artifacts.artifact_id AS windows_start_artifact_id,
+                   artifacts.relative_path AS windows_start_relative_path,
+                   artifacts.digest AS windows_start_digest,
+                   EXISTS(
+                     SELECT 1 FROM concurrency_reservations
+                     WHERE concurrency_reservations.attempt_id=attempts.attempt_id
+                       AND concurrency_reservations.state IN ('active','held_orphaned')
+                   ) AS has_live_reservation
+            FROM jobs
+            LEFT JOIN attempts ON attempts.attempt_id=(
+              SELECT latest.attempt_id
+              FROM attempts AS latest
+              WHERE latest.job_id=jobs.job_id
+              ORDER BY latest.attempt_number DESC
+              LIMIT 1
+            )
+            LEFT JOIN artifacts
+              ON artifacts.attempt_id=attempts.attempt_id AND artifacts.kind='windows_start'
+            ORDER BY jobs.created_at_ms,jobs.job_id
+            """
+        ).fetchall()
+        candidates: list[dict[str, object]] = []
+        requested_jobs = set(args.job_ids or [])
+        for row in rows:
+            if requested_jobs and str(row["job_id"]) not in requested_jobs:
+                continue
+            try:
+                plan = json.loads(str(row["execution_plan_json"]))
+                if not isinstance(plan, dict) or plan.get("executionTarget") != "windows_native":
+                    continue
+                input_set_id = plan.get("inputSetId")
+                effective_inputs = plan.get("effectiveInputs")
+                if input_set_id in {None, ""} and not effective_inputs:
+                    continue
+                if not isinstance(input_set_id, str) or re.fullmatch(r"[0-9a-f]{64}", input_set_id) is None:
+                    raise RuntimeError("committed inputSetId is invalid")
+                bindings_digest = windows_input_bindings_digest(effective_inputs)
+                env = plan.get("env")
+                if not isinstance(env, dict) or env.get("ProgramData") != program_data:
+                    raise RuntimeError("committed ProgramData differs from current Windows provider")
+                expected_presentation = program_data + "\\OrdivonImmutableInputs\\" + input_set_id
+                if env.get("ORDIVON_INPUT_ROOT") != expected_presentation:
+                    raise RuntimeError("committed ORDIVON_INPUT_ROOT differs from inputSetId")
+                attempt_id = row["attempt_id"]
+                evidence = None
+                if attempt_id is not None:
+                    evidence = verify_windows_start_artifact(
+                        row,
+                        job_id=str(row["job_id"]),
+                        attempt_id=str(attempt_id),
+                        input_set_id=input_set_id,
+                        input_bindings_digest=bindings_digest,
+                        expected_presentation=expected_presentation,
+                    )
+                resolution = row["resolution"]
+                attempt_state = row["attempt_state"]
+                finished_at_ms = row["finished_at_ms"]
+                physical_present = input_set_id in exact
+                quarantine_present = input_set_id in reclaiming
+                if resolution is None or attempt_state not in TERMINAL_ATTEMPT_STATES:
+                    classification = "protected_nonterminal"
+                    eligible = False
+                elif bool(row["has_live_reservation"]):
+                    classification = "protected_live_reservation"
+                    eligible = False
+                elif not isinstance(finished_at_ms, int):
+                    classification = "blocked_incomplete_terminal"
+                    eligible = False
+                elif not physical_present and not quarantine_present:
+                    classification = "terminal_absent"
+                    eligible = False
+                elif finished_at_ms > cutoff_ms:
+                    classification = "terminal_retained"
+                    eligible = False
+                else:
+                    classification = "terminal_reclaimable"
+                    eligible = True
+                candidates.append(
+                    {
+                        "jobId": str(row["job_id"]),
+                        "attemptId": str(attempt_id) if attempt_id is not None else None,
+                        "resolution": str(resolution) if resolution is not None else None,
+                        "attemptState": str(attempt_state) if attempt_state is not None else None,
+                        "finishedAtMs": finished_at_ms,
+                        "inputSetId": input_set_id,
+                        "inputBindingsDigest": bindings_digest,
+                        "inputPresentationRoot": expected_presentation,
+                        "physicalPresent": physical_present,
+                        "reclaimQuarantinePresent": quarantine_present,
+                        "windowsStartEvidence": evidence,
+                        "classification": classification,
+                        "policyEligible": eligible,
+                    }
+                )
+            except (RuntimeError, json.JSONDecodeError, OSError) as error:
+                candidates.append(
+                    {
+                        "jobId": str(row["job_id"]),
+                        "attemptId": str(row["attempt_id"]) if row["attempt_id"] is not None else None,
+                        "classification": "blocked_invalid_evidence",
+                        "policyEligible": False,
+                        "error": str(error),
+                    }
+                )
+    finally:
+        connection.close()
+    counts: dict[str, int] = {}
+    for item in candidates:
+        key = str(item["classification"])
+        counts[key] = counts.get(key, 0) + 1
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "status": "completed",
+        "truthRole": "terminal-windows-input-presentation-retention",
+        "generatedAtMs": now_ms,
+        "minimumTerminalAgeHours": args.minimum_terminal_age_hours,
+        "requestedJobIds": sorted(set(args.job_ids or [])),
+        "windowsLauncher": str(launcher),
+        "programData": program_data,
+        "presentationParent": str(parent),
+        "physicalInputSetCount": len(exact),
+        "reclaimQuarantineCount": len(reclaiming),
+        "summary": {"counts": counts, "policyEligible": sum(1 for item in candidates if item.get("policyEligible") is True)},
+        "candidates": candidates,
+    }
+
+
+def invoke_input_presentation_reclaim(
+    launcher: Path, input_set_id: str, input_bindings_digest: str
+) -> dict[str, object]:
+    return run_json(
+        [
+            str(launcher),
+            "--reclaim-input-presentation",
+            "--input-set-id",
+            input_set_id,
+            "--input-bindings-digest",
+            input_bindings_digest,
+        ]
+    )
+
+
+def sweep_input_presentations(args: argparse.Namespace) -> dict[str, object]:
+    if args.confirm_policy != INPUT_SWEEP_CONFIRMATION:
+        raise RuntimeError(f"confirm-policy must equal {INPUT_SWEEP_CONFIRMATION}")
+    with exclusive_lock(args.lock_file):
+        before = inspect_input_presentations(args)
+        receipt = receipt_path(args.receipt_root, "windows-input-presentations")
+        write_json_atomic(receipt / "before.json", before)
+        selected = [item for item in before["candidates"] if item.get("policyEligible") is True]
+        actions: list[dict[str, object]] = []
+        failures: list[dict[str, object]] = []
+        launcher = Path(str(before["windowsLauncher"]))
+        for selected_item in selected:
+            job_id = str(selected_item["jobId"])
+            input_set_id = str(selected_item["inputSetId"])
+            bindings_digest = str(selected_item["inputBindingsDigest"])
+            try:
+                current = inspect_input_presentations(args)
+                by_job = {str(item.get("jobId")): item for item in current["candidates"]}
+                item = by_job.get(job_id)
+                if (
+                    Path(str(current.get("windowsLauncher"))) != launcher
+                    or current.get("programData") != before.get("programData")
+                    or item is None
+                    or item.get("policyEligible") is not True
+                    or item.get("inputSetId") != input_set_id
+                    or item.get("inputBindingsDigest") != bindings_digest
+                    or item.get("inputPresentationRoot") != selected_item.get("inputPresentationRoot")
+                ):
+                    raise RuntimeError("input presentation lost reclaim or provider eligibility before apply")
+                result = invoke_input_presentation_reclaim(launcher, input_set_id, bindings_digest)
+                disposition = result.get("disposition")
+                if disposition not in {"deleted", "deleted_recovered_quarantine", "absent"}:
+                    raise RuntimeError(f"Windows launcher returned unknown reclaim disposition: {disposition}")
+                actions.append(
+                    {
+                        "jobId": job_id,
+                        "attemptId": item.get("attemptId"),
+                        "inputSetId": input_set_id,
+                        "inputBindingsDigest": bindings_digest,
+                        "disposition": disposition,
+                        "launcherResult": result,
+                    }
+                )
+            except Exception as error:
+                failures.append(
+                    {
+                        "jobId": job_id,
+                        "inputSetId": input_set_id,
+                        "error": str(error),
+                    }
+                )
+        after = inspect_input_presentations(args)
+        write_json_atomic(receipt / "after.json", after)
+        result = {
+            "schemaVersion": SCHEMA_VERSION,
+            "status": "completed" if not failures else "partial",
+            "truthRole": "receipted-terminal-windows-input-presentation-reclaim",
+            "selectedInputSetIds": [str(item["inputSetId"]) for item in selected],
+            "actions": actions,
+            "failures": failures,
             "receipt": str(receipt),
         }
         write_json_atomic(receipt / "result.json", result)
@@ -707,6 +1121,10 @@ def main() -> int:
             value = repair(args)
         elif args.command == "dirty-review":
             value = dirty_review(args)
+        elif args.command == "inputs-inspect":
+            value = inspect_input_presentations(args)
+        elif args.command == "inputs-sweep":
+            value = sweep_input_presentations(args)
         else:
             raise RuntimeError(f"unsupported command: {args.command}")
         print(json.dumps(value, indent=2 if args.pretty else None, sort_keys=args.pretty))

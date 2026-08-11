@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -440,6 +442,238 @@ class LifecycleTests(unittest.TestCase):
             receipt = Path(report["receipt"]) / "result.json"
             self.assertTrue(receipt.is_file())
             self.assertEqual(json.loads(receipt.read_text())["actions"][0]["statusDigest"], action["statusDigest"])
+
+
+    def test_windows_input_bindings_digest_matches_provider_contract_v2(self) -> None:
+        digest = self.module["windows_input_bindings_digest"](
+            [
+                {
+                    "access": "read_only",
+                    "authority": "finance-research-materializations",
+                    "byteLength": 6086,
+                    "digest": "sha256:23c39b521f68959018a12411a63af9ec9dab1434a3d7558efbd19110c9597386",
+                    "presentationRelativePath": "probe/manifest.json",
+                    "relativeObject": "ignored-by-provider-tree-digest",
+                }
+            ]
+        )
+        self.assertEqual(
+            digest,
+            "sha256:50000df99583f188fc5704f68331274e5f9c05f0e649fb8bacdaf5d38ce24c88",
+        )
+
+    def test_inputs_inspect_protects_nonterminal_and_selects_terminal_physical_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "registry.sqlite3"
+            now_ms = 100_000_000
+            input_digest = "sha256:23c39b521f68959018a12411a63af9ec9dab1434a3d7558efbd19110c9597386"
+            def plan(input_set_id: str) -> str:
+                return json.dumps(
+                    {
+                        "executionTarget": "windows_native",
+                        "inputSetId": input_set_id,
+                        "effectiveInputs": [
+                            {
+                                "access": "read_only",
+                                "authority": "authority",
+                                "byteLength": 6086,
+                                "digest": input_digest,
+                                "presentationRelativePath": "probe/manifest.json",
+                                "relativeObject": "object",
+                            }
+                        ],
+                        "env": {
+                            "ProgramData": r"C:\ProgramData",
+                            "ORDIVON_INPUT_ROOT": rf"C:\ProgramData\OrdivonImmutableInputs\{input_set_id}",
+                        },
+                    }
+                )
+            with closing(sqlite3.connect(database)) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE jobs(
+                      job_id TEXT PRIMARY KEY,
+                      resolution TEXT,
+                      execution_plan_json TEXT,
+                      current_attempt_id TEXT,
+                      created_at_ms INTEGER
+                    );
+                    CREATE TABLE attempts(
+                      attempt_id TEXT PRIMARY KEY,
+                      job_id TEXT,
+                      attempt_number INTEGER,
+                      state TEXT,
+                      finished_at_ms INTEGER,
+                      bundle_path TEXT
+                    );
+                    CREATE TABLE concurrency_reservations(attempt_id TEXT,state TEXT);
+                    CREATE TABLE artifacts(
+                      artifact_id TEXT,
+                      attempt_id TEXT,
+                      kind TEXT,
+                      relative_path TEXT,
+                      digest TEXT
+                    );
+                    """
+                )
+                terminal_id = "a" * 64
+                running_id = "b" * 64
+                connection.execute(
+                    "INSERT INTO jobs VALUES (?,?,?,?,?)",
+                    ("job-terminal", "succeeded", plan(terminal_id), None, 1),
+                )
+                connection.execute(
+                    "INSERT INTO attempts VALUES (?,?,?,?,?,?)",
+                    ("attempt-terminal", "job-terminal", 1, "succeeded", 1, str(root / "terminal-bundle")),
+                )
+                connection.execute(
+                    "INSERT INTO jobs VALUES (?,?,?,?,?)",
+                    ("job-running", None, plan(running_id), "attempt-running", 1),
+                )
+                connection.execute(
+                    "INSERT INTO attempts VALUES (?,?,?,?,?,?)",
+                    ("attempt-running", "job-running", 1, "running", None, str(root / "running-bundle")),
+                )
+                connection.commit()
+            args = SimpleNamespace(
+                database=database,
+                env_file=root / "runtime.env",
+                busy_timeout_ms=5_000,
+                minimum_terminal_age_hours=0.0,
+                job_ids=None,
+            )
+            function_globals = self.module["inspect_input_presentations"].__globals__
+            with mock.patch.dict(
+                function_globals,
+                {
+                    "discover_windows_input_presentations": lambda _env: (
+                        root / "launcher",
+                        r"C:\ProgramData",
+                        root / "native",
+                        {"a" * 64, "b" * 64},
+                        set(),
+                    ),
+                    "time": SimpleNamespace(time=lambda: now_ms / 1000),
+                },
+            ):
+                report = self.module["inspect_input_presentations"](args)
+            by_job = {item["jobId"]: item for item in report["candidates"]}
+            self.assertEqual(by_job["job-terminal"]["classification"], "terminal_reclaimable")
+            self.assertTrue(by_job["job-terminal"]["policyEligible"])
+            self.assertEqual(by_job["job-running"]["classification"], "protected_nonterminal")
+            self.assertFalse(by_job["job-running"]["policyEligible"])
+
+    def test_inputs_sweep_blocks_provider_transition_before_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_set_id = "c" * 64
+            bindings_digest = "sha256:" + "a" * 64
+            presentation = "C:\\ProgramData\\OrdivonImmutableInputs\\" + input_set_id
+            item = {
+                "jobId": "job-terminal",
+                "attemptId": "attempt-terminal",
+                "inputSetId": input_set_id,
+                "inputBindingsDigest": bindings_digest,
+                "inputPresentationRoot": presentation,
+                "policyEligible": True,
+            }
+            before = {
+                "schemaVersion": 1,
+                "status": "completed",
+                "windowsLauncher": str(root / "launcher-old.exe"),
+                "programData": r"C:\ProgramData",
+                "candidates": [dict(item)],
+            }
+            transitioned = {
+                "schemaVersion": 1,
+                "status": "completed",
+                "windowsLauncher": str(root / "launcher-new.exe"),
+                "programData": r"C:\ProgramData",
+                "candidates": [dict(item)],
+            }
+            reports = iter([before, transitioned, transitioned])
+            reclaim_calls: list[tuple[str, str]] = []
+            args = SimpleNamespace(
+                confirm_policy="RECLAIM_TERMINAL_WINDOWS_INPUT_PRESENTATIONS",
+                lock_file=root / "lifecycle.lock",
+                receipt_root=root / "receipts",
+                job_ids=None,
+            )
+            function_globals = self.module["sweep_input_presentations"].__globals__
+            with mock.patch.dict(
+                function_globals,
+                {
+                    "inspect_input_presentations": lambda _args: next(reports),
+                    "invoke_input_presentation_reclaim": lambda _launcher, sid, digest: reclaim_calls.append(
+                        (sid, digest)
+                    ),
+                },
+            ):
+                result = self.module["sweep_input_presentations"](args)
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual(reclaim_calls, [])
+            self.assertEqual(result["failures"][0]["jobId"], "job-terminal")
+            self.assertIn("provider eligibility", result["failures"][0]["error"])
+
+    def test_inputs_sweep_rechecks_eligibility_and_receipts_launcher_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_set_id = "d" * 64
+            bindings_digest = "sha256:" + "e" * 64
+            item = {
+                "jobId": "job-terminal",
+                "attemptId": "attempt-terminal",
+                "inputSetId": input_set_id,
+                "inputBindingsDigest": bindings_digest,
+                "policyEligible": True,
+            }
+            before = {
+                "schemaVersion": 1,
+                "status": "completed",
+                "windowsLauncher": str(root / "launcher"),
+                "candidates": [dict(item)],
+            }
+            after = {
+                "schemaVersion": 1,
+                "status": "completed",
+                "windowsLauncher": str(root / "launcher"),
+                "candidates": [{**item, "policyEligible": False}],
+            }
+            reports = iter([before, before, after])
+            calls: list[tuple[str, str]] = []
+            def fake_inspect(_args):
+                return next(reports)
+            def fake_reclaim(_launcher, observed_input_set_id, observed_digest):
+                calls.append((observed_input_set_id, observed_digest))
+                return {
+                    "schemaVersion": 1,
+                    "disposition": "deleted",
+                    "inputSetId": observed_input_set_id,
+                    "inputBindingsDigest": observed_digest,
+                }
+            args = SimpleNamespace(
+                confirm_policy="RECLAIM_TERMINAL_WINDOWS_INPUT_PRESENTATIONS",
+                lock_file=root / "lifecycle.lock",
+                receipt_root=root / "receipts",
+                job_ids=None,
+            )
+            function_globals = self.module["sweep_input_presentations"].__globals__
+            with mock.patch.dict(
+                function_globals,
+                {
+                    "inspect_input_presentations": fake_inspect,
+                    "invoke_input_presentation_reclaim": fake_reclaim,
+                },
+            ):
+                result = self.module["sweep_input_presentations"](args)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(calls, [(input_set_id, bindings_digest)])
+            self.assertEqual(result["actions"][0]["disposition"], "deleted")
+            receipt = Path(result["receipt"])
+            self.assertTrue((receipt / "before.json").is_file())
+            self.assertTrue((receipt / "after.json").is_file())
+            self.assertEqual(json.loads((receipt / "result.json").read_text())["actions"], result["actions"])
 
 
 if __name__ == "__main__":

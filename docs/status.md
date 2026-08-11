@@ -94,7 +94,7 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 | doctor, repair, backup, restore | operational |
 | receipted deploy and rollback | operational |
 | structured Runtime self-release (`release.apply` / `release.get`) | implemented; operator-configured, exact-replay-safe admission binds a deterministic release effect to the ordinary Job/Attempt lifecycle, while `release.get` reads deployment receipt truth without redispatch |
-| Workspace lifecycle and cache reclamation | operational |
+| Workspace lifecycle, terminal Windows input-presentation reclamation, and cache reclamation | operational; Windows native reclaim is terminal-only, grace-perioded, receipted, exact-tree verified by the current launcher, and leaves Job-owned input bytes intact |
 | `contained_local` authority reduction | experimental but verified for the declared boundary |
 | Immutable input materialization and `workspace.execBound` | implemented and real-system verified on both targets: `local_linux` uses contained-local read-only presentation, while configured `windows_native` uses a Runtime-owned native read-only presentation under the proven limited token only; named authority roots remain operator configuration and elevated Windows input-bound admission is rejected |
 | stable trusted-local Cargo target presentation | implemented after cross-Workspace sccache falsification; all trusted-local Jobs see `CARGO_TARGET_DIR=/proc/self/fd/198` while each Workspace retains its own physical build-target backing, so compiler-visible path identity is stable without sharing mutable target bytes |

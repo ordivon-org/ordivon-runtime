@@ -253,7 +253,34 @@ scripts/ordivon-runtime-lifecycle sweep \
   --confirm-policy APPLY_WORKSPACE_RETENTION_POLICY --pretty
 ```
 
-The packaged timer runs this sweep daily with a randomized delay. It can only select policy-expired `closable` and `stale_record` entries; dirty, active, pinned, unknown, and orphan-directory cases remain excluded. The subordinate reclaim receipt is linked from the lifecycle receipt.
+The packaged timer runs the Runtime lifecycle service daily with a randomized delay. The Workspace phase can only select policy-expired `closable` and `stale_record` entries; dirty, active, pinned, unknown, and orphan-directory cases remain excluded. The subordinate reclaim receipt is linked from the lifecycle receipt. The same oneshot then runs terminal Windows immutable-input presentation reclamation and finally cache pruning; these remain separate receipt domains and do not turn Workspace retention into input or cache authority.
+
+### Terminal Windows immutable-input presentations
+
+`workspace.execBound` keeps the admitted exact bytes under Runtime-owned `job-inputs/<jobId>` and may additionally realize a request-scoped native copy at `%ProgramData%\OrdivonImmutableInputs\<inputSetId>` for a limited Windows child. The native tree is reconstructible provider state, not the authority copy. Normal process exit, timeout, cancel, or launcher crash never deletes it inline because an interrupted cleanup path cannot prove completion.
+
+Read-only inspection derives the latest durable Attempt from `attempts` history rather than the transient `jobs.current_attempt_id`, checks terminal/reservation state, re-derives the canonical Windows V2 input-tree digest from the committed Execution Plan, and cross-checks `windows-start` when that Artifact exists. A Job that fails after native publication but before `windows-start` remains classifiable from committed plan truth. `--job-id` may be repeated to narrow an operator inspection or graduation run to exact Jobs.
+
+```bash
+scripts/ordivon-runtime-lifecycle inputs-inspect \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --env-file /etc/ordivon/ordivon-runtime.env \
+  --minimum-terminal-age-hours 24 \
+  --pretty
+
+scripts/ordivon-runtime-lifecycle inputs-sweep \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --env-file /etc/ordivon/ordivon-runtime.env \
+  --minimum-terminal-age-hours 24 \
+  --receipt-root /var/lib/ordivon/runtime/input-presentation-receipts \
+  --lock-file /run/ordivon-runtime-lifecycle.lock \
+  --confirm-policy RECLAIM_TERMINAL_WINDOWS_INPUT_PRESENTATIONS \
+  --pretty
+```
+
+The packaged policy uses a 24-hour terminal grace period. Nonterminal Jobs, active/held reservations, incomplete terminal evidence, invalid committed plans, and state that changes before apply are excluded. Before each selected action the lifecycle tool repeats the Registry classification. It then asks the **currently configured receipt-bound Windows launcher** to act on the exact `<inputSetId>`; the caller cannot supply an arbitrary delete path. The launcher computes the canonical `%ProgramData%\OrdivonImmutableInputs\<inputSetId>` path itself, independently recomputes the exact directory/file inventory digest, rejects reparse points through the same tree verifier used for dispatch, and only then atomically renames the tree to `.<inputSetId>.reclaiming`, re-verifies it, and deletes it.
+
+Launcher dispositions are explicit: `deleted` means an exact tree was verified and removed; `absent` is idempotent success; `deleted_recovered_quarantine` completes an interrupted earlier reclaim only after the quarantine digest still matches. Canonical plus quarantine state, a digest mismatch, invalid inventory, or other uncertainty fails closed and preserves provider bytes. A partial sweep receipts successful independent actions and failures separately and exits nonzero. This path **never** deletes `/var/lib/ordivon/runtime/job-inputs/<jobId>`, Job/Attempt rows, Artifacts, terminal evidence, or replay identity.
 
 The `--confirm-policy` / `--confirm-quarantine` phrases on these root-operated maintenance CLIs are human/operator anti-mistake ceremony, not semantic authority. The actual protection comes from classification, exact Workspace identity, active-Job checks, locks, before/after receipts, and preserved bytes. Future Agent-facing control surfaces should express deliberate intent and affected identities structurally rather than asking an Agent to echo a magic phrase.
 
