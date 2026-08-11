@@ -10,6 +10,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{UniversalExecError, UniversalExecErrorCode};
 
+pub const WORKSPACE_ID_MIN_LENGTH: usize = 1;
+pub const WORKSPACE_ID_MAX_LENGTH: usize = 96;
+pub const WORKSPACE_ID_PATTERN: &str = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$";
+pub const ENVIRONMENT_VARIABLE_NAME_PATTERN: &str = r"^[A-Za-z_][A-Za-z0-9_]*$";
+
 #[repr(C)]
 struct OpenHow {
     flags: u64,
@@ -77,7 +82,7 @@ pub(crate) fn validate_id(value: &str, field: &str) -> Result<(), UniversalExecE
         .next()
         .is_some_and(|character| character.is_ascii_alphanumeric());
     if !valid_first
-        || value.len() > 96
+        || value.len() > WORKSPACE_ID_MAX_LENGTH
         || !chars.all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
         })

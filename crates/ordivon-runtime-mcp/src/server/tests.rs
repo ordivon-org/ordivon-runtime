@@ -111,6 +111,265 @@ fn plan_step(id: &str, timeout_ms: Option<u64>) -> ExecutionStepProposal {
     }
 }
 
+fn workspace_id_schemas<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+                if let Some(workspace_id) = properties.get("workspaceId") {
+                    found.push(workspace_id);
+                }
+            }
+            for child in object.values() {
+                workspace_id_schemas(child, found);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                workspace_id_schemas(child, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn every_workspace_id_tool_schema_projects_the_core_workspace_id_law() {
+    let server = Sandbox::new("workspace-id-schema-law").server();
+    let tools = server.tool_router.list_all();
+    let expected_tools = [
+        "release.apply",
+        "workspace.open",
+        "workspace.close",
+        "workspace.get",
+        "workspace.list",
+        "workspace.read",
+        "workspace.content",
+        "workspace.mutate",
+        "workspace.changes",
+        "workspace.patch",
+        "workspace.diff",
+        "workspace.exec",
+        "workspace.execBound",
+        "workspace.execPlan",
+        "task.list",
+    ];
+    for name in expected_tools {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("missing Tool {name}"));
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        let mut workspace_ids = Vec::new();
+        workspace_id_schemas(&schema, &mut workspace_ids);
+        assert!(
+            !workspace_ids.is_empty(),
+            "{name} exposes Workspace identity but schema has no workspaceId projection: {schema}"
+        );
+        for workspace_id in workspace_ids {
+            assert_eq!(
+                workspace_id.get("pattern"),
+                Some(&serde_json::json!(WORKSPACE_ID_PATTERN)),
+                "{name} workspaceId pattern drift: {workspace_id}"
+            );
+            assert_eq!(
+                workspace_id.get("minLength"),
+                Some(&serde_json::json!(WORKSPACE_ID_MIN_LENGTH)),
+                "{name} workspaceId minLength drift: {workspace_id}"
+            );
+            assert_eq!(
+                workspace_id.get("maxLength"),
+                Some(&serde_json::json!(WORKSPACE_ID_MAX_LENGTH)),
+                "{name} workspaceId maxLength drift: {workspace_id}"
+            );
+        }
+    }
+}
+
+fn assert_logical_id_schema(name: &str, value: &Value) {
+    assert_eq!(
+        value.get("minLength"),
+        Some(&serde_json::json!(LOGICAL_ID_MIN_LENGTH)),
+        "{name} logical-id minLength drift: {value}"
+    );
+    assert_eq!(
+        value.get("maxLength"),
+        Some(&serde_json::json!(LOGICAL_ID_MAX_LENGTH)),
+        "{name} logical-id maxLength drift: {value}"
+    );
+    assert_eq!(
+        value.get("pattern"),
+        Some(&serde_json::json!(LOGICAL_ID_PATTERN)),
+        "{name} logical-id pattern drift: {value}"
+    );
+}
+
+#[test]
+fn execution_schemas_project_agent_authored_logical_id_law() {
+    let server = Sandbox::new("logical-id-schema-law").server();
+    let tools = server.tool_router.list_all();
+    for tool_name in [
+        "workspace.exec",
+        "workspace.execBound",
+        "workspace.execPlan",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == tool_name)
+            .unwrap_or_else(|| panic!("missing Tool {tool_name}"));
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        let defs = schema
+            .get("$defs")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("{tool_name} has no $defs: {schema}"));
+
+        if let Some(step) = defs.get("ExecutionStepProposal") {
+            let id = step
+                .get("properties")
+                .and_then(Value::as_object)
+                .and_then(|properties| properties.get("id"))
+                .unwrap_or_else(|| panic!("{tool_name} step has no id: {step}"));
+            assert_logical_id_schema(&format!("{tool_name}.step.id"), id);
+        }
+        if let Some(reference) = defs.get("ForeignReference") {
+            let properties = reference
+                .get("properties")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{tool_name} ForeignReference has no properties"));
+            for field in ["namespace", "type", "id", "generation", "digest"] {
+                let value = properties
+                    .get(field)
+                    .unwrap_or_else(|| panic!("{tool_name} ForeignReference missing {field}"));
+                assert_logical_id_schema(&format!("{tool_name}.foreignReferences.{field}"), value);
+            }
+        }
+    }
+}
+
+fn client_request_id_schemas<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+                if let Some(client_request_id) = properties.get("clientRequestId") {
+                    found.push(client_request_id);
+                }
+            }
+            for child in object.values() {
+                client_request_id_schemas(child, found);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                client_request_id_schemas(child, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn every_client_request_id_tool_schema_projects_one_runtime_identity_law() {
+    let server = Sandbox::new("client-request-id-schema-law").server();
+    let tools = server.tool_router.list_all();
+    for name in [
+        "release.apply",
+        "release.get",
+        "workspace.patch",
+        "workspace.patch.get",
+        "workspace.exec",
+        "workspace.execBound",
+        "workspace.execPlan",
+        "task.list",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("missing Tool {name}"));
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        let mut ids = Vec::new();
+        client_request_id_schemas(&schema, &mut ids);
+        assert!(
+            !ids.is_empty(),
+            "{name} has no clientRequestId schema: {schema}"
+        );
+        for client_request_id in ids {
+            assert_eq!(
+                client_request_id.get("minLength"),
+                Some(&serde_json::json!(CLIENT_REQUEST_ID_MIN_LENGTH)),
+                "{name} clientRequestId minLength drift: {client_request_id}"
+            );
+            assert_eq!(
+                client_request_id.get("maxLength"),
+                Some(&serde_json::json!(CLIENT_REQUEST_ID_MAX_LENGTH)),
+                "{name} clientRequestId maxLength drift: {client_request_id}"
+            );
+            assert_eq!(
+                client_request_id.get("pattern"),
+                Some(&serde_json::json!(CLIENT_REQUEST_ID_PATTERN)),
+                "{name} clientRequestId pattern drift: {client_request_id}"
+            );
+        }
+    }
+}
+
+fn env_schemas<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+                if let Some(env) = properties.get("env") {
+                    found.push(env);
+                }
+            }
+            for child in object.values() {
+                env_schemas(child, found);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                env_schemas(child, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn execution_tool_schemas_project_environment_name_law() {
+    let server = Sandbox::new("environment-name-schema-law").server();
+    let tools = server.tool_router.list_all();
+    for name in [
+        "workspace.exec",
+        "workspace.execBound",
+        "workspace.execPlan",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("missing Tool {name}"));
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        let mut environments = Vec::new();
+        env_schemas(&schema, &mut environments);
+        assert!(
+            !environments.is_empty(),
+            "{name} has no env schema: {schema}"
+        );
+        for env in environments {
+            let pattern_properties = env
+                .get("patternProperties")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{name} env lacks patternProperties: {env}"));
+            assert!(
+                pattern_properties.contains_key(ENVIRONMENT_VARIABLE_NAME_PATTERN),
+                "{name} env key law drift: {env}"
+            );
+            assert_eq!(
+                env.get("additionalProperties"),
+                Some(&Value::Bool(false)),
+                "{name} env permits keys outside the declared name law: {env}"
+            );
+        }
+    }
+}
+
 #[test]
 fn workspace_exec_schema_exposes_mechanical_limits_as_optional() {
     let server = Sandbox::new("proposal-schema").server();

@@ -12,15 +12,15 @@ use uuid::Uuid;
 
 use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::{
-    operation_request_identity_digest_from_plan, AdmissionOutcome, ArtifactRegistration,
-    AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate, CreatedAdmission,
-    ExecutionProviderContract, ExecutionProviderSnapshot, HostDependencyBinding, JobDesiredState,
-    JobProjection, JobResolution, ReservationRecord, ReservationState, RunnerIdentity,
-    RuntimeArtifactRecord, RuntimeDeliveryDisposition, RuntimeError, RuntimeErrorCode,
-    RuntimeExecutionPlan, RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest,
-    RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary, RuntimeReleaseContract,
-    RuntimeReleaseEffectBinding, RuntimeResult, SubmitRequest, TerminalCommit,
-    MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
+    operation_request_identity_digest_from_plan, validate_client_request_id, AdmissionOutcome,
+    ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,
+    CreatedAdmission, ExecutionProviderContract, ExecutionProviderSnapshot, HostDependencyBinding,
+    JobDesiredState, JobProjection, JobResolution, ReservationRecord, ReservationState,
+    RunnerIdentity, RuntimeArtifactRecord, RuntimeDeliveryDisposition, RuntimeError,
+    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeInvariantViolation, RuntimeJobListCursor,
+    RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary,
+    RuntimeReleaseContract, RuntimeReleaseEffectBinding, RuntimeResult, SubmitRequest,
+    TerminalCommit, MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
 };
 
 const MIGRATION_V1: i64 = 1;
@@ -60,7 +60,76 @@ const JOB_CLIENT_REQUEST_LOOKUP_INDEX_SQL: &str =
 const JOB_WORKSPACE_LOOKUP_INDEX: &str = "idx_jobs_workspace_created";
 const JOB_WORKSPACE_LOOKUP_INDEX_SQL: &str =
     "CREATE INDEX IF NOT EXISTS idx_jobs_workspace_created ON jobs(workspace_id, created_at_ms, job_id)";
+const ARTIFACT_JOB_LOOKUP_INDEX: &str = "idx_artifacts_job";
+const ARTIFACT_JOB_LOOKUP_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_artifacts_job ON artifacts(job_id)";
 const WORKSPACE_EXECUTION_LIMIT: u32 = 1;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TestCommitPoint {
+    Admission,
+    Cancel,
+    Terminal,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TestCommitFault {
+    CommitThenError,
+    RollbackThenError,
+    DeferredConstraint,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_COMMIT_FAULT: std::cell::RefCell<Option<(TestCommitPoint, TestCommitFault)>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_commit_fault(point: TestCommitPoint, fault: TestCommitFault) {
+    TEST_COMMIT_FAULT.with(|slot| {
+        let previous = slot.replace(Some((point, fault)));
+        assert!(previous.is_none(), "test commit fault already armed");
+    });
+}
+
+#[cfg(test)]
+fn commit_with_test_fault(
+    transaction: Transaction<'_>,
+    point: TestCommitPoint,
+) -> rusqlite::Result<()> {
+    let fault = TEST_COMMIT_FAULT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        match *slot {
+            Some((armed_point, fault)) if armed_point == point => {
+                *slot = None;
+                Some(fault)
+            }
+            _ => None,
+        }
+    });
+    match fault {
+        None => transaction.commit(),
+        Some(TestCommitFault::CommitThenError) => {
+            transaction.commit()?;
+            Err(rusqlite::Error::InvalidQuery)
+        }
+        Some(TestCommitFault::RollbackThenError) => {
+            transaction.rollback()?;
+            Err(rusqlite::Error::InvalidQuery)
+        }
+        Some(TestCommitFault::DeferredConstraint) => {
+            transaction.execute(
+                "INSERT INTO idempotency_keys(principal,client_request_id,operation_digest,job_id,created_at_ms) VALUES('__test_fault__',?1,'__test_fault__','__missing_job__',0)",
+                [format!("fault:{}", Uuid::now_v7())],
+            )?;
+            transaction.commit()
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct RegistryConfig {
@@ -200,19 +269,21 @@ impl Registry {
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let connection = Connection::open_with_flags(&self.config.db_path, flags)
-            .map_err(|error| RuntimeError::from_sql(error, "cannot open runtime registry"))?;
+            .map_err(|error| safe_same_request_sql_error(error, "cannot open runtime registry"))?;
         connection
             .busy_timeout(Duration::from_millis(self.config.busy_timeout_ms))
-            .map_err(|error| RuntimeError::from_sql(error, "cannot set registry busy timeout"))?;
+            .map_err(|error| {
+                safe_same_request_sql_error(error, "cannot set registry busy timeout")
+            })?;
         connection
             .pragma_update(None, "foreign_keys", true)
-            .map_err(|error| RuntimeError::from_sql(error, "cannot enable foreign keys"))?;
+            .map_err(|error| safe_same_request_sql_error(error, "cannot enable foreign keys"))?;
         connection
             .pragma_update(None, "trusted_schema", false)
-            .map_err(|error| RuntimeError::from_sql(error, "cannot disable trusted schema"))?;
+            .map_err(|error| safe_same_request_sql_error(error, "cannot disable trusted schema"))?;
         connection
             .pragma_update(None, "synchronous", "FULL")
-            .map_err(|error| RuntimeError::from_sql(error, "cannot set synchronous mode"))?;
+            .map_err(|error| safe_same_request_sql_error(error, "cannot set synchronous mode"))?;
         Ok(connection)
     }
 
@@ -386,6 +457,10 @@ impl Registry {
                 JOB_WORKSPACE_LOOKUP_INDEX_SQL,
                 "cannot ensure Job Workspace lookup index",
             ),
+            (
+                ARTIFACT_JOB_LOOKUP_INDEX_SQL,
+                "cannot ensure Artifact Job lookup index",
+            ),
         ] {
             transaction
                 .execute(sql, [])
@@ -404,6 +479,11 @@ impl Registry {
                 JOB_WORKSPACE_LOOKUP_INDEX,
                 "cannot verify Job Workspace lookup index",
                 "Job Workspace lookup index is missing after maintenance",
+            ),
+            (
+                ARTIFACT_JOB_LOOKUP_INDEX,
+                "cannot verify Artifact Job lookup index",
+                "Artifact Job lookup index is missing after maintenance",
             ),
         ] {
             let exists: bool = connection
@@ -592,7 +672,7 @@ impl Registry {
         request_identity_digest: &str,
     ) -> RuntimeResult<Option<RuntimeJobRecord>> {
         validate_identifier(principal, "principal")?;
-        validate_identifier(client_request_id, "clientRequestId")?;
+        validate_client_request_id(client_request_id, "clientRequestId")?;
         validate_request_identity_digest(request_identity_digest)?;
         let connection = self.open_connection()?;
         let job_id: Option<String> = connection
@@ -1079,9 +1159,61 @@ impl Registry {
                 observed_at_ms: created_at_ms,
             },
         )?;
-        transaction
-            .commit()
-            .map_err(|error| RuntimeError::from_sql(error, "cannot commit admission"))?;
+        #[cfg(test)]
+        let commit_result = commit_with_test_fault(transaction, TestCommitPoint::Admission);
+        #[cfg(not(test))]
+        let commit_result = transaction.commit();
+        if let Err(error) = commit_result {
+            let mut commit_error = RuntimeError::from_sql(error, "cannot commit admission");
+            if !connection.is_autocommit() {
+                return Err(unknown_commit_outcome(
+                    "admission commit outcome remains inside an open SQLite transaction",
+                    &commit_error,
+                    None,
+                ));
+            }
+            let durable = connection
+                .query_row(
+                    "SELECT operation_digest,job_id FROM idempotency_keys WHERE principal=?1 AND client_request_id=?2",
+                    params![request.plan.principal, request.client_request_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional();
+            match durable {
+                Ok(Some((existing_operation_digest, existing_job_id))) => {
+                    if existing_operation_digest != operation_digest {
+                        return Err(idempotency_conflict());
+                    }
+                    return match load_job(&connection, &existing_job_id) {
+                        Ok(existing) => Ok(AdmissionOutcome::Existing {
+                            job: Box::new(existing),
+                        }),
+                        Err(reconcile_error) => Err(committed_reconciliation(
+                            &existing_job_id,
+                            &format!(
+                                "admission committed but Job projection requires reconciliation: {}",
+                                reconcile_error.message
+                            ),
+                        )),
+                    };
+                }
+                Ok(None) => {
+                    commit_error.retryable = true;
+                    return Err(commit_error);
+                }
+                Err(error) => {
+                    let reconcile_error = RuntimeError::from_sql(
+                        error,
+                        "cannot reconcile admission after commit failure",
+                    );
+                    return Err(unknown_commit_outcome(
+                        "admission commit outcome cannot be proven",
+                        &commit_error,
+                        Some(&reconcile_error),
+                    ));
+                }
+            }
+        }
         Ok(AdmissionOutcome::Created(Box::new(CreatedAdmission {
             job,
             attempt,
@@ -1104,7 +1236,7 @@ impl Registry {
                     RuntimeErrorCode::RegistryUnavailable,
                     format!("cannot open admission fence {}: {error}", path.display()),
                     None,
-                    false,
+                    true,
                 )
             })?;
         let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
@@ -1119,7 +1251,7 @@ impl Registry {
             RuntimeErrorCode::RegistryUnavailable,
             format!("cannot acquire admission fence {}: {error}", path.display()),
             None,
-            false,
+            true,
         ))
     }
 
@@ -1634,7 +1766,7 @@ impl Registry {
             ));
         }
         if let Some(client_request_id) = request.client_request_id.as_deref() {
-            validate_identifier(client_request_id, "clientRequestId")?;
+            validate_client_request_id(client_request_id, "clientRequestId")?;
         }
         if let Some(workspace_id) = request.workspace_id.as_deref() {
             validate_identifier(workspace_id, "workspaceId")?;
@@ -2126,7 +2258,7 @@ impl Registry {
         client_request_id: &str,
     ) -> RuntimeResult<Option<(RuntimeJobRecord, RuntimeReleaseEffectBinding)>> {
         validate_identifier(principal, "principal")?;
-        validate_identifier(client_request_id, "clientRequestId")?;
+        validate_client_request_id(client_request_id, "clientRequestId")?;
         let connection = self.open_connection()?;
         let job_id: Option<String> = connection
             .query_row(
@@ -2430,9 +2562,18 @@ impl Registry {
                         observed_at_ms,
                     )?;
                 }
-                transaction.commit().map_err(|error| {
-                    RuntimeError::from_sql(error, "cannot commit orphan cancel intent")
-                })?;
+                #[cfg(test)]
+                let commit_result = commit_with_test_fault(transaction, TestCommitPoint::Cancel);
+                #[cfg(not(test))]
+                let commit_result = transaction.commit();
+                if let Err(error) = commit_result {
+                    return self.reconcile_cancel_commit_failure(
+                        &connection,
+                        job_id,
+                        error,
+                        "cannot commit orphan cancel intent",
+                    );
+                }
                 return Ok(load_job_snapshot(&connection, job_id)?.projection);
             }
             transaction.commit().map_err(|error| {
@@ -2517,10 +2658,65 @@ impl Registry {
                 observed_at_ms,
             )?;
         }
-        transaction
-            .commit()
-            .map_err(|error| RuntimeError::from_sql(error, "cannot commit cancel intent"))?;
+        #[cfg(test)]
+        let commit_result = commit_with_test_fault(transaction, TestCommitPoint::Cancel);
+        #[cfg(not(test))]
+        let commit_result = transaction.commit();
+        if let Err(error) = commit_result {
+            return self.reconcile_cancel_commit_failure(
+                &connection,
+                job_id,
+                error,
+                "cannot commit cancel intent",
+            );
+        }
         Ok(load_job_snapshot(&connection, job_id)?.projection)
+    }
+
+    fn reconcile_cancel_commit_failure(
+        &self,
+        connection: &Connection,
+        job_id: &str,
+        error: rusqlite::Error,
+        context: &str,
+    ) -> RuntimeResult<JobProjection> {
+        let mut commit_error = RuntimeError::from_sql(error, context);
+        if !connection.is_autocommit() {
+            return Err(unknown_commit_outcome(
+                "cancel-intent commit outcome remains inside an open SQLite transaction",
+                &commit_error,
+                None,
+            ));
+        }
+        match load_job_snapshot(connection, job_id) {
+            Ok(snapshot) if snapshot.job.resolution.is_some() => Ok(snapshot.projection),
+            Ok(snapshot)
+                if snapshot.job.desired_state == JobDesiredState::Cancelled
+                    && snapshot.attempt.as_ref().is_some_and(|attempt| {
+                        attempt.termination_intent == AttemptTerminationIntent::StopRequested
+                    }) =>
+            {
+                Ok(snapshot.projection)
+            }
+            Ok(snapshot)
+                if snapshot.job.desired_state == JobDesiredState::Run
+                    && snapshot.attempt.as_ref().is_some_and(|attempt| {
+                        attempt.termination_intent == AttemptTerminationIntent::Natural
+                    }) =>
+            {
+                commit_error.retryable = true;
+                Err(commit_error)
+            }
+            Ok(snapshot) => Err(committed_reconciliation(
+                &snapshot.job.job_id,
+                "cancel-intent commit raced with another durable Job/Attempt transition",
+            )),
+            Err(reconcile_error) => Err(unknown_commit_outcome(
+                "cancel-intent commit outcome cannot be proven",
+                &commit_error,
+                Some(&reconcile_error),
+            )),
+        }
     }
 
     pub fn commit_terminal(&self, request: &TerminalCommit) -> RuntimeResult<JobProjection> {
@@ -2677,9 +2873,55 @@ impl Registry {
             serde_json::json!({"resolution": resolution.as_db()}),
             request.finished_at_ms,
         )?;
-        transaction
-            .commit()
-            .map_err(|error| RuntimeError::from_sql(error, "cannot commit terminal transaction"))?;
+        #[cfg(test)]
+        let commit_result = commit_with_test_fault(transaction, TestCommitPoint::Terminal);
+        #[cfg(not(test))]
+        let commit_result = transaction.commit();
+        if let Err(error) = commit_result {
+            let mut commit_error =
+                RuntimeError::from_sql(error, "cannot commit terminal transaction");
+            if !connection.is_autocommit() {
+                return Err(unknown_commit_outcome(
+                    "terminal commit outcome remains inside an open SQLite transaction",
+                    &commit_error,
+                    None,
+                ));
+            }
+            return match load_attempt(&connection, &request.attempt_id) {
+                Ok(current)
+                    if current.state == request.state
+                        && current.result_digest.as_deref()
+                            == Some(request.result_digest.as_str()) =>
+                {
+                    match load_job_snapshot(&connection, &current.job_id) {
+                        Ok(snapshot) => Ok(snapshot.projection),
+                        Err(reconcile_error) => Err(committed_reconciliation(
+                            &current.job_id,
+                            &format!(
+                                "terminal result committed but Job projection requires reconciliation: {}",
+                                reconcile_error.message
+                            ),
+                        )),
+                    }
+                }
+                Ok(current)
+                    if !current.state.is_terminal()
+                        && current.row_version == request.expected_row_version =>
+                {
+                    commit_error.retryable = true;
+                    Err(commit_error)
+                }
+                Ok(current) => Err(committed_reconciliation(
+                    &current.job_id,
+                    "terminal commit raced with another durable Attempt transition",
+                )),
+                Err(reconcile_error) => Err(unknown_commit_outcome(
+                    "terminal commit outcome cannot be proven",
+                    &commit_error,
+                    Some(&reconcile_error),
+                )),
+            };
+        }
         Ok(load_job_snapshot(&connection, &attempt.job_id)?.projection)
     }
 
@@ -3180,10 +3422,53 @@ fn validate_migration_checksum(
     Ok(())
 }
 
+fn safe_same_request_sql_error(error: rusqlite::Error, context: &str) -> RuntimeError {
+    let mut mapped = RuntimeError::from_sql(error, context);
+    if matches!(
+        mapped.code,
+        RuntimeErrorCode::RegistryUnavailable | RuntimeErrorCode::RegistryBusy
+    ) {
+        mapped.retryable = true;
+    }
+    mapped
+}
+
+fn unknown_commit_outcome(
+    context: &str,
+    commit_error: &RuntimeError,
+    reconcile: Option<&RuntimeError>,
+) -> RuntimeError {
+    let suffix = reconcile
+        .map(|error| {
+            format!(
+                "; reconciliation failed: {}: {}",
+                error.code.as_str(),
+                error.message
+            )
+        })
+        .unwrap_or_default();
+    RuntimeError::new(
+        RuntimeErrorCode::DispatchOutcomeUnknown,
+        format!("{context}: {}{suffix}", commit_error.message),
+        None,
+        true,
+    )
+}
+
+fn committed_reconciliation(job_id: &str, context: &str) -> RuntimeError {
+    RuntimeError::new(
+        RuntimeErrorCode::ReconciliationRequired,
+        context,
+        None,
+        true,
+    )
+    .with_operation_id(job_id.to_string())
+}
+
 fn immediate<'a>(connection: &'a mut Connection, context: &str) -> RuntimeResult<Transaction<'a>> {
     connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| RuntimeError::from_sql(error, &format!("cannot begin {context}")))
+        .map_err(|error| safe_same_request_sql_error(error, &format!("cannot begin {context}")))
 }
 
 struct RawJob {
@@ -4299,7 +4584,7 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
             "schemaVersion",
         ));
     }
-    validate_identifier(&request.client_request_id, "clientRequestId")?;
+    validate_client_request_id(&request.client_request_id, "clientRequestId")?;
     if let Some(digest) = request.request_identity_digest.as_deref() {
         validate_request_identity_digest(digest)?;
     }

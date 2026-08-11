@@ -23,15 +23,16 @@ use super::supervisor::{
 use super::systemd::*;
 use super::windows::*;
 use super::{
-    runtime_release_effect_id, runtime_release_request_identity_digest, AdmissionOutcome,
-    ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult, ArtifactRegistration,
-    AttemptRecord, AttemptState, AttemptTerminationIntent, DurableWorkspacePatchRequest,
-    DurableWorkspacePatchResult, EffectiveInputBinding, ExecutionProviderContract,
-    ExecutionProviderSnapshot, HostDependencyBinding, InputAccessMode, InputAuthority,
-    InputBindingRequest, JobDesiredState, JobResolution, Registry, RegistryConfig, RunnerIdentity,
-    RuntimeArtifactRecord, RuntimeCapabilities, RuntimeError, RuntimeErrorCode,
-    RuntimeExecutionPlan, RuntimeExecutionStep, RuntimeExecutionTargetCapability,
-    RuntimeJobListRequest, RuntimeJobListResult, RuntimeReleaseAdmission, RuntimeReleaseContract,
+    runtime_release_effect_id, runtime_release_request_identity_digest, validate_client_request_id,
+    validate_logical_id, AdmissionOutcome, ArtifactDescriptor, ArtifactReadRequest,
+    ArtifactReadResult, ArtifactRegistration, AttemptRecord, AttemptState,
+    AttemptTerminationIntent, DurableWorkspacePatchRequest, DurableWorkspacePatchResult,
+    EffectiveInputBinding, ExecutionProviderContract, ExecutionProviderSnapshot,
+    HostDependencyBinding, InputAccessMode, InputAuthority, InputBindingRequest, JobDesiredState,
+    JobResolution, Registry, RegistryConfig, RunnerIdentity, RuntimeArtifactRecord,
+    RuntimeCapabilities, RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan,
+    RuntimeExecutionStep, RuntimeExecutionTargetCapability, RuntimeJobListRequest,
+    RuntimeJobListResult, RuntimeReleaseAdmission, RuntimeReleaseContract,
     RuntimeReleaseDisposition, RuntimeReleaseEffectBinding, RuntimeReleaseGetRequest,
     RuntimeReleaseProjection, RuntimeReleaseRequest, RuntimeResult, RuntimeWorkspaceGetRequest,
     RuntimeWorkspaceIssue, RuntimeWorkspaceIssueStage, RuntimeWorkspaceListRequest,
@@ -223,6 +224,7 @@ pub struct Runtime {
     windows: Option<WindowsExecutionConfig>,
     input_authorities: BTreeMap<String, OpenedInputAuthority>,
     lifecycle_lock: Arc<Mutex<()>>,
+    control_terminal_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -471,6 +473,7 @@ impl Runtime {
             windows: config.windows,
             input_authorities: configured_input_authorities,
             lifecycle_lock: Arc::new(Mutex::new(())),
+            control_terminal_lock: Arc::new(Mutex::new(())),
         };
         runtime.reconcile_recoverable_orphans()?;
         Ok(runtime)
@@ -508,6 +511,17 @@ impl Runtime {
         })
     }
 
+    fn lock_control_terminal(&self) -> RuntimeResult<MutexGuard<'_, ()>> {
+        self.control_terminal_lock.lock().map_err(|_| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryUnavailable,
+                "Runtime control-terminal lock is poisoned",
+                None,
+                true,
+            )
+        })
+    }
+
     pub fn run_task(&self, request: &TaskRunRequest) -> RuntimeResult<TaskObservation> {
         validate_run_request_structure(request)?;
         let request_identity_digest = super::operation_request_identity_digest(request)?;
@@ -524,18 +538,23 @@ impl Runtime {
         validate_run_request_structure(request)?;
         let inputs = canonical_input_binding_requests(inputs)?;
         let request_identity_digest = super::input_bound_request_identity_digest(request, &inputs)?;
-        let job_id = {
+        let (job_id, created) = {
             let _guard = self.lock_lifecycle()?;
             if let Some(existing) = self.registry.find_idempotent_job(
                 &request.principal,
                 &request.client_request_id,
                 &request_identity_digest,
             )? {
-                existing.job_id
+                (existing.job_id, false)
             } else {
-                self.admit_new_task_with_inputs(request, request_identity_digest, &inputs)?
+                let job_id =
+                    self.admit_new_task_with_inputs(request, request_identity_digest, &inputs)?;
+                (job_id, true)
             }
         };
+        if created {
+            self.ensure_newly_admitted_job_dispatched(&job_id)?;
+        }
         self.observe_admitted_task(
             &job_id,
             request.wait_ms,
@@ -665,8 +684,6 @@ impl Runtime {
                 let job_id = created.job.job_id.clone();
                 self.ensure_job_input_ownership(&job_id)
                     .map_err(|error| error.with_operation_id(job_id.clone()))?;
-                self.ensure_attempt_dispatched(&created.attempt)
-                    .map_err(|error| error.with_operation_id(job_id.clone()))?;
                 Ok(job_id)
             }
             Ok(AdmissionOutcome::Existing { job }) => {
@@ -689,14 +706,14 @@ impl Runtime {
     ) -> RuntimeResult<TaskObservation> {
         validate_run_proposal_structure(proposal)?;
         let request_identity_digest = super::proposal_request_identity_digest(proposal)?;
-        let job_id = {
+        let (job_id, created) = {
             let _guard = self.lock_lifecycle()?;
             if let Some(existing) = self.registry.find_idempotent_job(
                 &proposal.principal,
                 &proposal.client_request_id,
                 &request_identity_digest,
             )? {
-                existing.job_id
+                (existing.job_id, false)
             } else {
                 let request = self.resolve_proposal(proposal);
                 validate_run_request_structure(&request)?;
@@ -705,9 +722,15 @@ impl Runtime {
                     self.executor.max_runtime_ms,
                     self.executor.max_output_bytes,
                 )?;
-                self.admit_new_task(&request, request_identity_digest)?
+                (
+                    self.admit_new_task(&request, request_identity_digest)?,
+                    true,
+                )
             }
         };
+        if created {
+            self.ensure_newly_admitted_job_dispatched(&job_id)?;
+        }
         self.observe_admitted_task(
             &job_id,
             proposal.wait_ms,
@@ -721,23 +744,26 @@ impl Runtime {
         request: &TaskRunRequest,
         request_identity_digest: String,
     ) -> RuntimeResult<TaskObservation> {
-        let job_id = {
+        let (job_id, created) = {
             let _guard = self.lock_lifecycle()?;
             if let Some(existing) = self.registry.find_idempotent_job(
                 &request.principal,
                 &request.client_request_id,
                 &request_identity_digest,
             )? {
-                existing.job_id
+                (existing.job_id, false)
             } else {
                 validate_new_admission_policy(
                     request,
                     self.executor.max_runtime_ms,
                     self.executor.max_output_bytes,
                 )?;
-                self.admit_new_task(request, request_identity_digest)?
+                (self.admit_new_task(request, request_identity_digest)?, true)
             }
         };
+        if created {
+            self.ensure_newly_admitted_job_dispatched(&job_id)?;
+        }
         self.observe_admitted_task(
             &job_id,
             request.wait_ms,
@@ -768,12 +794,7 @@ impl Runtime {
             global_limit: request.global_limit,
         };
         match self.registry.submit(&submit)? {
-            AdmissionOutcome::Created(created) => {
-                let job_id = created.job.job_id.clone();
-                self.ensure_attempt_dispatched(&created.attempt)
-                    .map_err(|error| error.with_operation_id(job_id.clone()))?;
-                Ok(job_id)
-            }
+            AdmissionOutcome::Created(created) => Ok(created.job.job_id.clone()),
             AdmissionOutcome::Existing { job } => Ok(job.job_id),
         }
     }
@@ -2010,6 +2031,22 @@ impl Runtime {
             Err(error) => return Err(io_error("adopt prepared immutable inputs for Job", error)),
         }
         verify_effective_input_set(&owned_root, &requests)?;
+        Ok(())
+    }
+
+    fn ensure_newly_admitted_job_dispatched(&self, job_id: &str) -> RuntimeResult<()> {
+        let attempt = self.registry.get_latest_attempt(job_id)?.ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "newly admitted Job has no Attempt",
+                Some("jobId"),
+                false,
+            )
+        })?;
+        if attempt.state == AttemptState::Accepted {
+            self.ensure_attempt_dispatched(&attempt)
+                .map_err(|error| error.with_operation_id(job_id.to_string()))?;
+        }
         Ok(())
     }
 
@@ -3781,10 +3818,19 @@ impl Runtime {
         match disposition {
             SupervisorRecoveryDisposition::Running => Ok(()),
             SupervisorRecoveryDisposition::Terminal(state) => {
+                let reason_code = match (observation.unit_state, intent) {
+                    (SupervisorUnitState::NotFound, TerminationIntent::StopRequested) => {
+                        "STOP_REQUESTED_PROCESS_TREE_GONE"
+                    }
+                    (SupervisorUnitState::NotFound, TerminationIntent::DeadlineExceeded) => {
+                        "DEADLINE_EXCEEDED"
+                    }
+                    _ => "SUPERVISOR_TERMINAL_FALLBACK",
+                };
                 self.commit_observed_control_terminal(
                     attempt,
                     state,
-                    "SUPERVISOR_TERMINAL_FALLBACK",
+                    reason_code,
                     None,
                     Some(&observation),
                 )?;
@@ -3835,6 +3881,7 @@ impl Runtime {
         detail: Option<String>,
         observed_supervisor: Option<&SupervisorObservation>,
     ) -> RuntimeResult<TaskObservation> {
+        let control_terminal_guard = self.lock_control_terminal()?;
         let current = self.registry.get_attempt(&attempt.attempt_id)?;
         if current.state.is_terminal() {
             return self.observation_from_registry(&current.job_id, 0, 0);
@@ -3905,6 +3952,7 @@ impl Runtime {
             observed_supervisor,
         )?;
         let _ = self.registry.commit_terminal(&terminal)?;
+        drop(control_terminal_guard);
         if state != AttemptState::Orphaned {
             release_terminal_unit(&current.unit_name);
             self.cleanup_payload_view(&current.attempt_id)?;
@@ -4755,6 +4803,7 @@ fn validate_runtime_release_request(request: &RuntimeReleaseRequest) -> RuntimeR
             "schemaVersion",
         ));
     }
+    validate_client_request_id(&request.client_request_id, "clientRequestId")?;
     if request.expected_tool_count == 0 {
         return Err(RuntimeError::invalid(
             "Runtime Release expectedToolCount must be positive",
@@ -5056,8 +5105,8 @@ fn validate_run_request_structure(request: &TaskRunRequest) -> RuntimeResult<()>
             "schemaVersion",
         ));
     }
+    validate_client_request_id(&request.client_request_id, "clientRequestId")?;
     for (value, field) in [
-        (&request.client_request_id, "clientRequestId"),
         (&request.principal, "principal"),
         (&request.execution.workspace_id, "execution.workspaceId"),
     ] {
@@ -5144,19 +5193,19 @@ fn validate_run_request_structure(request: &TaskRunRequest) -> RuntimeResult<()>
             (&reference.reference_type, "type"),
             (&reference.id, "id"),
         ] {
-            validate_text_id(
+            validate_logical_id(
                 value,
                 &format!("execution.foreignReferences[{index}].{suffix}"),
             )?;
         }
         if let Some(generation) = &reference.generation {
-            validate_text_id(
+            validate_logical_id(
                 generation,
                 &format!("execution.foreignReferences[{index}].generation"),
             )?;
         }
         if let Some(digest) = &reference.digest {
-            validate_text_id(
+            validate_logical_id(
                 digest,
                 &format!("execution.foreignReferences[{index}].digest"),
             )?;
@@ -5178,7 +5227,7 @@ fn validate_run_request_structure(request: &TaskRunRequest) -> RuntimeResult<()>
     }
     let mut step_ids = std::collections::BTreeSet::new();
     for (index, step) in request.execution.steps.iter().enumerate() {
-        validate_text_id(&step.id, &format!("execution.steps[{index}].id"))?;
+        validate_logical_id(&step.id, &format!("execution.steps[{index}].id"))?;
         if !step_ids.insert(&step.id) {
             return Err(RuntimeError::invalid(
                 "step ids must be unique",
@@ -5360,7 +5409,6 @@ fn validate_observe_request(request: &TaskObserveRequest) -> RuntimeResult<()> {
             "schemaVersion",
         ));
     }
-    validate_text_id(&request.job_id, "jobId")?;
     if request.wait_ms > MAX_TASK_WAIT_MS
         || request.stdout_tail_bytes > MAX_TASK_TAIL_BYTES
         || request.stderr_tail_bytes > MAX_TASK_TAIL_BYTES

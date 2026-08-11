@@ -1014,17 +1014,10 @@ fn open_read_only(config: &RuntimeInspectionConfig) -> RuntimeResult<(Connection
         .execute_batch("BEGIN")
         .map_err(|error| RuntimeError::from_sql(error, "cannot begin inspection read snapshot"))?;
     debug_assert!(!connection.is_autocommit());
-    let integrity: String = connection
-        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|error| RuntimeError::from_sql(error, "cannot inspect Registry integrity"))?;
-    if integrity != "ok" {
-        return Err(RuntimeError::new(
-            RuntimeErrorCode::RegistryCorrupt,
-            format!("Registry integrity check returned {integrity}"),
-            None,
-            false,
-        ));
-    }
+    // Ordinary Agent-facing inspection is a bounded projection over one read snapshot.
+    // A full Registry integrity scan is deliberately owned by Runtime doctor/repair and
+    // backup/restore paths; coupling every projection to PRAGMA integrity_check makes
+    // point reads scale with the entire durable Registry rather than the requested object.
     let migration_version: i64 = connection
         .query_row(
             "SELECT COALESCE(MAX(version),0) FROM schema_migrations",

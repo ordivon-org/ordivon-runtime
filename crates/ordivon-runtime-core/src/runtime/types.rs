@@ -3,6 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::universal::{
+    ENVIRONMENT_VARIABLE_NAME_PATTERN, WORKSPACE_ID_MAX_LENGTH, WORKSPACE_ID_MIN_LENGTH,
+    WORKSPACE_ID_PATTERN,
+};
+
 use super::{RuntimeError, RuntimeErrorCode, RuntimeResult};
 
 pub const RUNTIME_SCHEMA_VERSION: u32 = 1;
@@ -15,6 +20,38 @@ pub const MAX_RUNTIME_LIST_LIMIT: u32 = 100;
 pub const MAX_TASK_WAIT_MS: u64 = 30_000;
 pub const MAX_TASK_TAIL_BYTES: u64 = 64 * 1024;
 pub const MAX_ARTIFACT_READ_BYTES: u64 = 1024 * 1024;
+
+pub const LOGICAL_ID_MIN_LENGTH: usize = 1;
+pub const LOGICAL_ID_MAX_LENGTH: usize = 256;
+pub const LOGICAL_ID_PATTERN: &str = r"^[^\u0000-\u0020\u007f-\u00a0\u1680\u2000-\u200a\u2028-\u2029\u202f\u205f\u3000](?:[^\u0000-\u001f\u007f-\u009f]*[^\u0000-\u0020\u007f-\u00a0\u1680\u2000-\u200a\u2028-\u2029\u202f\u205f\u3000])?$";
+pub const CLIENT_REQUEST_ID_MIN_LENGTH: usize = LOGICAL_ID_MIN_LENGTH;
+pub const CLIENT_REQUEST_ID_MAX_LENGTH: usize = LOGICAL_ID_MAX_LENGTH;
+pub const CLIENT_REQUEST_ID_PATTERN: &str = LOGICAL_ID_PATTERN;
+
+pub(crate) fn validate_logical_id(value: &str, field: &str) -> RuntimeResult<()> {
+    let scalar_length = value.chars().count();
+    if !(LOGICAL_ID_MIN_LENGTH..=LOGICAL_ID_MAX_LENGTH).contains(&scalar_length)
+        || value != value.trim()
+        || value.chars().any(char::is_control)
+    {
+        return Err(RuntimeError::invalid(
+            format!(
+                "{field} must contain 1..={LOGICAL_ID_MAX_LENGTH} Unicode characters, be trimmed, and be control-free"
+            ),
+            field,
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_client_request_id(value: &str, field: &str) -> RuntimeResult<()> {
+    validate_logical_id(value, field)
+}
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[schemars(extend("pattern" = ENVIRONMENT_VARIABLE_NAME_PATTERN))]
+struct EnvironmentVariableNameSchema(String);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -337,13 +374,18 @@ pub struct WindowsExecutionContext {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ForeignReference {
+    #[schemars(length(min = LOGICAL_ID_MIN_LENGTH, max = LOGICAL_ID_MAX_LENGTH), extend("pattern" = LOGICAL_ID_PATTERN))]
     pub namespace: String,
     #[serde(rename = "type")]
+    #[schemars(length(min = LOGICAL_ID_MIN_LENGTH, max = LOGICAL_ID_MAX_LENGTH), extend("pattern" = LOGICAL_ID_PATTERN))]
     pub reference_type: String,
+    #[schemars(length(min = LOGICAL_ID_MIN_LENGTH, max = LOGICAL_ID_MAX_LENGTH), extend("pattern" = LOGICAL_ID_PATTERN))]
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = LOGICAL_ID_MIN_LENGTH, max = LOGICAL_ID_MAX_LENGTH), extend("pattern" = LOGICAL_ID_PATTERN))]
     pub generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = LOGICAL_ID_MIN_LENGTH, max = LOGICAL_ID_MAX_LENGTH), extend("pattern" = LOGICAL_ID_PATTERN))]
     pub digest: Option<String>,
 }
 
@@ -405,8 +447,10 @@ pub struct RuntimeReleaseRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
     pub principal: String,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     pub commit: String,
     pub candidate_manifest_digest: String,
@@ -420,6 +464,7 @@ pub struct RuntimeReleaseGetRequest {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub principal: String,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
 }
 
@@ -570,6 +615,7 @@ impl ExecutionBudget {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UniversalExecutionStep {
+    #[schemars(length(min = LOGICAL_ID_MIN_LENGTH, max = LOGICAL_ID_MAX_LENGTH), extend("pattern" = LOGICAL_ID_PATTERN))]
     pub id: String,
     /// Absolute host path to the executable; PATH lookup is intentionally not performed.
     pub executable: String,
@@ -578,6 +624,7 @@ pub struct UniversalExecutionStep {
     /// Working directory relative to the Workspace root.
     pub cwd_relative: String,
     #[serde(default)]
+    #[schemars(with = "BTreeMap<EnvironmentVariableNameSchema, String>")]
     pub env: BTreeMap<String, String>,
     #[schemars(range(min = 1))]
     pub timeout_ms: u64,
@@ -589,6 +636,7 @@ pub struct UniversalExecutionStep {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionStepProposal {
+    #[schemars(length(min = LOGICAL_ID_MIN_LENGTH, max = LOGICAL_ID_MAX_LENGTH), extend("pattern" = LOGICAL_ID_PATTERN))]
     pub id: String,
     /// Absolute host path to the executable; PATH lookup is intentionally not performed.
     pub executable: String,
@@ -597,6 +645,7 @@ pub struct ExecutionStepProposal {
     /// Working directory relative to the Workspace root.
     pub cwd_relative: String,
     #[serde(default)]
+    #[schemars(with = "BTreeMap<EnvironmentVariableNameSchema, String>")]
     pub env: BTreeMap<String, String>,
     /// Optional step-local upper bound. Omission delegates only this mechanical limit to Runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -671,6 +720,7 @@ pub struct RuntimeExecutionPlan {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubmitRequest {
     pub schema_version: u32,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_identity_digest: Option<String>,
@@ -1309,6 +1359,7 @@ pub struct RuntimeWorkspaceGetRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
 }
 
@@ -1316,6 +1367,7 @@ pub struct RuntimeWorkspaceGetRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeWorkspaceListCursor {
     pub created_at_ms: u64,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
 }
 
@@ -1402,9 +1454,11 @@ pub struct RuntimeJobListRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<RuntimeJobListCursor>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: Option<String>,
     /// Exact Runtime Workspace identity used to bound Job reattachment.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: Option<String>,
 }
 
@@ -1511,6 +1565,7 @@ pub(crate) fn default_runtime_list_limit() -> u32 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionProposal {
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     /// Absolute host path to the executable; PATH lookup is intentionally not performed.
     pub executable: String,
@@ -1519,6 +1574,7 @@ pub struct ExecutionProposal {
     /// Working directory relative to the Workspace root.
     pub cwd_relative: String,
     #[serde(default)]
+    #[schemars(with = "BTreeMap<EnvironmentVariableNameSchema, String>")]
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
@@ -1550,6 +1606,7 @@ pub struct ExecutionProposal {
 pub struct TaskRunProposal {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
     pub principal: String,
     pub global_limit: u32,
@@ -1568,6 +1625,7 @@ pub struct TaskRunProposal {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UniversalExecutionRequest {
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     /// Absolute host path to the executable; PATH lookup is intentionally not performed.
     pub executable: String,
@@ -1576,6 +1634,7 @@ pub struct UniversalExecutionRequest {
     /// Working directory relative to the Workspace root.
     pub cwd_relative: String,
     #[serde(default)]
+    #[schemars(with = "BTreeMap<EnvironmentVariableNameSchema, String>")]
     pub env: BTreeMap<String, String>,
     pub timeout_ms: u64,
     pub stdout_limit_bytes: u64,
@@ -1602,6 +1661,7 @@ pub struct UniversalExecutionRequest {
 pub struct TaskRunRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
     pub principal: String,
     pub global_limit: u32,

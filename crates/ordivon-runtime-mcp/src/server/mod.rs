@@ -25,9 +25,11 @@ use ordivon_runtime_core::{
     WorkspaceDiffRequest as ExecWorkspaceDiffRequest, WorkspaceFilePatch, WorkspaceMutateRequest,
     WorkspaceMutateResult, WorkspacePatchOperationStatus, WorkspacePatchRequest,
     WorkspacePatchStatusRequest, WorkspaceReadRequest as ExecWorkspaceReadRequest,
-    WorkspaceReadSliceRequest, DEFAULT_INSPECTION_EVENT_LIMIT, MAX_INSPECTION_EVENT_LIMIT,
-    MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, MAX_WORKSPACE_CHANGE_PAGE_ENTRIES,
-    MAX_WORKSPACE_IO_BYTES, RUNTIME_SCHEMA_VERSION,
+    WorkspaceReadSliceRequest, CLIENT_REQUEST_ID_MAX_LENGTH, CLIENT_REQUEST_ID_MIN_LENGTH,
+    CLIENT_REQUEST_ID_PATTERN, DEFAULT_INSPECTION_EVENT_LIMIT, ENVIRONMENT_VARIABLE_NAME_PATTERN,
+    MAX_INSPECTION_EVENT_LIMIT, MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS,
+    MAX_WORKSPACE_CHANGE_PAGE_ENTRIES, MAX_WORKSPACE_IO_BYTES, RUNTIME_SCHEMA_VERSION,
+    WORKSPACE_ID_MAX_LENGTH, WORKSPACE_ID_MIN_LENGTH, WORKSPACE_ID_PATTERN,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{IntoCallToolResult, ToolCallContext};
@@ -40,6 +42,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+#[cfg(test)]
+use ordivon_runtime_core::{LOGICAL_ID_MAX_LENGTH, LOGICAL_ID_MIN_LENGTH, LOGICAL_ID_PATTERN};
 
 use crate::{append_rotating_jsonl, DEFAULT_TRACE_ROTATION_BYTES};
 
@@ -54,6 +59,11 @@ fn default_schema_version() -> u32 {
     1
 }
 
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[schemars(extend("pattern" = ENVIRONMENT_VARIABLE_NAME_PATTERN))]
+struct EnvironmentVariableNameSchema(String);
+
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceOpenRequest {
@@ -61,6 +71,7 @@ pub struct WorkspaceOpenRequest {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: Option<String>,
     pub source_repo: String,
     pub source_revision: String,
@@ -92,6 +103,7 @@ pub struct WorkspaceReadRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     pub relative_path: String,
     pub mode: WorkspaceReadMode,
@@ -118,6 +130,7 @@ pub struct WorkspaceDiffRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
     pub max_bytes: u64,
@@ -185,7 +198,9 @@ pub struct RuntimeReleaseApplyToolRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     pub commit: String,
     pub candidate_manifest_digest: String,
@@ -199,6 +214,7 @@ pub struct RuntimeReleaseGetToolRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
 }
 
@@ -229,6 +245,7 @@ pub struct WorkspaceChangesRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     #[serde(default = "default_change_page_limit")]
     #[schemars(range(min = 1, max = MAX_WORKSPACE_CHANGE_PAGE_ENTRIES))]
@@ -254,7 +271,9 @@ pub struct WorkspacePatchToolRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     #[schemars(length(min = 1))]
     pub files: Vec<WorkspaceFilePatch>,
@@ -269,6 +288,7 @@ pub struct WorkspacePatchStatusToolRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
 }
 
@@ -278,6 +298,7 @@ pub struct WorkspaceExecRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
     pub execution: ExecutionProposal,
     #[serde(default = "default_exec_wait_ms")]
@@ -294,6 +315,7 @@ pub struct WorkspaceExecRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceExecBoundExecution {
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     /// Absolute host path to the executable; PATH lookup is intentionally not performed.
     pub executable: String,
@@ -302,6 +324,7 @@ pub struct WorkspaceExecBoundExecution {
     /// Working directory relative to the Workspace root.
     pub cwd_relative: String,
     #[serde(default)]
+    #[schemars(with = "BTreeMap<EnvironmentVariableNameSchema, String>")]
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
@@ -330,6 +353,7 @@ pub struct WorkspaceExecBoundRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
     pub execution: WorkspaceExecBoundExecution,
     #[schemars(length(min = 1))]
@@ -348,6 +372,7 @@ pub struct WorkspaceExecBoundRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceExecPlanInput {
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     #[schemars(length(min = 1))]
     pub steps: Vec<ExecutionStepProposal>,
@@ -382,6 +407,7 @@ pub struct WorkspaceExecPlanRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
     pub execution: WorkspaceExecPlanInput,
     #[serde(default = "default_exec_wait_ms")]

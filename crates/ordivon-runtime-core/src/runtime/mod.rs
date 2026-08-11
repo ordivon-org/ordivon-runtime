@@ -47,9 +47,9 @@ pub use repair::{
 pub(crate) use types::{
     input_bound_proposal_request_identity_digest, input_bound_request_identity_digest,
     operation_request_identity_digest, operation_request_identity_digest_from_plan,
-    proposal_request_identity_digest, INPUT_BOUND_IDENTITY_PREFIX,
-    INPUT_BOUND_PROPOSAL_IDENTITY_PREFIX, PROPOSAL_IDENTITY_PREFIX, REQUEST_IDENTITY_PREFIX,
-    RUNTIME_RELEASE_IDENTITY_PREFIX,
+    proposal_request_identity_digest, validate_client_request_id, validate_logical_id,
+    INPUT_BOUND_IDENTITY_PREFIX, INPUT_BOUND_PROPOSAL_IDENTITY_PREFIX, PROPOSAL_IDENTITY_PREFIX,
+    REQUEST_IDENTITY_PREFIX, RUNTIME_RELEASE_IDENTITY_PREFIX,
 };
 pub use types::{
     runtime_release_effect_id, runtime_release_request_identity_digest, AdmissionOutcome,
@@ -70,7 +70,9 @@ pub use types::{
     RuntimeWorkspaceListResult, RuntimeWorkspaceSummary, SubmitRequest, TaskCancelRequest,
     TaskObservation, TaskObserveRequest, TaskObserveWaitUntil, TaskRunProposal, TaskRunRequest,
     TerminalCommit, UniversalExecutionRequest, UniversalExecutionStep, WindowsAuthority,
-    WindowsExecutionContext, WindowsTokenClass, MAX_ARTIFACT_READ_BYTES, MAX_RUNTIME_LIST_LIMIT,
+    WindowsExecutionContext, WindowsTokenClass, CLIENT_REQUEST_ID_MAX_LENGTH,
+    CLIENT_REQUEST_ID_MIN_LENGTH, CLIENT_REQUEST_ID_PATTERN, LOGICAL_ID_MAX_LENGTH,
+    LOGICAL_ID_MIN_LENGTH, LOGICAL_ID_PATTERN, MAX_ARTIFACT_READ_BYTES, MAX_RUNTIME_LIST_LIMIT,
     MAX_TASK_TAIL_BYTES, MAX_TASK_WAIT_MS, RUNTIME_SCHEMA_VERSION,
 };
 pub use windows::WindowsExecutionConfig;

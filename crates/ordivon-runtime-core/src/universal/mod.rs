@@ -10,6 +10,10 @@ mod workspace;
 
 pub use config::{UniversalExecutorConfig, MAX_WORKSPACE_IO_BYTES, UNIVERSAL_EXEC_SCHEMA_VERSION};
 pub use error::{UniversalExecError, UniversalExecErrorCode};
+pub use fsutil::{
+    ENVIRONMENT_VARIABLE_NAME_PATTERN, WORKSPACE_ID_MAX_LENGTH, WORKSPACE_ID_MIN_LENGTH,
+    WORKSPACE_ID_PATTERN,
+};
 pub use mutation::{mutate_workspace, read_workspace_slice};
 pub use patch::{
     inspect_workspace_patch_plan, patch_workspace, plan_workspace_patch,

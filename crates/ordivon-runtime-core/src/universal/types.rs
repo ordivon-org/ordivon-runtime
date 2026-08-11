@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     invalid, validate_id, validate_relative_path, UniversalExecError, MAX_WORKSPACE_IO_BYTES,
-    UNIVERSAL_EXEC_SCHEMA_VERSION,
+    UNIVERSAL_EXEC_SCHEMA_VERSION, WORKSPACE_ID_MAX_LENGTH, WORKSPACE_ID_MIN_LENGTH,
+    WORKSPACE_ID_PATTERN,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
@@ -12,6 +13,7 @@ use super::{
 pub struct GitWorkspaceCreateRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     pub source_repo: String,
     pub source_revision: String,
@@ -67,6 +69,7 @@ pub struct WorkspaceCloseRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     #[serde(default)]
     pub force: bool,
@@ -122,6 +125,7 @@ pub struct WorkspaceCloseResult {
 pub struct WorkspaceReadRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     pub relative_path: String,
     #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
@@ -159,6 +163,7 @@ pub struct WorkspaceContentRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     pub relative_path: String,
     pub expected_digest: String,
@@ -212,6 +217,7 @@ pub struct CompactWorkspaceReadResult {
 pub struct WorkspaceWriteRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     pub relative_path: String,
     pub content: String,
@@ -257,6 +263,7 @@ pub struct WorkspaceWriteResult {
 pub struct WorkspaceDiffRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     #[schemars(range(min = 1, max = MAX_WORKSPACE_IO_BYTES))]
     pub max_bytes: u64,
@@ -346,6 +353,7 @@ pub struct WorkspaceChangeEntry {
 pub struct WorkspaceChangePageRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     #[schemars(range(min = 1, max = MAX_WORKSPACE_CHANGE_PAGE_ENTRIES))]
     pub limit: u32,
@@ -487,6 +495,7 @@ pub struct WorkspaceMutateRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     #[schemars(length(min = 1))]
     pub mutations: Vec<WorkspaceMutation>,
@@ -569,6 +578,7 @@ pub struct WorkspaceFilePatch {
 pub struct WorkspacePatchRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     #[schemars(length(min = 1))]
     pub files: Vec<WorkspaceFilePatch>,
@@ -667,6 +677,7 @@ fn default_patch_diff_bytes() -> u64 {
 pub struct WorkspaceReadSliceRequest {
     #[schemars(range(min = 1, max = 1), extend("const" = 1))]
     pub schema_version: u32,
+    #[schemars(length(min = WORKSPACE_ID_MIN_LENGTH, max = WORKSPACE_ID_MAX_LENGTH), regex(pattern = WORKSPACE_ID_PATTERN))]
     pub workspace_id: String,
     pub relative_path: String,
     #[serde(default)]

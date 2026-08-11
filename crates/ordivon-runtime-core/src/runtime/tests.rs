@@ -1,3 +1,4 @@
+use super::registry::{set_test_commit_fault, TestCommitFault, TestCommitPoint};
 use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::*;
 use crate::universal::{
@@ -215,6 +216,40 @@ fn created(outcome: AdmissionOutcome) -> CreatedAdmission {
         AdmissionOutcome::Created(created) => *created,
         AdmissionOutcome::Existing { .. } => panic!("expected newly created admission"),
     }
+}
+
+fn running_attempt_for_commit_fault(sandbox: &Sandbox, client_request_id: &str) -> AttemptRecord {
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(sandbox, client_request_id, 1))
+            .unwrap(),
+    );
+    let attempt = sandbox
+        .registry
+        .mark_bundle_ready(&created.attempt.attempt_id, 0, &digest(b"bundle"), 10)
+        .unwrap();
+    let attempt = sandbox
+        .registry
+        .mark_dispatch_issued(&attempt.attempt_id, attempt.row_version, 11)
+        .unwrap();
+    sandbox
+        .registry
+        .bind_running(
+            &attempt.attempt_id,
+            attempt.row_version,
+            &RunnerIdentity {
+                boot_id: "boot:test".to_string(),
+                unit_name: attempt.unit_name.clone(),
+                invocation_id: format!("invocation:{client_request_id}"),
+                control_group: "/system.slice/ordivon-test.service".to_string(),
+                main_pid: 42,
+                process_start_identity: format!("start:{client_request_id}"),
+                runner_start_digest: digest(b"runner-start"),
+                observed_at_ms: 12,
+            },
+        )
+        .unwrap()
 }
 
 fn input_bound_submit_for_job(
@@ -1155,6 +1190,54 @@ fn deployment_fence_blocks_only_new_admission_and_preserves_exact_replay() {
         sandbox.registry.submit(&new_request).unwrap(),
         AdmissionOutcome::Created(_)
     ));
+}
+
+#[test]
+fn client_request_id_law_is_unicode_scalar_bounded_trimmed_and_control_free() {
+    let ascii_max = "a".repeat(CLIENT_REQUEST_ID_MAX_LENGTH);
+    validate_client_request_id(&ascii_max, "clientRequestId").unwrap();
+
+    let unicode_over_old_byte_bound = "🙂".repeat(100);
+    assert!(unicode_over_old_byte_bound.len() > 256);
+    assert_eq!(unicode_over_old_byte_bound.chars().count(), 100);
+    validate_client_request_id(&unicode_over_old_byte_bound, "clientRequestId").unwrap();
+
+    let too_many_scalars = "🙂".repeat(CLIENT_REQUEST_ID_MAX_LENGTH + 1);
+    let error = validate_client_request_id(&too_many_scalars, "clientRequestId").unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert_eq!(error.field.as_deref(), Some("clientRequestId"));
+
+    for value in [
+        " leading",
+        "trailing ",
+        "\u{00a0}nonbreaking",
+        "newline\ninside",
+        "",
+    ] {
+        let error = validate_client_request_id(value, "clientRequestId").unwrap_err();
+        assert_eq!(
+            error.code,
+            RuntimeErrorCode::InvalidRequest,
+            "value={value:?}"
+        );
+    }
+    validate_client_request_id("interior whitespace is fine", "clientRequestId").unwrap();
+    validate_client_request_id("请求-🙂-e\u{301}", "clientRequestId").unwrap();
+}
+
+#[test]
+fn admission_fence_io_failure_is_safe_same_request() {
+    let sandbox = Sandbox::new("admission-fence-io", 5_000);
+    let fence = sandbox.registry.config().admission_fence_path();
+    fs::remove_file(&fence).unwrap();
+    fs::create_dir(&fence).unwrap();
+    let error = sandbox
+        .registry
+        .submit(&request(&sandbox, "request:admission-fence-io", 1))
+        .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::RegistryUnavailable);
+    assert!(error.retryable);
+    assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
 }
 
 #[test]
@@ -2446,6 +2529,153 @@ fn busy_writer_fails_with_retryable_registry_busy() {
     assert_eq!(error.code, RuntimeErrorCode::RegistryBusy);
     assert!(error.retryable);
     lock.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn admission_commit_fault_classifies_durable_and_uncommitted_outcomes() {
+    let committed = Sandbox::new("admission-commit-then-error", 5_000);
+    let committed_request = request(&committed, "request:admission-commit-then-error", 1);
+    set_test_commit_fault(TestCommitPoint::Admission, TestCommitFault::CommitThenError);
+    let existing = match committed.registry.submit(&committed_request).unwrap() {
+        AdmissionOutcome::Existing { job } => job,
+        AdmissionOutcome::Created(_) => panic!("commit-then-error was not reconciled as durable"),
+    };
+    assert_eq!(committed.registry.active_reservation_count().unwrap(), 1);
+    let replay = match committed.registry.submit(&committed_request).unwrap() {
+        AdmissionOutcome::Existing { job } => job,
+        AdmissionOutcome::Created(_) => panic!("durable admission replay created a second Job"),
+    };
+    assert_eq!(existing.job_id, replay.job_id);
+
+    for (label, fault) in [
+        ("rollback-then-error", TestCommitFault::RollbackThenError),
+        ("deferred-constraint", TestCommitFault::DeferredConstraint),
+    ] {
+        let sandbox = Sandbox::new(&format!("admission-{label}"), 5_000);
+        let submit = request(&sandbox, &format!("request:admission-{label}"), 1);
+        set_test_commit_fault(TestCommitPoint::Admission, fault);
+        let error = sandbox.registry.submit(&submit).unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::RegistryUnavailable);
+        assert!(error.retryable);
+        assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
+        let created = created(sandbox.registry.submit(&submit).unwrap());
+        assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 1);
+        let replay = match sandbox.registry.submit(&submit).unwrap() {
+            AdmissionOutcome::Existing { job } => job,
+            AdmissionOutcome::Created(_) => panic!("replay created a second Job after retry"),
+        };
+        assert_eq!(created.job.job_id, replay.job_id);
+    }
+}
+
+#[test]
+fn cancel_commit_fault_classifies_durable_and_uncommitted_outcomes() {
+    let committed = Sandbox::new("cancel-commit-then-error", 5_000);
+    let committed_admission = created(
+        committed
+            .registry
+            .submit(&request(&committed, "request:cancel-commit-then-error", 1))
+            .unwrap(),
+    );
+    set_test_commit_fault(TestCommitPoint::Cancel, TestCommitFault::CommitThenError);
+    let projection = committed
+        .registry
+        .request_cancel(&committed_admission.job.job_id, 10)
+        .unwrap();
+    assert_eq!(projection.status, "cancelled");
+    assert_eq!(committed.registry.active_reservation_count().unwrap(), 0);
+    let replay = committed
+        .registry
+        .request_cancel(&committed_admission.job.job_id, 11)
+        .unwrap();
+    assert_eq!(replay.status, "cancelled");
+
+    for (label, fault) in [
+        ("rollback-then-error", TestCommitFault::RollbackThenError),
+        ("deferred-constraint", TestCommitFault::DeferredConstraint),
+    ] {
+        let sandbox = Sandbox::new(&format!("cancel-{label}"), 5_000);
+        let created = created(
+            sandbox
+                .registry
+                .submit(&request(&sandbox, &format!("request:cancel-{label}"), 1))
+                .unwrap(),
+        );
+        set_test_commit_fault(TestCommitPoint::Cancel, fault);
+        let error = sandbox
+            .registry
+            .request_cancel(&created.job.job_id, 10)
+            .unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::RegistryUnavailable);
+        assert!(error.retryable);
+        let current = sandbox.registry.get_job(&created.job.job_id).unwrap();
+        assert_eq!(current.desired_state, JobDesiredState::Run);
+        assert_eq!(current.resolution, None);
+        assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 1);
+        let projection = sandbox
+            .registry
+            .request_cancel(&created.job.job_id, 11)
+            .unwrap();
+        assert_eq!(projection.status, "cancelled");
+        assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
+    }
+}
+
+#[test]
+fn terminal_commit_fault_classifies_durable_and_uncommitted_outcomes() {
+    let committed = Sandbox::new("terminal-commit-then-error", 5_000);
+    let attempt =
+        running_attempt_for_commit_fault(&committed, "request:terminal-commit-then-error");
+    let terminal = TerminalCommit {
+        attempt_id: attempt.attempt_id.clone(),
+        expected_row_version: attempt.row_version,
+        state: AttemptState::Succeeded,
+        result_digest: digest(b"commit-fault-result"),
+        exit_code: Some(0),
+        infrastructure_error_digest: None,
+        finished_at_ms: 13,
+        artifacts: Vec::new(),
+        reason_code: "PROCESS_EXIT_ZERO".to_string(),
+    };
+    set_test_commit_fault(TestCommitPoint::Terminal, TestCommitFault::CommitThenError);
+    let projection = committed.registry.commit_terminal(&terminal).unwrap();
+    assert_eq!(projection.status, "succeeded");
+    assert_eq!(committed.registry.active_reservation_count().unwrap(), 0);
+    assert_eq!(
+        committed.registry.commit_terminal(&terminal).unwrap(),
+        projection
+    );
+
+    for (label, fault) in [
+        ("rollback-then-error", TestCommitFault::RollbackThenError),
+        ("deferred-constraint", TestCommitFault::DeferredConstraint),
+    ] {
+        let sandbox = Sandbox::new(&format!("terminal-{label}"), 5_000);
+        let attempt =
+            running_attempt_for_commit_fault(&sandbox, &format!("request:terminal-{label}"));
+        let terminal = TerminalCommit {
+            attempt_id: attempt.attempt_id.clone(),
+            expected_row_version: attempt.row_version,
+            state: AttemptState::Succeeded,
+            result_digest: digest(format!("terminal-{label}").as_bytes()),
+            exit_code: Some(0),
+            infrastructure_error_digest: None,
+            finished_at_ms: 13,
+            artifacts: Vec::new(),
+            reason_code: "PROCESS_EXIT_ZERO".to_string(),
+        };
+        set_test_commit_fault(TestCommitPoint::Terminal, fault);
+        let error = sandbox.registry.commit_terminal(&terminal).unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::RegistryUnavailable);
+        assert!(error.retryable);
+        let current = sandbox.registry.get_attempt(&attempt.attempt_id).unwrap();
+        assert_eq!(current.state, AttemptState::Running);
+        assert_eq!(current.row_version, terminal.expected_row_version);
+        assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 1);
+        let projection = sandbox.registry.commit_terminal(&terminal).unwrap();
+        assert_eq!(projection.status, "succeeded");
+        assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
+    }
 }
 
 #[test]
@@ -5152,6 +5382,7 @@ fn query_indexes_are_recreated_without_advancing_schema_version() {
     for index in [
         "idx_jobs_client_request_id_created",
         "idx_jobs_workspace_created",
+        "idx_artifacts_job",
     ] {
         connection
             .execute(&format!("DROP INDEX {index}"), [])
@@ -5170,6 +5401,7 @@ fn query_indexes_are_recreated_without_advancing_schema_version() {
     for index in [
         "idx_jobs_client_request_id_created",
         "idx_jobs_workspace_created",
+        "idx_artifacts_job",
     ] {
         let actual: String = connection
             .query_row(
@@ -5505,6 +5737,14 @@ fn existing_v1_registry_upgrades_and_ensures_lookup_index() {
         )
         .unwrap();
     assert_eq!(reclaim_checksum, RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM);
+    let artifact_job_index: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_artifacts_job'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(artifact_job_index, "idx_artifacts_job");
     let patch_table: String = connection
         .query_row(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='workspace_patch_operations'",
@@ -6029,4 +6269,170 @@ fn runtime_capabilities_project_current_affordances_without_input_authority_path
     let serialized = serde_json::to_string(&capabilities).unwrap();
     assert!(serialized.contains("finance-state"));
     assert!(!serialized.contains(input_root.to_string_lossy().as_ref()));
+}
+
+#[cfg(test)]
+mod registry_reference_model_properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Clone, Debug)]
+    enum ModelOp {
+        ReplaySame,
+        ReplayChanged,
+        Cancel,
+        CommitSucceeded,
+        CommitFailed,
+    }
+
+    fn op_strategy() -> impl Strategy<Value = ModelOp> {
+        prop_oneof![
+            Just(ModelOp::ReplaySame),
+            Just(ModelOp::ReplayChanged),
+            Just(ModelOp::Cancel),
+            Just(ModelOp::CommitSucceeded),
+            Just(ModelOp::CommitFailed),
+        ]
+    }
+
+    fn terminal_identity(
+        kind: &ModelOp,
+    ) -> Option<(AttemptState, String, Option<i32>, &'static str)> {
+        match kind {
+            ModelOp::CommitSucceeded => Some((
+                AttemptState::Succeeded,
+                digest(b"model-terminal-succeeded"),
+                Some(0),
+                "MODEL_SUCCEEDED",
+            )),
+            ModelOp::CommitFailed => Some((
+                AttemptState::Failed,
+                digest(b"model-terminal-failed"),
+                Some(1),
+                "MODEL_FAILED",
+            )),
+            _ => None,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 512,
+            max_shrink_iters: 16_384,
+            .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn request_identity_and_terminal_winner_match_reference_model(
+            operations in prop::collection::vec(op_strategy(), 1..48),
+        ) {
+            let sandbox = Sandbox::new("registry-reference-model", 5_000);
+            let client_request_id = "request:registry-reference-model";
+            let attempt = running_attempt_for_commit_fault(&sandbox, client_request_id);
+            let job_id = attempt.job_id.clone();
+            let original = request(&sandbox, client_request_id, 1);
+            let mut changed = original.clone();
+            changed.plan.timeout_ms += 1;
+            let mut winner: Option<(AttemptState, String)> = None;
+            let mut stop_requested = false;
+
+            for (index, operation) in operations.iter().enumerate() {
+                match operation {
+                    ModelOp::ReplaySame => {
+                        let replay = sandbox.registry.submit(&original).unwrap();
+                        let replay_job_id = match replay {
+                            AdmissionOutcome::Existing { job } => job.job_id,
+                            AdmissionOutcome::Created(_) => {
+                                return Err(TestCaseError::fail("exact replay created a second Job"));
+                            }
+                        };
+                        prop_assert_eq!(replay_job_id, job_id.clone());
+                    }
+                    ModelOp::ReplayChanged => {
+                        let error = sandbox.registry.submit(&changed).unwrap_err();
+                        prop_assert_eq!(error.code, RuntimeErrorCode::IdempotencyConflict);
+                    }
+                    ModelOp::Cancel => {
+                        let projection = sandbox
+                            .registry
+                            .request_cancel(&job_id, 20 + index as u64)
+                            .unwrap();
+                        prop_assert_eq!(projection.job_id, job_id.clone());
+                        if winner.is_none() {
+                            stop_requested = true;
+                        }
+                    }
+                    ModelOp::CommitSucceeded | ModelOp::CommitFailed => {
+                        let (state, result_digest, exit_code, reason_code) =
+                            terminal_identity(operation).unwrap();
+                        let current = sandbox.registry.get_attempt(&attempt.attempt_id).unwrap();
+                        let terminal = TerminalCommit {
+                            attempt_id: attempt.attempt_id.clone(),
+                            expected_row_version: current.row_version,
+                            state,
+                            result_digest: result_digest.clone(),
+                            exit_code,
+                            infrastructure_error_digest: None,
+                            finished_at_ms: 100 + index as u64,
+                            artifacts: Vec::new(),
+                            reason_code: reason_code.to_string(),
+                        };
+                        match &winner {
+                            None => {
+                                let projection = sandbox.registry.commit_terminal(&terminal).unwrap();
+                                prop_assert_eq!(projection.job_id, job_id.clone());
+                                winner = Some((state, result_digest));
+                            }
+                            Some((winner_state, winner_digest))
+                                if *winner_state == state && *winner_digest == result_digest =>
+                            {
+                                let projection = sandbox.registry.commit_terminal(&terminal).unwrap();
+                                prop_assert_eq!(projection.job_id, job_id.clone());
+                            }
+                            Some(_) => {
+                                let error = sandbox.registry.commit_terminal(&terminal).unwrap_err();
+                                prop_assert_eq!(error.code, RuntimeErrorCode::ResultIdentityConflict);
+                            }
+                        }
+                    }
+                }
+
+                let current = sandbox.registry.get_attempt(&attempt.attempt_id).unwrap();
+                let current_job = sandbox.registry.get_job(&job_id).unwrap();
+                prop_assert_eq!(current.job_id, job_id.clone());
+                prop_assert_eq!(current_job.job_id, job_id.clone());
+                match &winner {
+                    Some((state, result_digest)) => {
+                        prop_assert_eq!(current.state, *state);
+                        prop_assert_eq!(current.result_digest.as_deref(), Some(result_digest.as_str()));
+                        prop_assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 0);
+                    }
+                    None if stop_requested => {
+                        prop_assert_eq!(current.state, AttemptState::Stopping);
+                        prop_assert_eq!(current.termination_intent, AttemptTerminationIntent::StopRequested);
+                        prop_assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 1);
+                    }
+                    None => {
+                        prop_assert_eq!(current.state, AttemptState::Running);
+                        prop_assert_eq!(current.termination_intent, AttemptTerminationIntent::Natural);
+                        prop_assert_eq!(sandbox.registry.active_reservation_count().unwrap(), 1);
+                    }
+                }
+            }
+
+            let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+            let job_count: u32 = connection
+                .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))
+                .unwrap();
+            let dispatch_count: u32 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM job_events WHERE job_id=?1 AND event_type='DISPATCH_ISSUED'",
+                    [&job_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            prop_assert_eq!(job_count, 1);
+            prop_assert_eq!(dispatch_count, 1);
+        }
+    }
 }

@@ -81,7 +81,15 @@ pub(crate) fn classify_supervisor_recovery(
                     "recorded process identity is alive but supervisor unit is missing".to_string(),
                 ));
             }
-            Ok(SupervisorRecoveryDisposition::Lost)
+            Ok(match termination_intent {
+                TerminationIntent::StopRequested => {
+                    SupervisorRecoveryDisposition::Terminal(AttemptState::Cancelled)
+                }
+                TerminationIntent::DeadlineExceeded => {
+                    SupervisorRecoveryDisposition::Terminal(AttemptState::TimedOut)
+                }
+                TerminationIntent::Natural => SupervisorRecoveryDisposition::Lost,
+            })
         }
     }
 }
@@ -241,6 +249,40 @@ mod tests {
             classify_supervisor_recovery(&expected(), &observation, TerminationIntent::Natural)
                 .unwrap(),
             SupervisorRecoveryDisposition::Terminal(AttemptState::Succeeded)
+        );
+    }
+
+    #[test]
+    fn missing_unit_after_committed_stop_is_cancelled_when_recorded_pid_is_gone() {
+        let mut observation = running();
+        observation.unit_state = SupervisorUnitState::NotFound;
+        observation.recorded_pid_alive = false;
+        observation.recorded_pid_start_identity = None;
+        assert_eq!(
+            classify_supervisor_recovery(
+                &expected(),
+                &observation,
+                TerminationIntent::StopRequested,
+            )
+            .unwrap(),
+            SupervisorRecoveryDisposition::Terminal(AttemptState::Cancelled)
+        );
+    }
+
+    #[test]
+    fn missing_unit_after_committed_deadline_is_timed_out_when_recorded_pid_is_gone() {
+        let mut observation = running();
+        observation.unit_state = SupervisorUnitState::NotFound;
+        observation.recorded_pid_alive = false;
+        observation.recorded_pid_start_identity = None;
+        assert_eq!(
+            classify_supervisor_recovery(
+                &expected(),
+                &observation,
+                TerminationIntent::DeadlineExceeded,
+            )
+            .unwrap(),
+            SupervisorRecoveryDisposition::Terminal(AttemptState::TimedOut)
         );
     }
 

@@ -8,13 +8,18 @@ use crate::universal::{
     sha256_bytes, WorkspacePatchPlan, WorkspacePatchRequest, WorkspacePatchResult,
 };
 
-use super::{Registry, RuntimeError, RuntimeErrorCode, RuntimeResult, RUNTIME_SCHEMA_VERSION};
+use super::{
+    validate_client_request_id, Registry, RuntimeError, RuntimeErrorCode, RuntimeResult,
+    CLIENT_REQUEST_ID_MAX_LENGTH, CLIENT_REQUEST_ID_MIN_LENGTH, CLIENT_REQUEST_ID_PATTERN,
+    RUNTIME_SCHEMA_VERSION,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DurableWorkspacePatchRequest {
     pub schema_version: u32,
     pub principal: String,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
     pub patch: WorkspacePatchRequest,
 }
@@ -58,6 +63,7 @@ pub struct DurableWorkspacePatchResult {
 pub struct WorkspacePatchStatusRequest {
     pub schema_version: u32,
     pub principal: String,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
 }
 
@@ -97,7 +103,7 @@ pub(crate) fn validate_durable_patch_request(
         ));
     }
     validate_identity(&request.principal, "principal")?;
-    validate_identity(&request.client_request_id, "clientRequestId")?;
+    validate_client_request_id(&request.client_request_id, "clientRequestId")?;
     request.patch.validate_shape().map_err(map_patch_error)
 }
 
@@ -111,7 +117,7 @@ pub(crate) fn validate_patch_status_request(
         ));
     }
     validate_identity(&request.principal, "principal")?;
-    validate_identity(&request.client_request_id, "clientRequestId")
+    validate_client_request_id(&request.client_request_id, "clientRequestId")
 }
 
 pub(crate) fn durable_patch_request_digest(

@@ -31,7 +31,11 @@ ordivon-runtime-inspect workspace --database <registry> --store-root <runtime-st
 ordivon-runtime-inspect summary --database <registry> --since-ms <unix-ms> --pretty
 ```
 
-The inspection binary reads the current Registry schema through the shared Rust Core. It never writes recovery decisions, creates a second trajectory database, or evaluates semantic task completion.
+The inspection binary reads the current Registry schema through the shared Rust Core. It never writes recovery decisions, creates a second trajectory database, or evaluates semantic task completion. Inspection is a bounded projection, not a full Registry-health ceremony: it uses one query-only snapshot, checks the supported migration version, and surfaces SQLite/query/decoding failures it encounters, while global `PRAGMA integrity_check` remains owned by Doctor and explicit repair/backup/restore validation.
+
+Registry-medium failure is not evidence that a logical operation definitely did or did not commit. Admission, cancellation, and terminal write paths therefore classify the transaction outcome from durable readback after a COMMIT error. If the exact durable mutation is present, Runtime returns/reconciles the committed identity. If rollback/not-committed state can be proven, the operation remains retryable with the **same** request identity. `commitState=unknown` is reserved for the harder case where COMMIT outcome and subsequent rollback/readback cannot establish either side; the caller must reconcile before creating any new operation identity. The same fail-closed rule applies when the admission fence or Registry medium becomes read-only, full, or otherwise unavailable: no successful error response is allowed to imply a speculative second Job.
+
+A Registry fault experiment must isolate the Registry/WAL/fence medium from the Workspace, source checkout, Attempt bundle, and trace storage. Making the entire Runtime state tree read-only or full is not a valid Registry-only experiment because failures in those other owners can mimic Registry behavior. After restoring the medium, exact request replay and `ordivon-runtime-doctor inspect --fail-on-violation` are the required convergence checks.
 
 Inspect Workspace lifecycle without mutation with:
 
@@ -56,5 +60,6 @@ python scripts/restore.py --help
 - A stale fingerprint, changed row version, invalid snapshot, Digest mismatch, or unselected manual case must abort the repair.
 - The repair batch must be atomic; a late conflict must not leave partial Registry mutation.
 - Missing runner evidence remains an explicit Lost conclusion rather than an inferred process outcome.
+- A missing supervisor unit is interpreted together with persisted termination intent and recorded process identity. If the recorded process is gone, committed stop intent converges to `cancelled`, committed deadline intent converges to `timed_out`, and natural disappearance retains the generic lost/failure path. Concurrent cancel and generic reconciliation must not create two control terminal identities; the short control-result/evidence/terminal-commit section is serialized and Registry terminal identity remains the final arbiter.
 - Restore writes into a new destination and never overwrites live state.
 - Git restores code and documentation; Runtime snapshots restore durable execution truth.
