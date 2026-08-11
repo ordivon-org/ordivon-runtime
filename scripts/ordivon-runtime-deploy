@@ -26,6 +26,8 @@ from mcp_probe import load_bearer_token, load_environment_file, probe_catalog
 SCHEMA_VERSION = 4
 LEGACY_SCHEMA_VERSIONS = {1, 2, 3}
 WINDOWS_PROVIDER_CONTRACT = "windows_native_launcher_v2"
+WINDOWS_PROVIDER_LEGACY_BUILD_CONTRACT = "framework_csc_v1_nologo_optimize"
+WINDOWS_PROVIDER_BUILD_CONTRACT = WINDOWS_PROVIDER_LEGACY_BUILD_CONTRACT
 WINDOWS_PROVIDER_NAME = "ordivon-windows-job-launcher.exe"
 WINDOWS_PROVIDER_SOURCE = Path("platform/windows/Ordivon.WindowsJobLauncher.cs")
 DEFAULT_WINDOWS_CSC = Path("/mnt/c/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe")
@@ -598,6 +600,7 @@ def prepare_windows_provider(
     record.update(
         {
             "contract": WINDOWS_PROVIDER_CONTRACT,
+            "buildContract": WINDOWS_PROVIDER_BUILD_CONTRACT,
             "source": str(WINDOWS_PROVIDER_SOURCE),
             "sourceDigest": sha256(source),
             "compiler": {
@@ -696,7 +699,78 @@ def candidate_windows_provider(
         or not SHA256_PATTERN.fullmatch(str(compiler.get("digest")))
     ):
         blockers.append("candidate Windows provider lacks compiler identity")
+    if windows_provider_provenance(raw) is None:
+        blockers.append("candidate Windows provider build provenance is unsupported")
     return raw
+
+
+def windows_provider_provenance(record: object) -> dict[str, str] | None:
+    if not isinstance(record, dict):
+        return None
+    contract = record.get("contract")
+    build_contract = record.get("buildContract")
+    if build_contract is None and contract == WINDOWS_PROVIDER_CONTRACT:
+        build_contract = WINDOWS_PROVIDER_LEGACY_BUILD_CONTRACT
+    source_digest = record.get("sourceDigest")
+    compiler = record.get("compiler")
+    compiler_digest = record.get("compilerDigest")
+    if compiler_digest is None and isinstance(compiler, dict):
+        compiler_digest = compiler.get("digest")
+    if (
+        contract != WINDOWS_PROVIDER_CONTRACT
+        or build_contract != WINDOWS_PROVIDER_BUILD_CONTRACT
+        or not isinstance(source_digest, str)
+        or not SHA256_PATTERN.fullmatch(source_digest)
+        or not isinstance(compiler_digest, str)
+        or not SHA256_PATTERN.fullmatch(compiler_digest)
+    ):
+        return None
+    return {
+        "contract": contract,
+        "buildContract": build_contract,
+        "sourceDigest": source_digest,
+        "compilerDigest": compiler_digest,
+    }
+
+
+def receipt_bound_windows_provider_provenance(
+    deployment_root: Path, current_path: Path, current_digest: str
+) -> dict[str, str] | None:
+    if not deployment_root.is_dir():
+        return None
+    matches: list[tuple[int, dict[str, str]]] = []
+    for result_path in deployment_root.glob("*/result.json"):
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(result, dict) or result.get("status") != "deployed":
+            continue
+        finished = result.get("finishedAtMs")
+        provider = result.get("windowsProvider")
+        if not isinstance(finished, int) or finished < 0 or not isinstance(provider, dict):
+            continue
+        if (
+            provider.get("configured") is not True
+            or provider.get("deployedPath") != str(current_path)
+            or provider.get("installedDigest") != current_digest
+        ):
+            continue
+        if provider.get("transitionNeeded") is False:
+            provenance = windows_provider_provenance(provider.get("currentProvenance"))
+        else:
+            candidate = provider.get("candidate")
+            if not isinstance(candidate, dict) or candidate.get("digest") != current_digest:
+                continue
+            provenance = windows_provider_provenance(candidate)
+        if provenance is not None:
+            matches.append((finished, provenance))
+    if not matches:
+        return None
+    identities = {json.dumps(provenance, sort_keys=True) for _, provenance in matches}
+    if len(identities) != 1:
+        raise RuntimeError("deployment receipts disagree about current Windows provider provenance")
+    return max(matches, key=lambda item: item[0])[1]
 
 
 def planned_windows_provider(
@@ -727,6 +801,36 @@ def planned_windows_provider(
     if not SHA256_PATTERN.fullmatch(digest):
         blockers.append("candidate Windows provider digest is invalid")
         return {"configured": True, "currentPath": launcher_value, "candidate": candidate_provider}, blockers
+    current_digest = sha256(current)
+    candidate_provenance = windows_provider_provenance(candidate_provider)
+    if candidate_provenance is None:
+        blockers.append("candidate Windows provider provenance is invalid")
+        return {"configured": True, "currentPath": launcher_value, "candidate": candidate_provider}, blockers
+    receipt_root = getattr(args, "receipt_root", None)
+    try:
+        current_provenance = (
+            receipt_bound_windows_provider_provenance(receipt_root, current, current_digest)
+            if isinstance(receipt_root, Path)
+            else None
+        )
+    except RuntimeError as error:
+        blockers.append(str(error))
+        current_provenance = None
+    env_before = sha256(args.env_file) if args.env_file.is_file() else None
+    if current_provenance == candidate_provenance and not blockers:
+        return {
+            "configured": True,
+            "contract": WINDOWS_PROVIDER_CONTRACT,
+            "currentPath": launcher_value,
+            "currentDigest": current_digest,
+            "currentProvenance": current_provenance,
+            "providerRoot": str(provider_root),
+            "candidate": candidate_provider,
+            "deployedPath": launcher_value,
+            "envBeforeDigest": env_before,
+            "envAfterDigest": env_before,
+            "transitionNeeded": False,
+        }, blockers
     target = provider_root / f"sha256-{digest.removeprefix('sha256:')}" / WINDOWS_PROVIDER_NAME
     try:
         updated, env_before, env_after = env_assignment_rewrite(
@@ -741,12 +845,14 @@ def planned_windows_provider(
         "configured": True,
         "contract": WINDOWS_PROVIDER_CONTRACT,
         "currentPath": launcher_value,
-        "currentDigest": sha256(current),
+        "currentDigest": current_digest,
+        "currentProvenance": current_provenance,
         "providerRoot": str(provider_root),
         "candidate": candidate_provider,
         "deployedPath": str(target),
         "envBeforeDigest": env_before,
         "envAfterDigest": env_after,
+        "transitionNeeded": True,
     }, blockers
 
 
@@ -763,6 +869,23 @@ def install_windows_provider(
     expected_digest = str(candidate.get("digest"))
     if not SHA256_PATTERN.fullmatch(expected_digest):
         raise RuntimeError("deployment plan has invalid Windows provider digest")
+    if record.get("transitionNeeded") is False:
+        current = Path(str(record.get("currentPath")))
+        current_digest = str(record.get("currentDigest"))
+        before = str(record.get("envBeforeDigest"))
+        after = str(record.get("envAfterDigest"))
+        if target != current or before != after:
+            raise RuntimeError("no-op Windows provider plan changes provider state")
+        if current.is_symlink() or not current.is_file() or sha256(current) != current_digest:
+            raise RuntimeError("current Windows provider changed before no-op release")
+        if sha256(args.env_file) != before:
+            raise RuntimeError("Runtime environment changed before no-op provider release")
+        return {
+            **record,
+            "installedDigest": current_digest,
+            "environmentDigest": before,
+            "transitionApplied": False,
+        }
     target.parent.mkdir(parents=True, exist_ok=True)
     atomic_copy(source, target, mode=0o755)
     if sha256(target) != expected_digest:
@@ -778,6 +901,7 @@ def install_windows_provider(
         **record,
         "installedDigest": sha256(target),
         "environmentDigest": sha256(args.env_file),
+        "transitionApplied": True,
     }
 
 

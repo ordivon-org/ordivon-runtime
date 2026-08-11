@@ -2343,6 +2343,130 @@ class DeployReclaimTests(unittest.TestCase):
             handle.close()
 
 
+    def test_same_windows_provider_provenance_preserves_current_exact_binary(self) -> None:
+        scripts_path = str(REPO / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
+        finally:
+            sys.path.remove(scripts_path)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider_root = root / "WindowsJobLauncher"
+            current = provider_root / ("sha256-" + "a" * 64) / "ordivon-windows-job-launcher.exe"
+            current.parent.mkdir(parents=True)
+            write_executable(current, "receipt-bound-current-launcher\n")
+            current_digest = "sha256:" + hashlib.sha256(current.read_bytes()).hexdigest()
+            candidate_dir = root / "candidate"
+            candidate_dir.mkdir()
+            candidate = candidate_dir / "ordivon-windows-job-launcher.exe"
+            write_executable(candidate, "nondeterministic-recompile-of-same-source\n")
+            candidate_digest = "sha256:" + hashlib.sha256(candidate.read_bytes()).hexdigest()
+            source_digest = "sha256:" + "1" * 64
+            compiler_digest = "sha256:" + "2" * 64
+            env_file = root / "runtime.env"
+            env_file.write_text(
+                "ORDIVON_BIND=127.0.0.1:8897\n"
+                f"ORDIVON_WINDOWS_LAUNCHER_PATH={current}\n"
+                "ORDIVON_WINDOWS_WSL_DISTRIBUTION=archlinux\n",
+                encoding="utf-8",
+            )
+            receipt_root = root / "receipts"
+            receipt = receipt_root / "deployed-current"
+            receipt.mkdir(parents=True)
+            current_candidate = {
+                "name": "ordivon-windows-job-launcher.exe",
+                "kind": "windows_provider",
+                "mode": 0o755,
+                "digest": current_digest,
+                "contract": "windows_native_launcher_v2",
+                "sourceDigest": source_digest,
+                "compiler": {"digest": compiler_digest},
+            }
+            (receipt / "result.json").write_text(
+                json.dumps(
+                    {
+                        "status": "deployed",
+                        "finishedAtMs": 1,
+                        "windowsProvider": {
+                            "configured": True,
+                            "deployedPath": str(current),
+                            "installedDigest": current_digest,
+                            "candidate": current_candidate,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            candidate_record = {
+                "name": "ordivon-windows-job-launcher.exe",
+                "kind": "windows_provider",
+                "mode": 0o755,
+                "path": str(candidate),
+                "bytes": candidate.stat().st_size,
+                "digest": candidate_digest,
+                "contract": "windows_native_launcher_v2",
+                "buildContract": "framework_csc_v1_nologo_optimize",
+                "source": "platform/windows/Ordivon.WindowsJobLauncher.cs",
+                "sourceDigest": source_digest,
+                "compiler": {
+                    "path": "/compiler/csc.exe",
+                    "resolvedPath": "/compiler/csc.exe",
+                    "digest": compiler_digest,
+                },
+            }
+            args = type(
+                "Args",
+                (),
+                {
+                    "env_file": env_file,
+                    "candidate_dir": candidate_dir,
+                    "receipt_root": receipt_root,
+                },
+            )()
+            before_env = env_file.read_bytes()
+            before_provider = current.read_bytes()
+            plan, blockers = module["planned_windows_provider"](args, candidate_record)
+            self.assertEqual(blockers, [])
+            self.assertFalse(plan["transitionNeeded"])
+            self.assertEqual(plan["deployedPath"], str(current))
+            self.assertEqual(plan["currentDigest"], current_digest)
+            self.assertEqual(plan["envBeforeDigest"], plan["envAfterDigest"])
+            installed = module["install_windows_provider"](args, plan)
+            self.assertFalse(installed["transitionApplied"])
+            self.assertEqual(installed["installedDigest"], current_digest)
+            self.assertEqual(env_file.read_bytes(), before_env)
+            self.assertEqual(current.read_bytes(), before_provider)
+            self.assertFalse(
+                (provider_root / ("sha256-" + candidate_digest.removeprefix("sha256:"))).exists()
+            )
+
+            no_op_receipt = receipt_root / "no-op-current"
+            no_op_receipt.mkdir()
+            (no_op_receipt / "result.json").write_text(
+                json.dumps(
+                    {
+                        "status": "deployed",
+                        "finishedAtMs": 2,
+                        "windowsProvider": installed,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                module["receipt_bound_windows_provider_provenance"](
+                    receipt_root, current, current_digest
+                ),
+                plan["currentProvenance"],
+            )
+
+            changed = dict(candidate_record)
+            changed["sourceDigest"] = "sha256:" + "3" * 64
+            changed_plan, changed_blockers = module["planned_windows_provider"](args, changed)
+            self.assertEqual(changed_blockers, [])
+            self.assertTrue(changed_plan["transitionNeeded"])
+            self.assertNotEqual(changed_plan["deployedPath"], str(current))
+
     def test_windows_provider_release_updates_content_addressed_path_and_restores_exact_env(self) -> None:
         scripts_path = str(REPO / "scripts")
         sys.path.insert(0, scripts_path)
