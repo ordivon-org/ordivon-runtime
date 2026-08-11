@@ -321,6 +321,94 @@ class CacheMigrationTests(unittest.TestCase):
             self.assertEqual(report["actions"][0]["action"], "cache_removed")
             self.assertTrue(Path(report["receipt"], "plan.json").is_file())
 
+    def test_prune_reports_protected_residual_without_execution_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            source = root / "source"
+            source.mkdir()
+            record(runtime, "workspace-protected", source)
+            protected = runtime / "cache" / "build" / "workspace-protected"
+            protected.mkdir(parents=True)
+            (protected / "artifact").write_bytes(b"p" * 120)
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-cache",
+                    "prune",
+                    "--database",
+                    str(database),
+                    "--runtime-store-root",
+                    str(runtime),
+                    "--receipt-root",
+                    str(root / "receipts"),
+                    "--lock-file",
+                    str(root / "cache.lock"),
+                    "--high-watermark-bytes",
+                    "50",
+                    "--low-watermark-bytes",
+                    "10",
+                    "--confirm-policy",
+                    "PRUNE_EXECUTION_CACHES",
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["status"], "completed")
+            self.assertEqual(report["capacityDisposition"], "protected_residual")
+            self.assertGreater(report["afterBytes"], report["highWatermarkBytes"])
+            self.assertEqual(report["remainingCandidateBytes"], 0)
+            self.assertGreater(report["residualOverHighBytes"], 0)
+            self.assertEqual(report["actions"], [])
+            self.assertEqual(report["failures"], [])
+            self.assertTrue(protected.is_dir())
+
+    def test_prune_keeps_reclaimable_residual_partial_after_delete_failure(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            stale = runtime / "cache" / "build" / "workspace-stale"
+            stale.mkdir(parents=True)
+            (stale / "artifact").write_bytes(b"s" * 120)
+            args = type(
+                "Args",
+                (),
+                {
+                    "database": database,
+                    "runtime_store_root": runtime,
+                    "receipt_root": root / "receipts",
+                    "lock_file": root / "cache.lock",
+                    "env_file": None,
+                    "confirm_policy": "PRUNE_EXECUTION_CACHES",
+                    "high_watermark_bytes": 50,
+                    "low_watermark_bytes": 10,
+                },
+            )()
+            shutil_module = module["shutil"]
+            original_rmtree = shutil_module.rmtree
+            try:
+                def fail_delete(_path: Path) -> None:
+                    raise OSError("synthetic delete failure")
+
+                shutil_module.rmtree = fail_delete
+                report = module["prune"](args)
+            finally:
+                shutil_module.rmtree = original_rmtree
+            self.assertEqual(report["status"], "partial")
+            self.assertEqual(report["capacityDisposition"], "reclaimable_residual")
+            self.assertGreaterEqual(report["remainingCandidateBytes"], 120)
+            self.assertEqual(len(report["failures"]), 1)
+            self.assertTrue(stale.is_dir())
+
     def test_prune_uses_operator_env_watermarks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

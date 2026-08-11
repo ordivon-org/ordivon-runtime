@@ -4,7 +4,7 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ## Unreleased
 
-- Packaged cache maintenance now resolves its high/low watermark from the same `ORDIVON_CACHE_HIGH_WATERMARK_BYTES` / `ORDIVON_CACHE_LOW_WATERMARK_BYTES` operator environment used by Runtime health/status instead of embedding a second 64 GiB / 48 GiB policy in the lifecycle unit. Explicit cache-prune CLI values still override the environment, standalone defaults remain available, and an incomplete environment policy fails before deletion.
+- Packaged cache maintenance now resolves its high/low watermark from the same `ORDIVON_CACHE_HIGH_WATERMARK_BYTES` / `ORDIVON_CACHE_LOW_WATERMARK_BYTES` operator environment used by Runtime health/status instead of embedding a second 64 GiB / 48 GiB policy in the lifecycle unit. Explicit cache-prune CLI values still override the environment, standalone defaults remain available, and an incomplete environment policy fails before deletion. Cache execution status is also separated from residual capacity pressure: deletion failures or still-reclaimable residual bytes remain partial/nonzero, while a watermark breach made entirely of currently protected bytes completes successfully with an explicit `protected_residual` capacity disposition and remains visible as maintenance attention.
 
 - Runtime admission now holds the Workspace lifecycle lock only through durable admission, then performs physical dispatch after releasing that lock. Capacity remains Registry-reservation truth rather than a mutex side effect: multi-client pressure, cancellation, natural completion, and daemon reconstruction may interleave without admitting above the configured global limit or duplicating `DISPATCH_ISSUED`.
 

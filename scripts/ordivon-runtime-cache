@@ -377,17 +377,36 @@ def prune(args: argparse.Namespace) -> dict[str, object]:
                 actions.append({**candidate, "action": "cache_removed"})
             except (OSError, RuntimeError) as error:
                 failures.append({**candidate, "error": str(error)})
-        after_bytes = directory_bytes(args.runtime_store_root / "cache")
-        status = "completed" if not failures and after_bytes <= high_watermark_bytes else "partial"
+        after_bytes, remaining_candidates = cache_prune_candidates(
+            args.database, args.runtime_store_root
+        )
+        remaining_candidate_bytes = sum(
+            int(candidate["bytes"]) for candidate in remaining_candidates
+        )
+        if after_bytes <= high_watermark_bytes:
+            capacity_disposition = "within_high_watermark"
+        elif remaining_candidate_bytes > 0:
+            capacity_disposition = "reclaimable_residual"
+        else:
+            capacity_disposition = "protected_residual"
+        status = (
+            "completed"
+            if not failures and capacity_disposition != "reclaimable_residual"
+            else "partial"
+        )
         result = {
             "schemaVersion": SCHEMA_VERSION,
             "status": status,
+            "capacityDisposition": capacity_disposition,
             "completedAtMs": int(time.time() * 1000),
             "confirmation": args.confirm_policy,
             "beforeBytes": before_bytes,
             "afterBytes": after_bytes,
             "highWatermarkBytes": high_watermark_bytes,
             "lowWatermarkBytes": low_watermark_bytes,
+            "remainingCandidateCount": len(remaining_candidates),
+            "remainingCandidateBytes": remaining_candidate_bytes,
+            "residualOverHighBytes": max(0, after_bytes - high_watermark_bytes),
             "actions": actions,
             "failures": failures,
             "receipt": str(receipt),
