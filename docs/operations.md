@@ -128,7 +128,7 @@ scripts/ordivon-runtime-deploy plan \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --env-file /etc/ordivon/ordivon-runtime.env \
   --receipt-root /var/lib/ordivon/deployments \
-  --expected-tool-count 20 \
+  --expected-tool-count 22 \
   --pretty
 
 scripts/ordivon-runtime-deploy apply \
@@ -141,7 +141,7 @@ scripts/ordivon-runtime-deploy apply \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --env-file /etc/ordivon/ordivon-runtime.env \
   --receipt-root /var/lib/ordivon/deployments \
-  --expected-tool-count 20 \
+  --expected-tool-count 22 \
   --drain-seconds 30
 ```
 
