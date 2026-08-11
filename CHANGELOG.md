@@ -4,6 +4,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ## Unreleased
 
+- structured Runtime release now carries the repository-owned Windows launcher when Windows provider build equipment is available, binds its source/compiler/candidate digest in the candidate manifest, installs it at a content-addressed provider path, and atomically advances only `ORDIVON_WINDOWS_LAUNCHER_PATH` under the existing admission/service fence with receipt-bound rollback. The launcher protocol advances to `windows_native_launcher_v2`; a new Runtime rejects a legacy V1 launcher during context validation instead of dispatching unsupported provider arguments.
+
 - Windows-native transient launch now disables `systemd-run` environment expansion so Agent-authored `$VAR` and `${VAR}` arguments remain literal across the outer WSL supervisor boundary.
 
 - `workspace.open` now classifies a missing Git revision as `REVISION_NOT_FOUND` on `sourceRevision` instead of collapsing the Git rejection into a generic `TOOL_FAILED` error.

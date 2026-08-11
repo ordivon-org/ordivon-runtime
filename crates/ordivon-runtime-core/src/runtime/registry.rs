@@ -4149,7 +4149,8 @@ fn validate_execution_provider_snapshot(
                 ));
             }
         }
-        ExecutionProviderContract::WindowsNativeLauncherV1 => {
+        ExecutionProviderContract::WindowsNativeLauncherV1
+        | ExecutionProviderContract::WindowsNativeLauncherV2 => {
             let distribution = snapshot.wsl_distribution.as_deref().ok_or_else(|| {
                 RuntimeError::invalid(
                     "Windows execution provider requires a WSL distribution",
@@ -4320,6 +4321,7 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
             ) | (
                 super::ExecutionTarget::WindowsNative,
                 ExecutionProviderContract::WindowsNativeLauncherV1
+                    | ExecutionProviderContract::WindowsNativeLauncherV2
             )
         );
         if !target_matches {

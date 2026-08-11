@@ -378,7 +378,7 @@ class DeployReclaimTests(unittest.TestCase):
                 capture_output=True,
             )
             report = json.loads(completed.stdout)
-            self.assertEqual(report["schemaVersion"], 2)
+            self.assertEqual(report["schemaVersion"], 3)
             artifacts = {item["name"]: item for item in report["artifacts"]}
             self.assertEqual(len(artifacts), 12)
             self.assertEqual(artifacts["mcp_probe.py"]["kind"], "support")
@@ -540,7 +540,7 @@ class DeployReclaimTests(unittest.TestCase):
                 )
                 receipt = Path(result["receipt"])
                 receipt_manifest = json.loads((receipt / "manifest.json").read_text())
-                self.assertEqual(receipt_manifest["schemaVersion"], 2)
+                self.assertEqual(receipt_manifest["schemaVersion"], 3)
                 self.assertEqual(len(receipt_manifest["artifacts"]), 12)
                 rolled_back = subprocess.run(
                     [
@@ -2055,6 +2055,76 @@ class DeployReclaimTests(unittest.TestCase):
                     self.fail("rollback crossed an active Runtime Job")
             handle = module["acquire_exclusive_admission_fence"](database)
             handle.close()
+
+
+    def test_windows_provider_release_updates_content_addressed_path_and_restores_exact_env(self) -> None:
+        scripts_path = str(REPO / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
+        finally:
+            sys.path.remove(scripts_path)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider_root = root / "WindowsJobLauncher"
+            current = provider_root / "legacy-commit" / "ordivon-windows-job-launcher.exe"
+            current.parent.mkdir(parents=True)
+            write_executable(current, "old-launcher\n")
+            candidate_dir = root / "candidate"
+            candidate_dir.mkdir()
+            candidate = candidate_dir / "ordivon-windows-job-launcher.exe"
+            write_executable(candidate, "new-launcher\n")
+            digest = "sha256:" + hashlib.sha256(candidate.read_bytes()).hexdigest()
+            env_file = root / "runtime.env"
+            env_file.write_text(
+                "ORDIVON_BIND=127.0.0.1:8897\n"
+                f"ORDIVON_WINDOWS_LAUNCHER_PATH={current}\n"
+                "ORDIVON_WINDOWS_WSL_DISTRIBUTION=archlinux\n",
+                encoding="utf-8",
+            )
+            candidate_record = {
+                "name": "ordivon-windows-job-launcher.exe",
+                "kind": "windows_provider",
+                "mode": 0o755,
+                "path": str(candidate),
+                "bytes": candidate.stat().st_size,
+                "digest": digest,
+                "contract": "windows_native_launcher_v2",
+                "source": "platform/windows/Ordivon.WindowsJobLauncher.cs",
+                "sourceDigest": "sha256:" + "1" * 64,
+                "compiler": {
+                    "path": "/compiler/csc.exe",
+                    "resolvedPath": "/compiler/csc.exe",
+                    "digest": "sha256:" + "2" * 64,
+                },
+            }
+            args = type("Args", (), {"env_file": env_file, "candidate_dir": candidate_dir})()
+            missing, blockers = module["planned_windows_provider"](args, None)
+            self.assertTrue(missing["configured"])
+            self.assertIn("configured Windows provider requires a candidate launcher", blockers)
+
+            plan, blockers = module["planned_windows_provider"](args, candidate_record)
+            self.assertEqual(blockers, [])
+            self.assertTrue(plan["configured"])
+            deployed = Path(plan["deployedPath"])
+            self.assertEqual(deployed.parent.name, "sha256-" + digest.removeprefix("sha256:"))
+            before = env_file.read_bytes()
+            installed = module["install_windows_provider"](args, plan)
+            self.assertEqual(installed["installedDigest"], digest)
+            self.assertEqual(deployed.read_text(), "new-launcher\n")
+            self.assertIn(
+                f"ORDIVON_WINDOWS_LAUNCHER_PATH={deployed}\n",
+                env_file.read_text(),
+            )
+            restored = module["restore_windows_provider"](env_file, plan)
+            self.assertTrue(restored["restored"])
+            self.assertEqual(env_file.read_bytes(), before)
+            self.assertTrue(deployed.is_file())
+
+            module["install_windows_provider"](args, plan)
+            env_file.write_text(env_file.read_text() + "UNRELATED_OPERATOR_CHANGE=1\n")
+            with self.assertRaisesRegex(RuntimeError, "changed outside the deployment"):
+                module["restore_windows_provider"](env_file, plan)
 
 
 if __name__ == "__main__":

@@ -801,6 +801,7 @@ internal static class OrdivonWindowsJobLauncher
             environmentJson.Append('}');
             string json = "{" +
                 "\"schemaVersion\":1," +
+                "\"providerContract\":\"windows_native_launcher_v2\"," +
                 TokenEvidenceJsonFields(evidence) + "," +
                 "\"environment\":" + environmentJson.ToString() +
                 "}";

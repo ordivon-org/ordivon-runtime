@@ -40,7 +40,7 @@ Runtime does not compress every compatibility question into one SemVer number.
 | Tool catalog digest | exact generated Tool names, annotations, and schemas |
 | Runtime schema version | public request and response structure |
 | Registry migration version and checksums | persisted execution-state interpretation |
-| deployment receipt | exact source commit, toolchain, candidate binaries, installed binaries, protocol, and catalog |
+| deployment receipt | exact source commit, toolchain, candidate/installed Runtime artifacts, any configured repository-owned Windows provider transition, protocol, and catalog |
 
 A release version helps users discuss change. It does not replace the stronger identities required for replay, recovery, migration, or rollback.
 
@@ -90,9 +90,9 @@ A releasable commit must have:
 3. an updated Changelog entry;
 4. generated Tool reference with no diff;
 5. a clean source tree and fixed Rust toolchain;
-6. a deployment candidate manifest binding toolchain identity and binary digests;
+6. a deployment candidate manifest binding toolchain identity and release-artifact digests; on a Windows-configured node this also includes the exact repository-owned Windows launcher contract, source/compiler identity, and candidate digest;
 7. a successful deployment plan;
-8. after deployment, a receipt binding the complete installed release-artifact digests and modes, protocol lifecycle, supported versions, and Tool catalog digest;
+8. after deployment, a receipt binding the complete installed release-artifact digests and modes, any Windows launcher path/digest transition plus environment-file before/after digests, protocol lifecycle, supported versions, and Tool catalog digest;
 9. for a release that changes the structured self-release contract, an exact `release.apply` → Runtime ingress replacement → reconnect → `release.get` acceptance proving the same effect identity/receipt is reconciled without a second physical deployment;
 10. a verified previous-binary rollback path while that rollback window remains supported.
 
