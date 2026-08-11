@@ -92,7 +92,7 @@ See [`compatibility.md`](compatibility.md) and [`releases.md`](releases.md).
 | bounded output and Artifact retention | operational |
 | observation, cancellation, reconciliation | operational |
 | doctor, repair, backup, restore | operational |
-| receipted deploy and rollback | operational |
+| receipted deploy and rollback | operational; deployment schema v4 binds the default 15-artifact set across Runtime install and manager-owned systemd-unit targets, status verifies unit drift, and rollback restores/reloads previous unit bytes |
 | structured Runtime self-release (`release.apply` / `release.get`) | implemented; operator-configured, exact-replay-safe admission binds a deterministic release effect to the ordinary Job/Attempt lifecycle, while `release.get` reads deployment receipt truth without redispatch |
 | Workspace lifecycle, terminal Windows input-presentation reclamation, and cache reclamation | operational; Windows native reclaim is terminal-only, grace-perioded, receipted, exact-tree verified by the current launcher, and leaves Job-owned input bytes intact |
 | `contained_local` authority reduction | experimental but verified for the declared boundary |

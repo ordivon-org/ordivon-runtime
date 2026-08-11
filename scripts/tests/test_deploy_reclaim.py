@@ -231,7 +231,16 @@ def add_release_operator_sources(path: Path, *, push: bool) -> str:
         write_executable(scripts / name, f"#!/bin/sh\nprintf '{name}-candidate\\n'\n")
     (scripts / "mcp_probe.py").write_text("PROBE_REVISION = 'candidate'\n", encoding="utf-8")
     (scripts / "mcp_probe.py").chmod(0o644)
-    subprocess.run(["git", "-C", str(path), "add", "scripts"], check=True)
+    systemd = path / "packaging" / "systemd"
+    systemd.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "ordivon-runtime.service",
+        "ordivon-runtime-lifecycle.service",
+        "ordivon-runtime-lifecycle.timer",
+    ):
+        (systemd / name).write_text(f"# candidate {name}\n", encoding="utf-8")
+        (systemd / name).chmod(0o644)
+    subprocess.run(["git", "-C", str(path), "add", "scripts", "packaging/systemd"], check=True)
     subprocess.run(["git", "-C", str(path), "commit", "-qm", "release operator sources"], check=True)
     if push:
         subprocess.run(["git", "-C", str(path), "push", "-qu", "origin", "main"], check=True)
@@ -331,15 +340,48 @@ def write_candidate_manifest(
 def fake_systemctl(root: Path) -> Path:
     state = root / "service-state"
     state.write_text("active\n", encoding="utf-8")
+    log = root / "systemctl.log"
     systemctl = root / "systemctl"
     write_executable(
         systemctl,
         "#!/bin/sh\n"
         f"state='{state}'\n"
+        f"log='{log}'\n"
+        f"unit_path='{root / 'systemd'}'\n"
+        'printf "%s\\n" "$*" >> "$log"\n'
         'case "$1" in\n'
         '  is-active) cat "$state" ;;\n'
+        '  show) printf "%s\\n" "$unit_path" ;;\n'
         "  stop) printf 'inactive\\n' > \"$state\" ;;\n"
         "  start) printf 'active\\n' > \"$state\" ;;\n"
+        "  daemon-reload) : ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+    )
+    return systemctl
+
+
+def fake_systemctl_fail_first_reload(root: Path) -> Path:
+    state = root / "service-state"
+    state.write_text("active\n", encoding="utf-8")
+    reload_count = root / "reload-count"
+    reload_count.write_text("0\n", encoding="utf-8")
+    log = root / "systemctl.log"
+    systemctl = root / "systemctl-fail-first-reload"
+    write_executable(
+        systemctl,
+        "#!/bin/sh\n"
+        f"state='{state}'\n"
+        f"count='{reload_count}'\n"
+        f"log='{log}'\n"
+        f"unit_path='{root / 'systemd'}'\n"
+        'printf "%s\\n" "$*" >> "$log"\n'
+        'case "$1" in\n'
+        '  is-active) cat "$state" ;;\n'
+        '  show) printf "%s\\n" "$unit_path" ;;\n'
+        "  stop) printf 'inactive\\n' > \"$state\" ;;\n"
+        "  start) printf 'active\\n' > \"$state\" ;;\n"
+        '  daemon-reload) n=$(cat "$count"); n=$((n+1)); printf "%s\\n" "$n" > "$count"; [ "$n" -gt 1 ] ;;\n'
         "  *) exit 1 ;;\n"
         "esac\n",
     )
@@ -378,13 +420,17 @@ class DeployReclaimTests(unittest.TestCase):
                 capture_output=True,
             )
             report = json.loads(completed.stdout)
-            self.assertEqual(report["schemaVersion"], 3)
+            self.assertEqual(report["schemaVersion"], 4)
             artifacts = {item["name"]: item for item in report["artifacts"]}
-            self.assertEqual(len(artifacts), 12)
+            self.assertEqual(len(artifacts), 15)
+            self.assertEqual(artifacts["ordivon-runtime"]["target"], "runtime_install")
             self.assertEqual(artifacts["mcp_probe.py"]["kind"], "support")
             self.assertEqual(artifacts["mcp_probe.py"]["mode"], 0o644)
             self.assertEqual(artifacts["ordivon-runtime-status"]["kind"], "operator")
             self.assertEqual(artifacts["ordivon-runtime-status"]["mode"], 0o755)
+            self.assertEqual(artifacts["ordivon-runtime-lifecycle.service"]["kind"], "systemd_unit")
+            self.assertEqual(artifacts["ordivon-runtime-lifecycle.service"]["target"], "systemd_unit")
+            self.assertEqual(artifacts["ordivon-runtime-lifecycle.service"]["mode"], 0o644)
             self.assertEqual(
                 (candidate / "ordivon-runtime-status").read_bytes(),
                 (repo / "scripts/ordivon-runtime-status").read_bytes(),
@@ -394,7 +440,7 @@ class DeployReclaimTests(unittest.TestCase):
                 hashlib.sha256((repo / "scripts/mcp_probe.py").read_bytes()).hexdigest(),
             )
 
-    def test_default_apply_and_rollback_cover_operator_and_support_artifacts(self) -> None:
+    def test_default_apply_and_rollback_cover_operator_support_and_systemd_units(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repo = root / "repo"
@@ -426,6 +472,8 @@ class DeployReclaimTests(unittest.TestCase):
             )
             install = root / "install"
             install.mkdir()
+            systemd_unit_dir = root / "systemd"
+            systemd_unit_dir.mkdir()
             release_names = [
                 "ordivon-runtime",
                 "ordivon-runtime-runner",
@@ -439,38 +487,54 @@ class DeployReclaimTests(unittest.TestCase):
                 "ordivon-runtime-status",
                 "ordivon-runtime-capacity-acceptance",
             ]
+            systemd_unit_names = [
+                "ordivon-runtime.service",
+                "ordivon-runtime-lifecycle.service",
+                "ordivon-runtime-lifecycle.timer",
+            ]
             for name in release_names:
                 write_executable(install / name, f"old-{name}\n")
             (install / "mcp_probe.py").write_text("OLD_PROBE = True\n", encoding="utf-8")
             (install / "mcp_probe.py").chmod(0o644)
+            for name in systemd_unit_names:
+                (systemd_unit_dir / name).write_text(f"# old {name}\n", encoding="utf-8")
+                (systemd_unit_dir / name).chmod(0o644)
+
             prior_commit = "a" * 40
             prior_receipt = root / "receipts" / "prior"
             prior_receipt.mkdir(parents=True)
             prior_installed = []
-            for name in [*release_names, "mcp_probe.py"]:
-                path = install / name
+            for name in [*release_names, "mcp_probe.py", *systemd_unit_names]:
+                is_systemd = name in systemd_unit_names
+                path = (systemd_unit_dir if is_systemd else install) / name
+                if is_systemd:
+                    kind = "systemd_unit"
+                elif name == "mcp_probe.py":
+                    kind = "support"
+                elif name in {
+                    "ordivon-runtime",
+                    "ordivon-runtime-runner",
+                    "ordivon-runtime-doctor",
+                    "ordivon-runtime-inspect",
+                    "ordivon-runtime-repair",
+                }:
+                    kind = "binary"
+                else:
+                    kind = "operator"
                 prior_installed.append(
                     {
                         "name": name,
-                        "kind": "support" if name == "mcp_probe.py" else (
-                            "binary" if name in {
-                                "ordivon-runtime",
-                                "ordivon-runtime-runner",
-                                "ordivon-runtime-doctor",
-                                "ordivon-runtime-inspect",
-                                "ordivon-runtime-repair",
-                            } else "operator"
-                        ),
+                        "kind": kind,
+                        "target": "systemd_unit" if is_systemd else "runtime_install",
                         "mode": path.stat().st_mode & 0o777,
                         "digest": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
                         "bytes": path.stat().st_size,
-                        "path": str(path),
                     }
                 )
             (prior_receipt / "result.json").write_text(
                 json.dumps(
                     {
-                        "schemaVersion": 2,
+                        "schemaVersion": 3,
                         "status": "deployed",
                         "commit": prior_commit,
                         "finishedAtMs": 1,
@@ -479,6 +543,7 @@ class DeployReclaimTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+
             database = root / "registry.sqlite3"
             initialize_registry(database)
             systemctl = fake_systemctl(root)
@@ -505,6 +570,8 @@ class DeployReclaimTests(unittest.TestCase):
                         str(manifest),
                         "--install-dir",
                         str(install),
+                        "--systemd-unit-dir",
+                        str(systemd_unit_dir),
                         "--database",
                         str(database),
                         "--env-file",
@@ -531,17 +598,25 @@ class DeployReclaimTests(unittest.TestCase):
                 )
                 result = json.loads(deployed.stdout)
                 installed = {item["name"]: item for item in result["installed"]}
-                self.assertEqual(len(installed), 12)
+                self.assertEqual(len(installed), 15)
                 self.assertEqual(installed["mcp_probe.py"]["mode"], 0o644)
+                self.assertEqual(installed["ordivon-runtime-lifecycle.service"]["target"], "systemd_unit")
                 self.assertEqual((install / "mcp_probe.py").stat().st_mode & 0o777, 0o644)
                 self.assertEqual(
                     (install / "ordivon-runtime-status").read_bytes(),
                     (repo / "scripts/ordivon-runtime-status").read_bytes(),
                 )
+                self.assertEqual(
+                    (systemd_unit_dir / "ordivon-runtime-lifecycle.service").read_bytes(),
+                    (repo / "packaging/systemd/ordivon-runtime-lifecycle.service").read_bytes(),
+                )
                 receipt = Path(result["receipt"])
                 receipt_manifest = json.loads((receipt / "manifest.json").read_text())
-                self.assertEqual(receipt_manifest["schemaVersion"], 3)
-                self.assertEqual(len(receipt_manifest["artifacts"]), 12)
+                self.assertEqual(receipt_manifest["schemaVersion"], 4)
+                self.assertEqual(len(receipt_manifest["artifacts"]), 15)
+                self.assertEqual(receipt_manifest["systemdUnitDir"], str(systemd_unit_dir))
+                self.assertEqual(receipt_manifest["previousCommit"], prior_commit)
+
                 rolled_back = subprocess.run(
                     [
                         sys.executable,
@@ -553,6 +628,8 @@ class DeployReclaimTests(unittest.TestCase):
                         str(receipt),
                         "--install-dir",
                         str(install),
+                        "--systemd-unit-dir",
+                        str(systemd_unit_dir),
                         "--database",
                         str(database),
                         "--env-file",
@@ -573,10 +650,127 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual(rollback["status"], "restored_previous")
             self.assertEqual(rollback["commit"], prior_commit)
             self.assertTrue(rollback["commitKnown"])
-            self.assertEqual(len(rollback["installed"]), 12)
+            self.assertEqual(len(rollback["installed"]), 15)
             self.assertEqual((install / "ordivon-runtime-status").read_text(), "old-ordivon-runtime-status\n")
             self.assertEqual((install / "mcp_probe.py").read_text(), "OLD_PROBE = True\n")
             self.assertEqual((install / "mcp_probe.py").stat().st_mode & 0o777, 0o644)
+            self.assertEqual(
+                (systemd_unit_dir / "ordivon-runtime-lifecycle.service").read_text(),
+                "# old ordivon-runtime-lifecycle.service\n",
+            )
+            self.assertGreaterEqual(
+                (root / "systemctl.log").read_text().splitlines().count("daemon-reload"), 2
+            )
+
+    def test_daemon_reload_failure_automatically_restores_previous_systemd_units(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            initialize_git_repository(repo, remote=True)
+            commit = add_release_operator_sources(repo, push=True)
+            candidate = repo / "target" / "release"
+            candidate_manifest = root / "candidate-manifest.json"
+            cargo = fake_cargo_for_default_release(root)
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-deploy",
+                    "prepare",
+                    "--source-repo",
+                    str(repo),
+                    "--commit",
+                    commit,
+                    "--candidate-dir",
+                    str(candidate),
+                    "--candidate-manifest",
+                    str(candidate_manifest),
+                    "--cargo",
+                    str(cargo),
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            manifest_value = json.loads(candidate_manifest.read_text())
+            install = root / "install"
+            install.mkdir()
+            systemd_unit_dir = root / "systemd"
+            systemd_unit_dir.mkdir()
+            expected_previous: dict[str, bytes] = {}
+            for artifact in manifest_value["artifacts"]:
+                name = artifact["name"]
+                target = artifact.get("target", "runtime_install")
+                destination = (systemd_unit_dir if target == "systemd_unit" else install) / name
+                data = (f"# old {name}\n" if target == "systemd_unit" else f"old-{name}\n").encode()
+                destination.write_bytes(data)
+                destination.chmod(artifact["mode"])
+                expected_previous[name] = data
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            systemctl = fake_systemctl_fail_first_reload(root)
+            with mcp_server(["workspace.get"]) as port:
+                env_file = root / "runtime.env"
+                env_file.write_text(
+                    f"ORDIVON_BIND=127.0.0.1:{port}\nORDIVON_BEARER_TOKEN=test\n",
+                    encoding="utf-8",
+                )
+                failed = subprocess.run(
+                    [
+                        sys.executable,
+                        "scripts/ordivon-runtime-deploy",
+                        "apply",
+                        "--source-repo",
+                        str(repo),
+                        "--commit",
+                        commit,
+                        "--confirm-commit",
+                        commit,
+                        "--candidate-dir",
+                        str(candidate),
+                        "--candidate-manifest",
+                        str(candidate_manifest),
+                        "--install-dir",
+                        str(install),
+                        "--systemd-unit-dir",
+                        str(systemd_unit_dir),
+                        "--database",
+                        str(database),
+                        "--env-file",
+                        str(env_file),
+                        "--receipt-root",
+                        str(root / "receipts"),
+                        "--systemctl",
+                        str(systemctl),
+                        "--git",
+                        shutil.which("git") or "/usr/bin/git",
+                        "--lock-file",
+                        str(root / "deploy.lock"),
+                        "--required-tool",
+                        "workspace.get",
+                        "--expected-tool-count",
+                        "1",
+                        "--wait-seconds",
+                        "2",
+                    ],
+                    cwd=REPO,
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+            self.assertNotEqual(failed.returncode, 0)
+            receipts = sorted((root / "receipts").iterdir())
+            self.assertEqual(len(receipts), 1)
+            result = json.loads((receipts[0] / "result.json").read_text())
+            self.assertEqual(result["status"], "rolled_back")
+            self.assertIsNone(result["rollbackError"])
+            self.assertEqual((root / "service-state").read_text().strip(), "active")
+            self.assertEqual(int((root / "reload-count").read_text()), 2)
+            for artifact in manifest_value["artifacts"]:
+                name = artifact["name"]
+                target = artifact.get("target", "runtime_install")
+                destination = (systemd_unit_dir if target == "systemd_unit" else install) / name
+                self.assertEqual(destination.read_bytes(), expected_previous[name])
 
     def test_new_deployer_rolls_back_legacy_v1_binary_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -647,6 +841,98 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual(json.loads(completed.stdout)["status"], "restored_previous")
             self.assertEqual((install / "runtime").read_text(), "legacy-previous\n")
             self.assertEqual((install / "runtime").stat().st_mode & 0o777, 0o755)
+
+    def test_systemd_release_target_must_be_in_manager_unit_path(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            managed = root / "systemd"
+            managed.mkdir()
+            unmanaged = root / "elsewhere"
+            unmanaged.mkdir()
+            systemctl = fake_systemctl(root)
+            accepted, unit_paths = module["systemd_unit_dir_is_managed"](systemctl, managed)
+            rejected, same_unit_paths = module["systemd_unit_dir_is_managed"](systemctl, unmanaged)
+            self.assertTrue(accepted)
+            self.assertFalse(rejected)
+            self.assertEqual(unit_paths, same_unit_paths)
+            self.assertIn(managed.resolve(), unit_paths)
+
+    def test_new_deployer_rolls_back_legacy_v3_targetless_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install = root / "install"
+            install.mkdir()
+            write_executable(install / "runtime", "current-v4\n")
+            receipt = root / "receipt"
+            previous = receipt / "previous"
+            previous.mkdir(parents=True)
+            write_executable(previous / "runtime", "v3-previous\n")
+            previous_digest = "sha256:" + hashlib.sha256((previous / "runtime").read_bytes()).hexdigest()
+            env_file = root / "runtime.env"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            systemctl = fake_systemctl(root)
+            with mcp_server(["workspace.get"]) as port:
+                env_file.write_text(
+                    f"ORDIVON_BIND=127.0.0.1:{port}\nORDIVON_BEARER_TOKEN=test\n",
+                    encoding="utf-8",
+                )
+                (receipt / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "schemaVersion": 3,
+                            "service": "ordivon-runtime.service",
+                            "artifacts": [
+                                {"name": "runtime", "kind": "binary", "mode": 0o755}
+                            ],
+                            "binaries": ["runtime"],
+                            "installDir": str(install),
+                            "envFile": str(env_file),
+                            "previous": [
+                                {
+                                    "name": "runtime",
+                                    "kind": "binary",
+                                    "mode": 0o755,
+                                    "digest": previous_digest,
+                                    "bytes": (previous / "runtime").stat().st_size,
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "scripts/ordivon-runtime-deploy",
+                        "rollback",
+                        "--receipt",
+                        str(receipt),
+                        "--confirm-receipt",
+                        str(receipt),
+                        "--install-dir",
+                        str(install),
+                        "--database",
+                        str(database),
+                        "--env-file",
+                        str(env_file),
+                        "--systemctl",
+                        str(systemctl),
+                        "--lock-file",
+                        str(root / "deploy.lock"),
+                        "--wait-seconds",
+                        "2",
+                    ],
+                    cwd=REPO,
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                )
+            result = json.loads(completed.stdout)
+            self.assertEqual(result["status"], "restored_previous")
+            self.assertEqual(result["installed"][0]["target"], "runtime_install")
+            self.assertEqual((install / "runtime").read_text(), "v3-previous\n")
 
     def test_deploy_admission_fence_is_exclusive_and_drain_waits_for_natural_release(self) -> None:
         scripts_path = str(REPO / "scripts")

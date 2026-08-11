@@ -349,6 +349,68 @@ class RuntimeStatusTests(unittest.TestCase):
                 report["operatorAction"]["reasons"],
             )
 
+    def test_systemd_unit_artifact_drift_is_deployment_health_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = fixture(root)
+            systemd_unit_dir = root / "systemd"
+            systemd_unit_dir.mkdir()
+            unit = systemd_unit_dir / "ordivon-runtime-lifecycle.service"
+            unit.write_text("# unit-v1\n", encoding="utf-8")
+            unit.chmod(0o644)
+
+            receipt = paths["deployments"] / "deploy-1"
+            plan_path = receipt / "plan.json"
+            plan = json.loads(plan_path.read_text())
+            plan["systemdUnitDir"] = str(systemd_unit_dir)
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            result_path = receipt / "result.json"
+            result = json.loads(result_path.read_text())
+            result["installed"].append(
+                {
+                    "name": unit.name,
+                    "kind": "systemd_unit",
+                    "target": "systemd_unit",
+                    "mode": 0o644,
+                    "digest": digest(unit),
+                    "bytes": unit.stat().st_size,
+                }
+            )
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+
+            healthy = subprocess.run(
+                raw_command(paths, "--health", "--json"),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            healthy_report = json.loads(healthy.stdout)
+            artifact = next(
+                item
+                for item in healthy_report["deployment"]["artifacts"]
+                if item["name"] == unit.name
+            )
+            self.assertEqual(artifact["target"], "systemd_unit")
+            self.assertTrue(artifact["matches"])
+            self.assertNotIn(str(root), healthy.stdout)
+
+            unit.write_text("# unit-drift\n", encoding="utf-8")
+            drifted = subprocess.run(
+                raw_command(paths, "--health", "--json"),
+                cwd=REPO,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(drifted.returncode, 1)
+            report = json.loads(drifted.stdout)
+            self.assertIn(
+                "ARTIFACT_DIGEST_MISMATCH:ordivon-runtime-lifecycle.service",
+                report["operatorAction"]["reasons"],
+            )
+            self.assertNotIn(str(root), drifted.stdout)
+
     def test_diagnostic_policy_inputs_have_no_legacy_round_maxima(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             paths = fixture(Path(temporary))
