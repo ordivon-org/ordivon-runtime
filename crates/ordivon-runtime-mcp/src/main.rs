@@ -424,7 +424,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                         .unwrap_or_else(|| "/var/lib/ordivon/deployments".to_string()),
                 ),
                 required_ref: optional_env("ORDIVON_RELEASE_REQUIRED_REF")?
-                    .unwrap_or_else(|| "main".to_string()),
+                    .unwrap_or_else(|| "origin/main".to_string()),
                 timeout_ms,
             })
         })
