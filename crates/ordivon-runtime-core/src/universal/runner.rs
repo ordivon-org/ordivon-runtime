@@ -26,6 +26,8 @@ const STDOUT_FILE: &str = "stdout.log";
 const STDERR_FILE: &str = "stderr.log";
 const RUNNER_START_FILE: &str = "runner-start.json";
 const PROGRESS_FILE: &str = "progress.json";
+const TRUSTED_BUILD_TARGET_PRESENTATION: &str = "/proc/self/fd/198";
+const TRUSTED_BUILD_TARGET_PRESENTATION_FD: libc::c_int = 198;
 
 pub fn run_task_runner(task_dir: &Path) -> Result<(), UniversalExecError> {
     if !task_dir.is_absolute() {
@@ -650,6 +652,16 @@ fn execute_step(
         command.env_clear();
     }
     command.envs(&step.env);
+    let _build_target_backing = if step.env.get("CARGO_TARGET_DIR").map(String::as_str)
+        == Some(TRUSTED_BUILD_TARGET_PRESENTATION)
+    {
+        let backing = request.build_target_backing.as_deref().ok_or_else(|| {
+            runner_error("stable Cargo target presentation has no private backing")
+        })?;
+        Some(configure_build_target_presentation(&mut command, backing)?)
+    } else {
+        None
+    };
     if let Some(payload) = &request.payload {
         command
             .env("HOME", &payload.runtime_view)
@@ -1289,6 +1301,25 @@ fn validate_request_identity(request: &RunnerTaskRequest) -> Result<(), Universa
             ));
         }
     }
+    let uses_stable_build_target = request.env.get("CARGO_TARGET_DIR").map(String::as_str)
+        == Some(TRUSTED_BUILD_TARGET_PRESENTATION)
+        || request.steps.iter().any(|step| {
+            step.env.get("CARGO_TARGET_DIR").map(String::as_str)
+                == Some(TRUSTED_BUILD_TARGET_PRESENTATION)
+        });
+    match request.build_target_backing.as_deref() {
+        None if !uses_stable_build_target => {}
+        Some(backing)
+            if uses_stable_build_target
+                && request.payload.is_none()
+                && Path::new(backing).is_absolute()
+                && !backing.as_bytes().contains(&0) => {}
+        _ => {
+            return Err(runner_error(
+                "buildTargetBacking must be an absolute NUL-free path exactly for trusted stable Cargo target presentation",
+            ));
+        }
+    }
     for (index, input) in request.input_commitments.iter().enumerate() {
         if !Path::new(&input.presentation_path).is_absolute()
             || input.presentation_path.as_bytes().contains(&0)
@@ -1363,6 +1394,40 @@ fn validate_request_identity(request: &RunnerTaskRequest) -> Result<(), Universa
         }
     }
     Ok(())
+}
+
+fn configure_build_target_presentation(
+    command: &mut Command,
+    backing: &str,
+) -> Result<File, UniversalExecError> {
+    let backing = canonical_directory(Path::new(backing), "buildTargetBacking")?;
+    let directory = File::open(&backing).map_err(|error| {
+        UniversalExecError::new(
+            UniversalExecErrorCode::IoError,
+            format!(
+                "cannot open private Cargo target backing {}: {error}",
+                backing.display()
+            ),
+            Some("buildTargetBacking"),
+            false,
+        )
+    })?;
+    let source_fd = directory.as_raw_fd();
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(source_fd, TRUSTED_BUILD_TARGET_PRESENTATION_FD) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // File::open uses close-on-exec. dup2 clears FD_CLOEXEC when it duplicates
+            // onto a different descriptor, but source_fd may itself already be 198.
+            // Clear it explicitly so the stable presentation always survives exec.
+            if libc::fcntl(TRUSTED_BUILD_TARGET_PRESENTATION_FD, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(directory)
 }
 
 fn configure_payload_drop(

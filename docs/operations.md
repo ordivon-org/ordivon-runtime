@@ -284,7 +284,7 @@ cache/workspaces/<workspaceId>/  Workspace generic cache and contained-local hom
 cache/tmp/<workspaceId>/         Workspace temporary files
 ```
 
-The committed execution environment sets explicit paths for Cargo, uv, pip, npm, pnpm/Corepack, Bun, and Go. Every Workspace receives its own `CARGO_TARGET_DIR`, including trusted-local Jobs. Package-download caches remain global in trusted-local, while contained-local keeps its tooling/package cache Workspace-scoped. This prevents two detached source states from overwriting one another's Cargo metadata or compiled path-package artifacts; compiler-output sharing should use a content-addressed compiler cache rather than a shared mutable target directory.
+The committed execution environment sets explicit paths for Cargo, uv, pip, npm, pnpm/Corepack, Bun, and Go. Every Workspace still owns its own physical Cargo target backing under `cache/build/<workspaceId>/cargo`. For `trusted_local`, the Runner opens that backing and presents it at the stable compiler-visible `CARGO_TARGET_DIR=/proc/self/fd/198`; concurrent Jobs use the same pathname string but distinct inherited directory descriptors and therefore distinct mutable backings. This stable presentation exists to make content-addressed compiler wrappers such as sccache insensitive to otherwise-arbitrary Workspace target paths; Runtime does not share Cargo target bytes or operate a compiler-cache service. `contained_local` keeps the direct Workspace-private target path. Package-download caches remain global in trusted-local, while contained-local keeps its tooling/package cache Workspace-scoped.
 
 Inspect legacy build caches without mutation:
 

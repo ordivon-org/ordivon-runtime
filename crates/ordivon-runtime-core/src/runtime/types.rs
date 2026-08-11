@@ -496,6 +496,10 @@ pub struct RuntimeExecutionTargetCapability {
     pub execution_profiles: Vec<ExecutionProfile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub windows_authorities: Vec<WindowsAuthority>,
+    /// Windows authorities for which Runtime can present exact immutable inputs.
+    /// Empty for non-Windows targets and when no safe native presentation is available.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows_immutable_input_authorities: Vec<WindowsAuthority>,
     pub structured_plan: bool,
     pub immutable_inputs: bool,
     /// Whether trusted-local Jobs on this target may bind Agent-declared exact host file prerequisites.

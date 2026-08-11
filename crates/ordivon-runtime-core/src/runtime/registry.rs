@@ -4408,11 +4408,29 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
                     "plan.inputSetId",
                 ));
             }
-            if request.plan.execution_profile != super::ExecutionProfile::ContainedLocal {
-                return Err(RuntimeError::invalid(
-                    "effective inputs require contained_local execution",
-                    "plan.executionProfile",
-                ));
+            match request.plan.execution_target {
+                super::ExecutionTarget::LocalLinux => {
+                    if request.plan.execution_profile != super::ExecutionProfile::ContainedLocal {
+                        return Err(RuntimeError::invalid(
+                            "local_linux effective inputs require contained_local execution",
+                            "plan.executionProfile",
+                        ));
+                    }
+                }
+                super::ExecutionTarget::WindowsNative => {
+                    if request.plan.execution_profile != super::ExecutionProfile::TrustedLocal {
+                        return Err(RuntimeError::invalid(
+                            "windows_native effective inputs require trusted_local execution",
+                            "plan.executionProfile",
+                        ));
+                    }
+                    if request.plan.windows_authority != super::WindowsAuthority::Limited {
+                        return Err(RuntimeError::invalid(
+                            "windows_native effective inputs require limited authority",
+                            "plan.windowsAuthority",
+                        ));
+                    }
+                }
             }
         }
         (Some(_), true) => {
@@ -4427,6 +4445,15 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
                 "plan.inputSetId",
             ));
         }
+    }
+    if request.plan.execution_target == super::ExecutionTarget::WindowsNative {
+        super::windows::validate_windows_input_relative_paths(
+            request
+                .plan
+                .effective_inputs
+                .iter()
+                .map(|input| input.presentation_relative_path.as_str()),
+        )?;
     }
     let mut input_paths = std::collections::BTreeSet::<PathBuf>::new();
     for (index, input) in request.plan.effective_inputs.iter().enumerate() {
@@ -4461,6 +4488,12 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
                     &field,
                 ));
             }
+        }
+        if request.plan.execution_target == super::ExecutionTarget::WindowsNative {
+            super::windows::validate_windows_input_relative_path(
+                &input.presentation_relative_path,
+                index,
+            )?;
         }
         for existing in &input_paths {
             if presentation == existing

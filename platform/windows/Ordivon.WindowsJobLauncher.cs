@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
@@ -276,6 +277,10 @@ internal static class OrdivonWindowsJobLauncher
         public string RuntimeAttemptId;
         public string RuntimeLaunchTokenDigest;
         public string JobName;
+        public string InputSourceRoot;
+        public string InputSetId;
+        public string InputPresentationRoot;
+        public string InputBindingsDigest;
         public ulong? StdoutLimitBytes;
         public ulong? StderrLimitBytes;
         public ulong? TimeoutMs;
@@ -559,6 +564,22 @@ internal static class OrdivonWindowsJobLauncher
             {
                 options.JobName = value;
             }
+            else if (current == "--input-source-root")
+            {
+                options.InputSourceRoot = value;
+            }
+            else if (current == "--input-set-id")
+            {
+                options.InputSetId = value;
+            }
+            else if (current == "--input-presentation-root")
+            {
+                options.InputPresentationRoot = value;
+            }
+            else if (current == "--input-bindings-digest")
+            {
+                options.InputBindingsDigest = value;
+            }
             else if (current == "--timeout-ms")
             {
                 ulong parsed;
@@ -669,6 +690,59 @@ internal static class OrdivonWindowsJobLauncher
             if (!IsSha256Digest(options.RuntimeLaunchTokenDigest))
             {
                 throw new InvalidOperationException("runtime launch-token digest is invalid");
+            }
+            bool hasInputSource = !String.IsNullOrWhiteSpace(options.InputSourceRoot);
+            bool hasInputSet = !String.IsNullOrWhiteSpace(options.InputSetId);
+            bool hasInputPresentation = !String.IsNullOrWhiteSpace(options.InputPresentationRoot);
+            bool hasInputDigest = !String.IsNullOrWhiteSpace(options.InputBindingsDigest);
+            int inputFieldCount = (hasInputSource ? 1 : 0) + (hasInputSet ? 1 : 0)
+                + (hasInputPresentation ? 1 : 0) + (hasInputDigest ? 1 : 0);
+            if (inputFieldCount != 0 && inputFieldCount != 4)
+            {
+                throw new InvalidOperationException("runtime immutable input metadata must be complete");
+            }
+            if (inputFieldCount == 4)
+            {
+                if (options.Authority != ExecutionAuthority.Limited)
+                {
+                    throw new InvalidOperationException("runtime immutable inputs support limited authority only");
+                }
+                if (options.InputSetId.Length != 64
+                    || !IsLowerHex(options.InputSetId)
+                    || !IsSha256Digest(options.InputBindingsDigest))
+                {
+                    throw new InvalidOperationException("runtime immutable input identity is invalid");
+                }
+                options.InputSourceRoot = Path.GetFullPath(options.InputSourceRoot);
+                if (!Directory.Exists(options.InputSourceRoot))
+                {
+                    throw new InvalidOperationException("runtime immutable input source root does not exist");
+                }
+                options.InputPresentationRoot = Path.GetFullPath(options.InputPresentationRoot);
+                string programData;
+                if (!options.Environment.TryGetValue("ProgramData", out programData)
+                    || String.IsNullOrWhiteSpace(programData))
+                {
+                    throw new InvalidOperationException("runtime immutable inputs require frozen ProgramData");
+                }
+                string expectedPresentation = Path.GetFullPath(Path.Combine(
+                    programData, "OrdivonImmutableInputs", options.InputSetId));
+                if (!String.Equals(
+                        expectedPresentation,
+                        options.InputPresentationRoot,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException("runtime immutable input presentation root is outside provider authority");
+                }
+                string environmentInputRoot;
+                if (!options.Environment.TryGetValue("ORDIVON_INPUT_ROOT", out environmentInputRoot)
+                    || !String.Equals(
+                        Path.GetFullPath(environmentInputRoot),
+                        options.InputPresentationRoot,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException("ORDIVON_INPUT_ROOT does not match committed native input presentation");
+                }
             }
         }
         else if (options.StdoutLimitBytes.HasValue || options.StderrLimitBytes.HasValue)
@@ -1132,6 +1206,7 @@ internal static class OrdivonWindowsJobLauncher
             uint cpuRate = ConfigureCpuRate(job, options.CpuQuotaPercent);
             powerRequest = AcquireSystemPowerRequest(options.RuntimeAttemptId);
             executionToken = AcquireExecutionToken(options.Authority, out tokenEvidence);
+            PrepareImmutableInputs(options, tokenEvidence);
             environment = BuildEnvironment(options);
 
             stdoutCapture = CreateCaptureWorker(
@@ -1516,6 +1591,9 @@ internal static class OrdivonWindowsJobLauncher
             TokenEvidenceJsonFields(tokenEvidence) + "," +
             "\"powerRequestType\":\"system_required\"," +
             "\"powerRequestAcquired\":" + (systemPowerRequestAcquired ? "true" : "false") + "," +
+            "\"inputSetId\":" + JsonString(options.InputSetId) + "," +
+            "\"inputPresentationRoot\":" + JsonString(options.InputPresentationRoot) + "," +
+            "\"inputBindingsDigest\":" + JsonString(options.InputBindingsDigest) + "," +
             "\"observedUnixMs\":" + UnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) +
             "}";
         WriteTextAtomic(Path.Combine(options.RuntimeBundle, "windows-start.json"), json);
@@ -1602,6 +1680,269 @@ internal static class OrdivonWindowsJobLauncher
             throw new InvalidOperationException("runtime evidence path already exists: " + path);
         }
         File.Move(temporary, path);
+    }
+
+    private static void PrepareImmutableInputs(Options options, TokenEvidence tokenEvidence)
+    {
+        if (String.IsNullOrWhiteSpace(options.InputSetId))
+        {
+            return;
+        }
+        if (options.Authority != ExecutionAuthority.Limited || tokenEvidence.IsElevated)
+        {
+            throw new InvalidOperationException("immutable input presentation requires the limited Windows token");
+        }
+        string sourceDigest = InputTreeDigest(options.InputSourceRoot);
+        if (!String.Equals(sourceDigest, options.InputBindingsDigest, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "immutable input source tree differs from committed bindings: expected "
+                + options.InputBindingsDigest + ", observed " + sourceDigest);
+        }
+        string parent = Path.GetDirectoryName(options.InputPresentationRoot);
+        if (String.IsNullOrWhiteSpace(parent))
+        {
+            throw new InvalidOperationException("immutable input presentation root has no parent");
+        }
+        Directory.CreateDirectory(parent);
+        SecurityIdentifier system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        SecurityIdentifier administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        SecurityIdentifier limitedUser = new SecurityIdentifier(tokenEvidence.UserSid);
+        ApplyDirectoryInputAcl(parent, system, administrators, limitedUser);
+        if (Directory.Exists(options.InputPresentationRoot))
+        {
+            string existingDigest = InputTreeDigest(options.InputPresentationRoot);
+            if (!String.Equals(existingDigest, options.InputBindingsDigest, StringComparison.Ordinal))
+            {
+                Directory.Delete(options.InputPresentationRoot, true);
+            }
+        }
+        if (!Directory.Exists(options.InputPresentationRoot))
+        {
+            string staging = Path.Combine(
+                parent,
+                "." + options.InputSetId + ".staging-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                CopyInputTreeExact(options.InputSourceRoot, staging);
+                string stagedDigest = InputTreeDigest(staging);
+                if (!String.Equals(stagedDigest, options.InputBindingsDigest, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "native immutable input staging differs from committed bindings");
+                }
+                ApplyReadOnlyInputAclTree(staging, tokenEvidence.UserSid);
+                if (!String.Equals(
+                        InputTreeDigest(staging),
+                        options.InputBindingsDigest,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("native immutable input bytes changed while applying ACLs");
+                }
+                try
+                {
+                    Directory.Move(staging, options.InputPresentationRoot);
+                    staging = null;
+                }
+                catch (IOException)
+                {
+                    if (!Directory.Exists(options.InputPresentationRoot)
+                        || !String.Equals(
+                            InputTreeDigest(options.InputPresentationRoot),
+                            options.InputBindingsDigest,
+                            StringComparison.Ordinal))
+                    {
+                        throw;
+                    }
+                }
+            }
+            finally
+            {
+                if (!String.IsNullOrWhiteSpace(staging) && Directory.Exists(staging))
+                {
+                    Directory.Delete(staging, true);
+                }
+            }
+        }
+        ApplyReadOnlyInputAclTree(options.InputPresentationRoot, tokenEvidence.UserSid);
+        string finalDigest = InputTreeDigest(options.InputPresentationRoot);
+        if (!String.Equals(finalDigest, options.InputBindingsDigest, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "native immutable input presentation differs from committed bindings after ACL enforcement");
+        }
+    }
+
+    private static void CopyInputTreeExact(string sourceRoot, string targetRoot)
+    {
+        FileAttributes rootAttributes = File.GetAttributes(sourceRoot);
+        if ((rootAttributes & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidOperationException("immutable input source root is a reparse point");
+        }
+        Directory.CreateDirectory(targetRoot);
+        foreach (string file in Directory.GetFiles(sourceRoot, "*", SearchOption.TopDirectoryOnly))
+        {
+            FileAttributes attributes = File.GetAttributes(file);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException("immutable input source contains a reparse-point file");
+            }
+            File.Copy(file, Path.Combine(targetRoot, Path.GetFileName(file)), false);
+        }
+        foreach (string directory in Directory.GetDirectories(sourceRoot, "*", SearchOption.TopDirectoryOnly))
+        {
+            FileAttributes attributes = File.GetAttributes(directory);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException("immutable input source contains a reparse-point directory");
+            }
+            CopyInputTreeExact(directory, Path.Combine(targetRoot, Path.GetFileName(directory)));
+        }
+    }
+
+    private static string InputTreeDigest(string root)
+    {
+        List<string> directories = new List<string>();
+        List<string> files = new List<string>();
+        CollectInputTree(root, root, directories, files);
+        directories.Sort(Utf8OrdinalCompare);
+        files.Sort(Utf8OrdinalCompare);
+        StringBuilder canonical = new StringBuilder();
+        canonical.Append("windows-immutable-input-tree-v2\0");
+        foreach (string relative in directories)
+        {
+            canonical.Append("D\0");
+            canonical.Append(relative);
+            canonical.Append('\0');
+        }
+        foreach (string relative in files)
+        {
+            string path = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
+            canonical.Append("F\0");
+            canonical.Append(relative);
+            canonical.Append('\0');
+            canonical.Append(Sha256File(path));
+            canonical.Append('\0');
+            canonical.Append(new FileInfo(path).Length.ToString(CultureInfo.InvariantCulture));
+            canonical.Append('\0');
+        }
+        using (SHA256 sha = SHA256.Create())
+        {
+            byte[] digest = sha.ComputeHash(Encoding.UTF8.GetBytes(canonical.ToString()));
+            StringBuilder text = new StringBuilder("sha256:");
+            for (int index = 0; index < digest.Length; ++index)
+            {
+                text.Append(digest[index].ToString("x2", CultureInfo.InvariantCulture));
+            }
+            return text.ToString();
+        }
+    }
+
+    private static void CollectInputTree(
+        string root,
+        string current,
+        List<string> directories,
+        List<string> files)
+    {
+        FileAttributes rootAttributes = File.GetAttributes(current);
+        if ((rootAttributes & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidOperationException("immutable input tree contains a reparse-point directory");
+        }
+        foreach (string file in Directory.GetFiles(current, "*", SearchOption.TopDirectoryOnly))
+        {
+            FileAttributes attributes = File.GetAttributes(file);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException("immutable input tree contains a reparse-point file");
+            }
+            string relative = file.Substring(root.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Replace(Path.DirectorySeparatorChar, '/');
+            files.Add(relative);
+        }
+        foreach (string directory in Directory.GetDirectories(current, "*", SearchOption.TopDirectoryOnly))
+        {
+            string relative = directory.Substring(root.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Replace(Path.DirectorySeparatorChar, '/');
+            directories.Add(relative);
+            CollectInputTree(root, directory, directories, files);
+        }
+    }
+
+    private static int Utf8OrdinalCompare(string left, string right)
+    {
+        byte[] leftBytes = Encoding.UTF8.GetBytes(left);
+        byte[] rightBytes = Encoding.UTF8.GetBytes(right);
+        int length = Math.Min(leftBytes.Length, rightBytes.Length);
+        for (int index = 0; index < length; ++index)
+        {
+            int comparison = leftBytes[index].CompareTo(rightBytes[index]);
+            if (comparison != 0) return comparison;
+        }
+        return leftBytes.Length.CompareTo(rightBytes.Length);
+    }
+
+    private static void ApplyReadOnlyInputAclTree(string root, string userSid)
+    {
+        SecurityIdentifier system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        SecurityIdentifier administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        SecurityIdentifier user = new SecurityIdentifier(userSid);
+        ApplyDirectoryInputAcl(root, system, administrators, user);
+        foreach (string directory in Directory.GetDirectories(root, "*", SearchOption.AllDirectories))
+        {
+            ApplyDirectoryInputAcl(directory, system, administrators, user);
+        }
+        foreach (string file in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+        {
+            ApplyFileInputAcl(file, system, administrators, user);
+        }
+    }
+
+    private static void ApplyDirectoryInputAcl(
+        string path,
+        SecurityIdentifier system,
+        SecurityIdentifier administrators,
+        SecurityIdentifier user)
+    {
+        DirectorySecurity security = new DirectorySecurity();
+        security.SetAccessRuleProtection(true, false);
+        security.SetOwner(administrators);
+        InheritanceFlags inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+        security.AddAccessRule(new FileSystemAccessRule(
+            system, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(
+            administrators, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(
+            user, FileSystemRights.ReadAndExecute, inheritance, PropagationFlags.None, AccessControlType.Allow));
+        Directory.SetAccessControl(path, security);
+    }
+
+    private static void ApplyFileInputAcl(
+        string path,
+        SecurityIdentifier system,
+        SecurityIdentifier administrators,
+        SecurityIdentifier user)
+    {
+        FileSecurity security = new FileSecurity();
+        security.SetAccessRuleProtection(true, false);
+        security.SetOwner(administrators);
+        security.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.ReadAndExecute, AccessControlType.Allow));
+        File.SetAccessControl(path, security);
+    }
+
+    private static bool IsLowerHex(string value)
+    {
+        foreach (char c in value)
+        {
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static string Sha256File(string path)

@@ -1590,7 +1590,7 @@ fn input_bound_proposal_identity_preserves_proposal_and_binding_semantics() {
 }
 
 #[test]
-fn immutable_inputs_reject_trusted_local_before_workspace_resolution() {
+fn local_linux_immutable_inputs_reject_trusted_local_before_workspace_resolution() {
     let sandbox = Sandbox::new("input-trusted-reject", 5000);
     let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
     let mut request = input_bound_task_request("workspace-does-not-exist", "request:input-trusted");
@@ -1612,6 +1612,88 @@ fn immutable_inputs_reject_trusted_local_before_workspace_resolution() {
     assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
     assert_eq!(error.field.as_deref(), Some("execution.executionProfile"));
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+fn windows_immutable_inputs_reject_elevated_authority_before_workspace_resolution() {
+    let sandbox = Sandbox::new("input-windows-elevated-reject", 5000);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let mut request =
+        input_bound_task_request("workspace-does-not-exist", "request:input-windows-elevated");
+    request.execution.execution_profile = ExecutionProfile::TrustedLocal;
+    request.execution.execution_target = ExecutionTarget::WindowsNative;
+    request.execution.windows_authority = WindowsAuthority::Elevated;
+    let error = runtime
+        .run_task_with_inputs(
+            &request,
+            &[InputBindingRequest {
+                authority: "finance".to_string(),
+                relative_object: "input.bin".to_string(),
+                expected_digest: digest(b"payload"),
+                presentation_relative_path: "input.bin".to_string(),
+            }],
+        )
+        .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
+    assert_eq!(error.field.as_deref(), Some("execution.windowsAuthority"));
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+}
+
+#[test]
+fn windows_immutable_input_paths_reject_native_aliases_before_workspace_resolution() {
+    for invalid in [
+        "data\\alias.bin",
+        "data/CON.txt",
+        "data/trailing. ",
+        "data/colon:name.bin",
+    ] {
+        let error = super::windows::validate_windows_input_relative_path(invalid, 0).unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::InvalidRequest, "{invalid}");
+        assert_eq!(
+            error.field.as_deref(),
+            Some("inputs[0].presentationRelativePath"),
+            "{invalid}"
+        );
+    }
+    super::windows::validate_windows_input_relative_path("data/fragment.parquet", 0).unwrap();
+    for paths in [
+        ["Data/input.bin", "data/INPUT.bin"],
+        ["Bundle", "bundle/child.bin"],
+    ] {
+        let error = super::windows::validate_windows_input_relative_paths(paths).unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::InvalidRequest, "{paths:?}");
+        assert_eq!(
+            error.field.as_deref(),
+            Some("inputs[1].presentationRelativePath"),
+            "{paths:?}"
+        );
+    }
+}
+
+#[test]
+fn windows_immutable_input_tree_digest_matches_native_provider_contract() {
+    let binding = EffectiveInputBinding {
+        authority: "finance".to_string(),
+        relative_object: "input.txt".to_string(),
+        digest: "sha256:9e839d11caba648e8f04df5db7bbdb8c3a12fa0721635b841d13bc2ba00e5f7b"
+            .to_string(),
+        byte_length: 22,
+        presentation_relative_path: "input.txt".to_string(),
+        access: InputAccessMode::ReadOnly,
+    };
+    assert_eq!(
+        super::engine::windows_input_bindings_digest(std::slice::from_ref(&binding)),
+        "sha256:1ef2624c5421da462d132c75b4a7e38b2d92e9e34bf9844cc55a9515b3eaf469"
+    );
+
+    let nested = EffectiveInputBinding {
+        presentation_relative_path: "payload/input.txt".to_string(),
+        ..binding
+    };
+    assert_eq!(
+        super::engine::windows_input_bindings_digest(&[nested]),
+        "sha256:fbf44f54dec2b9e07f462fdf80bcc5af4660a6d9f055a349f3e7a1ac60f9ce6c"
+    );
 }
 
 #[test]
@@ -5916,6 +5998,7 @@ fn runtime_capabilities_project_current_affordances_without_input_authority_path
     assert!(linux.structured_plan);
     assert!(linux.immutable_inputs);
     assert!(linux.windows_authorities.is_empty());
+    assert!(linux.windows_immutable_input_authorities.is_empty());
     assert_eq!(
         linux.execution_provider.as_ref().unwrap().contract,
         ExecutionProviderContract::LocalLinuxRunnerV1
@@ -5937,6 +6020,7 @@ fn runtime_capabilities_project_current_affordances_without_input_authority_path
         vec![ExecutionProfile::TrustedLocal]
     );
     assert!(windows.windows_authorities.is_empty());
+    assert!(windows.windows_immutable_input_authorities.is_empty());
     assert!(!windows.structured_plan);
     assert!(!windows.immutable_inputs);
     assert!(windows.execution_provider.is_none());

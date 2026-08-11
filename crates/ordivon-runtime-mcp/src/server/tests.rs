@@ -217,7 +217,7 @@ fn workspace_exec_plan_defaults_to_brief_mcp_observation() {
 }
 
 #[test]
-fn workspace_exec_bound_binding_forces_contained_local() {
+fn workspace_exec_bound_binding_selects_runtime_owned_profile_by_target() {
     let server = Sandbox::new("bound-binding").server();
     let request = WorkspaceExecBoundRequest {
         schema_version: 1,
@@ -257,6 +257,55 @@ fn workspace_exec_bound_binding_forces_contained_local() {
     assert_eq!(proposal.execution.timeout_ms, None);
     assert_eq!(inputs.len(), 1);
     assert_eq!(inputs[0].authority, "finance-prepared");
+}
+
+#[test]
+fn workspace_exec_bound_windows_binding_uses_trusted_local_limited_contract() {
+    let server = Sandbox::new("bound-windows-binding").server();
+    let request = WorkspaceExecBoundRequest {
+        schema_version: 1,
+        client_request_id: "request:bound-windows".to_string(),
+        execution: WorkspaceExecBoundExecution {
+            workspace_id: "workspace:test".to_string(),
+            executable: "/mnt/c/Windows/System32/cmd.exe".to_string(),
+            args: Vec::new(),
+            cwd_relative: ".".to_string(),
+            env: Default::default(),
+            timeout_ms: None,
+            stdout_limit_bytes: None,
+            stderr_limit_bytes: None,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            execution_target: ExecutionTarget::WindowsNative,
+            windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
+            foreign_references: Vec::new(),
+        },
+        inputs: vec![InputBindingRequest {
+            authority: "finance-prepared".to_string(),
+            relative_object: "bundle/manifest.json".to_string(),
+            expected_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            presentation_relative_path: "finance-lab/bundle/manifest.json".to_string(),
+        }],
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    let (proposal, inputs) = server.state.execution.bind_bound(request);
+    assert_eq!(
+        proposal.execution.execution_target,
+        ExecutionTarget::WindowsNative
+    );
+    assert_eq!(
+        proposal.execution.execution_profile,
+        ExecutionProfile::TrustedLocal
+    );
+    assert_eq!(
+        proposal.execution.windows_authority,
+        ordivon_runtime_core::WindowsAuthority::Limited
+    );
+    assert_eq!(inputs.len(), 1);
 }
 
 #[test]
@@ -1566,6 +1615,7 @@ fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
         "availabilityIssue",
         "structuredPlan",
         "immutableInputs",
+        "windowsImmutableInputAuthorities",
         "hostDependencyCommitments",
         "hostDependencyContinuityScope",
     ] {

@@ -523,7 +523,10 @@ impl ExecutionContext {
                     stderr_limit_bytes: execution.stderr_limit_bytes,
                     steps: execution.steps,
                     budget: execution.budget,
-                    execution_profile: ExecutionProfile::ContainedLocal,
+                    execution_profile: match execution.execution_target {
+                        ExecutionTarget::LocalLinux => ExecutionProfile::ContainedLocal,
+                        ExecutionTarget::WindowsNative => ExecutionProfile::TrustedLocal,
+                    },
                     execution_target: execution.execution_target,
                     windows_authority: execution.windows_authority,
                     foreign_references: execution.foreign_references,

@@ -95,7 +95,7 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
             schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
             workspace_id: workspace_id.clone(),
             relative_path: "runtime_it.py".to_string(),
-            content: "print('RUNTIME_OK', flush=True)\n".to_string(),
+            content: "import os\nfrom pathlib import Path\ntarget=os.environ['CARGO_TARGET_DIR']\nroot=Path(target)\nroot.mkdir(parents=True, exist_ok=True)\n(root/'p5-runtime-marker.txt').write_text('PRIVATE_TARGET')\nprint('RUNTIME_OK', flush=True)\nprint('P5_CARGO_TARGET='+target, flush=True)\nprint('P5_CARGO_REAL='+str(root.resolve()), flush=True)\n".to_string(),
             expected_digest: None,
         },
     )
@@ -140,6 +140,20 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
     let first = runtime.run_task(&request).unwrap();
     assert_eq!(first.status, "succeeded");
     assert!(first.stdout_tail.contains("RUNTIME_OK"));
+    assert!(first
+        .stdout_tail
+        .contains("P5_CARGO_TARGET=/proc/self/fd/198"));
+    let private_target = executor
+        .build_caches_root()
+        .join(&workspace_id)
+        .join("cargo");
+    assert_eq!(
+        fs::read_to_string(private_target.join("p5-runtime-marker.txt")).unwrap(),
+        "PRIVATE_TARGET"
+    );
+    assert!(first
+        .stdout_tail
+        .contains(&format!("P5_CARGO_REAL={}", private_target.display())));
     let stdout_descriptor = first
         .artifacts
         .iter()
@@ -199,6 +213,29 @@ fn runtime_transactional_runtime_executes_replays_and_releases_capacity() {
         .unwrap();
     assert!(read.content.contains("RUNTIME_OK"));
     assert!(read.eof);
+
+    let custom_target = root.join("caller-custom-cargo-target");
+    let mut custom_request = request.clone();
+    custom_request.client_request_id = format!("request:it-custom:{}", Uuid::now_v7());
+    custom_request.execution.env.insert(
+        "CARGO_TARGET_DIR".to_string(),
+        custom_target.to_string_lossy().into_owned(),
+    );
+    let custom = runtime.run_task(&custom_request).unwrap();
+    assert_eq!(custom.status, "succeeded", "{}", custom.stderr_tail);
+    assert!(custom
+        .stdout_tail
+        .contains(&format!("P5_CARGO_TARGET={}", custom_target.display())));
+    assert_eq!(
+        fs::read_to_string(custom_target.join("p5-runtime-marker.txt")).unwrap(),
+        "PRIVATE_TARGET"
+    );
+    println!(
+        "P5_STABLE_BUILD_PRESENTATION jobId={} stable=/proc/self/fd/198 privateBacking={} customOverrideJob={}",
+        first.job_id,
+        private_target.display(),
+        custom.job_id
+    );
 
     let attempt_id = first.attempt_id.unwrap();
     let unit = format!("ordivon-{attempt_id}.service");
@@ -356,21 +393,46 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
         },
     )
     .unwrap();
-    let runtime = Runtime::new(RuntimeConfig {
-        registry: RegistryConfig {
-            db_path: root.join("registry/registry.sqlite3"),
-            store_root: root.join("registry"),
-            busy_timeout_ms: 5_000,
+    let input_authority_root = root.join("input-authority");
+    fs::create_dir_all(&input_authority_root).unwrap();
+    let input_authority_file = input_authority_root.join("bound-input.txt");
+    let input_v1 = b"P5_WINDOWS_BOUND_V1\n";
+    fs::write(&input_authority_file, input_v1).unwrap();
+    let runtime = Runtime::new_with_input_authorities(
+        RuntimeConfig {
+            registry: RegistryConfig {
+                db_path: root.join("registry/registry.sqlite3"),
+                store_root: root.join("registry"),
+                busy_timeout_ms: 5_000,
+            },
+            executor: executor.clone(),
+            startup_grace_ms: 2_000,
+            windows: Some(WindowsExecutionConfig {
+                launcher_path: launcher.clone(),
+                wsl_distribution: std::env::var("WSL_DISTRO_NAME")
+                    .unwrap_or_else(|_| "archlinux".to_string()),
+            }),
         },
-        executor: executor.clone(),
-        startup_grace_ms: 2_000,
-        windows: Some(WindowsExecutionConfig {
-            launcher_path: launcher.clone(),
-            wsl_distribution: std::env::var("WSL_DISTRO_NAME")
-                .unwrap_or_else(|_| "archlinux".to_string()),
-        }),
-    })
+        vec![InputAuthority {
+            name: "windows-integration".to_string(),
+            root: input_authority_root.clone(),
+        }],
+    )
     .unwrap();
+    let runtime_capabilities = runtime.capabilities();
+    let windows_capability = runtime_capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == ordivon_runtime_core::ExecutionTarget::WindowsNative)
+        .unwrap();
+    assert!(windows_capability.configured);
+    assert!(windows_capability.available);
+    assert!(windows_capability.immutable_inputs);
+    assert_eq!(
+        windows_capability.windows_immutable_input_authorities,
+        vec![ordivon_runtime_core::WindowsAuthority::Limited]
+    );
+
     let request = TaskRunRequest {
         schema_version: RUNTIME_SCHEMA_VERSION,
         client_request_id: format!("request:windows-rw1:{}", Uuid::now_v7()),
@@ -546,6 +608,185 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
         .any(|value| value == &serde_json::Value::String(format!("{attempt_id}.windows-start"))));
 
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+
+    let mut input_request = request.clone();
+    input_request.client_request_id = format!("request:windows-input-v1:{}", Uuid::now_v7());
+    input_request.execution.args = vec![
+        "immutable-input".to_string(),
+        "payload/bound-input.txt".to_string(),
+    ];
+    let input_binding_v1 = InputBindingRequest {
+        authority: "windows-integration".to_string(),
+        relative_object: "bound-input.txt".to_string(),
+        expected_digest: file_digest(&input_authority_file),
+        presentation_relative_path: "payload/bound-input.txt".to_string(),
+    };
+    let input_first = runtime
+        .run_task_with_inputs(&input_request, std::slice::from_ref(&input_binding_v1))
+        .unwrap();
+    assert_eq!(
+        input_first.status, "succeeded",
+        "{}",
+        input_first.stderr_tail
+    );
+    assert!(input_first.execution_terminal);
+    for marker in [
+        "W1_IMMUTABLE_INPUT_WRITE=denied:",
+        "W1_IMMUTABLE_INPUT_CREATE=denied:",
+        "W1_IMMUTABLE_INPUT_RENAME_FILE=denied:",
+        "W1_IMMUTABLE_INPUT_GRANT=denied:",
+        "W1_IMMUTABLE_INPUT_RENAME_ROOT=denied:",
+        "W1_IMMUTABLE_INPUT_CREATE_SIBLING=denied:",
+        "W1_IMMUTABLE_INPUT_RENAME_CONTAINER=denied:",
+    ] {
+        assert!(
+            input_first.stdout_tail.contains(marker),
+            "{marker}: {}",
+            input_first.stdout_tail
+        );
+    }
+    let input_job = runtime.registry().get_job(&input_first.job_id).unwrap();
+    let input_plan: RuntimeExecutionPlan =
+        serde_json::from_str(&input_job.execution_plan_json).unwrap();
+    assert_eq!(
+        input_plan.execution_profile,
+        ordivon_runtime_core::ExecutionProfile::TrustedLocal
+    );
+    assert_eq!(
+        input_plan.windows_authority,
+        ordivon_runtime_core::WindowsAuthority::Limited
+    );
+    assert_eq!(input_plan.effective_inputs.len(), 1);
+    let input_set_id = input_plan.input_set_id.as_deref().unwrap();
+    let native_root = input_plan
+        .env
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("ORDIVON_INPUT_ROOT"))
+        .map(|(_, value)| value.clone())
+        .unwrap();
+    assert!(native_root.ends_with(input_set_id));
+    assert!(native_root
+        .to_ascii_lowercase()
+        .contains("\\ordivonimmutableinputs\\"));
+    let native_file = PathBuf::from("/mnt/c/ProgramData/OrdivonImmutableInputs")
+        .join(input_set_id)
+        .join("payload/bound-input.txt");
+    assert_eq!(fs::read(&native_file).unwrap(), input_v1);
+    let input_artifacts = runtime
+        .registry()
+        .list_artifacts(&input_first.job_id)
+        .unwrap();
+    let input_start = input_artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "windows_start")
+        .unwrap();
+    let input_start_value: serde_json::Value = serde_json::from_str(
+        &runtime
+            .read_artifact(&ArtifactReadRequest {
+                schema_version: RUNTIME_SCHEMA_VERSION,
+                job_id: input_first.job_id.clone(),
+                artifact_id: input_start.artifact_id.clone(),
+                offset: 0,
+                max_bytes: 65_536,
+            })
+            .unwrap()
+            .content,
+    )
+    .unwrap();
+    assert_eq!(input_start_value["inputSetId"], input_set_id);
+    assert_eq!(input_start_value["inputPresentationRoot"], native_root);
+    assert!(input_start_value["inputBindingsDigest"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("sha256:")));
+
+    let input_v2 = b"P5_WINDOWS_BOUND_V2\n";
+    fs::write(&input_authority_file, input_v2).unwrap();
+    let replay = runtime
+        .run_task_with_inputs(&input_request, std::slice::from_ref(&input_binding_v1))
+        .unwrap();
+    assert_eq!(replay.job_id, input_first.job_id);
+    assert_eq!(replay.attempt_id, input_first.attempt_id);
+    assert_eq!(replay.stdout_tail, input_first.stdout_tail);
+    assert_eq!(fs::read(&native_file).unwrap(), input_v1);
+
+    let mut stale_request = input_request.clone();
+    stale_request.client_request_id = format!("request:windows-input-stale:{}", Uuid::now_v7());
+    let stale_error = runtime
+        .run_task_with_inputs(&stale_request, std::slice::from_ref(&input_binding_v1))
+        .unwrap_err();
+    assert_eq!(
+        stale_error.code,
+        ordivon_runtime_core::RuntimeErrorCode::InvalidRequest
+    );
+    assert!(stale_error
+        .message
+        .contains("materialized input digest mismatch"));
+
+    let mut current_request = input_request.clone();
+    current_request.client_request_id = format!("request:windows-input-v2:{}", Uuid::now_v7());
+    let input_binding_v2 = InputBindingRequest {
+        expected_digest: file_digest(&input_authority_file),
+        ..input_binding_v1.clone()
+    };
+    let current = runtime
+        .run_task_with_inputs(&current_request, std::slice::from_ref(&input_binding_v2))
+        .unwrap();
+    assert_eq!(current.status, "succeeded", "{}", current.stderr_tail);
+    for marker in [
+        "W1_IMMUTABLE_INPUT_WRITE=denied:",
+        "W1_IMMUTABLE_INPUT_CREATE=denied:",
+        "W1_IMMUTABLE_INPUT_RENAME_FILE=denied:",
+        "W1_IMMUTABLE_INPUT_GRANT=denied:",
+        "W1_IMMUTABLE_INPUT_RENAME_ROOT=denied:",
+        "W1_IMMUTABLE_INPUT_CREATE_SIBLING=denied:",
+        "W1_IMMUTABLE_INPUT_RENAME_CONTAINER=denied:",
+    ] {
+        assert!(
+            current.stdout_tail.contains(marker),
+            "{marker}: {}",
+            current.stdout_tail
+        );
+    }
+    let current_job = runtime.registry().get_job(&current.job_id).unwrap();
+    let current_plan: RuntimeExecutionPlan =
+        serde_json::from_str(&current_job.execution_plan_json).unwrap();
+    let current_input_set_id = current_plan.input_set_id.as_deref().unwrap();
+    assert_ne!(input_set_id, current_input_set_id);
+    let current_native_file = PathBuf::from("/mnt/c/ProgramData/OrdivonImmutableInputs")
+        .join(current_input_set_id)
+        .join("payload/bound-input.txt");
+    assert_eq!(fs::read(&current_native_file).unwrap(), input_v2);
+
+    let mut elevated_input_request = current_request.clone();
+    elevated_input_request.client_request_id =
+        format!("request:windows-input-elevated:{}", Uuid::now_v7());
+    elevated_input_request.execution.windows_authority =
+        ordivon_runtime_core::WindowsAuthority::Elevated;
+    let elevated_input_error = runtime
+        .run_task_with_inputs(
+            &elevated_input_request,
+            std::slice::from_ref(&input_binding_v2),
+        )
+        .unwrap_err();
+    assert_eq!(
+        elevated_input_error.code,
+        ordivon_runtime_core::RuntimeErrorCode::InvalidRequest
+    );
+    assert_eq!(
+        elevated_input_error.field.as_deref(),
+        Some("execution.windowsAuthority")
+    );
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    println!(
+        "P5_WINDOWS_IMMUTABLE_INPUT v1Job={} v2Job={} replayHistorical=true staleRejected=true limitedMutationSetDenied=true elevatedRejected=true",
+        input_first.job_id, current.job_id,
+    );
+    let _ = fs::remove_dir_all(
+        PathBuf::from("/mnt/c/ProgramData/OrdivonImmutableInputs").join(input_set_id),
+    );
+    let _ = fs::remove_dir_all(
+        PathBuf::from("/mnt/c/ProgramData/OrdivonImmutableInputs").join(current_input_set_id),
+    );
 
     let limited_admin_marker = format!("LIMITED_{}", Uuid::now_v7());
     let mut limited_admin_request = request.clone();

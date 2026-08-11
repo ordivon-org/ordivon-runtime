@@ -74,6 +74,8 @@ const DEFAULT_EXECUTION_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/
 const DEFAULT_EXECUTION_HOME: &str = "/root";
 const STALE_PREPARED_INPUT_AGE_MS: u64 = 60_000;
 const HOST_DEPENDENCY_CONTINUITY_SCOPE: &str = "runtime_host_namespace_path_witness";
+const TRUSTED_BUILD_TARGET_PRESENTATION: &str = "/proc/self/fd/198";
+const WINDOWS_INPUT_PRESENTATION_COMPONENTS: [&str; 1] = ["OrdivonImmutableInputs"];
 const CONTAINED_RUNTIME_ENVIRONMENT: [&str; 15] = [
     "HOME",
     "TMPDIR",
@@ -91,6 +93,90 @@ const CONTAINED_RUNTIME_ENVIRONMENT: [&str; 15] = [
     "ORDIVON_PAYLOAD_UID",
     "ORDIVON_PAYLOAD_GID",
 ];
+
+fn set_environment_value_case_insensitive(
+    environment: &mut BTreeMap<String, String>,
+    name: &str,
+    value: String,
+) {
+    if let Some(existing) = environment
+        .keys()
+        .find(|existing| existing.eq_ignore_ascii_case(name))
+        .cloned()
+    {
+        environment.remove(&existing);
+    }
+    environment.insert(name.to_string(), value);
+}
+
+fn required_environment_value_case_insensitive<'a>(
+    environment: &'a BTreeMap<String, String>,
+    name: &str,
+    field: &str,
+) -> RuntimeResult<&'a str> {
+    environment
+        .iter()
+        .find(|(actual, value)| actual.eq_ignore_ascii_case(name) && !value.is_empty())
+        .map(|(_, value)| value.as_str())
+        .ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                format!("committed Windows environment omitted {name}"),
+                Some(field),
+                false,
+            )
+        })
+}
+
+fn windows_input_presentation_root(
+    plan: &RuntimeExecutionPlan,
+    input_set_id: &str,
+) -> RuntimeResult<String> {
+    let program_data =
+        required_environment_value_case_insensitive(&plan.env, "ProgramData", "executionPlan.env")?;
+    let mut root = program_data.trim_end_matches(['\\', '/']).to_string();
+    for component in WINDOWS_INPUT_PRESENTATION_COMPONENTS {
+        root.push('\\');
+        root.push_str(component);
+    }
+    root.push('\\');
+    root.push_str(input_set_id);
+    Ok(root)
+}
+
+pub(crate) fn windows_input_bindings_digest(inputs: &[EffectiveInputBinding]) -> String {
+    let mut ordered = inputs.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        left.presentation_relative_path
+            .cmp(&right.presentation_relative_path)
+    });
+    let mut directories = BTreeSet::<String>::new();
+    for input in &ordered {
+        let components = input
+            .presentation_relative_path
+            .split('/')
+            .collect::<Vec<_>>();
+        for end in 1..components.len() {
+            directories.insert(components[..end].join("/"));
+        }
+    }
+    let mut bytes = b"windows-immutable-input-tree-v2\0".to_vec();
+    for directory in directories {
+        bytes.extend_from_slice(b"D\0");
+        bytes.extend_from_slice(directory.as_bytes());
+        bytes.push(0);
+    }
+    for input in ordered {
+        bytes.extend_from_slice(b"F\0");
+        bytes.extend_from_slice(input.presentation_relative_path.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(input.digest.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(input.byte_length.to_string().as_bytes());
+        bytes.push(0);
+    }
+    sha256_bytes(&bytes)
+}
 
 fn adaptive_poll_delay(poll_index: usize) -> Duration {
     Duration::from_millis(
@@ -498,17 +584,34 @@ impl Runtime {
         request_identity_digest: String,
         inputs: &[InputBindingRequest],
     ) -> RuntimeResult<String> {
-        if request.execution.execution_target == super::ExecutionTarget::WindowsNative {
-            return Err(RuntimeError::invalid(
-                "windows_native immutable input bindings are not implemented in R-W2",
-                "execution.executionTarget",
-            ));
-        }
-        if request.execution.execution_profile != super::ExecutionProfile::ContainedLocal {
-            return Err(RuntimeError::invalid(
-                "immutable input bindings require contained_local execution",
-                "execution.executionProfile",
-            ));
+        match request.execution.execution_target {
+            super::ExecutionTarget::LocalLinux => {
+                if request.execution.execution_profile != super::ExecutionProfile::ContainedLocal {
+                    return Err(RuntimeError::invalid(
+                        "local_linux immutable input bindings require contained_local execution",
+                        "execution.executionProfile",
+                    ));
+                }
+            }
+            super::ExecutionTarget::WindowsNative => {
+                if request.execution.execution_profile != super::ExecutionProfile::TrustedLocal {
+                    return Err(RuntimeError::invalid(
+                        "windows_native immutable input bindings require trusted_local execution",
+                        "execution.executionProfile",
+                    ));
+                }
+                if request.execution.windows_authority != super::WindowsAuthority::Limited {
+                    return Err(RuntimeError::invalid(
+                        "windows_native immutable input bindings support limited authority only",
+                        "execution.windowsAuthority",
+                    ));
+                }
+                validate_windows_input_relative_paths(
+                    inputs
+                        .iter()
+                        .map(|input| input.presentation_relative_path.as_str()),
+                )?;
+            }
         }
         validate_new_admission_policy(
             request,
@@ -527,14 +630,22 @@ impl Runtime {
         )?;
         plan.input_set_id = Some(prepared.input_set_id.clone());
         plan.effective_inputs = prepared.effective_inputs.clone();
-        plan.env.insert(
-            "ORDIVON_INPUT_ROOT".to_string(),
-            CONTAINED_INPUT_ROOT.to_string(),
+        let input_root = match plan.execution_target {
+            super::ExecutionTarget::LocalLinux => CONTAINED_INPUT_ROOT.to_string(),
+            super::ExecutionTarget::WindowsNative => {
+                windows_input_presentation_root(&plan, &prepared.input_set_id)?
+            }
+        };
+        set_environment_value_case_insensitive(
+            &mut plan.env,
+            "ORDIVON_INPUT_ROOT",
+            input_root.clone(),
         );
         for step in &mut plan.steps {
-            step.env.insert(
-                "ORDIVON_INPUT_ROOT".to_string(),
-                CONTAINED_INPUT_ROOT.to_string(),
+            set_environment_value_case_insensitive(
+                &mut step.env,
+                "ORDIVON_INPUT_ROOT",
+                input_root.clone(),
             );
         }
         let submit = SubmitRequest {
@@ -1396,6 +1507,7 @@ impl Runtime {
                 super::ExecutionProfile::ContainedLocal,
             ],
             windows_authorities: Vec::new(),
+            windows_immutable_input_authorities: Vec::new(),
             structured_plan: true,
             immutable_inputs: true,
             host_dependency_commitments: true,
@@ -1435,14 +1547,19 @@ impl Runtime {
         } else {
             (None, Vec::new(), None)
         };
+        let windows_immutable_input_authorities = windows_authorities
+            .contains(&super::WindowsAuthority::Limited)
+            .then_some(vec![super::WindowsAuthority::Limited])
+            .unwrap_or_default();
         let windows = RuntimeExecutionTargetCapability {
             target: super::ExecutionTarget::WindowsNative,
             configured: windows_configured,
             available: windows_provider.is_some() && !windows_authorities.is_empty(),
             execution_profiles: vec![super::ExecutionProfile::TrustedLocal],
             windows_authorities,
+            windows_immutable_input_authorities: windows_immutable_input_authorities.clone(),
             structured_plan: false,
-            immutable_inputs: false,
+            immutable_inputs: !windows_immutable_input_authorities.is_empty(),
             host_dependency_commitments: false,
             host_dependency_continuity_scope: None,
             execution_provider: windows_provider,
@@ -1999,9 +2116,11 @@ impl Runtime {
             super::ExecutionProfile::TrustedLocal => self.executor.shared_caches_root(),
             super::ExecutionProfile::ContainedLocal => workspace_cache.join("tooling"),
         };
+        let cargo_target_backing = build_cache.join("cargo");
         for path in [
             &workspace_cache,
             &build_cache,
+            &cargo_target_backing,
             &workspace_tmp,
             &package_cache,
         ] {
@@ -2038,8 +2157,14 @@ impl Runtime {
             "XDG_CACHE_HOME".to_string(),
             workspace_cache.to_string_lossy().into_owned(),
         );
+        let cargo_target = match execution_profile {
+            super::ExecutionProfile::TrustedLocal => {
+                PathBuf::from(TRUSTED_BUILD_TARGET_PRESENTATION)
+            }
+            super::ExecutionProfile::ContainedLocal => cargo_target_backing,
+        };
         for (name, path) in [
-            ("CARGO_TARGET_DIR", build_cache.join("cargo")),
+            ("CARGO_TARGET_DIR", cargo_target),
             ("UV_CACHE_DIR", package_cache.join("uv")),
             ("PIP_CACHE_DIR", package_cache.join("pip")),
             ("npm_config_cache", package_cache.join("npm")),
@@ -2068,6 +2193,12 @@ impl Runtime {
             "GOMODCACHE",
             "GOCACHE",
         ] {
+            if name == "CARGO_TARGET_DIR"
+                && environment.get(name).map(String::as_str)
+                    == Some(TRUSTED_BUILD_TARGET_PRESENTATION)
+            {
+                continue;
+            }
             let path = Path::new(environment.get(name).expect("execution path is present"));
             fs::create_dir_all(path).map_err(|error| {
                 io_error(
@@ -2144,23 +2275,46 @@ impl Runtime {
             workspace_id: plan.workspace_id.clone(),
             workspace_path: plan.workspace_path.clone(),
             workspace_source_digest: plan.workspace_source_digest.clone(),
-            input_presentation_root: if plan.effective_inputs.is_empty() {
-                None
-            } else {
-                Some(CONTAINED_INPUT_ROOT.to_string())
-            },
-            input_commitments: plan
-                .effective_inputs
-                .iter()
-                .map(|input| RunnerInputCommitment {
-                    presentation_path: Path::new(CONTAINED_INPUT_ROOT)
-                        .join(&input.presentation_relative_path)
+            build_target_backing: if plan.execution_target == super::ExecutionTarget::LocalLinux
+                && plan.execution_profile == super::ExecutionProfile::TrustedLocal
+                && (plan.env.get("CARGO_TARGET_DIR").map(String::as_str)
+                    == Some(TRUSTED_BUILD_TARGET_PRESENTATION)
+                    || plan.steps.iter().any(|step| {
+                        step.env.get("CARGO_TARGET_DIR").map(String::as_str)
+                            == Some(TRUSTED_BUILD_TARGET_PRESENTATION)
+                    })) {
+                Some(
+                    self.executor
+                        .workspace_build_cache_path(&plan.workspace_id)
+                        .join("cargo")
                         .to_string_lossy()
                         .into_owned(),
-                    digest: input.digest.clone(),
-                    byte_length: input.byte_length,
-                })
-                .collect(),
+                )
+            } else {
+                None
+            },
+            input_presentation_root: if plan.execution_target == super::ExecutionTarget::LocalLinux
+                && !plan.effective_inputs.is_empty()
+            {
+                Some(CONTAINED_INPUT_ROOT.to_string())
+            } else {
+                None
+            },
+            input_commitments: if plan.execution_target == super::ExecutionTarget::LocalLinux {
+                plan.effective_inputs
+                    .iter()
+                    .map(|input| RunnerInputCommitment {
+                        presentation_path: Path::new(CONTAINED_INPUT_ROOT)
+                            .join(&input.presentation_relative_path)
+                            .to_string_lossy()
+                            .into_owned(),
+                        digest: input.digest.clone(),
+                        byte_length: input.byte_length,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             host_dependencies: self
                 .registry
                 .host_dependencies(&attempt.job_id)?
@@ -2326,6 +2480,29 @@ impl Runtime {
                         true,
                     )
                 })?;
+                let input_source_root = if plan.input_set_id.is_some() {
+                    self.ensure_job_input_ownership(&starting.job_id)?;
+                    let path = self.executor.job_input_path(&starting.job_id);
+                    let requests = effective_input_requests_from_plan(&plan)?;
+                    verify_effective_input_set(&path, &requests)?;
+                    Some(path)
+                } else {
+                    None
+                };
+                let input_bindings_digest = if plan.effective_inputs.is_empty() {
+                    None
+                } else {
+                    Some(windows_input_bindings_digest(&plan.effective_inputs))
+                };
+                let input_presentation_root = if plan.effective_inputs.is_empty() {
+                    None
+                } else {
+                    Some(required_environment_value_case_insensitive(
+                        &plan.env,
+                        "ORDIVON_INPUT_ROOT",
+                        "executionPlan.env",
+                    )?)
+                };
                 windows_systemd_run(&WindowsSystemdRunSpec {
                     config: windows,
                     unit_name: &starting.unit_name,
@@ -2338,6 +2515,10 @@ impl Runtime {
                     args: &plan.args,
                     cwd: Path::new(&plan.cwd),
                     environment: &plan.env,
+                    input_source_root: input_source_root.as_deref(),
+                    input_set_id: plan.input_set_id.as_deref(),
+                    input_presentation_root,
+                    input_bindings_digest: input_bindings_digest.as_deref(),
                     budget: &plan.budget,
                     runtime_ceiling_ms: runtime_ceiling,
                     timeout_ms: plan.timeout_ms,
@@ -2485,6 +2666,28 @@ impl Runtime {
         let expected_image_normalized = expected_image
             .strip_prefix("\\\\?\\")
             .unwrap_or(&expected_image);
+        let expected_input_evidence = if plan.effective_inputs.is_empty() {
+            (None, None, None)
+        } else {
+            let input_set_id = plan.input_set_id.as_deref().ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Windows immutable inputs have no committed inputSetId",
+                    Some("executionPlan.inputSetId"),
+                    false,
+                )
+            })?;
+            let presentation_root = required_environment_value_case_insensitive(
+                &plan.env,
+                "ORDIVON_INPUT_ROOT",
+                "executionPlan.env",
+            )?;
+            (
+                Some(input_set_id),
+                Some(presentation_root),
+                Some(windows_input_bindings_digest(&plan.effective_inputs)),
+            )
+        };
         let token_authority_matches = match plan.windows_authority {
             super::WindowsAuthority::Limited => {
                 !evidence.token_is_elevated
@@ -2523,6 +2726,9 @@ impl Runtime {
             || !token_authority_matches
             || evidence.power_request_type != "system_required"
             || !evidence.power_request_acquired
+            || evidence.input_set_id.as_deref() != expected_input_evidence.0
+            || evidence.input_presentation_root.as_deref() != expected_input_evidence.1
+            || evidence.input_bindings_digest.as_deref() != expected_input_evidence.2.as_deref()
             || !observed_image.eq_ignore_ascii_case(expected_image_normalized)
         {
             return Err(RuntimeError::new(
@@ -6384,14 +6590,29 @@ mod trusted_systemd_command_tests {
             environment.get("HOME").map(String::as_str),
             Some(runtime.execution_home.as_str())
         );
-        assert_ne!(
-            environment.get("CARGO_TARGET_DIR"),
-            peer_environment.get("CARGO_TARGET_DIR")
+        assert_eq!(
+            environment.get("CARGO_TARGET_DIR").map(String::as_str),
+            Some(TRUSTED_BUILD_TARGET_PRESENTATION)
         );
-        assert_ne!(
-            environment.get("CARGO_TARGET_DIR"),
-            other_environment.get("CARGO_TARGET_DIR")
+        assert_eq!(
+            peer_environment.get("CARGO_TARGET_DIR"),
+            environment.get("CARGO_TARGET_DIR")
         );
+        assert_eq!(
+            other_environment.get("CARGO_TARGET_DIR"),
+            environment.get("CARGO_TARGET_DIR")
+        );
+        for workspace_id in ["workspace-env", "workspace-peer", "workspace-other"] {
+            let backing = runtime
+                .executor
+                .workspace_build_cache_path(workspace_id)
+                .join("cargo");
+            assert!(backing.is_dir());
+            assert_ne!(
+                backing.to_string_lossy().as_ref(),
+                TRUSTED_BUILD_TARGET_PRESENTATION
+            );
+        }
         for name in [
             "UV_CACHE_DIR",
             "PIP_CACHE_DIR",
@@ -6412,10 +6633,6 @@ mod trusted_systemd_command_tests {
             assert!(value.starts_with(root.join("runtime/cache")));
             assert!(!value.starts_with(&workspace_root));
         }
-        assert!(Path::new(environment.get("CARGO_TARGET_DIR").unwrap())
-            .starts_with(root.join("runtime/cache/build/workspace-env")));
-        assert!(Path::new(peer_environment.get("CARGO_TARGET_DIR").unwrap())
-            .starts_with(root.join("runtime/cache/build/workspace-peer")));
         assert!(Path::new(environment.get("XDG_CACHE_HOME").unwrap()).is_dir());
         assert!(Path::new(environment.get("TMPDIR").unwrap()).is_dir());
 

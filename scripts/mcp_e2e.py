@@ -733,6 +733,11 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             if isinstance(target, dict)
         }
         linux_description = described_targets.get("local_linux", {})
+        windows_description = described_targets.get("windows_native", {})
+        windows_authorities = windows_description.get("windowsAuthorities", [])
+        windows_immutable_authorities = windows_description.get(
+            "windowsImmutableInputAuthorities", []
+        )
         check(
             "runtime-describe",
             runtime_description.get("schemaVersion") == SCHEMA_VERSION
@@ -749,8 +754,14 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
             and linux_description.get("hostDependencyCommitments") is True
             and linux_description.get("hostDependencyContinuityScope")
             == "runtime_host_namespace_path_witness"
-            and described_targets.get("windows_native", {}).get("hostDependencyCommitments") is False
-            and described_targets.get("windows_native", {}).get("hostDependencyContinuityScope") is None
+            and windows_description.get("hostDependencyCommitments") is False
+            and windows_description.get("hostDependencyContinuityScope") is None
+            and isinstance(windows_authorities, list)
+            and isinstance(windows_immutable_authorities, list)
+            and windows_immutable_authorities
+            == (["limited"] if "limited" in windows_authorities else [])
+            and windows_description.get("immutableInputs")
+            is bool(windows_immutable_authorities)
             and isinstance(linux_description.get("executionProvider"), dict)
             and str(linux_description.get("executionProvider", {}).get("executableDigest", "")).startswith(
                 "sha256:"

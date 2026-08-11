@@ -780,6 +780,10 @@ pub(crate) struct RunnerTaskRequest {
     pub workspace_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_source_digest: Option<String>,
+    /// Runtime-owned private backing for a stable compiler-visible target path.
+    /// This is internal execution realization, not caller-authored authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_target_backing: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_presentation_root: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

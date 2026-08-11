@@ -1428,6 +1428,7 @@ fn runner_rejects_workspace_source_drift_before_spawning_target() {
         workspace_id: workspace_id.to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: Some(committed),
+        build_target_backing: None,
         input_presentation_root: None,
         input_commitments: Vec::new(),
         executable: executable.to_string_lossy().into_owned(),
@@ -1460,6 +1461,66 @@ fn runner_rejects_workspace_source_drift_before_spawning_target() {
 }
 
 #[test]
+fn runner_projects_private_build_target_through_stable_inherited_fd() {
+    let sandbox = Sandbox::new("runner-stable-build-target");
+    let workspace = sandbox.root.join("workspace-stable-build-target");
+    let backing = sandbox.root.join("private-target-backing");
+    let task_dir = sandbox.root.join("task-stable-build-target");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&backing).unwrap();
+    fs::create_dir_all(&task_dir).unwrap();
+    fs::write(
+        workspace.join("probe.py"),
+        "import os\nfrom pathlib import Path\nroot=Path(os.environ['CARGO_TARGET_DIR'])\n(root/'probe.txt').write_text('PRIVATE')\nprint(os.environ['CARGO_TARGET_DIR'])\nprint((root/'probe.txt').read_text())\n",
+    )
+    .unwrap();
+    let executable = real_executable("/usr/bin/python3");
+    let request = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        payload: None,
+        inherit_host_environment: true,
+        task_id: "task-stable-build-target".to_string(),
+        workspace_id: "workspace-stable-build-target".to_string(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
+        build_target_backing: Some(backing.to_string_lossy().into_owned()),
+        input_presentation_root: None,
+        input_commitments: Vec::new(),
+        host_dependencies: Vec::new(),
+        executable: executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&executable).unwrap(),
+        args: vec!["probe.py".to_string()],
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::from([(
+            "CARGO_TARGET_DIR".to_string(),
+            "/proc/self/fd/198".to_string(),
+        )]),
+        steps: Vec::new(),
+        timeout_ms: 2_000,
+        stdout_limit_bytes: 1_024,
+        stderr_limit_bytes: 1_024,
+    };
+    write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
+    run_task_runner(&task_dir).unwrap();
+
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result.status, TaskTerminalStatus::Completed);
+    assert_eq!(
+        fs::read_to_string(backing.join("probe.txt")).unwrap(),
+        "PRIVATE"
+    );
+    assert_eq!(
+        fs::read_to_string(task_dir.join("stdout.log")).unwrap(),
+        "/proc/self/fd/198\nPRIVATE\n"
+    );
+}
+
+#[test]
 fn runner_rejects_host_dependency_drift_before_spawning_target() {
     let sandbox = Sandbox::new("runner-host-dependency-drift");
     let workspace = sandbox.root.join("workspace-host-dependency-drift");
@@ -1486,6 +1547,7 @@ fn runner_rejects_host_dependency_drift_before_spawning_target() {
         workspace_id: "workspace-host-dependency-drift".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        build_target_backing: None,
         input_presentation_root: None,
         input_commitments: Vec::new(),
         host_dependencies: vec![RunnerHostDependencyCommitment {
@@ -1552,6 +1614,7 @@ fn runner_fails_when_host_dependency_drifts_after_target_start() {
         workspace_id: "workspace-host-dependency-runtime-drift".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        build_target_backing: None,
         input_presentation_root: None,
         input_commitments: Vec::new(),
         host_dependencies: vec![RunnerHostDependencyCommitment {
@@ -1638,6 +1701,7 @@ fn runner_preserves_shebang_path_semantics_but_fails_on_runtime_executable_drift
         workspace_id: "workspace-script-runtime-drift".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        build_target_backing: None,
         input_presentation_root: None,
         input_commitments: Vec::new(),
         host_dependencies: Vec::new(),
@@ -1721,6 +1785,7 @@ fn runner_rejects_immutable_input_drift_before_spawning_target() {
         workspace_id: "workspace-input-drift".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        build_target_backing: None,
         input_presentation_root: Some(input_view.to_string_lossy().into_owned()),
         input_commitments: vec![RunnerInputCommitment {
             presentation_path: presented.to_string_lossy().into_owned(),
@@ -1787,6 +1852,7 @@ fn runner_rejects_undeclared_input_directory_before_spawning_target() {
         workspace_id: "workspace-input-extra-directory".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        build_target_backing: None,
         input_presentation_root: Some(input_view.to_string_lossy().into_owned()),
         input_commitments: vec![RunnerInputCommitment {
             presentation_path: presented.to_string_lossy().into_owned(),
@@ -2678,6 +2744,7 @@ fn runner_executes_model_authored_script_and_bounds_output() {
         workspace_id: "workspace-runner".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        build_target_backing: None,
         input_presentation_root: None,
         input_commitments: Vec::new(),
         executable: executable.to_string_lossy().into_owned(),
@@ -2741,6 +2808,7 @@ fn runner_shared_overall_deadline_is_independent_of_step_timeout_sum() {
         workspace_id: "workspace-shared-overall".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        build_target_backing: None,
         input_presentation_root: None,
         input_commitments: Vec::new(),
         executable: true_executable.to_string_lossy().into_owned(),
@@ -2807,6 +2875,7 @@ fn runner_timeout_is_a_durable_failed_result() {
         workspace_id: "workspace-timeout".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        build_target_backing: None,
         input_presentation_root: None,
         input_commitments: Vec::new(),
         executable: executable.to_string_lossy().into_owned(),
@@ -2848,6 +2917,7 @@ fn runner_timeout_terminates_descendant_pipe_holders_before_result() {
         workspace_id: "workspace-timeout-descendants".to_string(),
         workspace_path: workspace.to_string_lossy().into_owned(),
         workspace_source_digest: None,
+        build_target_backing: None,
         input_presentation_root: None,
         input_commitments: Vec::new(),
         executable: executable.to_string_lossy().into_owned(),

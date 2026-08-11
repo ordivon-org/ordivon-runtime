@@ -152,6 +152,12 @@ pub(crate) struct WindowsStartEvidence {
     pub administrators_group_attributes: u32,
     pub power_request_type: String,
     pub power_request_acquired: bool,
+    #[serde(default)]
+    pub input_set_id: Option<String>,
+    #[serde(default)]
+    pub input_presentation_root: Option<String>,
+    #[serde(default)]
+    pub input_bindings_digest: Option<String>,
     pub observed_unix_ms: u64,
 }
 
@@ -167,6 +173,10 @@ pub(crate) struct WindowsSystemdRunSpec<'a> {
     pub args: &'a [String],
     pub cwd: &'a Path,
     pub environment: &'a BTreeMap<String, String>,
+    pub input_source_root: Option<&'a Path>,
+    pub input_set_id: Option<&'a str>,
+    pub input_presentation_root: Option<&'a str>,
+    pub input_bindings_digest: Option<&'a str>,
     pub budget: &'a ExecutionBudget,
     pub runtime_ceiling_ms: u64,
     pub timeout_ms: u64,
@@ -414,6 +424,37 @@ pub(crate) fn build_windows_systemd_run_command(
         .arg("--inherit-environment")
         .arg("false");
 
+    match (
+        spec.input_source_root,
+        spec.input_set_id,
+        spec.input_presentation_root,
+        spec.input_bindings_digest,
+    ) {
+        (None, None, None, None) => {}
+        (Some(source_root), Some(input_set_id), Some(presentation_root), Some(bindings_digest)) => {
+            command
+                .arg("--input-source-root")
+                .arg(windows_visible_path(
+                    spec.config,
+                    source_root,
+                    "execution.effectiveInputs",
+                )?)
+                .arg("--input-set-id")
+                .arg(input_set_id)
+                .arg("--input-presentation-root")
+                .arg(presentation_root)
+                .arg("--input-bindings-digest")
+                .arg(bindings_digest);
+        }
+        _ => {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "Windows immutable input launch metadata is incomplete",
+                Some("executionPlan.inputSetId"),
+                false,
+            ));
+        }
+    }
     for (name, value) in spec.environment {
         command.arg("--env").arg(format!("{name}={value}"));
     }
@@ -468,6 +509,79 @@ pub(crate) fn mounted_windows_path(path: &Path) -> Option<String> {
     } else {
         Some(format!("{drive}:\\{tail}"))
     }
+}
+
+pub(crate) fn validate_windows_input_relative_path(path: &str, index: usize) -> RuntimeResult<()> {
+    const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    let field = format!("inputs[{index}].presentationRelativePath");
+    if path.contains('\\') {
+        return Err(RuntimeError::invalid(
+            "Windows immutable input presentation paths must use '/' separators only",
+            &field,
+        ));
+    }
+    for component in path.split('/') {
+        if component.is_empty()
+            || component.ends_with(' ')
+            || component.ends_with('.')
+            || component
+                .chars()
+                .any(|ch| ch < ' ' || matches!(ch, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+        {
+            return Err(RuntimeError::invalid(
+                "Windows immutable input presentation path contains an invalid component",
+                &field,
+            ));
+        }
+        let stem = component
+            .split('.')
+            .next()
+            .unwrap_or(component)
+            .to_ascii_uppercase();
+        if RESERVED.contains(&stem.as_str())
+            || (stem.len() == 4
+                && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.as_bytes()[3].is_ascii_digit()
+                && stem.as_bytes()[3] != b'0')
+        {
+            return Err(RuntimeError::invalid(
+                "Windows immutable input presentation path uses a reserved device name",
+                &field,
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_windows_input_relative_paths<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> RuntimeResult<()> {
+    let mut normalized = Vec::<String>::new();
+    for (index, path) in paths.into_iter().enumerate() {
+        validate_windows_input_relative_path(path, index)?;
+        let folded = path
+            .split('/')
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+            .join("/");
+        for existing in &normalized {
+            if folded == *existing
+                || folded
+                    .strip_prefix(existing)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || existing
+                    .strip_prefix(&folded)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+            {
+                return Err(RuntimeError::invalid(
+                    "Windows immutable input presentation paths must not alias or overlap case-insensitively",
+                    &format!("inputs[{index}].presentationRelativePath"),
+                ));
+            }
+        }
+        normalized.push(folded);
+    }
+    Ok(())
 }
 
 fn tool_error(operation: &str, error: std::io::Error) -> RuntimeError {

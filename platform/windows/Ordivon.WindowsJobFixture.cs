@@ -2,6 +2,8 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using Microsoft.Win32;
 using System.Text;
 using System.Threading;
@@ -25,6 +27,7 @@ internal static class OrdivonWindowsJobFixture
         if (mode == "cpu") return Cpu(args);
         if (mode == "echo") return Echo(args);
         if (mode == "authority-probe") return AuthorityProbe(args);
+        if (mode == "immutable-input") return ImmutableInput(args);
         Console.Error.WriteLine("unknown fixture mode: " + mode);
         return 64;
     }
@@ -184,6 +187,90 @@ internal static class OrdivonWindowsJobFixture
         {
             Console.WriteLine("W1_AUTHORITY_HKLM=denied marker=" + marker + " type=" + error.GetType().Name);
             return 0;
+        }
+    }
+
+    private static int ImmutableInput(string[] args)
+    {
+        string root = Environment.GetEnvironmentVariable("ORDIVON_INPUT_ROOT");
+        if (String.IsNullOrWhiteSpace(root) || args.Length != 2)
+        {
+            Console.Error.WriteLine("W1_IMMUTABLE_INPUT_INVALID");
+            return 64;
+        }
+        string path = Path.Combine(root, args[1].Replace('/', Path.DirectorySeparatorChar));
+        string before = File.ReadAllText(path).Trim();
+        string write = Attempt("write", delegate { File.WriteAllText(path, "MUTATED"); });
+        string create = Attempt("create", delegate
+        {
+            string candidate = Path.Combine(root, "limited-created.txt");
+            File.WriteAllText(candidate, "CREATED");
+            File.Delete(candidate);
+        });
+        string renameFile = Attempt("rename-file", delegate
+        {
+            string moved = path + ".limited-moved";
+            File.Move(path, moved);
+            File.Move(moved, path);
+        });
+        string grant = Attempt("grant", delegate
+        {
+            SecurityIdentifier user = WindowsIdentity.GetCurrent().User;
+            FileSecurity security = File.GetAccessControl(path);
+            security.AddAccessRule(new FileSystemAccessRule(
+                user, FileSystemRights.FullControl, AccessControlType.Allow));
+            File.SetAccessControl(path, security);
+        });
+        string renameRoot = Attempt("rename-root", delegate
+        {
+            string moved = root + ".limited-moved";
+            Directory.Move(root, moved);
+            Directory.Move(moved, root);
+        });
+        string container = Directory.GetParent(root).FullName;
+        string createSibling = Attempt("create-sibling", delegate
+        {
+            string sibling = Path.Combine(container, "limited-sibling.txt");
+            File.WriteAllText(sibling, "CREATED");
+            File.Delete(sibling);
+        });
+        string renameContainer = Attempt("rename-container", delegate
+        {
+            string moved = container + ".limited-moved";
+            Directory.Move(container, moved);
+            Directory.Move(moved, container);
+        });
+        string after = File.ReadAllText(path).Trim();
+        Console.WriteLine("W1_IMMUTABLE_INPUT_ROOT_B64=" + B64(root));
+        Console.WriteLine("W1_IMMUTABLE_INPUT_BEFORE_B64=" + B64(before));
+        Console.WriteLine("W1_IMMUTABLE_INPUT_WRITE=" + write);
+        Console.WriteLine("W1_IMMUTABLE_INPUT_CREATE=" + create);
+        Console.WriteLine("W1_IMMUTABLE_INPUT_RENAME_FILE=" + renameFile);
+        Console.WriteLine("W1_IMMUTABLE_INPUT_GRANT=" + grant);
+        Console.WriteLine("W1_IMMUTABLE_INPUT_RENAME_ROOT=" + renameRoot);
+        Console.WriteLine("W1_IMMUTABLE_INPUT_CREATE_SIBLING=" + createSibling);
+        Console.WriteLine("W1_IMMUTABLE_INPUT_RENAME_CONTAINER=" + renameContainer);
+        Console.WriteLine("W1_IMMUTABLE_INPUT_AFTER_B64=" + B64(after));
+        bool denied = write.StartsWith("denied:", StringComparison.Ordinal)
+            && create.StartsWith("denied:", StringComparison.Ordinal)
+            && renameFile.StartsWith("denied:", StringComparison.Ordinal)
+            && grant.StartsWith("denied:", StringComparison.Ordinal)
+            && renameRoot.StartsWith("denied:", StringComparison.Ordinal)
+            && createSibling.StartsWith("denied:", StringComparison.Ordinal)
+            && renameContainer.StartsWith("denied:", StringComparison.Ordinal);
+        return denied && before == after ? 0 : 57;
+    }
+
+    private static string Attempt(string operation, Action action)
+    {
+        try
+        {
+            action();
+            return "succeeded";
+        }
+        catch (Exception error)
+        {
+            return "denied:" + error.GetType().Name;
         }
     }
 
