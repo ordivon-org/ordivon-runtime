@@ -23,7 +23,6 @@ if str(SCRIPT_DIR) not in sys.path:
 from mcp_probe import load_environment_file
 
 SCHEMA_VERSION = 1
-MIGRATION_CONFIRMATION = "MIGRATE_SHARED_EXECUTION_CACHES"
 PRUNE_CONFIRMATION = "PRUNE_EXECUTION_CACHES"
 DEFAULT_HIGH_WATERMARK_BYTES = 64 * 1024 * 1024 * 1024
 DEFAULT_LOW_WATERMARK_BYTES = 48 * 1024 * 1024 * 1024
@@ -60,14 +59,6 @@ def parse_args() -> argparse.Namespace:
     inspect_command.add_argument("--database", type=absolute_path, required=True)
     inspect_command.add_argument("--runtime-store-root", type=absolute_path, required=True)
     inspect_command.add_argument("--pretty", action="store_true")
-
-    migrate = commands.add_parser("migrate")
-    migrate.add_argument("--database", type=absolute_path, required=True)
-    migrate.add_argument("--runtime-store-root", type=absolute_path, required=True)
-    migrate.add_argument("--receipt-root", type=absolute_path, required=True)
-    migrate.add_argument("--lock-file", type=absolute_path, required=True)
-    migrate.add_argument("--confirm-policy", required=True)
-    migrate.add_argument("--pretty", action="store_true")
 
     prune = commands.add_parser("prune")
     prune.add_argument("--database", type=absolute_path, required=True)
@@ -173,95 +164,63 @@ def load_open_records(store_root: Path) -> tuple[list[dict[str, str]], list[dict
 
 def inspect(database: Path, store_root: Path) -> dict[str, object]:
     cache_root = store_root / "cache"
-    legacy_root = cache_root / "build"
-    source_root = legacy_root / "sources"
+    total_bytes, candidates = cache_prune_candidates(database, store_root)
     active = active_workspace_ids(database)
     records, issues = load_open_records(store_root)
-    groups: dict[str, dict[str, object]] = {}
-    active_by_source: dict[str, list[str]] = {}
-    for record in records:
-        if record["workspaceId"] in active:
-            active_by_source.setdefault(record["sourceRepo"], []).append(
-                record["workspaceId"]
-            )
-    legacy_bytes = 0
-    for record in records:
-        workspace_id = record["workspaceId"]
-        legacy = legacy_root / workspace_id
-        if not legacy.is_dir() or legacy.is_symlink():
-            continue
-        byte_length = directory_bytes(legacy)
-        legacy_bytes += byte_length
-        key = source_key(record["sourceRepo"])
-        group = groups.setdefault(
-            key,
-            {
-                "sourceKey": key,
-                "sourceRepo": record["sourceRepo"],
-                "target": str(source_root / key),
-                "targetExists": (source_root / key).is_dir(),
-                "sourceRepoAvailable": Path(record["sourceRepo"]).is_dir(),
-                "activeWorkspaceIds": sorted(
-                    active_by_source.get(record["sourceRepo"], [])
-                ),
-                "candidates": [],
-            },
-        )
-        group["candidates"].append(
-            {
-                "workspaceId": workspace_id,
-                "path": str(legacy),
-                "bytes": byte_length,
-                "active": workspace_id in active,
-                "modifiedUnixMs": int(legacy.stat().st_mtime * 1000),
-            }
-        )
-    plans: list[dict[str, object]] = []
-    for group in groups.values():
-        candidates = list(group["candidates"])
-        candidates.sort(
-            key=lambda item: (
-                bool(item["active"]),
-                -int(item["bytes"]),
-                -int(item["modifiedUnixMs"]),
-                str(item["workspaceId"]),
-            )
-        )
-        group["candidates"] = candidates
-        donor = next((item for item in candidates if not item["active"]), None)
-        group["selectedDonor"] = donor
-        target = Path(str(group["target"]))
-        target_has_files = target.is_dir() and any(
-            child.is_file() or child.is_symlink()
-            for child in target.rglob("*")
-        )
-        group["targetHasFiles"] = target_has_files
-        group["migrationEligible"] = (
-            donor is not None
-            and int(donor["bytes"]) > 0
-            and bool(group["sourceRepoAvailable"])
-            and not group["activeWorkspaceIds"]
-            and (not group["targetExists"] or not target_has_files)
-        )
-        plans.append(group)
-    plans.sort(key=lambda item: str(item["sourceKey"]))
+    open_ids = {record["workspaceId"] for record in records}
     package_root = cache_root / "shared"
+
+    candidate_bytes_by_kind: dict[str, int] = {}
+    candidate_count_by_kind: dict[str, int] = {}
+    for candidate in candidates:
+        kind = str(candidate["kind"])
+        candidate_bytes_by_kind[kind] = candidate_bytes_by_kind.get(kind, 0) + int(
+            candidate["bytes"]
+        )
+        candidate_count_by_kind[kind] = candidate_count_by_kind.get(kind, 0) + 1
+
+    package_bytes = directory_bytes(package_root)
+    reclaimable_bytes = sum(int(candidate["bytes"]) for candidate in candidates)
+    protected_or_external_bytes = max(0, total_bytes - reclaimable_bytes)
     return {
         "schemaVersion": SCHEMA_VERSION,
+        "kind": "ordivon.runtime-cache-retention-inspection",
         "generatedAtMs": int(time.time() * 1000),
         "cacheRoot": str(cache_root),
-        "packageCaches": [str(package_root / relative) for relative in PACKAGE_CACHE_DIRS],
         "summary": {
-            "sourceGroups": len(plans),
-            "migrationEligibleGroups": sum(bool(item["migrationEligible"]) for item in plans),
-            "legacyBytes": legacy_bytes,
+            "totalBytes": total_bytes,
+            "runtimeReclaimableBytes": reclaimable_bytes,
+            "runtimeReclaimableCandidates": len(candidates),
+            "packageManagerOwnedBytes": package_bytes,
+            "protectedOrExternalBytes": protected_or_external_bytes,
+            "openWorkspaces": len(open_ids),
             "activeWorkspaces": len(active),
             "issues": len(issues),
         },
-        "groups": plans,
+        "authority": {
+            "runtimeReclaimable": {
+                "candidateBytesByKind": candidate_bytes_by_kind,
+                "candidateCountByKind": candidate_count_by_kind,
+                "candidates": candidates,
+            },
+            "workspaceProtected": {
+                "openWorkspaceIds": sorted(open_ids),
+                "activeWorkspaceIds": sorted(active),
+                "law": "current Workspace-scoped build/generic/tmp caches are protected while the Workspace is open or active",
+            },
+            "packageManagerOwned": {
+                "root": str(package_root),
+                "bytes": package_bytes,
+                "paths": [str(package_root / relative) for relative in PACKAGE_CACHE_DIRS],
+                "law": "Runtime measures but does not interpret or delete global package-manager caches",
+            },
+            "legacySourceBuild": {
+                "root": str(cache_root / "build" / "sources"),
+                "law": "no current execution plan consumes source-scoped build caches; they are Runtime-reclaimable reconstructible state",
+            },
+        },
         "issues": issues,
     }
-
 
 def cache_mtime_ms(path: Path) -> int:
     latest = path.stat().st_mtime
@@ -279,7 +238,6 @@ def cache_prune_candidates(database: Path, store_root: Path) -> tuple[int, list[
     active = active_workspace_ids(database)
     records, _ = load_open_records(store_root)
     open_ids = {record["workspaceId"] for record in records}
-    protected_sources = {source_key(record["sourceRepo"]) for record in records}
     candidates: list[dict[str, object]] = []
 
     def add_children(root: Path, kind: str, protected: set[str]) -> None:
@@ -300,7 +258,10 @@ def cache_prune_candidates(database: Path, store_root: Path) -> tuple[int, list[
     add_children(cache_root / "build", "legacy_build", open_ids | active | {"sources"})
     add_children(cache_root / "workspaces", "workspace_cache", open_ids | active)
     add_children(cache_root / "tmp", "workspace_tmp", open_ids | active)
-    add_children(cache_root / "build" / "sources", "source_build", protected_sources)
+    # Source-scoped build caches are legacy realization state. Current execution
+    # always uses Workspace-scoped build targets, so no open Workspace or active
+    # Job can hold a runtime dependency on cache/build/sources/<sourceKey>.
+    add_children(cache_root / "build" / "sources", "source_build", set())
     candidates.sort(key=lambda item: (int(item["modifiedUnixMs"]), -int(item["bytes"]), str(item["path"])))
     return total_bytes, candidates
 
@@ -435,82 +396,11 @@ def write_json_atomic(path: Path, value: object) -> None:
     os.replace(temporary, path)
 
 
-def migrate(args: argparse.Namespace) -> dict[str, object]:
-    if args.confirm_policy != MIGRATION_CONFIRMATION:
-        raise RuntimeError(f"--confirm-policy must equal {MIGRATION_CONFIRMATION}")
-    with exclusive_lock(args.lock_file):
-        plan = inspect(args.database, args.runtime_store_root)
-        package_root = args.runtime_store_root / "cache" / "shared"
-        for relative in PACKAGE_CACHE_DIRS:
-            (package_root / relative).mkdir(parents=True, exist_ok=True)
-        actions: list[dict[str, object]] = []
-        failures: list[dict[str, object]] = []
-        for group in plan["groups"]:
-            if not group["migrationEligible"]:
-                continue
-            donor = group["selectedDonor"]
-            assert isinstance(donor, dict)
-            source = Path(str(donor["path"]))
-            target = Path(str(group["target"]))
-            try:
-                if not source.is_dir() or source.is_symlink():
-                    raise RuntimeError("selected donor is no longer a regular directory")
-                if group["activeWorkspaceIds"]:
-                    raise RuntimeError("source repository gained an active Workspace")
-                if target.exists():
-                    if target.is_symlink() or not target.is_dir():
-                        raise RuntimeError("source-scoped target is not a regular directory")
-                    if any(
-                        child.is_file() or child.is_symlink()
-                        for child in target.rglob("*")
-                    ):
-                        raise RuntimeError("source-scoped target contains cache files")
-                    shutil.rmtree(target)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                os.rename(source, target)
-                actions.append(
-                    {
-                        "sourceKey": group["sourceKey"],
-                        "sourceRepo": group["sourceRepo"],
-                        "workspaceId": donor["workspaceId"],
-                        "from": str(source),
-                        "to": str(target),
-                        "bytes": donor["bytes"],
-                        "action": "legacy_cache_promoted",
-                    }
-                )
-            except (OSError, RuntimeError) as error:
-                failures.append(
-                    {
-                        "sourceKey": group["sourceKey"],
-                        "workspaceId": donor["workspaceId"],
-                        "error": str(error),
-                    }
-                )
-        receipt_id = time.strftime("cache-migration-%Y%m%dT%H%M%SZ", time.gmtime())
-        receipt = args.receipt_root / f"{receipt_id}-{os.getpid()}"
-        result = {
-            "schemaVersion": SCHEMA_VERSION,
-            "status": "completed" if not failures else "partial",
-            "completedAtMs": int(time.time() * 1000),
-            "confirmation": args.confirm_policy,
-            "planSummary": plan["summary"],
-            "actions": actions,
-            "failures": failures,
-            "receipt": str(receipt),
-        }
-        write_json_atomic(receipt / "plan.json", plan)
-        write_json_atomic(receipt / "result.json", result)
-        return result
-
-
 def main() -> int:
     args = parse_args()
     try:
         if args.command == "inspect":
             result = inspect(args.database, args.runtime_store_root)
-        elif args.command == "migrate":
-            result = migrate(args)
         else:
             result = prune(args)
     except (OSError, RuntimeError, sqlite3.Error) as error:

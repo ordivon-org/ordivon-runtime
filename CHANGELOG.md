@@ -4,6 +4,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ## Unreleased
 
+- Runtime cache retention now follows the current execution authority model: legacy `cache/build/sources/<sha256>/` targets are reclaimable even when the same repository has open Workspaces because no current execution plan consumes them. The obsolete cache `migrate` command that could still move Workspace build bytes into that retired hierarchy is removed; current Workspace-scoped caches remain protected, while shared package-manager caches remain externally owned.
+
 - Structured Runtime self-release now defaults to the same published `origin/main` authority as the canonical deploy CLI and release documentation when `ORDIVON_RELEASE_REQUIRED_REF` is omitted. Local checkout `HEAD`/`main` remains diagnostic state and cannot silently become release authority merely because another Agent is using that worktree.
 
 - Packaged cache maintenance now resolves its high/low watermark from the same `ORDIVON_CACHE_HIGH_WATERMARK_BYTES` / `ORDIVON_CACHE_LOW_WATERMARK_BYTES` operator environment used by Runtime health/status instead of embedding a second 64 GiB / 48 GiB policy in the lifecycle unit. Explicit cache-prune CLI values still override the environment, standalone defaults remain available, and an incomplete environment policy fails before deletion. Cache execution status is also separated from residual capacity pressure: deletion failures or still-reclaimable residual bytes remain partial/nonzero, while a watermark breach made entirely of currently protected bytes completes successfully with an explicit `protected_residual` capacity disposition and remains visible as maintenance attention.

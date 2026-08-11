@@ -314,7 +314,7 @@ cache/tmp/<workspaceId>/         Workspace temporary files
 
 The committed execution environment sets explicit paths for Cargo, uv, pip, npm, pnpm/Corepack, Bun, and Go. Every Workspace still owns its own physical Cargo target backing under `cache/build/<workspaceId>/cargo`. For `trusted_local`, the Runner opens that backing and presents it at the stable compiler-visible `CARGO_TARGET_DIR=/proc/self/fd/198`; concurrent Jobs use the same pathname string but distinct inherited directory descriptors and therefore distinct mutable backings. This stable presentation exists to make content-addressed compiler wrappers such as sccache insensitive to otherwise-arbitrary Workspace target paths; Runtime does not share Cargo target bytes or operate a compiler-cache service. `contained_local` keeps the direct Workspace-private target path. Package-download caches remain global in trusted-local, while contained-local keeps its tooling/package cache Workspace-scoped.
 
-Inspect legacy build caches without mutation:
+Inspect cache retention authority without mutation. The projection separates Runtime-reclaimable candidates, open/active Workspace protection, and package-manager-owned shared caches; it does not imply authority to delete every measured byte:
 
 ```bash
 scripts/ordivon-runtime-cache inspect \
@@ -322,18 +322,9 @@ scripts/ordivon-runtime-cache inspect \
   --runtime-store-root /var/lib/ordivon/runtime --pretty
 ```
 
-Migration is explicit, locked, and receipted. For each source repository it promotes the largest nonempty inactive legacy Workspace build cache with an atomic rename. Any source repository with an active or held Workspace is excluded. An absent or directory-only empty source target may be atomically replaced; a target containing cache files is never overwritten. Nonselected legacy caches are retained as fallbacks for later Workspace lifecycle cleanup.
+The former source-cache migration path is retired. Current execution never consumes `cache/build/sources/<sha256>/`; keeping an operator that moved Workspace build targets into that hierarchy would manufacture unused state. Existing source-scoped caches are therefore legacy reconstructible bytes and are eligible for ordinary capacity reclamation even when the same source repository still has an open Workspace.
 
-```bash
-scripts/ordivon-runtime-cache migrate \
-  --database /var/lib/ordivon/registry/registry.sqlite3 \
-  --runtime-store-root /var/lib/ordivon/runtime \
-  --receipt-root /var/lib/ordivon/runtime/cache-receipts \
-  --lock-file /run/ordivon-runtime-cache.lock \
-  --confirm-policy MIGRATE_SHARED_EXECUTION_CACHES --pretty
-```
-
-Cache reclamation is capacity-driven rather than a blind age sweep. The packaged daily lifecycle service resolves its watermarks from `ORDIVON_CACHE_HIGH_WATERMARK_BYTES` and `ORDIVON_CACHE_LOW_WATERMARK_BYTES` in `/etc/ordivon/ordivon-runtime.env`; the packaged example remains 64 GiB / 48 GiB, while an installation may deliberately choose another pair. Open or active Workspace caches and source-build caches referenced by any open Workspace are protected. Global package-manager caches are measured but not interpreted or deleted by Runtime; mature package-manager-native pruning remains their owner. Prune execution truth is separate from capacity pressure: deletion failures or a still-reclaimable residual produce `status=partial` and a nonzero exit, while a cache that remains above the high watermark only because no policy-eligible bytes remain is a successful maintenance execution with `capacityDisposition=protected_residual`. Its receipt records the residual overage and zero remaining reclaimable bytes; `runtime-status --diagnose` continues to surface `CACHE_HIGH_WATERMARK` as maintenance attention rather than turning protected state into a failed systemd unit.
+Cache reclamation is capacity-driven rather than a blind age sweep. The packaged daily lifecycle service resolves its watermarks from `ORDIVON_CACHE_HIGH_WATERMARK_BYTES` and `ORDIVON_CACHE_LOW_WATERMARK_BYTES` in `/etc/ordivon/ordivon-runtime.env`; the packaged example remains 64 GiB / 48 GiB, while an installation may deliberately choose another pair. Open or active Workspace-scoped build, generic, and temporary caches are protected. Legacy source-scoped build caches have no current execution consumer and remain capacity-reclaimable regardless of repository-open state. Global package-manager caches are measured but not interpreted or deleted by Runtime; mature package-manager-native pruning remains their owner. Prune execution truth is separate from capacity pressure: deletion failures or a still-reclaimable residual produce `status=partial` and a nonzero exit, while a cache that remains above the high watermark only because no policy-eligible bytes remain is a successful maintenance execution with `capacityDisposition=protected_residual`. Its receipt records the residual overage and zero remaining reclaimable bytes; `runtime-status --diagnose` continues to surface `CACHE_HIGH_WATERMARK` as maintenance attention rather than turning protected state into a failed systemd unit.
 
 ```bash
 scripts/ordivon-runtime-cache prune \

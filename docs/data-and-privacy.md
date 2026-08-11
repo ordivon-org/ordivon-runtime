@@ -60,7 +60,7 @@ Runtime does **not** automatically redact command arguments, environment values 
 | Registry database | `/var/lib/ordivon/registry/registry.sqlite3` | Job, Attempt, reservation, event, Artifact metadata, recovery truth | retained while the instance remains authoritative |
 | Attempt bundles and Artifacts | `/var/lib/ordivon/registry/attempts/` | request, plan, progress, output, result, terminal evidence | retained with Registry history unless the instance is retired or an explicit future archival policy applies |
 | Workspace records and worktrees | `/var/lib/ordivon/runtime/` | isolated source state and lifecycle identity | policy classes: ephemeral, review, or pinned; dirty/active/unknown state is never removed automatically |
-| execution caches | `/var/lib/ordivon/runtime/cache/` | reusable package and build state | capacity-driven reclamation; protected while referenced |
+| execution caches | `/var/lib/ordivon/runtime/cache/` | reusable package and build state | Workspace-scoped state is protected while referenced; legacy source-build state is reconstructible and capacity-reclaimable; shared package-cache semantics remain package-manager-owned |
 | immutable input staging and Job-owned bytes | `/var/lib/ordivon/runtime/input-materializations/` and `/var/lib/ordivon/runtime/job-inputs/` | exact digest-verified foreign bytes prepared during admission and then owned by the admitted input-bound Job | retained with current Runtime state; no automatic per-set reclamation contract yet |
 | Windows immutable-input presentations | `%ProgramData%\OrdivonImmutableInputs\<inputSetId>` | reconstructible native NTFS realization of one committed Job-owned input tree for a limited Windows child | terminal-only receipted reclamation after the configured grace period; nonterminal/reserved state is protected and mismatched provider bytes are preserved for diagnosis |
 | protocol trace | configured `ORDIVON_TRACE_PATH` | bounded protocol-version and client observations | current segment plus one rotated segment |
@@ -139,7 +139,7 @@ Use `ordivon-runtime-lifecycle inputs-inspect` before mutation and `inputs-sweep
 
 ### Cache deletion
 
-Use `ordivon-runtime-cache prune`. It protects caches associated with open or active Workspaces and does not interpret package-manager global caches it does not own.
+Use `ordivon-runtime-cache prune`. It protects current Workspace-scoped caches associated with open or active Workspaces, treats legacy source-scoped build caches as reconstructible reclaimable state because current execution never consumes them, and does not interpret package-manager global caches it does not own.
 
 ### Instance retirement
 
