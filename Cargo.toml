@@ -17,7 +17,9 @@ homepage = "https://ordivon.com"
 axum = { version = "0.8", features = ["http1", "tokio"] }
 base64 = "0.23"
 hex = "0.4"
+jsonwebtoken = { version = "=10.4.0", features = ["rust_crypto"] }
 libc = "0.2"
+reqwest = { version = "=0.12.23", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"

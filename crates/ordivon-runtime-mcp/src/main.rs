@@ -27,12 +27,16 @@ use tokio_util::sync::CancellationToken;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod access_auth;
+
+use access_auth::{CloudflareAccessConfig, CloudflareAccessVerifier};
+
 #[derive(Clone)]
 struct HttpState {
     bearer: Arc<str>,
     trace_path: Option<Arc<PathBuf>>,
     body_limit_bytes: u64,
-    trust_cf_access: bool,
+    cf_access: Option<Arc<CloudflareAccessVerifier>>,
 }
 
 static HTTP_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -49,7 +53,7 @@ struct AppConfig {
     bind: SocketAddr,
     token: String,
     body_limit_bytes: usize,
-    trust_cf_access: bool,
+    cf_access: Option<CloudflareAccessConfig>,
     reconcile_interval_ms: u64,
     reconcile_batch_size: u32,
     server: ServerConfig,
@@ -111,6 +115,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             transport_config(cancellation.child_token()),
         );
 
+    let cf_access = app
+        .cf_access
+        .clone()
+        .map(CloudflareAccessVerifier::new)
+        .transpose()
+        .map_err(std::io::Error::other)?
+        .map(Arc::new);
     let http_state = HttpState {
         bearer: Arc::from(format!("Bearer {}", app.token)),
         trace_path: app
@@ -119,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_ref()
             .map(|path| Arc::new(PathBuf::from(format!("{}.http.jsonl", path.display())))),
         body_limit_bytes: app.body_limit_bytes.try_into()?,
-        trust_cf_access: app.trust_cf_access,
+        cf_access,
     };
     let router = Router::new()
         .nest_service("/mcp", service)
@@ -211,7 +222,8 @@ async fn authenticate_and_trace(
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
     let request_bytes = content_length(request.headers());
-    let authorized = request_is_authorized(request.headers(), &state);
+    let auth_source = request_auth_source(request.headers(), &state).await;
+    let authorized = auth_source != AuthSource::None;
     let too_large = request_bytes.is_some_and(|bytes| bytes > state.body_limit_bytes);
     let mut response = if too_large {
         StatusCode::PAYLOAD_TOO_LARGE.into_response()
@@ -229,6 +241,7 @@ async fn authenticate_and_trace(
         &trace_id,
         &method,
         &path,
+        auth_source.as_str(),
         authorized,
         response.status().as_u16(),
         request_bytes,
@@ -237,16 +250,45 @@ async fn authenticate_and_trace(
     );
     response
 }
-fn request_is_authorized(headers: &HeaderMap, state: &HttpState) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthSource {
+    None,
+    LocalBearer,
+    CloudflareAccess,
+}
+
+impl AuthSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::LocalBearer => "local_bearer",
+            Self::CloudflareAccess => "cloudflare_access",
+        }
+    }
+}
+
+async fn request_auth_source(headers: &HeaderMap, state: &HttpState) -> AuthSource {
     let supplied = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    constant_time_eq(supplied.as_bytes(), state.bearer.as_bytes())
-        || (state.trust_cf_access
-            && headers
-                .get("cf-access-jwt-assertion")
-                .is_some_and(|value| !value.as_bytes().is_empty()))
+    if constant_time_eq(supplied.as_bytes(), state.bearer.as_bytes()) {
+        return AuthSource::LocalBearer;
+    }
+    let Some(verifier) = state.cf_access.as_deref() else {
+        return AuthSource::None;
+    };
+    let Some(assertion) = headers
+        .get("cf-access-jwt-assertion")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return AuthSource::None;
+    };
+    if verifier.verify(assertion).await {
+        AuthSource::CloudflareAccess
+    } else {
+        AuthSource::None
+    }
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -348,6 +390,20 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         Err(std::env::VarError::NotPresent) => false,
         Err(error) => return Err(Box::new(error)),
     };
+    let cf_access = if trust_cf_access {
+        let issuer = required_env("ORDIVON_CF_ACCESS_ISSUER")?;
+        let audience = required_env("ORDIVON_CF_ACCESS_AUDIENCE")?;
+        let normalized_issuer = issuer.trim_end_matches('/').to_string();
+        let jwks_url = optional_env("ORDIVON_CF_ACCESS_JWKS_URL")?
+            .unwrap_or_else(|| format!("{normalized_issuer}/cdn-cgi/access/certs"));
+        Some(CloudflareAccessConfig {
+            issuer: normalized_issuer,
+            audience,
+            jwks_url,
+        })
+    } else {
+        None
+    };
     let busy_timeout_ms = std::env::var("ORDIVON_BUSY_TIMEOUT_MS")
         .ok()
         .map(|value| value.parse())
@@ -437,7 +493,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         bind,
         token,
         body_limit_bytes,
-        trust_cf_access,
+        cf_access,
         reconcile_interval_ms,
         reconcile_batch_size,
         server: ServerConfig {
@@ -535,6 +591,7 @@ fn append_http_trace(
     trace_id: &str,
     method: &str,
     request_path: &str,
+    auth_source: &str,
     authorized: bool,
     status: u16,
     request_bytes: Option<u64>,
@@ -549,6 +606,7 @@ fn append_http_trace(
         "kind": "http",
         "method": method,
         "path": request_path,
+        "authSource": auth_source,
         "authorized": authorized,
         "status": status,
         "requestBytes": request_bytes,
@@ -580,19 +638,19 @@ fn unix_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_private_token_file, request_is_authorized, validate_loopback_bind, HttpState,
+        read_private_token_file, request_auth_source, validate_loopback_bind, AuthSource, HttpState,
     };
     use axum::http::{header, HeaderMap, HeaderValue};
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::sync::Arc;
 
-    fn auth_state(trust_cf_access: bool) -> HttpState {
+    fn auth_state() -> HttpState {
         HttpState {
             bearer: Arc::from("Bearer local-secret-token-value-1234567890"),
             trace_path: None,
             body_limit_bytes: 1024,
-            trust_cf_access,
+            cf_access: None,
         }
     }
 
@@ -633,21 +691,26 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
-    #[test]
-    fn bearer_and_explicit_cloudflare_access_are_valid_authentication_paths() {
+    #[tokio::test]
+    async fn local_bearer_is_valid_but_unverified_access_header_is_not() {
         let mut bearer = HeaderMap::new();
         bearer.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer local-secret-token-value-1234567890"),
         );
-        assert!(request_is_authorized(&bearer, &auth_state(false)));
+        assert_eq!(
+            request_auth_source(&bearer, &auth_state()).await,
+            AuthSource::LocalBearer
+        );
 
         let mut access = HeaderMap::new();
         access.insert(
             "cf-access-jwt-assertion",
             HeaderValue::from_static("signed-access-assertion"),
         );
-        assert!(request_is_authorized(&access, &auth_state(true)));
-        assert!(!request_is_authorized(&access, &auth_state(false)));
+        assert_eq!(
+            request_auth_source(&access, &auth_state()).await,
+            AuthSource::None
+        );
     }
 }

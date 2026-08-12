@@ -20,6 +20,25 @@ Its `compatibility` section combines the current deployment receipt, a bounded t
 
 `LocalSessionManager` and legacy `initialize` handling exist only for the two compatibility lifecycles. Modern continuity remains Workspace, Job, Attempt, cancellation, reconciliation, and Artifact truth in Runtime Core.
 
+## Remote MCP authentication compatibility
+
+Remote authentication is an edge compatibility contract, not a Runtime protocol lifecycle. The Runtime origin remains loopback-only and keeps a private static Bearer credential for trusted-local clients. That credential is not an interoperability mechanism and must never be copied into hosted AI platforms.
+
+The public MCP path is split deliberately:
+
+1. Cloudflare Tunnel provides public HTTPS ingress to the loopback origin but does not establish identity.
+2. Cloudflare Access Managed OAuth acts as the public OAuth authorization server and protected-resource facade for hosted or interactive MCP clients.
+3. Access forwards a signed `Cf-Access-Jwt-Assertion` after OAuth authorization.
+4. Runtime verifies that assertion's RS256 signature, exact issuer, Access application audience, and expiry against Access JWKS before admitting the request.
+
+Runtime retrieves Access JWKS lazily. A JWKS outage therefore fails the Access-authenticated request closed without turning public network availability into a startup dependency of the trusted-local Runtime. A nonempty or syntactically JWT-shaped Access header is never sufficient authentication.
+
+Access currently advertises Dynamic Client Registration (DCR). MCP `2026-07-28` prefers Client ID Metadata Documents (CIMD), while retaining DCR as a compatibility path for authorization servers and clients that have not migrated. Therefore DCR callback policy is tracked as an edge-client compatibility surface rather than being encoded into Runtime Tool or wire semantics. No platform-specific callback, OAuth client identifier, or authorization-server implementation belongs in Runtime Core.
+
+Named callback compatibility is expanded only from official client documentation or a directly observed registration attempt. The current known set includes ChatGPT's existing connector callback, VS Code's loopback/web callbacks, and Claude's documented MCP callbacks. Unknown hosted-client callback URIs, including any not documented by their platform, must not be guessed or covered by broad wildcard domains merely to make registration succeed.
+
+The legacy `ORDIVON_TRUST_CF_ACCESS` name is retained only as a rollback-compatible enable flag. When it is true, `ORDIVON_CF_ACCESS_ISSUER` and `ORDIVON_CF_ACCESS_AUDIENCE` are mandatory and the assertion is cryptographically verified. Renaming or deleting the legacy flag is eligible only after the receipt-bound previous binary can no longer be restored and one complete compatibility observation window proves no operator configuration depends on the old name.
+
 `workspace.content` is an additive Tool-catalog capability rather than a replacement for `workspace.read` or `artifact.read`. Older clients keep their UTF-8 read semantics and can ignore the new Tool; clients that need native media must refresh discovery and bind the new catalog digest before calling it. No persisted Job/request identity or Registry migration is introduced by this capability.
 
 ## Persisted Runtime state

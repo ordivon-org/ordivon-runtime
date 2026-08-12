@@ -35,9 +35,11 @@ Do not submit untrusted repositories, commands, or scripts. Put hostile or high-
 
 ## Network boundary
 
-The MCP origin must remain loopback-bound. Direct local clients require the configured Bearer token. Remote access must reach the loopback origin through an authenticated tunnel boundary configured and owned by the operator.
+The MCP origin must remain loopback-bound. Direct local clients require the configured Bearer token. Hosted or remote MCP clients reach that origin only through the operator-owned Cloudflare Tunnel and Access application; the Tunnel is network ingress, not an identity assertion.
 
-Do not expose the Runtime service directly on a public or shared interface. Rotate the Bearer token and tunnel credentials after suspected disclosure.
+For Cloudflare Access Managed OAuth, Access owns the public OAuth authorization-server flow and resolves the client's opaque access token into a signed `Cf-Access-Jwt-Assertion` for the origin. Runtime accepts that assertion only after verifying its RS256 signature against the configured Access JWKS and matching its issuer, application audience, and expiry. A merely present Access header is never authentication. JWKS retrieval is lazy and fail-closed for Access requests so remote identity does not become a startup dependency of the trusted-local Runtime.
+
+Do not expose the Runtime service directly on a public or shared interface, send the local Runtime Bearer token to hosted MCP clients, or treat Cloudflare Tunnel reachability as authorization. Rotate the Bearer token and tunnel credentials after suspected disclosure.
 
 ## Sensitive data
 
