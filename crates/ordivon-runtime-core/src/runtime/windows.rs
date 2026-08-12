@@ -118,7 +118,6 @@ impl WindowsExecutionConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct WindowsRuntimeContextSnapshot {
     pub schema_version: u32,
-    pub provider_contract: super::ExecutionProviderContract,
     pub token_selection: String,
     pub token_user_sid: String,
     pub token_type: i32,
@@ -270,7 +269,6 @@ fn validate_windows_runtime_context(
         }
     };
     if snapshot.schema_version != 1
-        || snapshot.provider_contract != super::ExecutionProviderContract::WindowsNativeLauncherV2
         || snapshot.token_user_sid.is_empty()
         || snapshot.token_type != 1
         || !token_authority_valid
@@ -647,7 +645,6 @@ mod tests {
     fn windows_runtime_context_rejects_elevated_or_ambient_environment_claims() {
         let mut snapshot = WindowsRuntimeContextSnapshot {
             schema_version: 1,
-            provider_contract: crate::runtime::ExecutionProviderContract::WindowsNativeLauncherV2,
             token_selection: "lua_medium_filtered".to_string(),
             token_user_sid: "S-1-5-21-test-1001".to_string(),
             token_type: 1,
@@ -662,12 +659,6 @@ mod tests {
                 .collect(),
         };
         validate_windows_runtime_context(&snapshot, WindowsAuthority::Limited).unwrap();
-        let mut legacy_provider = snapshot.clone();
-        legacy_provider.provider_contract =
-            crate::runtime::ExecutionProviderContract::WindowsNativeLauncherV1;
-        assert!(
-            validate_windows_runtime_context(&legacy_provider, WindowsAuthority::Limited).is_err()
-        );
         snapshot.token_is_elevated = true;
         assert!(validate_windows_runtime_context(&snapshot, WindowsAuthority::Limited).is_err());
         snapshot.token_is_elevated = false;
@@ -685,7 +676,6 @@ mod tests {
             .collect();
         let mut elevated = WindowsRuntimeContextSnapshot {
             schema_version: 1,
-            provider_contract: crate::runtime::ExecutionProviderContract::WindowsNativeLauncherV2,
             token_selection: "current_elevated".to_string(),
             token_user_sid: "S-1-5-21-test-1001".to_string(),
             token_type: 1,

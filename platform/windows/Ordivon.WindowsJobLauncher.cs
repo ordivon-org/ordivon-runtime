@@ -285,7 +285,6 @@ internal static class OrdivonWindowsJobLauncher
         public ulong? StderrLimitBytes;
         public ulong? TimeoutMs;
         public bool DescribeRuntimeContext;
-        public bool ReclaimInputPresentation;
         public ExecutionAuthority Authority = ExecutionAuthority.Limited;
         public readonly List<string> ContextEnvironmentNames = new List<string>();
 
@@ -461,9 +460,7 @@ internal static class OrdivonWindowsJobLauncher
         try
         {
             Options options = ParseOptions(args);
-            if (options.DescribeRuntimeContext) return DescribeRuntimeContext(options);
-            if (options.ReclaimInputPresentation) return ReclaimInputPresentation(options);
-            return Run(options);
+            return options.DescribeRuntimeContext ? DescribeRuntimeContext(options) : Run(options);
         }
         catch (Exception error)
         {
@@ -494,11 +491,6 @@ internal static class OrdivonWindowsJobLauncher
             if (current == "--describe-runtime-context")
             {
                 options.DescribeRuntimeContext = true;
-                continue;
-            }
-            if (current == "--reclaim-input-presentation")
-            {
-                options.ReclaimInputPresentation = true;
                 continue;
             }
             if (current == "--diagnostics")
@@ -648,29 +640,6 @@ internal static class OrdivonWindowsJobLauncher
             }
         }
 
-        if (options.ReclaimInputPresentation)
-        {
-            if (options.DescribeRuntimeContext
-                || options.RuntimeMode
-                || !String.IsNullOrWhiteSpace(options.Executable)
-                || !String.IsNullOrWhiteSpace(options.InputSourceRoot)
-                || !String.IsNullOrWhiteSpace(options.InputPresentationRoot)
-                || options.TargetArguments.Count != 0
-                || options.Environment.Count != 0
-                || options.ContextEnvironmentNames.Count != 0
-                || options.Authority != ExecutionAuthority.Limited)
-            {
-                throw new InvalidOperationException("input presentation reclamation cannot be combined with execution or context options");
-            }
-            if (String.IsNullOrWhiteSpace(options.InputSetId)
-                || options.InputSetId.Length != 64
-                || !IsLowerHex(options.InputSetId)
-                || !IsSha256Digest(options.InputBindingsDigest))
-            {
-                throw new InvalidOperationException("input presentation reclamation requires valid --input-set-id and --input-bindings-digest");
-            }
-            return options;
-        }
         if (options.DescribeRuntimeContext)
         {
             if (options.RuntimeMode || !String.IsNullOrWhiteSpace(options.Executable) || options.TargetArguments.Count != 0)
@@ -832,7 +801,6 @@ internal static class OrdivonWindowsJobLauncher
             environmentJson.Append('}');
             string json = "{" +
                 "\"schemaVersion\":1," +
-                "\"providerContract\":\"windows_native_launcher_v2\"," +
                 TokenEvidenceJsonFields(evidence) + "," +
                 "\"environment\":" + environmentJson.ToString() +
                 "}";
@@ -1712,76 +1680,6 @@ internal static class OrdivonWindowsJobLauncher
             throw new InvalidOperationException("runtime evidence path already exists: " + path);
         }
         File.Move(temporary, path);
-    }
-
-    private static int ReclaimInputPresentation(Options options)
-    {
-        string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-        if (String.IsNullOrWhiteSpace(programData))
-        {
-            throw new InvalidOperationException("Windows CommonApplicationData is unavailable");
-        }
-        string parent = Path.GetFullPath(Path.Combine(programData, "OrdivonImmutableInputs"));
-        string presentation = Path.GetFullPath(Path.Combine(parent, options.InputSetId));
-        string quarantine = Path.GetFullPath(Path.Combine(parent, "." + options.InputSetId + ".reclaiming"));
-        string expectedParent = Path.GetDirectoryName(presentation);
-        if (!String.Equals(parent, expectedParent, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException("input presentation reclamation escaped provider authority");
-        }
-        bool presentationExists = Directory.Exists(presentation) || File.Exists(presentation);
-        bool quarantineExists = Directory.Exists(quarantine) || File.Exists(quarantine);
-        if (presentationExists && quarantineExists)
-        {
-            throw new InvalidOperationException("input presentation and reclaim quarantine both exist");
-        }
-        string disposition;
-        if (presentationExists)
-        {
-            string observed = InputTreeDigest(presentation);
-            if (!String.Equals(observed, options.InputBindingsDigest, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    "input presentation differs from committed bindings: expected "
-                    + options.InputBindingsDigest + ", observed " + observed);
-            }
-            Directory.Move(presentation, quarantine);
-            string quarantinedDigest = InputTreeDigest(quarantine);
-            if (!String.Equals(quarantinedDigest, options.InputBindingsDigest, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException("input presentation changed while entering reclaim quarantine");
-            }
-            disposition = "deleted";
-        }
-        else if (quarantineExists)
-        {
-            string observed = InputTreeDigest(quarantine);
-            if (!String.Equals(observed, options.InputBindingsDigest, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    "reclaim quarantine differs from committed bindings: expected "
-                    + options.InputBindingsDigest + ", observed " + observed);
-            }
-            disposition = "deleted_recovered_quarantine";
-        }
-        else
-        {
-            Console.Out.WriteLine("{\"schemaVersion\":1,\"disposition\":\"absent\",\"inputSetId\":"
-                + JsonString(options.InputSetId) + ",\"inputBindingsDigest\":"
-                + JsonString(options.InputBindingsDigest) + ",\"presentationRoot\":"
-                + JsonString(presentation) + "}");
-            return 0;
-        }
-        Directory.Delete(quarantine, true);
-        if (Directory.Exists(presentation) || Directory.Exists(quarantine))
-        {
-            throw new InvalidOperationException("input presentation reclamation did not remove provider state");
-        }
-        Console.Out.WriteLine("{\"schemaVersion\":1,\"disposition\":" + JsonString(disposition)
-            + ",\"inputSetId\":" + JsonString(options.InputSetId)
-            + ",\"inputBindingsDigest\":" + JsonString(options.InputBindingsDigest)
-            + ",\"presentationRoot\":" + JsonString(presentation) + "}");
-        return 0;
     }
 
     private static void PrepareImmutableInputs(Options options, TokenEvidence tokenEvidence)

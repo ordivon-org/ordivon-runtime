@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily Ordivon Runtime lifecycle maintenance
+Description=Daily Ordivon Runtime Workspace lifecycle sweep
 
 [Timer]
 OnCalendar=daily

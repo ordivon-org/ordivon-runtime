@@ -781,75 +781,11 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
         "P5_WINDOWS_IMMUTABLE_INPUT v1Job={} v2Job={} replayHistorical=true staleRejected=true limitedMutationSetDenied=true elevatedRejected=true",
         input_first.job_id, current.job_id,
     );
-    let current_artifacts = runtime.registry().list_artifacts(&current.job_id).unwrap();
-    let current_start = current_artifacts
-        .iter()
-        .find(|artifact| artifact.kind == "windows_start")
-        .unwrap();
-    let current_start_value: serde_json::Value = serde_json::from_str(
-        &runtime
-            .read_artifact(&ArtifactReadRequest {
-                schema_version: RUNTIME_SCHEMA_VERSION,
-                job_id: current.job_id.clone(),
-                artifact_id: current_start.artifact_id.clone(),
-                offset: 0,
-                max_bytes: 65_536,
-            })
-            .unwrap()
-            .content,
-    )
-    .unwrap();
-    for (set_id, bindings_digest) in [
-        (
-            input_set_id,
-            input_start_value["inputBindingsDigest"].as_str().unwrap(),
-        ),
-        (
-            current_input_set_id,
-            current_start_value["inputBindingsDigest"].as_str().unwrap(),
-        ),
-    ] {
-        let presentation = PathBuf::from("/mnt/c/ProgramData/OrdivonImmutableInputs").join(set_id);
-        let reclaimed = Command::new(&launcher)
-            .args([
-                "--reclaim-input-presentation",
-                "--input-set-id",
-                set_id,
-                "--input-bindings-digest",
-                bindings_digest,
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            reclaimed.status.success(),
-            "{}",
-            String::from_utf8_lossy(&reclaimed.stderr)
-        );
-        let reclaim_value: serde_json::Value = serde_json::from_slice(&reclaimed.stdout).unwrap();
-        assert_eq!(reclaim_value["disposition"], "deleted");
-        assert!(!presentation.exists());
-        let replayed_reclaim = Command::new(&launcher)
-            .args([
-                "--reclaim-input-presentation",
-                "--input-set-id",
-                set_id,
-                "--input-bindings-digest",
-                bindings_digest,
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            replayed_reclaim.status.success(),
-            "{}",
-            String::from_utf8_lossy(&replayed_reclaim.stderr)
-        );
-        let replayed_reclaim_value: serde_json::Value =
-            serde_json::from_slice(&replayed_reclaim.stdout).unwrap();
-        assert_eq!(replayed_reclaim_value["disposition"], "absent");
-    }
-    println!(
-        "HP0_WINDOWS_INPUT_RECLAIM v1Set={} v2Set={} exactDeleted=true absentIdempotent=true",
-        input_set_id, current_input_set_id,
+    let _ = fs::remove_dir_all(
+        PathBuf::from("/mnt/c/ProgramData/OrdivonImmutableInputs").join(input_set_id),
+    );
+    let _ = fs::remove_dir_all(
+        PathBuf::from("/mnt/c/ProgramData/OrdivonImmutableInputs").join(current_input_set_id),
     );
 
     let limited_admin_marker = format!("LIMITED_{}", Uuid::now_v7());
@@ -2608,6 +2544,90 @@ fn runtime_blocks_workspace_mutation_while_source_state_is_committed_by_active_j
             }],
         })
         .unwrap();
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_systemd_path_rejects_source_drift_before_target_spawn() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("systemd-source-drift");
+    context.write(
+        "source_drift.py",
+        "from pathlib import Path\nPath('effect-marker').write_text('spawned')\n",
+    );
+    let real_runner = context.executor.runner_path.clone();
+    let delayed_runner = context.root.join("delayed-runner.sh");
+    let workspace = context
+        .executor
+        .store_root
+        .join("workspaces")
+        .join(&context.workspace_id);
+    fs::write(
+        &delayed_runner,
+        format!(
+            "#!/bin/sh\nprintf 'trusted-host drift\n' > '{}/README.md'\nexec '{}' \"$@\"\n",
+            workspace.display(),
+            real_runner.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&delayed_runner).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&delayed_runner, permissions).unwrap();
+
+    let mut executor = context.executor.clone();
+    executor.runner_path = delayed_runner;
+    let runtime = Runtime::new(RuntimeConfig {
+        registry: context.registry.clone(),
+        executor,
+        startup_grace_ms: 10_000,
+        windows: None,
+    })
+    .unwrap();
+    let request = context.request("source_drift.py", 10_000);
+    let observed = runtime.run_task(&request).unwrap();
+    assert_eq!(observed.status, "failed");
+    assert_eq!(observed.exit_code, None);
+    assert!(observed
+        .error_summary
+        .as_deref()
+        .is_some_and(|message| message.contains("WorkspaceStateMismatch")));
+    assert!(!workspace.join("effect-marker").exists());
+
+    let attempt = runtime
+        .registry()
+        .get_latest_attempt(&observed.job_id)
+        .unwrap()
+        .unwrap();
+    let runner_start: serde_json::Value = serde_json::from_slice(
+        &fs::read(Path::new(&attempt.bundle_path).join("runner-start.json")).unwrap(),
+    )
+    .unwrap();
+    let runner_observed_source = runner_start
+        .get("observedWorkspaceSourceDigest")
+        .and_then(serde_json::Value::as_str)
+        .expect("Runner start must record observed Workspace source state");
+    let job = runtime.registry().get_job(&observed.job_id).unwrap();
+    let plan: RuntimeExecutionPlan = serde_json::from_str(&job.execution_plan_json).unwrap();
+    assert_ne!(
+        runner_observed_source,
+        plan.workspace_source_digest
+            .as_deref()
+            .expect("Job must commit Workspace source state")
+    );
+
+    let connection = Connection::open(&context.registry.db_path).unwrap();
+    let reason: String = connection
+        .query_row(
+            "SELECT reason_code FROM job_events WHERE job_id=?1 AND event_type='JOB_TERMINAL'",
+            [&observed.job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reason, "WORKSPACE_SOURCE_PRECONDITION_DRIFT");
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }
 
 #[test]
