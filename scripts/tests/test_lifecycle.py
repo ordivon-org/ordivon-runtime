@@ -85,6 +85,28 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.module["nonnegative_float"]("-1")
 
+    def test_packaged_lifecycle_unit_only_invokes_supported_lifecycle_commands(self) -> None:
+        unit = (REPO / "packaging/systemd/ordivon-runtime-lifecycle.service").read_text(
+            encoding="utf-8"
+        )
+        marker = "/ordivon-runtime-lifecycle "
+        commands = [
+            line.split(marker, 1)[1].split()[0]
+            for line in unit.splitlines()
+            if marker in line
+        ]
+        self.assertTrue(commands)
+        help_result = subprocess.run(
+            [sys.executable, "scripts/ordivon-runtime-lifecycle", "--help"],
+            cwd=REPO,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        for command in commands:
+            self.assertIn(command, help_result.stdout)
+        self.assertNotIn("inputs-sweep", commands)
+
     def test_inspect_applies_retention_class_and_last_activity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
