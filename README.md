@@ -184,7 +184,7 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md). A change must identify an observed fa
 ## Project family
 
 - [Public project directory](https://ordivon.com/projects) — reader-facing role, maturity, and next steps.
-- [Cross-project map](https://github.com/zycxfyh/ordivon-computing/blob/main/projects/README.md) — stable roles, repository links, and authority entry points for all nine repositories.
+- [Cross-project map](https://github.com/zycxfyh/ordivon-computing/blob/main/projects/README.md) — stable roles, repository links, and authority entry points for the current project family.
 - Related owners: [Ordivon Host](https://github.com/zycxfyh/ordivon-host) preserves durable Task continuity; [Ordivon Harness](https://github.com/zycxfyh/ordivon-harness) owns Assignment-scoped Agent Runs.
 
 ## License

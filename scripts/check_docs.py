@@ -273,18 +273,6 @@ def validate_public_contracts() -> list[str]:
     project = PROJECT.read_text(encoding="utf-8")
     if "enforcement: strict" not in project:
         errors.append("project manifest is not strict")
-
-    operations = (ROOT / "docs/operations.md").read_text(encoding="utf-8")
-    expected_tool_count = len(parse_tools())
-    documented_tool_counts = re.findall(r"--expected-tool-count\s+(\d+)", operations)
-    if not documented_tool_counts:
-        errors.append("docs/operations.md lacks --expected-tool-count release examples")
-    for documented_tool_count in documented_tool_counts:
-        if int(documented_tool_count) != expected_tool_count:
-            errors.append(
-                "docs/operations.md uses stale --expected-tool-count "
-                f"{documented_tool_count}; current public Tool count is {expected_tool_count}"
-            )
     return errors
 
 

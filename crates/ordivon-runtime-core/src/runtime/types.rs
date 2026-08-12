@@ -423,7 +423,6 @@ pub struct InputBindingRequest {
 pub enum ExecutionProviderContract {
     LocalLinuxRunnerV1,
     WindowsNativeLauncherV1,
-    WindowsNativeLauncherV2,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]

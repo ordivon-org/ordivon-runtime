@@ -1497,7 +1497,7 @@ impl Runtime {
                     io_error("canonicalize Windows execution provider launcher", error)
                 })?;
                 Ok(ExecutionProviderSnapshot {
-                    contract: ExecutionProviderContract::WindowsNativeLauncherV2,
+                    contract: ExecutionProviderContract::WindowsNativeLauncherV1,
                     executable_digest: sha256_file(&launcher).map_err(map_universal_error)?,
                     wsl_distribution: Some(windows.wsl_distribution.clone()),
                 })
