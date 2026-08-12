@@ -62,7 +62,7 @@ Runtime does **not** automatically redact command arguments, environment values 
 | Workspace records and worktrees | `/var/lib/ordivon/runtime/` | isolated source state and lifecycle identity | policy classes: ephemeral, review, or pinned; dirty/active/unknown state is never removed automatically |
 | execution caches | `/var/lib/ordivon/runtime/cache/` | reusable package and build state | capacity-driven reclamation; protected while referenced |
 | immutable input staging and Job-owned bytes | `/var/lib/ordivon/runtime/input-materializations/` and `/var/lib/ordivon/runtime/job-inputs/` | exact digest-verified foreign bytes prepared during admission and then owned by the admitted input-bound Job | retained with current Runtime state; no automatic per-set reclamation contract yet |
-| Windows immutable-input presentations | `%ProgramData%\OrdivonImmutableInputs\<inputSetId>` | reconstructible native NTFS realization of one committed Job-owned input tree for a limited Windows child | terminal-only receipted reclamation after the configured grace period; nonterminal/reserved state is protected and mismatched provider bytes are preserved for diagnosis |
+| Windows immutable-input presentations | `%ProgramData%\OrdivonImmutableInputs\<inputSetId>` | reconstructible native NTFS realization of one committed Job-owned input tree for a limited Windows child | retained as provider-owned realization state; it is not the authority copy and no automatic presentation GC contract is claimed yet |
 | protocol trace | configured `ORDIVON_TRACE_PATH` | bounded protocol-version and client observations | current segment plus one rotated segment |
 | deployment receipts | `/var/lib/ordivon/deployments/` | binary, protocol, rollback, and catalog proof | current rollback and audit evidence; explicit pruning only |
 | lifecycle, reclaim, cache, repair, and quarantine receipts | Runtime state roots | prove administrative actions and preserve uncertain bytes | explicit operator policy; quarantine is never silently deleted |
@@ -101,7 +101,7 @@ These controls protect against ordinary local disclosure. They do not protect da
 
 ## Retention
 
-Workspace retention is policy-driven and implemented through `ordivon-runtime-lifecycle`; it never deletes dirty, active, pinned, unknown, or orphan-directory state automatically. The same installed lifecycle operator may reclaim only the reconstructible Windows native immutable-input presentation for a terminal Job after its configured grace period. It derives eligibility from durable Job/Attempt truth, rechecks before apply, and delegates exact NTFS inventory/digest verification to the current receipt-bound Windows launcher. Missing presentation state is an idempotent no-op; digest mismatch, reparse ambiguity, or conflicting canonical/quarantine state fails closed and preserves bytes. The Runtime-owned `/var/lib/ordivon/runtime/job-inputs/<jobId>` exact copy is **not** reclaimed by this policy.
+Workspace retention is policy-driven and implemented through `ordivon-runtime-lifecycle`; it never deletes dirty, active, pinned, unknown, or orphan-directory state automatically.
 
 Job, Attempt, event, Artifact, and terminal-evidence history is currently append-oriented and has no automatic per-record deletion path. This preserves idempotency, reconciliation, and recovery evidence. Operators who require bounded historical retention must use one of two explicit models:
 
@@ -132,10 +132,6 @@ There are three deletion levels:
 ### Workspace release
 
 Use `workspace.close` or the receipted lifecycle/reclaim tools. Never delete a worktree directory directly. Closure refuses active Jobs and dirty state unless the caller explicitly chooses force and accepts the loss.
-
-### Windows native input-presentation reclamation
-
-Use `ordivon-runtime-lifecycle inputs-inspect` before mutation and `inputs-sweep` for receipted terminal-only reclamation. The packaged daily policy keeps a 24-hour terminal grace period. `--job-id` may narrow an inspection or explicit maintenance run to exact Jobs. This removes only the reconstructible `%ProgramData%\OrdivonImmutableInputs\<inputSetId>` provider realization after exact verification; it does not delete the admitted Job-owned input bytes or execution evidence.
 
 ### Cache deletion
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=Ordivon Runtime lifecycle maintenance
+Description=Ordivon Runtime Workspace lifecycle sweep
 After=ordivon-runtime.service
 Requires=ordivon-runtime.service
 
@@ -9,5 +9,4 @@ User=root
 Group=root
 UMask=0077
 ExecStart=/usr/local/libexec/ordivon/ordivon-runtime-lifecycle sweep --database /var/lib/ordivon/registry/registry.sqlite3 --runtime-store-root /var/lib/ordivon/runtime --policy-file /etc/ordivon/workspace-retention.json --env-file /etc/ordivon/ordivon-runtime.env --receipt-root /var/lib/ordivon/runtime/lifecycle-receipts --lock-file /run/ordivon-runtime-lifecycle.lock --measure-bytes --confirm-policy APPLY_WORKSPACE_RETENTION_POLICY
-ExecStart=/usr/local/libexec/ordivon/ordivon-runtime-lifecycle inputs-sweep --database /var/lib/ordivon/registry/registry.sqlite3 --env-file /etc/ordivon/ordivon-runtime.env --minimum-terminal-age-hours 24 --receipt-root /var/lib/ordivon/runtime/input-presentation-receipts --lock-file /run/ordivon-runtime-lifecycle.lock --confirm-policy RECLAIM_TERMINAL_WINDOWS_INPUT_PRESENTATIONS
 ExecStart=/usr/local/libexec/ordivon/ordivon-runtime-cache prune --database /var/lib/ordivon/registry/registry.sqlite3 --runtime-store-root /var/lib/ordivon/runtime --receipt-root /var/lib/ordivon/runtime/cache-receipts --lock-file /run/ordivon-runtime-cache.lock --high-watermark-bytes 68719476736 --low-watermark-bytes 51539607552 --confirm-policy PRUNE_EXECUTION_CACHES

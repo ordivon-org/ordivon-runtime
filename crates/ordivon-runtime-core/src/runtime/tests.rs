@@ -5760,7 +5760,7 @@ fn execution_provider_contract_must_match_execution_target() {
     let sandbox = Sandbox::new("execution-provider-target", 5_000);
     let mut submission = request(&sandbox, "request:provider-target", 4);
     submission.execution_provider = Some(ExecutionProviderSnapshot {
-        contract: ExecutionProviderContract::WindowsNativeLauncherV2,
+        contract: ExecutionProviderContract::WindowsNativeLauncherV1,
         executable_digest: digest(b"launcher"),
         wsl_distribution: Some("archlinux".to_string()),
     });

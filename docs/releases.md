@@ -40,7 +40,7 @@ Runtime does not compress every compatibility question into one SemVer number.
 | Tool catalog digest | exact generated Tool names, annotations, and schemas |
 | Runtime schema version | public request and response structure |
 | Registry migration version and checksums | persisted execution-state interpretation |
-| deployment receipt | exact source commit, toolchain, candidate/installed Runtime artifacts including target-bound systemd units, any configured repository-owned Windows provider transition, protocol, and catalog |
+| deployment receipt | exact source commit, toolchain, candidate binaries, installed binaries, protocol, and catalog |
 
 A release version helps users discuss change. It does not replace the stronger identities required for replay, recovery, migration, or rollback.
 
@@ -90,11 +90,11 @@ A releasable commit must have:
 3. an updated Changelog entry;
 4. generated Tool reference with no diff;
 5. a clean source tree and fixed Rust toolchain;
-6. a deployment candidate manifest binding toolchain identity plus every release artifact's kind, constrained destination target, mode, size, and digest; the default release includes all three repository-owned systemd units, and on a Windows-configured node the manifest also binds the exact Windows launcher contract, pinned build contract, source/compiler identity, and freshly compiled candidate digest; byte variation from the legacy non-deterministic C# compiler does not by itself require a provider transition;
+6. a deployment candidate manifest binding toolchain identity and binary digests;
 7. a successful deployment plan;
-8. after deployment, a receipt binding the complete installed release-artifact targets, digests, and modes; the selected systemd unit directory and manager reload are part of the cutover/rollback contract, alongside the Windows provider disposition (`transitionNeeded` / `transitionApplied`), receipt-proven build provenance, exact retained-or-installed launcher identity, environment-file before/after digests, protocol lifecycle, supported versions, and Tool catalog digest;
+8. after deployment, a receipt binding the complete installed release-artifact digests and modes, protocol lifecycle, supported versions, and Tool catalog digest;
 9. for a release that changes the structured self-release contract, an exact `release.apply` → Runtime ingress replacement → reconnect → `release.get` acceptance proving the same effect identity/receipt is reconciled without a second physical deployment;
-10. a verified previous-artifact-set rollback path—including receipt-bound systemd units when present—while that rollback window remains supported.
+10. a verified previous-binary rollback path while that rollback window remains supported.
 
 Documentation-only changes do not require redeploying identical binaries, but public canonical documents must pass the documentation contract and identify when production behavior remains on an earlier code-equivalent commit.
 
@@ -118,7 +118,7 @@ Do not copy every commit. Include changes that affect use, operation, compatibil
 
 ## Rollback
 
-The receipt-bound previous artifact set remains the supported rollback boundary while its migrations and compatibility storage remain valid. A release that removes that path requires an explicit major cutover and archival decision.
+The receipt-bound previous binary remains the supported rollback boundary while its migrations and compatibility storage remain valid. A release that removes that path requires an explicit major cutover and archival decision.
 
 ## Deprecation and deletion
 
