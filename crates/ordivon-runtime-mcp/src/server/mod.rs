@@ -903,7 +903,10 @@ impl From<RuntimeError> for ToolError {
             .and_then(|value| value.as_str().map(ToString::to_string))
             .unwrap_or_else(|| "EXECUTION_ERROR".to_string());
         let committed_operation = error.operation_id.is_some();
-        let capacity_scope = error.capacity.as_deref().map(|capacity| capacity.scope.clone());
+        let capacity_scope = error
+            .capacity
+            .as_deref()
+            .map(|capacity| capacity.scope.clone());
         let (retry_class, commit_state) = if committed_operation {
             (ToolRetryClass::ReconcileFirst, ToolCommitState::Committed)
         } else {
@@ -928,10 +931,9 @@ impl From<RuntimeError> for ToolError {
                         // Another Workspace consumed the global capacity pool.
                         // The target Workspace has no active writer; the same
                         // request may be retried after capacity frees.
-                        Some("global") => (
-                            ToolRetryClass::WaitThenRetry,
-                            ToolCommitState::NotStarted,
-                        ),
+                        Some("global") => {
+                            (ToolRetryClass::WaitThenRetry, ToolCommitState::NotStarted)
+                        }
                         _ => (ToolRetryClass::SafeSameRequest, ToolCommitState::NotStarted),
                     }
                 }
