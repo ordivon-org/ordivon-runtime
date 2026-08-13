@@ -1,6 +1,12 @@
 [advisories]
 version = 2
-ignore = []
+# RUSTSEC-2023-0071 (Marvin Attack) is a timing sidechannel in RSA PKCS#1 v1.5
+# decryption. Runtime pulls the `rsa` crate only through jsonwebtoken's
+# rust_crypto feature for RS256 signature verification and never performs
+# PKCS#1 v1.5 decryption, so the attack path is unreachable. Upstream offers no
+# safe upgrade: PKCS#1 v1.5 decryption is inherently vulnerable and the
+# mitigation is OAEP, which Runtime does not use.
+ignore = ["RUSTSEC-2023-0071"]
 
 [licenses]
 version = 2
@@ -8,9 +14,13 @@ allow = [
   "Apache-2.0",
   "BSD-2-Clause",
   "BSD-3-Clause",
+  # webpki-roots: root-CA certificate DATA (not code), Mozilla-derived
+  "CDLA-Permissive-2.0",
   "ISC",
   "MIT",
   "Unicode-3.0",
+  # foldhash: permissive zlib license, same family as MIT/BSD
+  "Zlib",
 ]
 
 [bans]
