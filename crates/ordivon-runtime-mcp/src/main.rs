@@ -34,6 +34,7 @@ use access_auth::{CloudflareAccessConfig, CloudflareAccessVerifier};
 #[derive(Clone)]
 struct HttpState {
     bearer: Arc<str>,
+    remote_bearer: Option<Arc<str>>,
     trace_path: Option<Arc<PathBuf>>,
     body_limit_bytes: u64,
     cf_access: Option<Arc<CloudflareAccessVerifier>>,
@@ -52,6 +53,7 @@ struct InputAuthorityConfig {
 struct AppConfig {
     bind: SocketAddr,
     token: String,
+    remote_token: Option<String>,
     body_limit_bytes: usize,
     cf_access: Option<CloudflareAccessConfig>,
     reconcile_interval_ms: u64,
@@ -124,6 +126,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(Arc::new);
     let http_state = HttpState {
         bearer: Arc::from(format!("Bearer {}", app.token)),
+        remote_bearer: app
+            .remote_token
+            .as_ref()
+            .map(|token| Arc::from(format!("Bearer {token}"))),
         trace_path: app
             .server
             .trace_path
@@ -254,6 +260,7 @@ async fn authenticate_and_trace(
 enum AuthSource {
     None,
     LocalBearer,
+    RemoteBearer,
     CloudflareAccess,
 }
 
@@ -262,6 +269,7 @@ impl AuthSource {
         match self {
             Self::None => "none",
             Self::LocalBearer => "local_bearer",
+            Self::RemoteBearer => "remote_bearer",
             Self::CloudflareAccess => "cloudflare_access",
         }
     }
@@ -274,6 +282,13 @@ async fn request_auth_source(headers: &HeaderMap, state: &HttpState) -> AuthSour
         .unwrap_or_default();
     if constant_time_eq(supplied.as_bytes(), state.bearer.as_bytes()) {
         return AuthSource::LocalBearer;
+    }
+    if state
+        .remote_bearer
+        .as_deref()
+        .is_some_and(|remote| constant_time_eq(supplied.as_bytes(), remote.as_bytes()))
+    {
+        return AuthSource::RemoteBearer;
     }
     let Some(verifier) = state.cf_access.as_deref() else {
         return AuthSource::None;
@@ -327,6 +342,18 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     let token = load_bearer_token()?;
     if token.len() < 32 {
         return Err("Runtime Bearer token must be at least 32 characters".into());
+    }
+    let remote_token = load_remote_bearer_token()?;
+    if remote_token.as_ref().is_some_and(|token| token.len() < 32) {
+        return Err("Remote Runtime Bearer token must be at least 32 characters".into());
+    }
+    if remote_token
+        .as_ref()
+        .is_some_and(|remote| constant_time_eq(remote.as_bytes(), token.as_bytes()))
+    {
+        return Err(
+            "Remote Runtime Bearer token must differ from the local Runtime Bearer token".into(),
+        );
     }
     let store_root = PathBuf::from(required_env("ORDIVON_STORE_ROOT")?);
     let registry_root = PathBuf::from(required_env("ORDIVON_REGISTRY_ROOT")?);
@@ -492,6 +519,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     Ok(AppConfig {
         bind,
         token,
+        remote_token,
         body_limit_bytes,
         cf_access,
         reconcile_interval_ms,
@@ -544,24 +572,44 @@ fn load_bearer_token() -> Result<String, Box<dyn std::error::Error>> {
     }
 }
 
+fn load_remote_bearer_token() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    optional_env("ORDIVON_REMOTE_BEARER_TOKEN_FILE")?
+        .map(|path| {
+            read_private_token_file_for(
+                Path::new(&path),
+                "ORDIVON_REMOTE_BEARER_TOKEN_FILE",
+                "Remote Runtime Bearer token",
+            )
+        })
+        .transpose()
+}
+
 fn read_private_token_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    read_private_token_file_for(path, "ORDIVON_BEARER_TOKEN_FILE", "Runtime Bearer token")
+}
+
+fn read_private_token_file_for(
+    path: &Path,
+    env_name: &str,
+    label: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     if !path.is_absolute() {
-        return Err("ORDIVON_BEARER_TOKEN_FILE must be absolute".into());
+        return Err(format!("{env_name} must be absolute").into());
     }
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() {
-        return Err("Runtime Bearer token path must be a regular file".into());
+        return Err(format!("{label} path must be a regular file").into());
     }
     if metadata.permissions().mode() & 0o077 != 0 {
-        return Err("Runtime Bearer token file must not be accessible by group or others".into());
+        return Err(format!("{label} file must not be accessible by group or others").into());
     }
     if metadata.len() > MAX_BEARER_TOKEN_FILE_BYTES {
-        return Err("Runtime Bearer token file exceeds the configured bound".into());
+        return Err(format!("{label} file exceeds the configured bound").into());
     }
     let raw = fs::read_to_string(path)?;
     let token = raw.trim();
     if token.is_empty() || token.chars().any(char::is_whitespace) {
-        return Err("Runtime Bearer token file must contain one non-whitespace token".into());
+        return Err(format!("{label} file must contain one non-whitespace token").into());
     }
     Ok(token.to_owned())
 }
@@ -648,6 +696,9 @@ mod tests {
     fn auth_state() -> HttpState {
         HttpState {
             bearer: Arc::from("Bearer local-secret-token-value-1234567890"),
+            remote_bearer: Some(Arc::from(
+                "Bearer remote-agent-secret-token-value-1234567890",
+            )),
             trace_path: None,
             body_limit_bytes: 1024,
             cf_access: None,
@@ -692,7 +743,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_bearer_is_valid_but_unverified_access_header_is_not() {
+    async fn local_and_remote_bearers_are_valid_but_unverified_access_header_is_not() {
         let mut bearer = HeaderMap::new();
         bearer.insert(
             header::AUTHORIZATION,
@@ -701,6 +752,15 @@ mod tests {
         assert_eq!(
             request_auth_source(&bearer, &auth_state()).await,
             AuthSource::LocalBearer
+        );
+
+        bearer.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer remote-agent-secret-token-value-1234567890"),
+        );
+        assert_eq!(
+            request_auth_source(&bearer, &auth_state()).await,
+            AuthSource::RemoteBearer
         );
 
         let mut access = HeaderMap::new();

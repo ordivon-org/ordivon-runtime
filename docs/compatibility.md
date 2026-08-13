@@ -22,20 +22,20 @@ Its `compatibility` section combines the current deployment receipt, a bounded t
 
 ## Remote MCP authentication compatibility
 
-Remote authentication is an edge compatibility contract, not a Runtime protocol lifecycle. The Runtime origin remains loopback-only and keeps a private static Bearer credential for trusted-local clients. That credential is not an interoperability mechanism and must never be copied into hosted AI platforms.
+Remote authentication is an edge compatibility contract, not a Runtime protocol lifecycle. The Runtime origin remains loopback-only. Its private local Bearer credential is reserved for trusted-local callers and must never be copied into a hosted AI platform.
 
-The public MCP path is split deliberately:
+Two public ingress modes are intentionally supported because hosted MCP clients do not expose one uniform authorization surface:
 
-1. Cloudflare Tunnel provides public HTTPS ingress to the loopback origin but does not establish identity.
-2. Cloudflare Access Managed OAuth acts as the public OAuth authorization server and protected-resource facade for hosted or interactive MCP clients.
-3. Access forwards a signed `Cf-Access-Jwt-Assertion` after OAuth authorization.
-4. Runtime verifies that assertion's RS256 signature, exact issuer, Access application audience, and expiry against Access JWKS before admitting the request.
+1. **Managed OAuth path** — `mcp.ordivon.com` uses Cloudflare Tunnel plus Cloudflare Access Managed OAuth. Access forwards a signed `Cf-Access-Jwt-Assertion`, and Runtime verifies its RS256 signature, exact issuer, Access application audience, and expiry against Access JWKS before admission.
+2. **Direct Bearer path** — an operator-owned dedicated hostname may use Cloudflare Tunnel without an Access application. The hosted client sends `Authorization: Bearer ...`; Runtime accepts only the separate credential loaded from `ORDIVON_REMOTE_BEARER_TOKEN_FILE`. This credential must differ from the trusted-local Bearer and is traced as `remote_bearer`. A bare Tunnel is therefore reachability only, never authorization.
 
-Runtime retrieves Access JWKS lazily. A JWKS outage therefore fails the Access-authenticated request closed without turning public network availability into a startup dependency of the trusted-local Runtime. A nonempty or syntactically JWT-shaped Access header is never sufficient authentication.
+The direct path exists for clients whose MCP implementation supports static authorization headers but does not interoperate reliably with the edge OAuth flow. It is not a downgrade to anonymous public Runtime access. The remote Bearer is a full-authority Runtime credential, so it must be private, independently rotatable, disclosed only to explicitly approved hosted clients, and removed when that compatibility path is no longer needed.
+
+Runtime retrieves Access JWKS lazily. A JWKS outage therefore fails only Access-authenticated requests closed without turning public network availability into a startup dependency of trusted-local or direct-Bearer Runtime access. A nonempty or syntactically JWT-shaped Access header is never sufficient authentication.
 
 Access currently advertises Dynamic Client Registration (DCR). MCP `2026-07-28` prefers Client ID Metadata Documents (CIMD), while retaining DCR as a compatibility path for authorization servers and clients that have not migrated. Therefore DCR callback policy is tracked as an edge-client compatibility surface rather than being encoded into Runtime Tool or wire semantics. No platform-specific callback, OAuth client identifier, or authorization-server implementation belongs in Runtime Core.
 
-Named callback compatibility is expanded only from official client documentation or a directly observed registration attempt. The current known set includes ChatGPT's existing connector callback, VS Code's loopback/web callbacks, and Claude's documented MCP callbacks. Unknown hosted-client callback URIs, including any not documented by their platform, must not be guessed or covered by broad wildcard domains merely to make registration succeed.
+Named callback compatibility is expanded only from official client documentation or a directly observed registration attempt. Unknown hosted-client callback URIs must not be guessed or covered by broad wildcard domains merely to make registration succeed. Clients that can send a static Bearer may instead use the dedicated direct ingress without changing the Managed OAuth path for clients that already work there.
 
 The legacy `ORDIVON_TRUST_CF_ACCESS` name is retained only as a rollback-compatible enable flag. When it is true, `ORDIVON_CF_ACCESS_ISSUER` and `ORDIVON_CF_ACCESS_AUDIENCE` are mandatory and the assertion is cryptographically verified. Renaming or deleting the legacy flag is eligible only after the receipt-bound previous binary can no longer be restored and one complete compatibility observation window proves no operator configuration depends on the old name.
 

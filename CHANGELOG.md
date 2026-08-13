@@ -4,6 +4,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ## Unreleased
 
+- Remote MCP ingress can now use an independently rotatable hosted-client Bearer credential from `ORDIVON_REMOTE_BEARER_TOKEN_FILE`, distinct from the trusted-local Runtime Bearer and traced as `remote_bearer`. This supports dedicated Cloudflare Tunnel hostnames that intentionally bypass Access for clients with static Authorization-header support while preserving the existing Access JWT path and fail-closed unauthenticated behavior.
+
 - Runtime operational packaging now completes the execution-ownership contraction: the ordinary Runtime release owns the 12 installed Runtime artifacts rather than systemd-unit or Windows-provider bytes, and the packaged lifecycle service no longer invokes the removed Windows input-presentation maintenance command while retaining environment-owned cache pruning.
 
 - Runtime cache retention now follows the current execution authority model: legacy `cache/build/sources/<sha256>/` targets are reclaimable even when the same repository has open Workspaces because no current execution plan consumes them. The obsolete cache `migrate` command that could still move Workspace build bytes into that retired hierarchy is removed; current Workspace-scoped caches remain protected, while shared package-manager caches remain externally owned.

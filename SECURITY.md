@@ -39,7 +39,7 @@ The MCP origin must remain loopback-bound. Direct local clients require the conf
 
 For Cloudflare Access Managed OAuth, Access owns the public OAuth authorization-server flow and resolves the client's opaque access token into a signed `Cf-Access-Jwt-Assertion` for the origin. Runtime accepts that assertion only after verifying its RS256 signature against the configured Access JWKS and matching its issuer, application audience, and expiry. A merely present Access header is never authentication. JWKS retrieval is lazy and fail-closed for Access requests so remote identity does not become a startup dependency of the trusted-local Runtime.
 
-Do not expose the Runtime service directly on a public or shared interface, send the local Runtime Bearer token to hosted MCP clients, or treat Cloudflare Tunnel reachability as authorization. Rotate the Bearer token and tunnel credentials after suspected disclosure.
+Do not expose the Runtime service directly on a public or shared interface, send the local Runtime Bearer token to hosted MCP clients, or treat Cloudflare Tunnel reachability as authorization. A hosted client that cannot use the managed OAuth path may receive only the separate `ORDIVON_REMOTE_BEARER_TOKEN_FILE` credential through a dedicated Tunnel hostname; that credential carries full Runtime authority and must be independently rotatable. Rotate any affected Bearer token and tunnel credentials after suspected disclosure.
 
 ## Sensitive data
 

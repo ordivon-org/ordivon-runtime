@@ -95,7 +95,8 @@ The packaged service uses restrictive permissions:
 - Runtime and Registry state directories created as `0700` where possible;
 - MCP origin restricted to loopback;
 - Bearer authentication required for direct clients;
-- remote access delegated to an operator-owned authenticated tunnel.
+- a dedicated hosted-client Bearer, when configured, is separate from the trusted-local Bearer and remains full Runtime authority;
+- public ingress is operator-owned: either an authenticated Access path or a dedicated Tunnel hostname whose origin still enforces the remote Bearer.
 
 These controls protect against ordinary local disclosure. They do not protect data from root, the installed service user, or commands deliberately executed with that authority.
 
