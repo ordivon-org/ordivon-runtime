@@ -27,6 +27,9 @@ related:
   - runtime.foundations.rf2
   - runtime.foundations.rf2.sources
   - runtime.foundations.rf2.continuation
+  - runtime.foundations.rf3
+  - runtime.foundations.rf3.sources
+  - runtime.foundations.rf3.continuation
 ---
 # Ordivon Runtime Foundations
 
@@ -58,8 +61,8 @@ current engineering reality
 | RF0 | Runtime Phenomenon Space and Existing-System Decomposition | completed |
 | RF1 | State, Change, Event, Transition, Behavior and Dynamics | completed |
 | RF2 | Action, Intent, Proposal, Command and Operation | completed |
-| RF3 | Execution, Realization, Effect and Consequence | next |
-| RF4 | Identity, Sameness, Replay and History | planned |
+| RF3 | Execution, Realization, Effect and Consequence | completed |
+| RF4 | Identity, Sameness, Replay and History | next |
 | RF5 | Time, Ordering, Concurrency and Causality | planned |
 | RF6 | Authority, Capability, Permission and Control | planned |
 | RF7 | Boundary, Environment, Context and Dependency | planned |
@@ -88,8 +91,11 @@ Read the completed foundation chain in order:
 6. `RF2-ACTION-INTENT-PROPOSAL-COMMAND-OPERATION.md`
 7. `RF2-SOURCES.md`
 8. `RF2-CONTINUATION.md`
+9. `RF3-EXECUTION-REALIZATION-EFFECT-CONSEQUENCE.md`
+10. `RF3-SOURCES.md`
+11. `RF3-CONTINUATION.md`
 
-Then continue directly with RF3. Do not reconstruct RF0/RF1/RF2 from memory.
+Then continue directly with RF4. Do not reconstruct RF0/RF1/RF2/RF3 from memory.
 
 ## Boundary
 
