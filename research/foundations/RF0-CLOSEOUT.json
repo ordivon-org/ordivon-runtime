@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "series": "Runtime Foundations",
+  "round": "RF0",
+  "title": "Runtime Phenomenon Space and Existing-System Decomposition",
+  "status": "completed",
+  "date": "2026-08-17",
+  "workspaceId": "runtime-foundations-rr0-20260817",
+  "primaryRecord": "research/foundations/RF0-RUNTIME-PHENOMENON-SPACE.md",
+  "sources": "research/foundations/RF0-SOURCES.md",
+  "continuation": "research/foundations/RF0-CONTINUATION.md",
+  "results": [
+    "Process is a realization substrate/view rather than a safe foundation root.",
+    "State-transition models are necessary representational grammar but insufficient Runtime definitions.",
+    "Broad runtime ancestry is provisionally selected/specifiable behavior -> realization -> lifecycle/observation.",
+    "Ordivon Runtime is provisionally a durable authority-bounded realization-and-convergence specialization for Agent-selected operations.",
+    "Intentional/specification, ontic/realization, and epistemic/evidence planes must not collapse.",
+    "Time/order, termination/finality, failure, and recovery are multidimensional.",
+    "Recovery is not retry; effect semantics must justify new dispatch.",
+    "Effect is world/projection-relative and cannot be inferred generically from arbitrary process evidence.",
+    "Current Job/Attempt/Evidence/Reconciliation distinctions receive foundation-level support.",
+    "Workspace, finite Jobs, and Agent Effect Commit Kernel remain specializations to be re-tested."
+  ],
+  "antiCollapses": [
+    "Proposal != Commitment",
+    "Commitment != Dispatch",
+    "Command != Operation",
+    "Event != Effect",
+    "Observation != Reality",
+    "Process exit != global termination",
+    "Execution completion != external-effect finality",
+    "Execution success != semantic completion",
+    "Timeout != failure",
+    "Unknown != failed",
+    "Recovery != Retry",
+    "Replay != Retry",
+    "Wall-clock order != causal order"
+  ],
+  "nextRound": {
+    "id": "RF1",
+    "title": "State, Change, Event, Transition, Behavior and Dynamics",
+    "entryQuestion": "What lower structure of state/change/behavior must exist before action, execution and Runtime realization can be defined without circularity?"
+  },
+  "engineeringAuthority": "none",
+  "notes": "RF0 is foundation research. It does not authorize Runtime Core refactoring or public Tool changes."
+}
