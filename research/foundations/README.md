@@ -51,6 +51,9 @@ related:
   - runtime.foundations.rf10
   - runtime.foundations.rf10.sources
   - runtime.foundations.rf10.continuation
+  - runtime.foundations.rf11
+  - runtime.foundations.rf11.sources
+  - runtime.foundations.rf11.continuation
 ---
 # Ordivon Runtime Foundations
 
@@ -86,17 +89,18 @@ current engineering reality
 | RF4 | Identity, Sameness, Replay and History | completed |
 | RF5 | Time, Ordering, Concurrency and Causality | completed |
 | RF6 | Authority, Capability, Permission and Control | completed |
-| RF7 | Boundary, Environment, Context and Dependency | next |
-| RF8 | Observation, Evidence, Receipt, Proof and Truth | planned |
-| RF9 | Failure, Uncertainty, Partiality and Ambiguity | planned |
-| RF10 | Recovery, Retry, Reconciliation and Compensation | planned |
-| RF11 | Resource, Budget, Capacity and Scheduling | planned |
-| RF12 | Isolation, Containment and Trust | planned |
-| RF13 | Determinism, Nondeterminism and Agent Action | planned |
-| RF14 | External World and Open-System Effects | planned |
-| RF15 | Cross-domain falsification | planned |
-| RF16 | Runtime Foundations v1 reconstruction | planned |
-| RF17 | Existing Ordivon Runtime re-audit against foundations | planned |
+| RF7 | Boundary, Environment, Context and Dependency | completed |
+| RF8 | Resource, Capacity, Constraint and Scarcity | completed |
+| RF9 | Scheduling, Coordination, Admission and Backpressure | completed |
+| RF10 | Failure, Recovery, Retry, Idempotency and Exactly-Once | completed |
+| RF11 | Observation, Evidence, Proof and Truth Surfaces | completed |
+| RF12 | Composition, Transactions and Cross-Operation Atomicity | next |
+| RF13 | Isolation, Containment and Trust | planned |
+| RF14 | Determinism, Nondeterminism and Agent Action | planned |
+| RF15 | External World and Open-System Effects | planned |
+| RF16 | Cross-domain falsification | planned |
+| RF17 | Runtime Foundations v1 reconstruction | planned |
+| RF18 | Existing Ordivon Runtime re-audit against foundations | planned |
 
 The sequence is provisional. Later rounds may split, merge or reorder it when the dependency structure becomes clearer.
 
@@ -136,8 +140,11 @@ Read the completed foundation chain in order:
 30. `RF10-FAILURE-RECOVERY-RETRY-IDEMPOTENCY-EXACTLY-ONCE.md`
 31. `RF10-SOURCES.md`
 32. `RF10-CONTINUATION.md`
+33. `RF11-OBSERVATION-EVIDENCE-PROOF-TRUTH-SURFACES.md`
+34. `RF11-SOURCES.md`
+35. `RF11-CONTINUATION.md`
 
-Then continue directly with RF11. Do not reconstruct RF0/RF1/RF2/RF3/RF4/RF5/RF6/RF7/RF8/RF9/RF10 from memory.
+Then continue directly with RF12. Do not reconstruct RF0/RF1/RF2/RF3/RF4/RF5/RF6/RF7/RF8/RF9/RF10/RF11 from memory.
 
 ## Boundary
 
