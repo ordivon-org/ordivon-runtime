@@ -66,6 +66,10 @@ related:
   - runtime.foundations.rf15
   - runtime.foundations.rf15.sources
   - runtime.foundations.rf15.continuation
+  - runtime.foundations.rf16
+  - runtime.foundations.rf16.sources
+  - runtime.foundations.rf16.continuation
+  - runtime.foundations.v1
 ---
 # Ordivon Runtime Foundations
 
@@ -167,8 +171,12 @@ Read the completed foundation chain in order:
 45. `RF15-EXTERNAL-WORLD-OPEN-SYSTEM-EFFECTS.md`
 46. `RF15-SOURCES.md`
 47. `RF15-CONTINUATION.md`
+48. `RF16-CROSS-DOMAIN-FALSIFICATION-RUNTIME-FOUNDATIONS-V1.md`
+49. `RF16-SOURCES.md`
+50. `RUNTIME-FOUNDATIONS-V1.md`
+51. `RF16-CONTINUATION.md`
 
-Then continue directly with RF16. Do not reconstruct RF0/RF1/RF2/RF3/RF4/RF5/RF6/RF7/RF8/RF9/RF10/RF11/RF12/RF13/RF14/RF15 from memory.
+Runtime Foundations v1 is frozen. Do not continue to RF17 by default. Consume `RUNTIME-FOUNDATIONS-V1.md` into engineering, or reopen only under an explicit FoundationReopenCondition.
 
 ## Boundary
 
