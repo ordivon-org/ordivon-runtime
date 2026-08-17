@@ -2048,6 +2048,7 @@ impl Registry {
             let duration_end = finished_at_ms.unwrap_or(observed_at_ms);
             summaries.push(RuntimeJobSummary {
                 job_id: job.job_id,
+                operation_digest: job.operation_digest,
                 status: projection.status,
                 desired_state: projection.desired_state,
                 attempt_id: projection.attempt_id,
@@ -4341,6 +4342,7 @@ fn project_job(
     .then_some(250);
     JobProjection {
         job_id: job.job_id.clone(),
+        operation_digest: job.operation_digest.clone(),
         status,
         desired_state: job.desired_state,
         attempt_id: attempt.map(|attempt| attempt.attempt_id.clone()),
