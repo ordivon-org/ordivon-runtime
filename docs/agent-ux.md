@@ -97,8 +97,9 @@ Compiler-report normalization, Git publication, GitHub orchestration, coding-age
 
 ## Execution semantic projection
 
-Runtime preserves state distinctions that change a caller's safe next action. `status` remains a coarse compatibility summary (`queued`, `working`, or a terminal resolution) and must not be used as the sole control signal. `workspace.exec`, `workspace.execPlan`, `task.observe`, and `task.list` project the following explicit execution semantics:
+Runtime preserves state distinctions that change a caller's safe next action. `status` remains a coarse compatibility summary (`queued`, `working`, or a terminal resolution) and must not be used as the sole control signal. `workspace.exec`, `workspace.execBound`, `workspace.execPlan`, `task.observe`, and `task.list` project the following explicit execution semantics:
 
+- `operationDigest` is the stable identity of the committed Runtime Operation represented by the Job; it is not the Job ID or Runtime Attempt ID, and remains constant across observation and replay of that Operation;
 - `desiredState` preserves the persisted Job intent (`run` or `cancelled`) across reconnects;
 - `attemptState` is the exact current or latest Runtime Attempt state, including `starting`, `stopping`, and `recovering`;
 - `terminationIntent` distinguishes natural execution from persisted stop or deadline intent;

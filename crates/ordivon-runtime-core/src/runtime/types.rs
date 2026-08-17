@@ -1314,6 +1314,8 @@ pub enum RuntimeDeliveryDisposition {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobProjection {
     pub job_id: String,
+    /// Stable identity of the committed Runtime Operation represented by this Job.
+    pub operation_digest: String,
     /// Compatibility summary only. Use the explicit semantic fields below for control decisions.
     pub status: String,
     /// Persisted Runtime Job intent (`run` or `cancelled`).
@@ -1465,6 +1467,8 @@ pub struct RuntimeJobListRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeJobSummary {
     pub job_id: String,
+    /// Stable identity of the committed Runtime Operation represented by this Job.
+    pub operation_digest: String,
     /// Compatibility summary only. Use the explicit semantic fields below for control decisions.
     pub status: String,
     /// Persisted Runtime Job intent (`run` or `cancelled`).
@@ -1738,6 +1742,8 @@ pub struct EffectiveExecutionLimits {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskObservation {
     pub job_id: String,
+    /// Stable identity of the committed Runtime Operation represented by this Job.
+    pub operation_digest: String,
     /// Compatibility summary only. Use the explicit semantic fields below for control decisions.
     pub status: String,
     /// Persisted Runtime Job intent (`run` or `cancelled`).

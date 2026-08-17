@@ -342,6 +342,8 @@ struct TerminalProcessEvidence {
     schema_version: u32,
     job_id: String,
     attempt_id: String,
+    operation_digest: String,
+    execution_plan_digest: String,
     workspace_id: String,
     source_revision: String,
     execution_profile: super::ExecutionProfile,
@@ -366,6 +368,7 @@ struct TerminalProcessEvidence {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     effective_inputs: Vec<EffectiveInputBinding>,
     executable: String,
+    executable_digest: String,
     args: Vec<String>,
     cwd: String,
     supervisor: TerminalSupervisorEvidence,
@@ -3209,6 +3212,7 @@ impl Runtime {
         };
         Ok(TaskObservation {
             job_id,
+            operation_digest: projection.operation_digest,
             status: projection.status,
             desired_state: projection.desired_state,
             attempt_id: attempt.as_ref().map(|attempt| attempt.attempt_id.clone()),
@@ -4293,6 +4297,8 @@ fn append_terminal_evidence_for_commit_with_observation(
         schema_version: RUNTIME_SCHEMA_VERSION,
         job_id: attempt.job_id.clone(),
         attempt_id: attempt.attempt_id.clone(),
+        operation_digest: job.operation_digest,
+        execution_plan_digest: job.execution_plan_digest,
         workspace_id: plan.workspace_id,
         source_revision: plan.source_revision,
         execution_profile: plan.execution_profile,
@@ -4307,6 +4313,7 @@ fn append_terminal_evidence_for_commit_with_observation(
         input_set_id: plan.input_set_id,
         effective_inputs: plan.effective_inputs,
         executable: plan.executable,
+        executable_digest: plan.executable_digest,
         args: plan.args,
         cwd: plan.cwd,
         supervisor: TerminalSupervisorEvidence {

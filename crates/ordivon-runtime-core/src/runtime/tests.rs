@@ -782,6 +782,7 @@ fn task_observe_reconciliation_is_scoped_to_the_requested_job() {
         })
         .unwrap();
     assert!(observed.execution_terminal);
+    assert_eq!(observed.operation_digest, target.job.operation_digest);
     assert_eq!(
         runtime
             .registry()
@@ -2048,6 +2049,12 @@ fn terminal_evidence_is_a_durable_artifact_with_native_binding() {
         &fs::read(Path::new(&starting.bundle_path).join(&artifact.relative_path)).unwrap(),
     )
     .unwrap();
+    assert_eq!(evidence["operationDigest"], created.job.operation_digest);
+    assert_eq!(
+        evidence["executionPlanDigest"],
+        created.job.execution_plan_digest
+    );
+    assert_eq!(evidence["executableDigest"], submit.plan.executable_digest);
     assert_eq!(evidence["executionProfile"], "trusted_local");
     assert_eq!(evidence["executionTarget"], "windows_native");
     assert_eq!(evidence["windowsExecutionContext"]["tokenClass"], "limited");
@@ -2166,9 +2173,15 @@ fn host_boundary_references_replay_conflict_and_survive_terminal_evidence() {
     .unwrap();
     assert_eq!(evidence["jobId"], first.job.job_id);
     assert_eq!(evidence["attemptId"], starting.attempt_id);
+    assert_eq!(evidence["operationDigest"], first.job.operation_digest);
+    assert_eq!(
+        evidence["executionPlanDigest"],
+        first.job.execution_plan_digest
+    );
     assert_eq!(evidence["workspaceId"], submit.plan.workspace_id);
     assert_eq!(evidence["sourceRevision"], "fixture-revision");
     assert_eq!(evidence["executable"], submit.plan.executable);
+    assert_eq!(evidence["executableDigest"], submit.plan.executable_digest);
     assert_eq!(
         serde_json::from_value::<Vec<ForeignReference>>(evidence["foreignReferences"].clone(),)
             .unwrap(),
@@ -2189,6 +2202,7 @@ fn host_boundary_references_replay_conflict_and_survive_terminal_evidence() {
         .unwrap();
     assert_eq!(located.jobs.len(), 1);
     assert_eq!(located.jobs[0].job_id, first.job.job_id);
+    assert_eq!(located.jobs[0].operation_digest, first.job.operation_digest);
     let recovered_artifact = fresh_registry
         .list_artifacts(&first.job.job_id)
         .unwrap()
