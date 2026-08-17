@@ -1,0 +1,86 @@
+---
+schema_version: 1
+id: runtime.foundations.start
+title: Ordivon Runtime Foundations
+type: start
+profile: research
+lifecycle: active
+source_role: canonical
+visibility: public
+owners:
+  - ordivon-runtime
+audience:
+  - reader
+  - researcher
+  - builder
+  - agent
+updated: 2026-08-17
+summary: Foundation research program that reconstructs Runtime below the existing engineering object model before allowing foundation claims to influence production architecture.
+evidence_status: verified
+readiness: READY
+related:
+  - runtime.foundations.rf0
+  - runtime.foundations.rf0.sources
+  - runtime.foundations.rf0.continuation
+---
+# Ordivon Runtime Foundations
+
+## Purpose
+
+Runtime was historically built from real execution pressure: response loss, duplicate effect risk, source mutation, process ownership, crash recovery, concurrency, provider drift, immutable inputs and Windows execution. The engineering result is strong, but its theory is compressed into mechanisms and invariants.
+
+Runtime Foundations reconstructs the underlying phenomenon-space before treating the current `Workspace / Job / Attempt / Artifact / Reconciliation / Effect Kernel` model as fundamental.
+
+## Method
+
+```text
+current engineering reality
+→ bracket implementation nouns
+→ identify lower phenomenon
+→ competing models
+→ cross-domain primary-source triangulation
+→ edge-case falsification
+→ anti-collapse laws
+→ provisional reconstruction
+→ compare back to current Runtime
+→ no engineering change until later falsification supports it
+```
+
+## Rounds
+
+| Round | Topic | Status |
+|---|---|---|
+| RF0 | Runtime Phenomenon Space and Existing-System Decomposition | completed |
+| RF1 | State, Change, Event, Transition, Behavior and Dynamics | next |
+| RF2 | Action, Intent, Proposal, Command and Operation | planned |
+| RF3 | Execution, Realization, Effect and Consequence | planned |
+| RF4 | Identity, Sameness, Replay and History | planned |
+| RF5 | Time, Ordering, Concurrency and Causality | planned |
+| RF6 | Authority, Capability, Permission and Control | planned |
+| RF7 | Boundary, Environment, Context and Dependency | planned |
+| RF8 | Observation, Evidence, Receipt, Proof and Truth | planned |
+| RF9 | Failure, Uncertainty, Partiality and Ambiguity | planned |
+| RF10 | Recovery, Retry, Reconciliation and Compensation | planned |
+| RF11 | Resource, Budget, Capacity and Scheduling | planned |
+| RF12 | Isolation, Containment and Trust | planned |
+| RF13 | Determinism, Nondeterminism and Agent Action | planned |
+| RF14 | External World and Open-System Effects | planned |
+| RF15 | Cross-domain falsification | planned |
+| RF16 | Runtime Foundations v1 reconstruction | planned |
+| RF17 | Existing Ordivon Runtime re-audit against foundations | planned |
+
+The sequence is provisional. Later rounds may split, merge or reorder it when the dependency structure becomes clearer.
+
+## Current entry
+
+Read:
+
+1. `RF0-RUNTIME-PHENOMENON-SPACE.md`
+2. `RF0-SOURCES.md`
+3. `RF0-CONTINUATION.md`
+
+Then continue directly with RF1. Do not reconstruct RF0 from memory.
+
+## Boundary
+
+Foundation records are explanatory/research authority only. They do not override live Runtime source, generated Tool schemas, Registry truth, deployment receipts or operational evidence, and they do not authorize production architecture changes until a later research-to-engineering bridge explicitly does so.
