@@ -45,6 +45,9 @@ related:
   - runtime.foundations.rf8
   - runtime.foundations.rf8.sources
   - runtime.foundations.rf8.continuation
+  - runtime.foundations.rf9
+  - runtime.foundations.rf9.sources
+  - runtime.foundations.rf9.continuation
 ---
 # Ordivon Runtime Foundations
 
@@ -124,8 +127,11 @@ Read the completed foundation chain in order:
 24. `RF8-RESOURCE-CAPACITY-CONSTRAINT-SCARCITY.md`
 25. `RF8-SOURCES.md`
 26. `RF8-CONTINUATION.md`
+27. `RF9-SCHEDULING-COORDINATION-ADMISSION-BACKPRESSURE.md`
+28. `RF9-SOURCES.md`
+29. `RF9-CONTINUATION.md`
 
-Then continue directly with RF9. Do not reconstruct RF0/RF1/RF2/RF3/RF4/RF5/RF6/RF7/RF8 from memory.
+Then continue directly with RF10. Do not reconstruct RF0/RF1/RF2/RF3/RF4/RF5/RF6/RF7/RF8/RF9 from memory.
 
 ## Boundary
 
