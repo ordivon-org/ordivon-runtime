@@ -181,3 +181,9 @@ Runtime Foundations v1 is frozen. Do not continue to RF17 by default. Consume `R
 ## Boundary
 
 Foundation records are explanatory/research authority only. They do not override live Runtime source, generated Tool schemas, Registry truth, deployment receipts or operational evidence, and they do not authorize production architecture changes until a later research-to-engineering bridge explicitly does so.
+
+
+## Series closeout
+
+- `RUNTIME-FOUNDATIONS-V1.md` — frozen canonical compression.
+- `RUNTIME-FOUNDATIONS-RF0-RF16-CLOSEOUT.md` — complete RF0–RF16 research closeout and engineering-consumption handoff.
