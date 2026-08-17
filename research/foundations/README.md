@@ -60,6 +60,9 @@ related:
   - runtime.foundations.rf13
   - runtime.foundations.rf13.sources
   - runtime.foundations.rf13.continuation
+  - runtime.foundations.rf14
+  - runtime.foundations.rf14.sources
+  - runtime.foundations.rf14.continuation
 ---
 # Ordivon Runtime Foundations
 
@@ -102,8 +105,8 @@ current engineering reality
 | RF11 | Observation, Evidence, Proof and Truth Surfaces | completed |
 | RF12 | Composition, Transactions and Cross-Operation Atomicity | completed |
 | RF13 | Isolation, Containment and Trust | completed |
-| RF14 | Determinism, Nondeterminism and Agent Action | next |
-| RF15 | External World and Open-System Effects | planned |
+| RF14 | Determinism, Nondeterminism and Agent Action | completed |
+| RF15 | External World and Open-System Effects | next |
 | RF16 | Cross-domain falsification | planned |
 | RF17 | Runtime Foundations v1 reconstruction | planned |
 | RF18 | Existing Ordivon Runtime re-audit against foundations | planned |
@@ -155,8 +158,11 @@ Read the completed foundation chain in order:
 39. `RF13-ISOLATION-CONTAINMENT-TRUST.md`
 40. `RF13-SOURCES.md`
 41. `RF13-CONTINUATION.md`
+42. `RF14-DETERMINISM-NONDETERMINISM-AGENT-ACTION.md`
+43. `RF14-SOURCES.md`
+44. `RF14-CONTINUATION.md`
 
-Then continue directly with RF14. Do not reconstruct RF0/RF1/RF2/RF3/RF4/RF5/RF6/RF7/RF8/RF9/RF10/RF11/RF12/RF13 from memory.
+Then continue directly with RF15. Do not reconstruct RF0/RF1/RF2/RF3/RF4/RF5/RF6/RF7/RF8/RF9/RF10/RF11/RF12/RF13/RF14 from memory.
 
 ## Boundary
 
