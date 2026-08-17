@@ -39,6 +39,9 @@ related:
   - runtime.foundations.rf6
   - runtime.foundations.rf6.sources
   - runtime.foundations.rf6.continuation
+  - runtime.foundations.rf7
+  - runtime.foundations.rf7.sources
+  - runtime.foundations.rf7.continuation
 ---
 # Ordivon Runtime Foundations
 
@@ -112,8 +115,11 @@ Read the completed foundation chain in order:
 18. `RF6-AUTHORITY-CAPABILITY-PERMISSION-CONTROL.md`
 19. `RF6-SOURCES.md`
 20. `RF6-CONTINUATION.md`
+21. `RF7-BOUNDARY-ENVIRONMENT-CONTEXT-DEPENDENCY.md`
+22. `RF7-SOURCES.md`
+23. `RF7-CONTINUATION.md`
 
-Then continue directly with RF7. Do not reconstruct RF0/RF1/RF2/RF3/RF4/RF5/RF6 from memory.
+Then continue directly with RF8. Do not reconstruct RF0/RF1/RF2/RF3/RF4/RF5/RF6/RF7 from memory.
 
 ## Boundary
 
