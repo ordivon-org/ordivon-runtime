@@ -6,15 +6,16 @@ Runtime research is presented through one owner-native **Runtime Architecture**,
 
 Start here:
 
-1. [`core/RUNTIME-ARCHITECTURE.md`](core/RUNTIME-ARCHITECTURE.md) — current Runtime owner contract and architectural compression.
-2. [`core/FOUNDATION-FAMILIES.md`](core/FOUNDATION-FAMILIES.md) — six owner-native Foundation Families.
-3. [`core/DERIVED-RUNTIME-CORE-LAWS.md`](core/DERIVED-RUNTIME-CORE-LAWS.md) — cross-programme Runtime laws earned by the research corpus.
-4. [`core/OWNER-BRIDGES.md`](core/OWNER-BRIDGES.md) — SCD, World, Host, Harness and Network boundaries.
-5. [`core/SBF-OWNER-ROLE-MAP.md`](core/SBF-OWNER-ROLE-MAP.md) — SBF0–SBF23 identity-preserving current-role reclassification.
-6. [`core/REGISTRY-PROVENANCE.md`](core/REGISTRY-PROVENANCE.md) — exact RF / EF / SBF / LRF registry identities and provenance.
-7. [`core/SATURATION-NEGATIVE-EVIDENCE.md`](core/SATURATION-NEGATIVE-EVIDENCE.md) — saturation evidence, failed additive routes and closure scope.
-8. [`core/HISTORICAL-EF27.md`](core/HISTORICAL-EF27.md) — superseded EF27 research history and its merger into EF26.
-9. [`core/ENGINEERING-CONSUMPTION.md`](core/ENGINEERING-CONSUMPTION.md) — current research-to-engineering consumption surface.
+1. [`programme/README.md`](programme/README.md) — ongoing Runtime Research & Operational Realization Programme: constitution, consumption, falsification, dogfood and reopen policy.
+2. [`core/RUNTIME-ARCHITECTURE.md`](core/RUNTIME-ARCHITECTURE.md) — current Runtime owner contract and architectural compression.
+3. [`core/FOUNDATION-FAMILIES.md`](core/FOUNDATION-FAMILIES.md) — six owner-native Foundation Families.
+4. [`core/DERIVED-RUNTIME-CORE-LAWS.md`](core/DERIVED-RUNTIME-CORE-LAWS.md) — cross-programme Runtime laws earned by the research corpus.
+5. [`core/OWNER-BRIDGES.md`](core/OWNER-BRIDGES.md) — SCD, World, Host, Harness and Network boundaries.
+6. [`core/SBF-OWNER-ROLE-MAP.md`](core/SBF-OWNER-ROLE-MAP.md) — SBF0–SBF23 identity-preserving current-role reclassification.
+7. [`core/REGISTRY-PROVENANCE.md`](core/REGISTRY-PROVENANCE.md) — exact RF / EF / SBF / LRF registry identities and provenance.
+8. [`core/SATURATION-NEGATIVE-EVIDENCE.md`](core/SATURATION-NEGATIVE-EVIDENCE.md) — saturation evidence, failed additive routes and closure scope.
+9. [`core/HISTORICAL-EF27.md`](core/HISTORICAL-EF27.md) — superseded EF27 research history and its merger into EF26.
+10. [`core/ENGINEERING-CONSUMPTION.md`](core/ENGINEERING-CONSUMPTION.md) — current research-to-engineering consumption surface.
 
 ## Canonical standing
 
