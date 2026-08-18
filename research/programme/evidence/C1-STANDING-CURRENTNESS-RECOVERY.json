@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "kind": "ordivon.runtime-programme-consumption-evidence",
+  "consumptionRef": "consumption:runtime:c1-standing-currentness-recovery-20260818",
+  "status": "THEORY_CONFIRMED_WITH_CURRENTNESS_CLARIFICATION",
+  "observed": {
+    "branchTip": "6724b6c7a7a2832cdb77eeb792bf23ca79861ad5",
+    "authorityRef": "authority:ordivon:research-owner:runtime",
+    "liveAuthorityVersionRef": "sha256:227cc7e253de5fa10be7cbecdfd2e7d84724b507c4a0504836fc63996ac53497",
+    "previousAuthorityVersionRef": "sha256:350d042df3c01399cf9314c6954f0c3f4c45bdeb660aa275556e098a77ec62eb",
+    "currentPublicationSourceRevision": "95116717e576b078ecd57338aea85b7d372946b3",
+    "previousPublicationSourceRevision": "2e00028bfd285e8f4e793c41a19564ed6e14324e",
+    "currentPublicationDigestValid": true,
+    "previousPublicationDigestValid": true,
+    "currentSourceIsAncestorOfObservedBranchTip": true,
+    "currentSourceEqualsObservedBranchTip": false,
+    "gitTipRecencyMintsSemanticAuthority": false
+  },
+  "projectionCases": [
+    {
+      "projectedAuthorityVersionRef": "sha256:350d042df3c01399cf9314c6954f0c3f4c45bdeb660aa275556e098a77ec62eb",
+      "liveAuthorityVersionRef": "sha256:227cc7e253de5fa10be7cbecdfd2e7d84724b507c4a0504836fc63996ac53497",
+      "projectionHealth": "SOURCE_ADVANCED_STALE",
+      "standing": "HISTORICAL_NOT_CURRENT"
+    },
+    {
+      "projectedAuthorityVersionRef": "sha256:227cc7e253de5fa10be7cbecdfd2e7d84724b507c4a0504836fc63996ac53497",
+      "liveAuthorityVersionRef": "sha256:227cc7e253de5fa10be7cbecdfd2e7d84724b507c4a0504836fc63996ac53497",
+      "projectionHealth": "CURRENT_TO_SOURCE",
+      "standing": "CURRENT_DECLARED"
+    }
+  ],
+  "sourceHorizonObservation": {
+    "relation": "PUBLISHED_SOURCE_IS_ANCESTOR_OF_OBSERVED_BRANCH_TIP",
+    "semanticStandingEffect": "NONE_BY_RECENCY_ALONE",
+    "interpretation": "Post-fence Git changes are outside the current publication support scope until owner authority republishes them."
+  },
+  "hostContinuity": {
+    "historicalConsolidation": {
+      "taskId": "task:runtime-research-core-consolidation-branch-20260818",
+      "revision": 3,
+      "state": "completed",
+      "historicalFrontierIncludedPendingMaterialization": true
+    },
+    "laterMaterialization": {
+      "taskId": "task:runtime-research-materialization-repair-20260818",
+      "revision": 3,
+      "state": "completed",
+      "materializationCompletedAtRevision": "7af1b0d51f678d8662ac85bb91ec4d363141c483"
+    },
+    "hostIsSemanticCurrentnessAuthority": false
+  },
+  "falsifiers": {
+    "F3_STALE_AUTHORITY": "PASS_THEORY_CONFIRMED",
+    "F6_RESTORE_RECOVERY": "PASS_THEORY_CONFIRMED",
+    "F7_HISTORICAL_CURRENTNESS": "PASS_THEORY_CONFIRMED_WITH_CLARIFICATION"
+  },
+  "theoryDisposition": {
+    "foundationReopen": false,
+    "standingCurrentnessCandidateStrengthened": true,
+    "implementationHazardFound": "Do not derive SOURCE_ADVANCED_STALE from publication sourceRevision versus Git HEAD; compare projected AuthorityVersionRef with live owner CURRENT."
+  }
+}

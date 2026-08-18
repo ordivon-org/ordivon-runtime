@@ -17,6 +17,7 @@ Maintain and develop Ordivon's theory of bounded operational realization; conver
 5. [`DOGFOOD-AND-CASE-STUDIES.md`](DOGFOOD-AND-CASE-STUDIES.md) — concrete domains that test the theory.
 6. [`EMERGING-RESEARCH.md`](EMERGING-RESEARCH.md) — Operational Realization Theory, Standing/Currentness Semantics and Operational Claim Theory candidates.
 7. [`REOPEN-CONDITIONS.md`](REOPEN-CONDITIONS.md) — exact conditions for reopening frozen theory.
+8. [`consumption/C1-STANDING-CURRENTNESS-RECOVERY.md`](consumption/C1-STANDING-CURRENTNESS-RECOVERY.md) — first real consumption/falsification wave: typed currentness under historical continuity, owner authority and source advancement.
 
 ## Standing principle
 
