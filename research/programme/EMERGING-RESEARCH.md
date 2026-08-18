@@ -40,7 +40,7 @@ Candidate compression:
 
 `OperationalClaim = Identity + Scope + Support + Standing`.
 
-Current disposition: epistemic layer of Operational Realization Theory. Do not split into a separate project without independent falsification pressure.
+Current disposition after C5: **materially strengthened, but not promoted**. Heterogeneous Runtime/Host/Git/owner-publication/Atlas evidence confirms that operational claims require typed identity, scope, support and standing; strong evidence objects do not compose into broader truth without explicit owner bridges. The claim grammar still fits naturally as the epistemic discipline of Operational Realization Theory. Do not split it into a separate project without autonomous cross-domain pressure independent of realization/recovery.
 
 ## Computational economy bridge
 
