@@ -114,11 +114,11 @@ current engineering reality
 | RF13 | Isolation, Containment and Trust | completed |
 | RF14 | Determinism, Nondeterminism and Agent Action | completed |
 | RF15 | External World and Open-System Effects | completed |
-| RF16 | Cross-domain falsification | planned |
-| RF17 | Runtime Foundations v1 reconstruction | planned |
-| RF18 | Existing Ordivon Runtime re-audit against foundations | planned |
+| RF16 | Cross-domain falsification / Runtime Foundations v1 reconstruction and re-audit | completed |
+| RF17 | No numbered round admitted; RF series closed at RF16 | not admitted |
+| RF18 | No numbered round admitted; RF series closed at RF16 | not admitted |
 
-The sequence is provisional. Later rounds may split, merge or reorder it when the dependency structure becomes clearer.
+This table is historical programme navigation. The numbered RF series is closed at RF16 under the frozen Runtime Foundations v1 baseline; any future foundation work requires an explicit reopen/admission decision rather than continuation by numbering inertia.
 
 ## Current entry
 
