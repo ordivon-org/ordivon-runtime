@@ -24,6 +24,7 @@ Maintain and develop Ordivon's theory of bounded operational realization; conver
 12. [`consumption/C5-EVIDENCE-CLAIM-SCOPE.md`](consumption/C5-EVIDENCE-CLAIM-SCOPE.md) — heterogeneous Runtime/Host/Git/owner/Atlas evidence confirms Scope Conservation as typed support discipline; strong evidence cannot silently lift into broader claims.
 13. [`consumption/C6-LOCAL-GLOBAL-PUBLICATION-COMPOSITION.md`](consumption/C6-LOCAL-GLOBAL-PUBLICATION-COMPOSITION.md) — live Runtime→Git→owner-authority→Atlas pipeline proves end-to-end convergence is composed from scoped claims and explicit bridges, not one atomic `success` state.
 14. [`consumption/C7-IDENTITY-LINEAGE-CAUSAL-ATTRIBUTION.md`](consumption/C7-IDENTITY-LINEAGE-CAUSAL-ATTRIBUTION.md) — exact Branch-H Runtime ledger separates higher-level obligation, multiple Runtime Operations/Attempts, external effect and evidence; bounded causation requires a supported pre-state/transition/post-state chain.
+15. [`consumption/C8-BINDING-AUTHORITY-REALIZATION-ORTHOGONALITY.md`](consumption/C8-BINDING-AUTHORITY-REALIZATION-ORTHOGONALITY.md) — HTTPS→SSH substitution plus live Workstation anchor/egress evidence confirms capability, authority, binding, standing and realization as orthogonal axes.
 
 ## Standing principle
 
