@@ -42,4 +42,10 @@ Current disposition: epistemic layer of Operational Realization Theory. Do not s
 
 ## Computational economy bridge
 
-`ComputeNeed = UnsatisfiedSupportGap` is a promising consequence of Fresh-Execution Non-Necessity. It should be tested through real reuse/incremental-consumption cases before being promoted into a broader theory.
+C3 confirms Fresh-Execution Non-Necessity for identity-preserving durable replay, but also shows that current Runtime does not infer generic cross-Operation reuse merely from equal mechanical `operationDigest` values.
+
+The earlier shorthand `ComputeNeed = UnsatisfiedSupportGap` is therefore narrowed to the bounded hypothesis:
+
+`FreshExecutionNeed = UnsatisfiedAdmissibleSupportGap`
+
+where admissible support must already have sufficient identity/binding/input compatibility, evidence scope and current standing for the obligation. This is not yet a universal law or a generic production Runtime reuse mechanism.

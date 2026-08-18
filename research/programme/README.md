@@ -19,6 +19,7 @@ Maintain and develop Ordivon's theory of bounded operational realization; conver
 7. [`REOPEN-CONDITIONS.md`](REOPEN-CONDITIONS.md) — exact conditions for reopening frozen theory.
 8. [`consumption/C1-STANDING-CURRENTNESS-RECOVERY.md`](consumption/C1-STANDING-CURRENTNESS-RECOVERY.md) — live currentness transition: historical validity, owner authority and source support remain distinct.
 9. [`consumption/C2-CONSEQUENTIAL-RETRY-REGROUNDING.md`](consumption/C2-CONSEQUENTIAL-RETRY-REGROUNDING.md) — real external-effect timeout/reconciliation trace: retry is gated by effect knowledge, not local failure.
+10. [`consumption/C3-FRESH-EXECUTION-SUPPORT-REUSE.md`](consumption/C3-FRESH-EXECUTION-SUPPORT-REUSE.md) — exact Operation replay can reuse historical realization; generic cross-Operation semantic reuse remains unimplemented and requires explicit admissible-support proof.
 
 ## Standing principle
 
