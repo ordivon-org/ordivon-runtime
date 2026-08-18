@@ -22,6 +22,7 @@ Maintain and develop Ordivon's theory of bounded operational realization; conver
 10. [`consumption/C3-FRESH-EXECUTION-SUPPORT-REUSE.md`](consumption/C3-FRESH-EXECUTION-SUPPORT-REUSE.md) — exact Operation replay can reuse historical realization; generic cross-Operation semantic reuse remains unimplemented and requires explicit admissible-support proof.
 11. [`consumption/C4-CROSS-OWNER-STANDING-CURRENTNESS.md`](consumption/C4-CROSS-OWNER-STANDING-CURRENTNESS.md) — Network shared-corpus transition confirms typed standing/currentness beyond Runtime and recommends independent-project promotion.
 12. [`consumption/C5-EVIDENCE-CLAIM-SCOPE.md`](consumption/C5-EVIDENCE-CLAIM-SCOPE.md) — heterogeneous Runtime/Host/Git/owner/Atlas evidence confirms Scope Conservation as typed support discipline; strong evidence cannot silently lift into broader claims.
+13. [`consumption/C6-LOCAL-GLOBAL-PUBLICATION-COMPOSITION.md`](consumption/C6-LOCAL-GLOBAL-PUBLICATION-COMPOSITION.md) — live Runtime→Git→owner-authority→Atlas pipeline proves end-to-end convergence is composed from scoped claims and explicit bridges, not one atomic `success` state.
 
 ## Standing principle
 

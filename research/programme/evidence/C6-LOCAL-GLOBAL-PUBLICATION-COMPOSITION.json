@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "kind": "ordivon.runtime-programme-consumption-evidence",
+  "consumptionRef": "consumption:runtime:c6-local-global-publication-composition-20260818",
+  "status": "THEORY_CONFIRMED_END_TO_END_SUCCESS_IS_COMPOSED_NOT_ATOMIC",
+  "sourceTrace": {
+    "hostTaskId": "task:ordivon-atlas-end-to-end-live-transition-dogfood-20260818",
+    "hostRevision": 5,
+    "atlasBaselineCommit": "e223f9f31eb5f8b912e2a9e420e390bc86240a5a",
+    "atlasAcceptanceCommit": "276ff15c6a157c548330e6eccd013bc71e446be6"
+  },
+  "states": [
+    {
+      "name": "LOCAL_ONLY_REJECTED_BY_LEASE",
+      "localCandidateCommit": "8bcb5cb",
+      "candidateAuthorityVersionRef": "sha256:a3497b4440734dccec6e170e99306fa189c2ae34fa87386d8376b96c7e10433a",
+      "concurrentRemoteHead": "6724b6c7a7a2832cdb77eeb792bf23ca79861ad5",
+      "localCandidateExists": true,
+      "remoteDelivery": false,
+      "ownerAuthorityAdvanced": false,
+      "disposition": "REJECTED_BY_EXACT_LEASE_NOT_PUBLISHED_NOT_AUTHORITY"
+    },
+    {
+      "name": "OWNER_PUBLISHED_DOWNSTREAM_STALE",
+      "runtimeTransportRevision": "ee92d11eeede13aaff68880d9c395e23b617571e",
+      "liveAuthorityVersionRef": "sha256:e06cac5f69942068fabe80dc5da22fc1fb566d3004ce4951df545534fda289d9",
+      "retainedAtlasAuthorityVersionRef": "sha256:227cc7e253de5fa10be7cbecdfd2e7d84724b507c4a0504836fc63996ac53497",
+      "remoteDelivery": true,
+      "ownerAuthorityAdvanced": true,
+      "downstreamProjectionHealth": "SOURCE_ADVANCED_STALE",
+      "networkProjectionHealth": "CURRENT_TO_SOURCE"
+    },
+    {
+      "name": "FULLY_CONVERGED",
+      "runtimeAuthorityVersionRef": "sha256:e06cac5f69942068fabe80dc5da22fc1fb566d3004ce4951df545534fda289d9",
+      "runtimeProjectionHealth": "CURRENT_TO_SOURCE",
+      "previousRuntimeProjectionCurrentness": "SOURCE_ADVANCED_STALE",
+      "networkProjectionHealth": "CURRENT_TO_SOURCE",
+      "runtimeAuthorityHistoryVersions": 5,
+      "atlasFullyCurrent": true
+    }
+  ],
+  "falsifiers": {
+    "F2_LOST_ACKNOWLEDGEMENT": "PASS_IMPORTED_REAL_TRACE",
+    "F4_LOCAL_GLOBAL_LIFTING": "PASS_STRONG",
+    "F9_WEAK_COMPOSITION_UPGRADE": "PASS_STRONG"
+  },
+  "compositionFinding": {
+    "universalSuccessFlagSufficient": false,
+    "universalAtomicTransactionObserved": false,
+    "explicitTypedBridgesRequired": true,
+    "universalTotalOrderRequired": false,
+    "rule": "End-to-end claim requires scoped stage claims plus explicit bridge support, compatible identities/horizons and standing."
+  },
+  "theoryDisposition": {
+    "localGlobalNonLifting": "STRONGLY_CONFIRMED",
+    "nonUpgradingComposition": "STRONGLY_CONFIRMED",
+    "typedOrderGrammar": "CONFIRMED_LIVE_PIPELINE",
+    "runtimeFoundationReopen": false
+  }
+}
