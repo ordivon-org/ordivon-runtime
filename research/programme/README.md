@@ -20,6 +20,7 @@ Maintain and develop Ordivon's theory of bounded operational realization; conver
 8. [`consumption/C1-STANDING-CURRENTNESS-RECOVERY.md`](consumption/C1-STANDING-CURRENTNESS-RECOVERY.md) — live currentness transition: historical validity, owner authority and source support remain distinct.
 9. [`consumption/C2-CONSEQUENTIAL-RETRY-REGROUNDING.md`](consumption/C2-CONSEQUENTIAL-RETRY-REGROUNDING.md) — real external-effect timeout/reconciliation trace: retry is gated by effect knowledge, not local failure.
 10. [`consumption/C3-FRESH-EXECUTION-SUPPORT-REUSE.md`](consumption/C3-FRESH-EXECUTION-SUPPORT-REUSE.md) — exact Operation replay can reuse historical realization; generic cross-Operation semantic reuse remains unimplemented and requires explicit admissible-support proof.
+11. [`consumption/C4-CROSS-OWNER-STANDING-CURRENTNESS.md`](consumption/C4-CROSS-OWNER-STANDING-CURRENTNESS.md) — Network shared-corpus transition confirms typed standing/currentness beyond Runtime and recommends independent-project promotion.
 
 ## Standing principle
 

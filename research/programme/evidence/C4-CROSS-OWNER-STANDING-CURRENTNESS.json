@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "kind": "ordivon.runtime-programme-consumption-evidence",
+  "consumptionRef": "consumption:runtime:c4-cross-owner-standing-currentness-20260818",
+  "status": "CROSS_OWNER_THEORY_CONFIRMED_PROMOTION_RECOMMENDED",
+  "network": {
+    "ownerResearchRef": "research-owner:network",
+    "authorityRef": "authority:ordivon:research-owner:network",
+    "physicalTopology": "SHARED_RESEARCH_CORPUS",
+    "localCheckoutObserved": "0fde1702e18cbaa12896497e13f400f64c7d1756",
+    "remoteMainObserved": "edfb2bb80803a586636804015169f0c01d6e9709",
+    "liveAuthorityVersionRef": "sha256:dbdbb759b2b86b898a343cbb81646b283c589676989e919537f1a6cbc2b1df91",
+    "previousAuthorityVersionRef": "sha256:bfadaaaad3b01f9c4388e4e4a75e77c782c2c3111849e5c4598052ec740ee79f",
+    "livePublicationSourceRevision": "80bd37393ff46703be1dec6940bd11ea0f7149dc",
+    "previousPublicationSourceRevision": "0fde1702e18cbaa12896497e13f400f64c7d1756",
+    "publicationEvolutionCommit": "42c641d",
+    "bothAuthorityPublicationsRetained": true
+  },
+  "historicalAtlasEvidence": {
+    "taskId": "task:ordivon-atlas-generated-projection-observatory-mvp-20260818",
+    "revision": 3,
+    "networkAuthorityVersionThen": "sha256:bfadaaaad3b01f9c4388e4e4a75e77c782c2c3111849e5c4598052ec740ee79f",
+    "projectionHealthThen": "CURRENT_TO_SOURCE"
+  },
+  "c4ProjectionClassification": [
+    {
+      "projectedAuthorityVersionRef": "sha256:bfadaaaad3b01f9c4388e4e4a75e77c782c2c3111849e5c4598052ec740ee79f",
+      "liveAuthorityVersionRef": "sha256:dbdbb759b2b86b898a343cbb81646b283c589676989e919537f1a6cbc2b1df91",
+      "projectionHealth": "SOURCE_ADVANCED_STALE",
+      "standing": "HISTORICAL_NOT_CURRENT"
+    },
+    {
+      "projectedAuthorityVersionRef": "sha256:dbdbb759b2b86b898a343cbb81646b283c589676989e919537f1a6cbc2b1df91",
+      "liveAuthorityVersionRef": "sha256:dbdbb759b2b86b898a343cbb81646b283c589676989e919537f1a6cbc2b1df91",
+      "projectionHealth": "CURRENT_TO_SOURCE",
+      "standing": "CURRENT_DECLARED"
+    }
+  ],
+  "historicalHostEvidence": [
+    {
+      "taskId": "task:network-research-core-consolidation-branch-20260818",
+      "revision": 3,
+      "historicalFact": "No standalone materialized Network research root; semantic continuity remained in Host pending materialization."
+    },
+    {
+      "taskId": "task:network-research-materialization-repair-20260818",
+      "revision": 3,
+      "historicalFact": "Physical location escalation; shared research root not yet admitted at that horizon."
+    },
+    {
+      "taskId": "task:ordivon-research-system-owner-authority-closeout-materialization-20260818",
+      "revision": 3,
+      "laterFact": "Network authority publication materialized in shared corpus."
+    }
+  ],
+  "typedRoles": [
+    "CONTINUITY_HISTORY",
+    "TRANSPORT_OBSERVATION",
+    "AUTHORITY_CURRENTNESS",
+    "PUBLICATION_SOURCE_HORIZON"
+  ],
+  "falsifiers": {
+    "F3_STALE_AUTHORITY": "PASS_CROSS_OWNER",
+    "F6_RESTORE_RECOVERY": "PASS_CROSS_OWNER",
+    "F7_HISTORICAL_CURRENTNESS": "PASS_STRONG_CROSS_OWNER"
+  },
+  "projectDisposition": {
+    "standingCurrentnessSemantics": "PROMOTION_RECOMMENDED",
+    "runtimeFoundationReopen": false,
+    "reason": "Same typed standing/currentness relations survive Runtime independent-repo and Network shared-corpus topologies and are consumed by Host/Atlas recovery without Runtime ownership."
+  }
+}

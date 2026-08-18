@@ -30,7 +30,9 @@ Candidate core:
 - reclaimability;
 - validity domains and fencing.
 
-Current disposition: high-value cross-owner bridge because similar structures appear in Runtime, Host/Research recovery, Network currentness and durable provenance.
+Current disposition after C1 + C4: **PROMOTION_RECOMMENDED as an independent research programme candidate**. C1 observed a live Runtime AuthorityVersion transition in an independent owner repository; C4 reproduced the same historical-valid/current-stale relation for Network inside a shared physical research corpus while also exposing local-vs-remote transport divergence and publication source-fence separation. Host and Atlas consume the same distinctions without transferring their authority to Runtime.
+
+Promotion means the abstract typed standing/currentness problem now has heterogeneous cross-owner evidence. It does not mean Runtime's owner-native LRF family is removed, nor does it justify an automatic new repository, database, service or universal lifecycle schema.
 
 ## Operational Claim Theory
 
