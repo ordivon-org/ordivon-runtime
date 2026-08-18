@@ -26,6 +26,14 @@ Maintain and develop Ordivon's theory of bounded operational realization; conver
 14. [`consumption/C7-IDENTITY-LINEAGE-CAUSAL-ATTRIBUTION.md`](consumption/C7-IDENTITY-LINEAGE-CAUSAL-ATTRIBUTION.md) — exact Branch-H Runtime ledger separates higher-level obligation, multiple Runtime Operations/Attempts, external effect and evidence; bounded causation requires a supported pre-state/transition/post-state chain.
 15. [`consumption/C8-BINDING-AUTHORITY-REALIZATION-ORTHOGONALITY.md`](consumption/C8-BINDING-AUTHORITY-REALIZATION-ORTHOGONALITY.md) — HTTPS→SSH substitution plus live Workstation anchor/egress evidence confirms capability, authority, binding, standing and realization as orthogonal axes.
 16. [`consumption/C9-LIFECYCLE-RETENTION-RECLAIMABILITY.md`](consumption/C9-LIFECYCLE-RETENTION-RECLAIMABILITY.md) — disposable Workspace close/replay plus post-reclamation Job/artifact recovery proves current usability, physical reclamation, closure standing and historical retention are distinct lifecycle dimensions.
+17. [`consumption/C10-CROSS-FAMILY-SATURATION-AUDIT.md`](consumption/C10-CROSS-FAMILY-SATURATION-AUDIT.md) — hostile cross-family composition, deletion necessity and R1–R8 audit close the first post-Foundation wave as saturated under the current evidence horizon.
+18. [`PROGRAMME-SATURATION-CLOSEOUT.md`](PROGRAMME-SATURATION-CLOSEOUT.md) — formal C1–C10 closeout: no automatic C11; Foundations remain frozen and future theory requires a concrete falsifier.
+
+## Current disposition
+
+`PROGRAMME_SATURATED_CURRENT_EVIDENCE_HORIZON`
+
+This is not exhaustive Runtime closure. `WholeRuntimeExhaustiveClosure = UNKNOWN` remains canonical. The numbered consumption wave stops at C10 and resumes only under a new admitted falsifier or concrete engineering consumer.
 
 ## Standing principle
 
