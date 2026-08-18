@@ -23,6 +23,7 @@ Maintain and develop Ordivon's theory of bounded operational realization; conver
 11. [`consumption/C4-CROSS-OWNER-STANDING-CURRENTNESS.md`](consumption/C4-CROSS-OWNER-STANDING-CURRENTNESS.md) — Network shared-corpus transition confirms typed standing/currentness beyond Runtime and recommends independent-project promotion.
 12. [`consumption/C5-EVIDENCE-CLAIM-SCOPE.md`](consumption/C5-EVIDENCE-CLAIM-SCOPE.md) — heterogeneous Runtime/Host/Git/owner/Atlas evidence confirms Scope Conservation as typed support discipline; strong evidence cannot silently lift into broader claims.
 13. [`consumption/C6-LOCAL-GLOBAL-PUBLICATION-COMPOSITION.md`](consumption/C6-LOCAL-GLOBAL-PUBLICATION-COMPOSITION.md) — live Runtime→Git→owner-authority→Atlas pipeline proves end-to-end convergence is composed from scoped claims and explicit bridges, not one atomic `success` state.
+14. [`consumption/C7-IDENTITY-LINEAGE-CAUSAL-ATTRIBUTION.md`](consumption/C7-IDENTITY-LINEAGE-CAUSAL-ATTRIBUTION.md) — exact Branch-H Runtime ledger separates higher-level obligation, multiple Runtime Operations/Attempts, external effect and evidence; bounded causation requires a supported pre-state/transition/post-state chain.
 
 ## Standing principle
 

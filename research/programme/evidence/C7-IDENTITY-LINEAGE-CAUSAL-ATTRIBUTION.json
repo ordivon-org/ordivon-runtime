@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "kind": "ordivon.runtime-programme-consumption-evidence",
+  "consumptionRef": "consumption:runtime:c7-identity-lineage-causal-attribution-20260819",
+  "status": "THEORY_CONFIRMED_IDENTITY_BOUNDARY_CLARIFIED",
+  "higherLevelObligation": {
+    "ref": "O_pub:network-owner-authority-publication",
+    "runtimeJobIdentity": false,
+    "description": "Publish intended Network owner-authority state to shared research remote main."
+  },
+  "runtimeLineage": [
+    {
+      "role": "O1_A1_HTTPS_PUSH",
+      "clientRequestId": "atlas-h-network-push-main-20260818-v1",
+      "jobId": "job-01a014e6-ed5e-7161-8039-18e377b6bedc",
+      "operationDigest": "sha256:a3cab3e9e3ab217f00006fcaea0e2b893abac0b2ff1f75f6e0c805f7815eaec3",
+      "attemptId": "attempt-01a014e6-ed5e-7161-8039-18ff01ceb6f9",
+      "attemptNumber": 1,
+      "attemptState": "timed_out",
+      "executionReasonCode": "DEADLINE_EXCEEDED",
+      "dispatches": 1,
+      "duplicateDispatches": 0,
+      "deliveryProofPresent": false
+    },
+    {
+      "role": "OR_AR_REMOTE_RECONCILIATION",
+      "clientRequestId": "atlas-h-network-reconcile-push-20260818-v1",
+      "jobId": "job-01a014e8-892e-77c2-be83-052292b66306",
+      "operationDigest": "sha256:ce1addf6f10de0ad6864b051249cd8bcf2c66cc8025c80298f3f9dedeeaf52ba",
+      "attemptId": "attempt-01a014e8-892e-77c2-be83-053e18f03da6",
+      "attemptState": "succeeded",
+      "observedRemoteMain": "0fde1702e18cbaa12896497e13f400f64c7d1756",
+      "effectKnowledge": "TARGET_ADVANCEMENT_ABSENT_AT_OBSERVATION_HORIZON"
+    },
+    {
+      "role": "O2_A2_SSH_PUSH",
+      "clientRequestId": "atlas-h-network-push-main-ssh-20260818-v1",
+      "jobId": "job-01a014e8-b0cb-76b2-b542-09a624885c82",
+      "operationDigest": "sha256:021f6f605afaaa82faa73913e6ff912a5787d7628199de6e92ebba1b394f775d",
+      "attemptId": "attempt-01a014e8-b0cb-76b2-b542-09bbf1387eca",
+      "attemptNumber": 1,
+      "attemptState": "succeeded",
+      "gitTransportEvidence": "0fde170..80bd373 HEAD -> main"
+    },
+    {
+      "role": "OV_AV_FINAL_VERIFICATION",
+      "clientRequestId": "atlas-h-final-remote-fences-20260818-v1",
+      "jobId": "job-01a014e9-f1cc-7340-a52b-624f0534f9d3",
+      "operationDigest": "sha256:89efab4677a5b3c57b11239b2f44863f3ff0a154adf24df0454ad55006e50940",
+      "attemptId": "attempt-01a014e9-f1cc-7340-a52b-62587086ed40",
+      "attemptState": "succeeded",
+      "observedNetworkRemoteMain": "80bd37393ff46703be1dec6940bd11ea0f7149dc"
+    }
+  ],
+  "identityFindings": {
+    "sameHigherLevelObligationImpliesSameRuntimeOperation": false,
+    "sameRuntimeOperationImpliesSameAttempt": false,
+    "attemptStateEqualsEffectState": false,
+    "effectEqualsEvidence": false,
+    "verificationOperationEqualsEffect": false,
+    "retryLikeContinuationMayCreateNewRuntimeOperation": true
+  },
+  "causalAttribution": {
+    "a2RuntimeSuccessAloneProvesExternalEffect": false,
+    "r2ObservationAloneProvesA2Causation": false,
+    "boundedAttributionSupportedByCombinedChain": true,
+    "combinedChain": [
+      "R1 authoritative pre-state = 0fde170...",
+      "A2 Git transport reports 0fde170..80bd373 HEAD -> main",
+      "R2 authoritative post-state = 80bd373..."
+    ],
+    "boundedClaim": "O2/A2 is the supported delivery realization associated with the tested remote-ref advancement.",
+    "doesNotSupport": [
+      "SOLE_UNIVERSAL_CAUSE",
+      "HOST_GOAL_SUCCESS_BY_A2_ALONE",
+      "ATLAS_CONVERGENCE_CAUSED_BY_A2_ALONE",
+      "WORLD_LEVEL_CAUSATION"
+    ]
+  },
+  "falsifiers": {
+    "F8_IDENTITY_COLLAPSE": "PASS_STRONG_WITH_REPRESENTATION_CLARIFICATION",
+    "F1_DUPLICATE_EFFECT": "PASS",
+    "F2_LOST_ACKNOWLEDGEMENT": "PASS"
+  },
+  "theoryDisposition": {
+    "identityLineageConservation": "STRONGLY_CONFIRMED",
+    "causalAttributionSupportBridge": "CLARIFIED",
+    "runtimeFoundationReopen": false
+  }
+}
