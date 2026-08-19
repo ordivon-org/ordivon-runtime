@@ -683,6 +683,21 @@ def _run_git(source_repo: Path, *args: str) -> subprocess.CompletedProcess[str] 
         return None
 
 
+def _fresh_origin_main(source_repo: Path) -> tuple[str | None, str]:
+    result = _run_git(source_repo, "ls-remote", "origin", "refs/heads/main")
+    if result is None:
+        return None, "unavailable"
+    if result.returncode != 0:
+        return None, "query_failed"
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return None, "ref_missing" if not lines else "ambiguous"
+    fields = lines[0].split()
+    if len(fields) != 2 or fields[1] != "refs/heads/main" or not COMMIT_PATTERN.fullmatch(fields[0]):
+        return None, "invalid_response"
+    return fields[0], "fresh"
+
+
 def source_status(source_repo: Path | None, deployment_commit: str | None) -> dict[str, Any]:
     if source_repo is None:
         return {"available": False}
@@ -691,11 +706,12 @@ def source_status(source_repo: Path | None, deployment_commit: str | None) -> di
         return {"available": False, "reason": "SOURCE_REPO_UNREADABLE"}
     head = head_result.stdout.strip()
     origin_result = _run_git(source_repo, "rev-parse", "refs/remotes/origin/main")
-    origin = (
+    cached_origin = (
         origin_result.stdout.strip()
         if origin_result is not None and origin_result.returncode == 0
         else None
     )
+    remote_main, remote_observation = _fresh_origin_main(source_repo)
     dirty_result = _run_git(source_repo, "status", "--porcelain=v1", "--untracked-files=normal")
     dirty = None if dirty_result is None or dirty_result.returncode != 0 else bool(dirty_result.stdout)
     relation = "unknown"
@@ -719,10 +735,14 @@ def source_status(source_repo: Path | None, deployment_commit: str | None) -> di
     return {
         "available": True,
         "head": head,
-        "originMain": origin,
+        "originMain": cached_origin,
+        "originMainObservation": "cached_tracking_ref" if cached_origin is not None else "unavailable",
+        "remoteMain": remote_main,
+        "remoteMainObservation": remote_observation,
         "dirty": dirty,
         "relationToDeployment": relation,
-        "headMatchesOriginMain": None if origin is None else head == origin,
+        "headMatchesOriginMain": None if cached_origin is None else head == cached_origin,
+        "headMatchesRemoteMain": None if remote_main is None else head == remote_main,
     }
 
 
@@ -1003,13 +1023,17 @@ def dashboard_human(report: dict[str, Any], width: int) -> str:
     ]
     if source.get("available"):
         source_state = "dirty" if source.get("dirty") else ("clean" if source.get("dirty") is False else "state=unknown")
-        origin_match = source.get("headMatchesOriginMain")
-        origin_state = (
-            "origin=aligned" if origin_match is True else ("origin=drift" if origin_match is False else "origin=unknown")
+        remote_match = source.get("headMatchesRemoteMain")
+        remote_state = (
+            "remote=aligned" if remote_match is True else ("remote=drift" if remote_match is False else "remote=unknown")
+        )
+        cached_match = source.get("headMatchesOriginMain")
+        cached_state = (
+            "cache=aligned" if cached_match is True else ("cache=drift" if cached_match is False else "cache=unknown")
         )
         lines.append(
             _clip(
-                f"SOURCE    {_short(source.get('head'))}  {source_state}  {origin_state}  "
+                f"SOURCE    {_short(source.get('head'))}  {source_state}  {remote_state}  {cached_state}  "
                 f"release={source.get('relationToDeployment', 'unknown')}",
                 width,
             )

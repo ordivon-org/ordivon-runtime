@@ -756,5 +756,50 @@ class RuntimeStatusTests(unittest.TestCase):
             self.assertIn("capacity=0+0/8", result.stdout)
 
 
+    def test_dashboard_source_currentness_distinguishes_cached_ref_from_fresh_remote(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = fixture(root)
+            remote = root / "source-remote.git"
+            source = root / "source"
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(source)], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+            subprocess.run(
+                ["git", "-C", str(source), "config", "user.email", "test@example.invalid"],
+                check=True,
+            )
+            (source / "README.md").write_text("a\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source), "add", "README.md"], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-qm", "a"], check=True)
+            first = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+            subprocess.run(["git", "-C", str(source), "remote", "add", "origin", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(source), "push", "-u", "origin", "main"], check=True, capture_output=True)
+            (source / "README.md").write_text("b\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source), "commit", "-qam", "b"], check=True)
+            second = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+            subprocess.run(["git", "-C", str(source), "push", "origin", "main"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(source), "reset", "--hard", first], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-C", str(source), "update-ref", "refs/remotes/origin/main", first],
+                check=True,
+            )
+            completed = subprocess.run(
+                raw_command(paths, "--dashboard", "--json", "--source-repo", str(source)),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            projected = json.loads(completed.stdout)["dashboard"]["source"]
+            self.assertEqual(projected["head"], first)
+            self.assertEqual(projected["originMain"], first)
+            self.assertEqual(projected["originMainObservation"], "cached_tracking_ref")
+            self.assertTrue(projected["headMatchesOriginMain"])
+            self.assertEqual(projected["remoteMain"], second)
+            self.assertEqual(projected["remoteMainObservation"], "fresh")
+            self.assertFalse(projected["headMatchesRemoteMain"])
+
+
 if __name__ == "__main__":
     unittest.main()
