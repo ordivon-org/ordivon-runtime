@@ -3243,7 +3243,11 @@ impl Runtime {
             artifacts,
             poll_after_ms: projection.poll_after_ms,
             elapsed_ms: attempt.as_ref().map(|attempt| {
-                now.saturating_sub(attempt.started_at_ms.unwrap_or(attempt.created_at_ms))
+                let started_at_ms = attempt.started_at_ms.unwrap_or(attempt.created_at_ms);
+                attempt
+                    .finished_at_ms
+                    .unwrap_or(now)
+                    .saturating_sub(started_at_ms)
             }),
             last_output_at_ms,
             progress_revision: progress.as_ref().map(|progress| progress.revision),

@@ -6285,6 +6285,59 @@ fn runtime_capabilities_project_current_affordances_without_input_authority_path
     assert!(!serialized.contains(input_root.to_string_lossy().as_ref()));
 }
 
+#[test]
+fn terminal_task_observation_elapsed_ms_freezes_at_finished_time() {
+    let sandbox = Sandbox::new("terminal-observation-elapsed", 5_000);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let created = created(
+        runtime
+            .registry()
+            .submit(&request(
+                &sandbox,
+                "request:terminal-observation-elapsed",
+                4,
+            ))
+            .unwrap(),
+    );
+    let finished_at_ms = created.attempt.created_at_ms + 1;
+    runtime
+        .registry()
+        .commit_terminal(&TerminalCommit {
+            attempt_id: created.attempt.attempt_id.clone(),
+            expected_row_version: created.attempt.row_version,
+            state: AttemptState::Cancelled,
+            result_digest: digest(b"terminal-observation-elapsed"),
+            exit_code: None,
+            infrastructure_error_digest: None,
+            finished_at_ms,
+            artifacts: Vec::new(),
+            reason_code: "TEST_CANCELLED".to_string(),
+        })
+        .unwrap();
+
+    thread::sleep(std::time::Duration::from_millis(20));
+    let observe = || {
+        runtime
+            .observe_task(&TaskObserveRequest {
+                schema_version: RUNTIME_SCHEMA_VERSION,
+                job_id: created.job.job_id.clone(),
+                wait_ms: 0,
+                wait_until: TaskObserveWaitUntil::Terminal,
+                stdout_tail_bytes: 0,
+                stderr_tail_bytes: 0,
+                stdout_offset: None,
+                stderr_offset: None,
+            })
+            .unwrap()
+    };
+    let first = observe();
+    thread::sleep(std::time::Duration::from_millis(20));
+    let second = observe();
+
+    assert_eq!(first.elapsed_ms, Some(1));
+    assert_eq!(second.elapsed_ms, Some(1));
+}
+
 #[cfg(test)]
 mod registry_reference_model_properties {
     use super::*;
