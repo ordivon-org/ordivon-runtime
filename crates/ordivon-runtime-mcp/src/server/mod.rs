@@ -795,6 +795,15 @@ pub enum ToolRetryClass {
     Never,
     SafeSameRequest,
     ReconcileFirst,
+    /// Workspace-scope capacity rejection: the holder Job is identified in
+    /// `capacity.holderJobIds`. Observe the holder to terminal, re-observe the
+    /// Workspace, reassess the original intent, then submit a fresh request —
+    /// never blindly resubmit, because the Workspace state basis may have moved.
+    ObserveThenReassess,
+    /// Global-scope capacity rejection: another Workspace holds the capacity.
+    /// Wait for capacity (observe a holder or retryAfterMs backoff), then the
+    /// same request may be retried unchanged.
+    WaitThenRetry,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
@@ -894,6 +903,10 @@ impl From<RuntimeError> for ToolError {
             .and_then(|value| value.as_str().map(ToString::to_string))
             .unwrap_or_else(|| "EXECUTION_ERROR".to_string());
         let committed_operation = error.operation_id.is_some();
+        let capacity_scope = error
+            .capacity
+            .as_deref()
+            .map(|capacity| capacity.scope.clone());
         let (retry_class, commit_state) = if committed_operation {
             (ToolRetryClass::ReconcileFirst, ToolCommitState::Committed)
         } else {
@@ -905,8 +918,26 @@ impl From<RuntimeError> for ToolError {
                 ordivon_runtime_core::RuntimeErrorCode::WorkspaceExists => {
                     (ToolRetryClass::ReconcileFirst, ToolCommitState::NotStarted)
                 }
-                ordivon_runtime_core::RuntimeErrorCode::ConcurrencyLimit
-                | ordivon_runtime_core::RuntimeErrorCode::DeploymentInProgress
+                ordivon_runtime_core::RuntimeErrorCode::ConcurrencyLimit => {
+                    match capacity_scope.as_deref() {
+                        // The target Workspace itself holds the single-writer slot.
+                        // The Agent must observe the holder Job, re-observe the
+                        // Workspace, reassess the original intent, then submit a
+                        // fresh request: the state basis may have moved by then.
+                        Some("workspace") => (
+                            ToolRetryClass::ObserveThenReassess,
+                            ToolCommitState::NotStarted,
+                        ),
+                        // Another Workspace consumed the global capacity pool.
+                        // The target Workspace has no active writer; the same
+                        // request may be retried after capacity frees.
+                        Some("global") => {
+                            (ToolRetryClass::WaitThenRetry, ToolCommitState::NotStarted)
+                        }
+                        _ => (ToolRetryClass::SafeSameRequest, ToolCommitState::NotStarted),
+                    }
+                }
+                ordivon_runtime_core::RuntimeErrorCode::DeploymentInProgress
                 | ordivon_runtime_core::RuntimeErrorCode::RegistryBusy
                 | ordivon_runtime_core::RuntimeErrorCode::WorkspaceBusy => {
                     (ToolRetryClass::SafeSameRequest, ToolCommitState::NotStarted)

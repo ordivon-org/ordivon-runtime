@@ -2,3 +2,12 @@ title = "Ordivon Runtime gitleaks policy"
 
 [extend]
 useDefault = true
+
+# The only private-key match in the tree is a generated RSA fixture inside a
+# #[cfg(test)] module (Cloudflare Access JWT verification tests). It is never
+# loaded as a production credential and carries no secret material.
+[allowlist]
+description = "Generated test-only RSA fixture; never a production credential"
+paths = [
+  '''crates/ordivon-runtime-mcp/src/access_auth\.rs''',
+]

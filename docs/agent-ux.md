@@ -45,7 +45,7 @@ For compatibility, a fully explicit legacy `workspace.exec` request keeps its v1
 
 All public Runtime MCP Tools publish an `outputSchema` for their `structuredContent`. The schema is a two-branch contract: one branch is the Tool's exact success result and the other is the standard `{ "error": ToolError }` envelope. A caller can therefore discover execution fields, Workspace closure state, Artifact metadata, native-content metadata, and error-control semantics before the first Tool call instead of learning result shape from trial execution. `workspace.content` additionally uses the MCP `content` array for the native image block; its structured result remains the machine identity/provenance projection rather than duplicating image bytes into JSON.
 
-The error envelope keeps `code` as the stable machine reason while constraining the control vocabulary that changes safe Agent behavior: `origin` is one of `mcp_adapter`, `runtime_core`, or `workspace_executor`; `retryClass` is one of `never`, `safe_same_request`, or `reconcile_first`; and `commitState` is one of `not_started`, `not_committed`, `committed`, or `unknown`. `committed` means Runtime can prove that a durable operation identity already exists; the error includes `operationId`, and the caller must reattach/reconcile that identity rather than create new work. `unknown` remains reserved for cases where commitment itself cannot be proven. `toolCatalogDigest` binds these generated output schemas together with Tool names, descriptions, annotations, and input schemas, so a discovery refresh can detect an exact contract change without creating another Runtime authority.
+The error envelope keeps `code` as the stable machine reason while constraining the control vocabulary that changes safe Agent behavior: `origin` is one of `mcp_adapter`, `runtime_core`, or `workspace_executor`; `retryClass` is one of `never`, `safe_same_request`, `reconcile_first`, `observe_then_reassess`, or `wait_then_retry`; and `commitState` is one of `not_started`, `not_committed`, `committed`, or `unknown`. `committed` means Runtime can prove that a durable operation identity already exists; the error includes `operationId`, and the caller must reattach/reconcile that identity rather than create new work. `unknown` remains reserved for cases where commitment itself cannot be proven. `toolCatalogDigest` binds these generated output schemas together with Tool names, descriptions, annotations, and input schemas, so a discovery refresh can detect an exact contract change without creating another Runtime authority.
 
 ## Observation and reconciliation boundary
 
@@ -77,7 +77,12 @@ The fence exists only to make an idle deployment frontier stable: it does not ca
 
 ## Capacity backpressure
 
-`CONCURRENCY_LIMIT` is a pre-admission mechanical backpressure signal, not a queued Job state. Runtime returns `commitState=not_started`, `retryClass=safe_same_request`, `retryAfterMs`, the exact capacity scope and `active`/`limit`, plus bounded `holderJobIds`/`holderWorkspaceIds`. The Agent can inspect an exact holder with projection-only `task.get` and decide whether to wait, continue independent work, or later retry the same request. Runtime does not hide that decision behind an internal queue.
+`CONCURRENCY_LIMIT` is a pre-admission mechanical backpressure signal, not a queued Job state. Runtime returns `commitState=not_started`, the exact capacity scope and `active`/`limit`, `retryAfterMs`, plus bounded `holderJobIds`/`holderWorkspaceIds`. The retry guidance depends on the scope, which is the single field that distinguishes the two cases:
+
+- `capacity.scope=workspace` carries `retryClass=observe_then_reassess`. The target Workspace itself holds the single-writer slot (`holderJobIds` identifies the blocker). The Agent must observe the holder Job to terminal, re-observe the Workspace (`workspace.get` / `workspace.diff`), reassess whether the original intent still holds against the moved state basis, and only then submit a fresh request. Blindly resubmitting the same request is wrong: by the time the holder finishes, HEAD, files, and expected digests may all have changed.
+- `capacity.scope=global` carries `retryClass=wait_then_retry`. Another Workspace consumed the global capacity pool; the target Workspace has no active writer. The Agent may observe a holder or back off by `retryAfterMs`, then retry the same request unchanged once capacity frees.
+
+Runtime does not hide this decision behind an internal queue: a rejected request owns no reservation and must not be auto-replayed as if its intent were still valid against changed Workspace state.
 
 This fail-fast boundary protects execution identity. A rejected request owns no reservation and therefore does not freeze a mutable Workspace or preserve pre-materialized foreign-input bytes across the wait. A later retry re-resolves the Workspace source commitment and revalidates current input authority. Persisting rejected work as an internal queue would either make waiting intent a new authority over Workspace mutation or silently re-adjudicate a supposedly durable action against changed reality; neither follows from capacity pressure alone.
 
@@ -92,8 +97,9 @@ Compiler-report normalization, Git publication, GitHub orchestration, coding-age
 
 ## Execution semantic projection
 
-Runtime preserves state distinctions that change a caller's safe next action. `status` remains a coarse compatibility summary (`queued`, `working`, or a terminal resolution) and must not be used as the sole control signal. `workspace.exec`, `workspace.execPlan`, `task.observe`, and `task.list` project the following explicit execution semantics:
+Runtime preserves state distinctions that change a caller's safe next action. `status` remains a coarse compatibility summary (`queued`, `working`, or a terminal resolution) and must not be used as the sole control signal. `workspace.exec`, `workspace.execBound`, `workspace.execPlan`, `task.observe`, and `task.list` project the following explicit execution semantics:
 
+- `operationDigest` is the stable identity of the committed Runtime Operation represented by the Job; it is not the Job ID or Runtime Attempt ID, and remains constant across observation and replay of that Operation;
 - `desiredState` preserves the persisted Job intent (`run` or `cancelled`) across reconnects;
 - `attemptState` is the exact current or latest Runtime Attempt state, including `starting`, `stopping`, and `recovering`;
 - `terminationIntent` distinguishes natural execution from persisted stop or deadline intent;

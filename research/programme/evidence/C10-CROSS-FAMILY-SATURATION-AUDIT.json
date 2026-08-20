@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "kind": "ordivon.runtime-programme-consumption-evidence",
+  "consumptionRef": "consumption:runtime:c10-cross-family-saturation-audit-20260819",
+  "status": "PROGRAMME_SATURATED_CURRENT_EVIDENCE_HORIZON",
+  "evidenceHorizon": ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"],
+  "compositeScenario": {
+    "singleHistoricalTransactionClaimed": false,
+    "usesOnlyPreviouslyObservedComponentClasses": true,
+    "requiredSimultaneousFacts": [
+      "higher-level obligation may remain standing across distinct Runtime Operations",
+      "first Attempt may be terminal timeout while external effect knowledge is UNKNOWN",
+      "historical Job/evidence may remain retained after physical Workspace reclamation",
+      "old authority/support may remain historically valid while losing current standing",
+      "authoritative reconciliation may establish target effect absence at an observation horizon",
+      "substitute binding requires fresh capability/authority/binding/standing admission",
+      "new Runtime Operation/Attempt may serve the same higher-level obligation",
+      "bounded causal attribution requires pre-state + transition evidence + post-state",
+      "owner authority may advance before downstream projection refresh",
+      "historical support reuse requires admissible identity/scope/standing rather than similarity alone"
+    ],
+    "crossFamilyContradictionFound": false
+  },
+  "deletionNecessityAudit": {
+    "F1_OPERATIONAL_COMMITMENT_REALIZATION": {
+      "axisNecessary": true,
+      "realEvidence": ["C3", "C7", "C8"],
+      "collapseIfRemoved": "OBLIGATION_OPERATION_ATTEMPT_REALIZATION_IDENTITY_COLLAPSE"
+    },
+    "F2_BOUNDARY_AUTHORITY_RESOURCE_ISOLATION": {
+      "axisNecessary": true,
+      "realEvidence": ["C8"],
+      "collapseIfRemoved": "CAPABILITY_AUTHORITY_BINDING_REALIZATION_COLLAPSE"
+    },
+    "F3_BEHAVIOR_INTERACTION_COMPOSITION": {
+      "axisNecessary": true,
+      "realEvidence": ["C6"],
+      "collapseIfRemoved": "LOCAL_GLOBAL_LIFT_OR_UNIVERSAL_TOTAL_ORDER"
+    },
+    "F4_FAILURE_EFFECT_PERSISTENCE_RECONCILIATION": {
+      "axisNecessary": true,
+      "realEvidence": ["C2", "C7"],
+      "collapseIfRemoved": "PROCESS_OUTCOME_EFFECT_OUTCOME_COLLAPSE_AND_BLIND_RETRY"
+    },
+    "F5_EVIDENCE_CLAIM_TRUTH_SCOPE": {
+      "axisNecessary": true,
+      "realEvidence": ["C5", "C6", "C7"],
+      "collapseIfRemoved": "EVIDENCE_TO_TRUTH_SEMANTIC_LIFT"
+    },
+    "F6_LIFECYCLE_RETENTION_STANDING": {
+      "axisNecessary": true,
+      "realEvidence": ["C1", "C3", "C4", "C8", "C9"],
+      "collapseIfRemoved": "HISTORICAL_EXISTENCE_CURRENT_USABILITY_STANDING_COLLAPSE"
+    },
+    "allSixAxesNecessaryUnderEvidence": true,
+    "uniqueMinimalSixFamilyTaxonomyProven": false
+  },
+  "reopenAudit": {
+    "R1_IDENTITY_INSUFFICIENCY": false,
+    "R2_SCOPE_SUPPORT_CONTRADICTION": false,
+    "R3_STANDING_CURRENTNESS_FAILURE": false,
+    "R4_REALIZATION_CLASS_NOVELTY": false,
+    "R5_COMPOSITION_ORDER_FAILURE": false,
+    "R6_OPEN_WORLD_RECOVERY_FAILURE": false,
+    "R7_OWNER_BOUNDARY_CONTRADICTION": false,
+    "R8_CROSS_DOMAIN_REPEATED_ANOMALY": false,
+    "anyTriggered": false
+  },
+  "saturation": {
+    "programmeDisposition": "PROGRAMME_SATURATED",
+    "wholeRuntimeExhaustiveClosure": "UNKNOWN",
+    "foundationLayer": "FROZEN",
+    "automaticNextConsumptionNumber": null,
+    "futureTheoryAdmission": "CONCRETE_FALSIFIER_REQUIRED",
+    "futureEngineeringConsumptionAllowed": true,
+    "standingCurrentnessIndependentProjectContinues": true
+  },
+  "boundedCompression": "Operational legitimacy is a current, authority-compatible, identity-preserving, evidence-supported composition of admitted realizations re-grounded against open-world effects and lifecycle standing."
+}

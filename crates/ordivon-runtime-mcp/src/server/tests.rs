@@ -1074,6 +1074,7 @@ fn tool_catalog_uses_transactional_job_contract() {
 fn task_observation_serializes_discoverable_artifacts() {
     let observation = TaskObservation {
         job_id: "job-test".to_string(),
+        operation_digest: "sha256:operation-test".to_string(),
         status: "succeeded".to_string(),
         desired_state: JobDesiredState::Run,
         attempt_id: Some("attempt-test".to_string()),
@@ -1131,6 +1132,10 @@ fn task_observation_serializes_discoverable_artifacts() {
         error_summary: None,
     };
     let value = serde_json::to_value(observation).unwrap();
+    assert_eq!(
+        value.pointer("/operationDigest").and_then(Value::as_str),
+        Some("sha256:operation-test")
+    );
     assert_eq!(
         value
             .pointer("/artifacts/0/artifactId")
@@ -1347,7 +1352,47 @@ fn capacity_failure_preserves_retry_and_scope_metadata() {
     );
     assert_eq!(
         value.pointer("/retryClass").and_then(Value::as_str),
-        Some("safe_same_request")
+        Some("wait_then_retry")
+    );
+    assert_eq!(
+        value.pointer("/commitState").and_then(Value::as_str),
+        Some("not_started")
+    );
+}
+
+#[test]
+fn workspace_capacity_failure_guides_observe_then_reassess() {
+    let error = RuntimeError::concurrency(
+        "workspace execution concurrency limit reached (active=1, limit=1)",
+        "workspaceId",
+        RuntimeCapacity {
+            scope: "workspace".to_string(),
+            active: 1,
+            limit: 1,
+            workspace_id: Some("workspace-target".to_string()),
+            holder_job_ids: vec!["job-holder".to_string()],
+            holder_workspace_ids: vec!["workspace-holder".to_string()],
+            holders_truncated: false,
+        },
+    );
+    let value = serde_json::to_value(ToolError::from(error)).unwrap();
+    assert_eq!(
+        value.pointer("/code").and_then(Value::as_str),
+        Some("CONCURRENCY_LIMIT")
+    );
+    assert_eq!(
+        value.pointer("/capacity/scope").and_then(Value::as_str),
+        Some("workspace")
+    );
+    assert_eq!(
+        value
+            .pointer("/capacity/holderJobIds/0")
+            .and_then(Value::as_str),
+        Some("job-holder")
+    );
+    assert_eq!(
+        value.pointer("/retryClass").and_then(Value::as_str),
+        Some("observe_then_reassess")
     );
     assert_eq!(
         value.pointer("/commitState").and_then(Value::as_str),

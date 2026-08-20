@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "kind": "ordivon.runtime-programme-consumption-evidence",
+  "consumptionRef": "consumption:runtime:c5-evidence-claim-scope-20260818",
+  "status": "THEORY_CONFIRMED_TYPED_SUPPORT_CLARIFIED",
+  "cases": [
+    {
+      "evidenceRole": "RUNTIME_TERMINAL_EXECUTION",
+      "sourceRef": "job-01a01574-2d59-7d02-92f8-286ce6e2bb35",
+      "observed": {
+        "attemptState": "succeeded",
+        "exitCode": 0,
+        "mechanicallyConverged": true,
+        "resultAvailable": true,
+        "semanticCompletionEvaluated": false
+      },
+      "supports": ["ATTEMPT_TERMINAL_SUCCESS", "PROCESS_EXIT_ZERO", "RESULT_AVAILABLE", "MECHANICAL_CONVERGENCE"],
+      "doesNotSupportWithoutBridge": ["EXTERNAL_EFFECT_PRESENT", "HOST_GOAL_SUCCEEDED", "OWNER_SEMANTIC_OBJECTIVE_SATISFIED", "WORLD_TRUE"]
+    },
+    {
+      "evidenceRole": "AUTHORITATIVE_EXTERNAL_STATE_OBSERVATION",
+      "sourceRef": "task:ordivon-research-system-owner-authority-closeout-materialization-20260818@rev3",
+      "supports": ["REMOTE_REF_STATE_AT_OBSERVATION_HORIZON"],
+      "doesNotSupportWithoutBridge": ["CAUSATION_BY_SPECIFIC_ATTEMPT", "HOST_GOAL_SUCCEEDED", "GLOBAL_REPLICA_VISIBILITY"]
+    },
+    {
+      "evidenceRole": "HOST_CONTINUITY_CHECKPOINT",
+      "sourceRef": "task:runtime-operational-realization-programme-20260818",
+      "supports": ["TASK_CONTINUITY_FACT_AT_REVISION", "HOST_RECORDED_WORKING_CLAIM"],
+      "doesNotSupportWithoutBridge": ["CURRENT_GIT_TRUTH", "OWNER_SEMANTIC_CURRENTNESS", "EXTERNAL_EFFECT", "WORLD_TRUE"]
+    },
+    {
+      "evidenceRole": "OWNER_AUTHORITY_PUBLICATION",
+      "supports": ["OWNER_QUALIFIED_SEMANTIC_CLAIM_WITHIN_AUTHORITY_AND_SOURCE_FENCE"],
+      "doesNotSupportWithoutBridge": ["WORLD_TRUE", "HOST_GOAL_SUCCEEDED", "POST_SOURCE_FENCE_CHANGES", "DOWNSTREAM_PROJECTION_FRESHNESS"]
+    },
+    {
+      "evidenceRole": "ATLAS_PROJECTION",
+      "sourceRef": "task:ordivon-atlas-generated-projection-observatory-mvp-20260818@rev3",
+      "supports": ["PROJECTED_AUTHORITY_VERSION", "PROJECTION_HEALTH", "PROJECTED_RECOVERY_BINDING"],
+      "doesNotSupportWithoutBridge": ["ATLAS_OWNS_OWNER_TRUTH", "PROJECTION_RECENCY_MINTS_AUTHORITY", "WORLD_TRUE", "HOST_GOAL_SUCCEEDED"]
+    }
+  ],
+  "falsifiers": {
+    "F4_LOCAL_GLOBAL_LIFTING": "PASS_STRONG",
+    "F5_EVIDENCE_TRUTH_LIFTING": "PASS_STRONG",
+    "F9_WEAK_COMPOSITION_UPGRADE": "PASS_WITH_TYPED_SUPPORT_CLARIFICATION"
+  },
+  "clarification": {
+    "supportScopeScalar": false,
+    "supportScopeTypedMultidimensional": true,
+    "rule": "ClaimAdmissible(C) iff required typed support for C is covered by proven evidence/bridges and current standing.",
+    "explicitBridgeRequiredForSemanticLift": true
+  },
+  "theoryDisposition": {
+    "scopeConservation": "STRONGLY_CONFIRMED_TYPED",
+    "operationalClaimTheory": "STRENGTHENED_NOT_PROMOTED",
+    "runtimeFoundationReopen": false
+  }
+}

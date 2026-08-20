@@ -782,6 +782,7 @@ fn task_observe_reconciliation_is_scoped_to_the_requested_job() {
         })
         .unwrap();
     assert!(observed.execution_terminal);
+    assert_eq!(observed.operation_digest, target.job.operation_digest);
     assert_eq!(
         runtime
             .registry()
@@ -2048,6 +2049,12 @@ fn terminal_evidence_is_a_durable_artifact_with_native_binding() {
         &fs::read(Path::new(&starting.bundle_path).join(&artifact.relative_path)).unwrap(),
     )
     .unwrap();
+    assert_eq!(evidence["operationDigest"], created.job.operation_digest);
+    assert_eq!(
+        evidence["executionPlanDigest"],
+        created.job.execution_plan_digest
+    );
+    assert_eq!(evidence["executableDigest"], submit.plan.executable_digest);
     assert_eq!(evidence["executionProfile"], "trusted_local");
     assert_eq!(evidence["executionTarget"], "windows_native");
     assert_eq!(evidence["windowsExecutionContext"]["tokenClass"], "limited");
@@ -2166,9 +2173,15 @@ fn host_boundary_references_replay_conflict_and_survive_terminal_evidence() {
     .unwrap();
     assert_eq!(evidence["jobId"], first.job.job_id);
     assert_eq!(evidence["attemptId"], starting.attempt_id);
+    assert_eq!(evidence["operationDigest"], first.job.operation_digest);
+    assert_eq!(
+        evidence["executionPlanDigest"],
+        first.job.execution_plan_digest
+    );
     assert_eq!(evidence["workspaceId"], submit.plan.workspace_id);
     assert_eq!(evidence["sourceRevision"], "fixture-revision");
     assert_eq!(evidence["executable"], submit.plan.executable);
+    assert_eq!(evidence["executableDigest"], submit.plan.executable_digest);
     assert_eq!(
         serde_json::from_value::<Vec<ForeignReference>>(evidence["foreignReferences"].clone(),)
             .unwrap(),
@@ -2189,6 +2202,7 @@ fn host_boundary_references_replay_conflict_and_survive_terminal_evidence() {
         .unwrap();
     assert_eq!(located.jobs.len(), 1);
     assert_eq!(located.jobs[0].job_id, first.job.job_id);
+    assert_eq!(located.jobs[0].operation_digest, first.job.operation_digest);
     let recovered_artifact = fresh_registry
         .list_artifacts(&first.job.job_id)
         .unwrap()
@@ -6269,6 +6283,59 @@ fn runtime_capabilities_project_current_affordances_without_input_authority_path
     let serialized = serde_json::to_string(&capabilities).unwrap();
     assert!(serialized.contains("finance-state"));
     assert!(!serialized.contains(input_root.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn terminal_task_observation_elapsed_ms_freezes_at_finished_time() {
+    let sandbox = Sandbox::new("terminal-observation-elapsed", 5_000);
+    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
+    let created = created(
+        runtime
+            .registry()
+            .submit(&request(
+                &sandbox,
+                "request:terminal-observation-elapsed",
+                4,
+            ))
+            .unwrap(),
+    );
+    let finished_at_ms = created.attempt.created_at_ms + 1;
+    runtime
+        .registry()
+        .commit_terminal(&TerminalCommit {
+            attempt_id: created.attempt.attempt_id.clone(),
+            expected_row_version: created.attempt.row_version,
+            state: AttemptState::Cancelled,
+            result_digest: digest(b"terminal-observation-elapsed"),
+            exit_code: None,
+            infrastructure_error_digest: None,
+            finished_at_ms,
+            artifacts: Vec::new(),
+            reason_code: "TEST_CANCELLED".to_string(),
+        })
+        .unwrap();
+
+    thread::sleep(std::time::Duration::from_millis(20));
+    let observe = || {
+        runtime
+            .observe_task(&TaskObserveRequest {
+                schema_version: RUNTIME_SCHEMA_VERSION,
+                job_id: created.job.job_id.clone(),
+                wait_ms: 0,
+                wait_until: TaskObserveWaitUntil::Terminal,
+                stdout_tail_bytes: 0,
+                stderr_tail_bytes: 0,
+                stdout_offset: None,
+                stderr_offset: None,
+            })
+            .unwrap()
+    };
+    let first = observe();
+    thread::sleep(std::time::Duration::from_millis(20));
+    let second = observe();
+
+    assert_eq!(first.elapsed_ms, Some(1));
+    assert_eq!(second.elapsed_ms, Some(1));
 }
 
 #[cfg(test)]

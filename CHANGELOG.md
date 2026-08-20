@@ -4,6 +4,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ## Unreleased
 
+- `CONCURRENCY_LIMIT` backpressure now distinguishes its two capacity scopes in the MCP error envelope instead of collapsing both into `safe_same_request`: `capacity.scope=workspace` maps to the new `retryClass=observe_then_reassess` (observe the `holderJobIds` blocker to terminal, re-observe the Workspace, reassess the intent, then submit fresh — the state basis may have moved), while `capacity.scope=global` maps to `retryClass=wait_then_retry` (another Workspace holds the capacity; the same request may be retried unchanged after `retryAfterMs`). Deployment/Registry/Workspace-busy fences keep `safe_same_request`. `holderJobIds`/`holderWorkspaceIds` were already present in the envelope; this change only stops the adapter from discarding the semantic distinction in the retry guidance.
+
 - Remote MCP ingress can now use an independently rotatable hosted-client Bearer credential from `ORDIVON_REMOTE_BEARER_TOKEN_FILE`, distinct from the trusted-local Runtime Bearer and traced as `remote_bearer`. This supports dedicated Cloudflare Tunnel hostnames that intentionally bypass Access for clients with static Authorization-header support while preserving the existing Access JWT path and fail-closed unauthenticated behavior.
 
 - Runtime operational packaging now completes the execution-ownership contraction: the ordinary Runtime release owns the 12 installed Runtime artifacts rather than systemd-unit or Windows-provider bytes, and the packaged lifecycle service no longer invokes the removed Windows input-presentation maintenance command while retaining environment-owned cache pruning.

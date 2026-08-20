@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "kind": "ordivon.runtime-programme-consumption-evidence",
+  "consumptionRef": "consumption:runtime:c1-standing-currentness-recovery-20260818",
+  "status": "THEORY_CONFIRMED_WITH_LIVE_CURRENTNESS_TRANSITION",
+  "epochs": [
+    {
+      "epoch": "A",
+      "observedBranchTip": "6724b6c7a7a2832cdb77eeb792bf23ca79861ad5",
+      "liveAuthorityVersionRef": "sha256:227cc7e253de5fa10be7cbecdfd2e7d84724b507c4a0504836fc63996ac53497",
+      "previousAuthorityVersionRef": "sha256:350d042df3c01399cf9314c6954f0c3f4c45bdeb660aa275556e098a77ec62eb",
+      "projectionCases": [
+        {
+          "projectedAuthorityVersionRef": "sha256:227cc7e253de5fa10be7cbecdfd2e7d84724b507c4a0504836fc63996ac53497",
+          "projectionHealth": "CURRENT_TO_SOURCE",
+          "standing": "CURRENT_DECLARED"
+        },
+        {
+          "projectedAuthorityVersionRef": "sha256:350d042df3c01399cf9314c6954f0c3f4c45bdeb660aa275556e098a77ec62eb",
+          "projectionHealth": "SOURCE_ADVANCED_STALE",
+          "standing": "HISTORICAL_NOT_CURRENT"
+        }
+      ]
+    },
+    {
+      "epoch": "B",
+      "authorityAdvanceRemoteCommit": "ee92d11eeede13aaff68880d9c395e23b617571e",
+      "c1ReconciledHead": "a2b35c7ef44e62acfbd3c2e819869c8689489207",
+      "liveAuthorityVersionRef": "sha256:e06cac5f69942068fabe80dc5da22fc1fb566d3004ce4951df545534fda289d9",
+      "previousAuthorityVersionRef": "sha256:227cc7e253de5fa10be7cbecdfd2e7d84724b507c4a0504836fc63996ac53497",
+      "livePublicationSourceRevision": "6724b6c7a7a2832cdb77eeb792bf23ca79861ad5",
+      "projectionCases": [
+        {
+          "projectedAuthorityVersionRef": "sha256:e06cac5f69942068fabe80dc5da22fc1fb566d3004ce4951df545534fda289d9",
+          "digestValid": true,
+          "projectionHealth": "CURRENT_TO_SOURCE",
+          "standing": "CURRENT_DECLARED"
+        },
+        {
+          "projectedAuthorityVersionRef": "sha256:227cc7e253de5fa10be7cbecdfd2e7d84724b507c4a0504836fc63996ac53497",
+          "digestValid": true,
+          "projectionHealth": "SOURCE_ADVANCED_STALE",
+          "standing": "HISTORICAL_NOT_CURRENT"
+        },
+        {
+          "projectedAuthorityVersionRef": "sha256:350d042df3c01399cf9314c6954f0c3f4c45bdeb660aa275556e098a77ec62eb",
+          "digestValid": true,
+          "projectionHealth": "SOURCE_ADVANCED_STALE",
+          "standing": "HISTORICAL_NOT_CURRENT"
+        }
+      ]
+    }
+  ],
+  "hostContinuity": {
+    "historicalConsolidation": {
+      "taskId": "task:runtime-research-core-consolidation-branch-20260818",
+      "revision": 3,
+      "state": "completed",
+      "historicalFrontierIncludedPendingMaterialization": true
+    },
+    "laterMaterialization": {
+      "taskId": "task:runtime-research-materialization-repair-20260818",
+      "revision": 3,
+      "state": "completed",
+      "materializationCompletedAtRevision": "7af1b0d51f678d8662ac85bb91ec4d363141c483"
+    },
+    "hostIsSemanticCurrentnessAuthority": false
+  },
+  "sourceFenceFinding": {
+    "gitTipRecencyMintsSemanticAuthority": false,
+    "publicationSourceFenceDefinesSupportHorizon": true,
+    "sourceFenceVersusGitTipIsAuthorityProjectionHealth": false
+  },
+  "falsifiers": {
+    "F3_STALE_AUTHORITY": "PASS_THEORY_CONFIRMED",
+    "F6_RESTORE_RECOVERY": "PASS_THEORY_CONFIRMED",
+    "F7_HISTORICAL_CURRENTNESS": "PASS_THEORY_CONFIRMED_BY_LIVE_TRANSITION"
+  },
+  "selfCorrection": {
+    "rejectedProbeRule": "publication.sourceRevision != Git HEAD => SOURCE_ADVANCED_STALE",
+    "reason": "This launders Git recency into semantic authority.",
+    "correctedRule": "Compare projected AuthorityVersionRef with live owner CURRENT AuthorityVersionRef; report source-horizon relation separately."
+  },
+  "theoryDisposition": {
+    "foundationReopen": false,
+    "standingCurrentnessCandidateStrengthened": true,
+    "implementationBugFoundAndRepaired": "Initial research probe conflated source-fence freshness with authority currentness; corrected before closeout."
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "series": "Runtime Foundations",
+  "round": "RF1",
+  "title": "State, Change, Event, Transition, Behavior and Dynamics",
+  "status": "completed",
+  "date": "2026-08-17",
+  "workspaceId": "runtime-foundations-rr0-20260817",
+  "primaryRecord": "research/foundations/RF1-STATE-CHANGE-EVENT-BEHAVIOR-DYNAMICS.md",
+  "sources": "research/foundations/RF1-SOURCES.md",
+  "continuation": "research/foundations/RF1-CONTINUATION.md",
+  "results": [
+    "State is a boundary/question-relative representation and future-relevant history compression, not complete Reality.",
+    "State, observation, estimate and recorded operational state are distinct.",
+    "State representations can be nonunique, nonminimal and hidden/unobservable.",
+    "Change is projection-relative and stuttering proves unchanged modeled state does not imply unchanged wider Reality.",
+    "Continuous dynamics falsifies a universal discrete-transition ontology.",
+    "Event is a modeled distinguished occurrence/boundary in behavior rather than a guaranteed canonical atom of Reality.",
+    "Event, transition, event record and timestamp are distinct.",
+    "Transition granularity and atomicity are abstraction-relative.",
+    "Behavior/trajectory is more general than a current state, finite lifecycle or event sequence.",
+    "Dynamics constrains possible evolution; behavior is one realized/modelled trajectory.",
+    "Dynamics may be deterministic, nondeterministic, stochastic, continuous, discrete or hybrid.",
+    "System/environment/input partition is boundary-relative and environment assumptions belong in the model contract.",
+    "Transition relation and temporal order do not by themselves prove causation.",
+    "Current Ordivon AttemptState is an operational projection, not a foundations ontology."
+  ],
+  "antiCollapses": [
+    "State != Reality",
+    "State != Observation",
+    "State != Estimate",
+    "No modeled change != no Reality change",
+    "Epistemic state change != target-world effect",
+    "Event != Transition",
+    "Event != Event Record",
+    "Timestamp != Event Identity",
+    "Transition relation != realized transition",
+    "Atomic transition != physically indivisible change",
+    "Behavior != State",
+    "Behavior != finite lifecycle",
+    "Dynamics != Behavior",
+    "Dynamics != deterministic function by definition",
+    "Transition relation != causal proof"
+  ],
+  "nextRound": {
+    "id": "RF2",
+    "title": "Action, Intent, Proposal, Command and Operation",
+    "entryQuestion": "What distinguishes selected/attributed action from merely allowed system evolution, and what structure exists before execution/realization?"
+  },
+  "engineeringAuthority": "none",
+  "notes": "RF1 explains current Runtime state/event machinery but does not authorize state-machine or Registry refactoring."
+}

@@ -464,5 +464,80 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(json.loads(receipt.read_text())["actions"][0]["statusDigest"], action["statusDigest"])
 
 
+    def test_sweep_rejects_incompatible_reclaim_contract_before_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            marker = root / "apply-called"
+            fake_reclaim = root / "fake-reclaim"
+            fake_reclaim.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, pathlib, sys\n"
+                "if sys.argv[1] == 'inspect':\n"
+                " print(json.dumps({'schemaVersion': 2, 'summary': {}, 'candidates': []}))\n"
+                "elif sys.argv[1] == 'apply':\n"
+                f" pathlib.Path({str(marker)!r}).write_text('called')\n"
+                " print(json.dumps({'schemaVersion': 2, 'status': 'completed', 'actions': [], 'failures': [], 'receipt': '/fake'}))\n"
+                "else: raise SystemExit(1)\n",
+                encoding="utf-8",
+            )
+            fake_reclaim.chmod(0o755)
+            environment = os.environ.copy()
+            environment["ORDIVON_RUNTIME_RECLAIM"] = str(fake_reclaim)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-lifecycle",
+                    "sweep",
+                    "--database",
+                    str(root / "unused.sqlite3"),
+                    "--runtime-store-root",
+                    str(root / "runtime"),
+                    "--env-file",
+                    str(root / "unused.env"),
+                    "--receipt-root",
+                    str(root / "receipts"),
+                    "--lock-file",
+                    str(root / "lifecycle.lock"),
+                    "--confirm-policy",
+                    "APPLY_WORKSPACE_RETENTION_POLICY",
+                ],
+                cwd=REPO,
+                env=environment,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unsupported schemaVersion", result.stderr)
+            self.assertFalse(marker.exists(), "incompatible inspect contract reached apply")
+
+    def test_reclaim_result_validators_reject_malformed_structures(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "candidates must be an array"):
+            self.module["validate_reclaim_inspect"](
+                {"schemaVersion": 1, "summary": {}, "candidates": {}}
+            )
+        with self.assertRaisesRegex(RuntimeError, "duplicate workspaceId"):
+            self.module["validate_reclaim_inspect"](
+                {
+                    "schemaVersion": 1,
+                    "summary": {},
+                    "candidates": [
+                        {"workspaceId": "same", "classification": "closable"},
+                        {"workspaceId": "same", "classification": "closable"},
+                    ],
+                }
+            )
+        with self.assertRaisesRegex(RuntimeError, "actions must be an array of objects"):
+            self.module["validate_reclaim_apply"](
+                {
+                    "schemaVersion": 1,
+                    "status": "completed",
+                    "actions": ["not-an-object"],
+                    "failures": [],
+                    "receipt": "/fake",
+                }
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
