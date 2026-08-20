@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "kind": "ordivon.runtime-programme-consumption-evidence",
+  "consumptionRef": "consumption:runtime:c9-lifecycle-retention-reclaimability-20260819",
+  "status": "THEORY_CONFIRMED_RECLAMATION_DOES_NOT_ERASE_HISTORY",
+  "fixture": {
+    "workspaceId": "runtime-c9-disposable-lifecycle-fixture-20260819",
+    "sourceRevision": "23d8847e348ec40777f80ac0b43e29c9de2ca73d",
+    "sourceStateDigest": "sha256:0bfb5729ac3c8c5dd756d68c81f1c3e344e8566fe8c1fdbb3580267a077c7969",
+    "jobId": "job-01a015b2-05b3-7120-a278-8afd1d3fa1e7",
+    "operationDigest": "sha256:c12d74f2a19f2354eb5e571d1480f1954f44f5d43768c0ad80b007666b0440c2",
+    "attemptId": "attempt-01a015b2-05b3-7120-a278-8b07dc749fb9",
+    "attemptState": "succeeded",
+    "stdoutArtifactId": "attempt-01a015b2-05b3-7120-a278-8b07dc749fb9.stdout",
+    "stdoutArtifactDigest": "sha256:c0eef0f5fac981c05a210dcf4ecf3a1f7931f795c1b452f796a0db2a8df05cd2"
+  },
+  "firstClose": {
+    "closureDisposition": "removed",
+    "removed": true,
+    "exactDigestFence": true
+  },
+  "postCloseCurrentUse": {
+    "workspaceGet": "WORKSPACE_NOT_FOUND_WORKSPACE_IS_CLOSED",
+    "newExecAdmission": "WORKSPACE_NOT_FOUND_NOT_COMMITTED",
+    "currentlyUsable": false
+  },
+  "closeReplay": {
+    "closureDisposition": "already_closed",
+    "removed": false,
+    "sameSourceStateDigest": true,
+    "closureIdentityRetained": true
+  },
+  "historicalRetentionAfterWorkspaceRemoval": {
+    "taskGetSucceeded": true,
+    "taskListByClosedWorkspaceSucceeded": true,
+    "jobIdentityRetained": true,
+    "attemptHistoryRetained": true,
+    "timelineRetained": true,
+    "artifactCount": 4,
+    "artifactReadSucceeded": true,
+    "artifactDigestStable": true
+  },
+  "findings": {
+    "physicalWorkspacePresenceEqualsHistoricalAddressability": false,
+    "workspaceUsabilityEqualsJobRetention": false,
+    "physicalReclamationEqualsHistoricalErasure": false,
+    "closureStandingEqualsRemovalOccurrence": false,
+    "retainedEvidenceResurrectsWorkspace": false,
+    "historicalIdentityImpliesCurrentStanding": false,
+    "infiniteRetentionProven": false,
+    "retirementAndReclamationTemporallySeparatedInFixture": false
+  },
+  "falsifiers": {
+    "F7_HISTORICAL_CURRENTNESS": "PASS_STRONG",
+    "F10_UNSAFE_REUSE": "PASS_STRONG"
+  },
+  "theoryDisposition": {
+    "lifecycleRetentionStanding": "STRONGLY_CONFIRMED",
+    "historyReproductionNonIdentity": "CONFIRMED",
+    "retirementVsReclamation": "CONSISTENT_NOT_INDEPENDENTLY_PHASE_SEPARATED",
+    "runtimeFoundationReopen": false
+  }
+}

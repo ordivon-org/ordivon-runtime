@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "kind": "ordivon.runtime-programme-consumption-evidence",
+  "consumptionRef": "consumption:runtime:c8-binding-authority-realization-orthogonality-20260819",
+  "status": "THEORY_CONFIRMED_ORTHOGONALITY_STRONGLY_SUPPORTED",
+  "caseA_transportSubstitution": {
+    "higherLevelObligation": "network-owner-authority-publication",
+    "httpsOperationDigest": "sha256:a3cab3e9e3ab217f00006fcaea0e2b893abac0b2ff1f75f6e0c805f7815eaec3",
+    "httpsAttemptState": "timed_out",
+    "reconciliationRemoteMain": "0fde1702e18cbaa12896497e13f400f64c7d1756",
+    "sshOperationDigest": "sha256:021f6f605afaaa82faa73913e6ff912a5787d7628199de6e92ebba1b394f775d",
+    "sshAttemptState": "succeeded",
+    "sshTransportEvidence": "0fde170..80bd373 HEAD -> main",
+    "finalRemoteMain": "80bd37393ff46703be1dec6940bd11ea0f7149dc",
+    "sameHigherObligation": true,
+    "sameRuntimeOperation": false,
+    "sameAttempt": false,
+    "bindingChanged": true
+  },
+  "caseB_liveSurfClash": {
+    "observationMode": "READ_ONLY_LIVE_WORKSTATION",
+    "status": "UNAVAILABLE",
+    "generationDigest": "sha256:d7e66dcb53f484bb87bcd7649231d5f205b01dafd49a2f4f9e89be910732e92c",
+    "capabilityDigest": "sha256:9358ce15081e89d10bd31356f5779bcb93d09a875f49acb52c1562c70f6dad4c",
+    "namespacePresent": false,
+    "resolverHealthy": false,
+    "transportHealthy": false,
+    "requiredTargetsHealthy": false,
+    "serviceActive": false,
+    "finding": "CAPABILITY_IDENTITY_PRESENT_WHILE_REALIZATION_UNAVAILABLE"
+  },
+  "caseC_liveFinanceOkx": {
+    "observationMode": "READ_ONLY_LIVE_WORKSTATION",
+    "status": "UNKNOWN",
+    "profileDigest": "sha256:3e993ee46cc5f9dbf0457c03464ba18fd5175bbfa27ff38a34d64c85125fb69e",
+    "authorityDigest": "sha256:3e993ee46cc5f9dbf0457c03464ba18fd5175bbfa27ff38a34d64c85125fb69e",
+    "memberCount": 2,
+    "listenerReachable": false,
+    "serviceActive": false,
+    "parentHealthOk": false,
+    "activeMember": null,
+    "eligibleMembers": [],
+    "watchdogDisposition": "no-eligible-member",
+    "finding": "AUTHORITY_PROFILE_PRESENT_WITHOUT_ACTIVE_REALIZATION"
+  },
+  "caseD_workstationRegression": {
+    "sourceJobId": "job-01a0159d-3d2b-7cd0-8199-a33251bbba20",
+    "sourceRevision": "7b0c23e32a1772f88826a743b9ae68c953dbb486",
+    "contractsObserved": [
+      "AVAILABLE overlay candidate may remain requires-admission",
+      "resource discovery candidate may be admissionEligible=false and requiresOwnerRevalidation=true",
+      "ADMITTED_NOT_PROVEN does not imply current-egress-root",
+      "stale saved observation may preserve identity while execution is rejected"
+    ],
+    "finding": "CAPABILITY_OR_DISCOVERY_DOES_NOT_MINT_AUTHORITY_OR_CURRENT_REALIZATION"
+  },
+  "orthogonality": {
+    "capabilityEqualsAuthority": false,
+    "authorityEqualsRealization": false,
+    "bindingEqualsRealization": false,
+    "semanticIdentityEqualsPhysicalRealization": false,
+    "identityContinuityImpliesPositiveStanding": false,
+    "admissibleRealizationRequiresConjunction": true
+  },
+  "falsifiers": {
+    "F3_STALE_AUTHORITY_OR_STANDING": "PASS_STRONG",
+    "F8_IDENTITY_COLLAPSE": "PASS_STRONG",
+    "F10_UNSAFE_REUSE": "PASS_STRONG"
+  },
+  "theoryDisposition": {
+    "orthogonality": "STRONGLY_CONFIRMED",
+    "runtimeFoundationReopen": false
+  }
+}

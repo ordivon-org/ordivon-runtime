@@ -1074,6 +1074,7 @@ fn tool_catalog_uses_transactional_job_contract() {
 fn task_observation_serializes_discoverable_artifacts() {
     let observation = TaskObservation {
         job_id: "job-test".to_string(),
+        operation_digest: "sha256:operation-test".to_string(),
         status: "succeeded".to_string(),
         desired_state: JobDesiredState::Run,
         attempt_id: Some("attempt-test".to_string()),
@@ -1131,6 +1132,10 @@ fn task_observation_serializes_discoverable_artifacts() {
         error_summary: None,
     };
     let value = serde_json::to_value(observation).unwrap();
+    assert_eq!(
+        value.pointer("/operationDigest").and_then(Value::as_str),
+        Some("sha256:operation-test")
+    );
     assert_eq!(
         value
             .pointer("/artifacts/0/artifactId")

@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "kind": "ordivon.runtime-programme-consumption-evidence",
+  "consumptionRef": "consumption:runtime:c3-fresh-execution-support-reuse-20260818",
+  "status": "BOUNDED_THEORY_CONFIRMED_GENERIC_REUSE_NOT_IMPLEMENTED",
+  "baseSourceStateDigest": "sha256:a62795c4c08bc39a85c448eb4bac496cf8e6ed79200e57a57336dc9b3d44179a",
+  "sameOperationReplay": {
+    "clientRequestId": "runtime-c3-support-reuse-same-operation-20260818-v1",
+    "jobId": "job-01a01574-2d59-7d02-92f8-286ce6e2bb35",
+    "attemptId": "attempt-01a01574-2d59-7d02-92f8-287a7a7549c9",
+    "operationDigest": "sha256:fe2b2f9c3036fb00a257865ab7cc918c1881f0d3abe3acc8c926e346575c9efd",
+    "resultValue": "dd9048ee467cb6f68817dedcca24a630be49bf0cee58043c286481d980726fb1",
+    "replayReturnedSameJob": true,
+    "replayReturnedSameAttempt": true,
+    "attemptCountAfterReplay": 1,
+    "dispatchCountAfterReplay": 1,
+    "duplicateDispatchCount": 0,
+    "freshExecutionRequiredForReplay": false
+  },
+  "distinctOperationSameMechanicalDigest": {
+    "clientRequestId": "runtime-c3-support-reuse-new-operation-20260818-v1",
+    "jobId": "job-01a01574-8019-78d3-a4b1-3eac16793808",
+    "attemptId": "attempt-01a01574-8019-78d3-a4b1-3eb1a37ac363",
+    "operationDigest": "sha256:fe2b2f9c3036fb00a257865ab7cc918c1881f0d3abe3acc8c926e346575c9efd",
+    "resultValue": "dd9048ee467cb6f68817dedcca24a630be49bf0cee58043c286481d980726fb1",
+    "newJobCreated": true,
+    "newAttemptCreated": true,
+    "genericCrossOperationReuseInferred": false
+  },
+  "unsafeReuseFixture": {
+    "alpha": {
+      "workspaceSourceStateDigest": "sha256:a529466d9f1172cefcb6c78f2030b36abc1a6a9739c585de026c3e3174641e0d",
+      "inputDigest": "sha256:b6a98d9ce9a2d9149288fa3df42d377c3e42737afdcdaf714e33c0a100b51060",
+      "operationDigest": "sha256:4b32033517a7102b0c5516407f4a0e167500ae77a5cc9134f3e5234aeff636ae",
+      "jobId": "job-01a01575-35bf-7603-b9c1-679ea44bda35",
+      "attemptId": "attempt-01a01575-35bf-7603-b9c1-67a4d373b245"
+    },
+    "beta": {
+      "workspaceSourceStateDigest": "sha256:6fb2711120096465c43e5f1342633ab94a11c0bea3217e2136b1344065a1d0c5",
+      "inputDigest": "sha256:f2c82decdd7181cf98945929a62598db7e6b477e11f6e0eb0ae97020eff151ad",
+      "operationDigest": "sha256:db74f71dbd927129cfe0114c0823b07b1e0b305f6333204356c073a6c9507486",
+      "jobId": "job-01a01575-93f4-7772-bef0-07ddbc62a020",
+      "attemptId": "attempt-01a01575-93f4-7772-bef0-07e147e9c62c"
+    },
+    "sameCommandTextProducedDifferentOperationDigestAfterInputChange": true,
+    "historicalAlphaReplayAfterBetaReturnedOriginalAlphaJob": true,
+    "historicalAlphaReplayCreatedFreshAttempt": false,
+    "temporaryFixtureRemoved": true
+  },
+  "falsifiers": {
+    "F10_UNSAFE_REUSE": "PASS_THEORY_CONFIRMED",
+    "IDENTITY_COLLAPSE": "PASS_THEORY_CONFIRMED",
+    "SCOPE_OVERCLAIM": "PASS_THEORY_CONFIRMED"
+  },
+  "hypothesisDisposition": {
+    "freshExecutionNonNecessity": "CONFIRMED_FOR_IDENTITY_PRESERVING_REPLAY",
+    "genericSemanticReuse": "NOT_IMPLEMENTED_NOT_PROVEN",
+    "originalComputeNeedFormula": "NARROWED",
+    "refinedFormula": "FreshExecutionNeed = UnsatisfiedAdmissibleSupportGap",
+    "foundationReopen": false
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "kind": "ordivon.runtime-programme-consumption-evidence",
+  "consumptionRef": "consumption:runtime:c2-consequential-retry-regrounding-20260818",
+  "status": "THEORY_CONFIRMED_BY_HISTORICAL_EXTERNAL_EFFECT_TRACE",
+  "sourceTrace": {
+    "hostTaskId": "task:ordivon-research-system-owner-authority-closeout-materialization-20260818",
+    "hostRevision": 3,
+    "externalAuthority": "git remote main for ordivon-research",
+    "finalVerifiedRemoteRevision": "80bd37393ff46703be1dec6940bd11ea0f7149dc",
+    "newLiveConsequentialActionCreatedForC2": false
+  },
+  "sequence": [
+    {
+      "stage": "A1",
+      "attemptTransport": "HTTPS_GIT_PUSH",
+      "attemptDisposition": "TIMEOUT_NO_SUCCESS_PROOF",
+      "effectKnowledge": "UNKNOWN",
+      "retryAdmissibility": "NOT_YET",
+      "requiredAction": "RECONCILE"
+    },
+    {
+      "stage": "R1",
+      "evidence": "AUTHORITATIVE_REMOTE_REF_OBSERVATION",
+      "effectKnowledge": "ABSENT_AT_OBSERVATION_HORIZON",
+      "retryAdmissibility": "YES"
+    },
+    {
+      "stage": "A2",
+      "attemptTransport": "SSH_GIT_PUSH",
+      "attemptDisposition": "SUCCEEDED",
+      "effectKnowledgeAfterVerification": "PRESENT_AS_INTENDED",
+      "finalRemoteRevision": "80bd37393ff46703be1dec6940bd11ea0f7149dc"
+    }
+  ],
+  "falsifiers": {
+    "F1_DUPLICATE_EFFECT": "PASS_THEORY_CONFIRMED",
+    "F2_LOST_ACKNOWLEDGEMENT": "PASS_THEORY_CONFIRMED",
+    "F6_RESTORE_RECOVERY": "PASS_THEORY_CONFIRMED"
+  },
+  "counterfactuals": {
+    "effectAlreadyPresent": "DO_NOT_RETRY_VERIFY_EXISTING_EFFECT",
+    "effectAbsent": "RETRY_ADMISSIBLE_IF_OPERATION_CONTRACT_STILL_STANDS",
+    "conflictingExternalState": "DO_NOT_RETRY_RECONCILE_CONFLICT",
+    "effectUnknown": "DO_NOT_RETRY_YET_RECONCILE_REQUIRED"
+  },
+  "theoryDisposition": {
+    "foundationReopen": false,
+    "openWorldRegroundingStrengthened": true,
+    "minimalEngineeringConsequence": "Retry must be gated by current effect knowledge and authoritative reconciliation, not local timeout/failure alone."
+  }
+}

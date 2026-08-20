@@ -1,0 +1,89 @@
+{
+  "authorityRef": "authority:ordivon:research-owner:runtime",
+  "closeouts": [
+    {
+      "closure": [
+        {
+          "scope": "RF0-RF16",
+          "status": "ESTABLISHED"
+        },
+        {
+          "scope": "EF0-EF26",
+          "status": "ESTABLISHED"
+        },
+        {
+          "scope": "WHOLE_DOMAIN_EXHAUSTIVE",
+          "status": "UNKNOWN"
+        }
+      ],
+      "epistemicVerdict": "ESTABLISHED_IN_SCOPE",
+      "evidenceScope": "Current manually consolidated Runtime research corpus at the published source revision.",
+      "materialLineage": [
+        "EF27 is historical superseded evidence and its effective work was merged into EF26.",
+        "SBF0-SBF23 identities/history are preserved with owner-role reclassification after SCD reconciliation.",
+        "SBF24 and LRF4 do not exist."
+      ],
+      "profile": "LEGACY_EXTRACTION",
+      "provenance": [
+        "research/README.md",
+        "research/core/RUNTIME-ARCHITECTURE.md",
+        "research/core/REGISTRY-PROVENANCE.md",
+        "research/core/HISTORICAL-EF27.md",
+        "research/core/SATURATION-NEGATIVE-EVIDENCE.md",
+        "research/core/ENGINEERING-CONSUMPTION.md"
+      ],
+      "reopenPolicy": "Use owner-declared FoundationReopenConditions; task completion, numbering or engineering convenience does not reopen frozen research.",
+      "researchRef": "research:runtime:core-materialization-20260818",
+      "residualState": "OPEN_OR_UNKNOWN_RESIDUALS",
+      "resultRefs": [
+        "result:runtime:architecture-current-interface",
+        "result:runtime:rf0-rf16-frozen",
+        "result:runtime:ef0-ef26-frozen",
+        "result:runtime:ef27-historical-superseded",
+        "result:runtime:whole-domain-exhaustive-closure-unknown"
+      ],
+      "scopeRefs": [
+        "research-owner:runtime"
+      ],
+      "standing": [
+        "CURRENT",
+        "FROZEN"
+      ]
+    }
+  ],
+  "currentRecovery": {
+    "locator": "research/README.md",
+    "targetRole": "OWNER_RESEARCH_CORPUS"
+  },
+  "kind": "ordivon.research-owner-publication",
+  "ownerResearchRef": "research-owner:runtime",
+  "profile": "LEGACY_EXTRACTION",
+  "schemaVersion": 1,
+  "source": {
+    "authorityBranch": "refs/heads/main",
+    "corpusRoot": "research",
+    "kind": "git",
+    "repository": "git@github.com:zycxfyh/ordivon-runtime.git",
+    "sourceRevision": "7af1b0d51f678d8662ac85bb91ec4d363141c483"
+  },
+  "statements": [
+    {
+      "predicate": "OWNER_BINDING",
+      "scope": "OWNER",
+      "subjectRef": "research-owner:runtime",
+      "value": "runtime"
+    },
+    {
+      "predicate": "STANDING:CURRENT",
+      "scope": "OWNER",
+      "subjectRef": "research-owner:runtime",
+      "value": true
+    },
+    {
+      "predicate": "CLOSURE",
+      "scope": "WHOLE_DOMAIN_EXHAUSTIVE",
+      "subjectRef": "research-owner:runtime",
+      "value": "UNKNOWN"
+    }
+  ]
+}

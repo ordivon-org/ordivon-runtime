@@ -1,0 +1,409 @@
+{
+  "authorityRef": "authority:ordivon:research-owner:runtime",
+  "closeouts": [
+    {
+      "closure": [
+        {
+          "scope": "RF0-RF16",
+          "status": "ESTABLISHED"
+        },
+        {
+          "scope": "EF0-EF26",
+          "status": "ESTABLISHED"
+        },
+        {
+          "scope": "WHOLE_DOMAIN_EXHAUSTIVE",
+          "status": "UNKNOWN"
+        }
+      ],
+      "epistemicVerdict": "ESTABLISHED_IN_SCOPE",
+      "evidenceScope": "Current manually consolidated Runtime research corpus at the published source revision.",
+      "materialLineage": [
+        "EF27 is historical superseded evidence and its effective work was merged into EF26.",
+        "SBF0-SBF23 identities/history are preserved with owner-role reclassification after SCD reconciliation.",
+        "SBF24 and LRF4 do not exist."
+      ],
+      "profile": "LEGACY_EXTRACTION",
+      "provenance": [
+        "research/README.md",
+        "research/core/RUNTIME-ARCHITECTURE.md",
+        "research/core/REGISTRY-PROVENANCE.md",
+        "research/core/HISTORICAL-EF27.md",
+        "research/core/SATURATION-NEGATIVE-EVIDENCE.md",
+        "research/core/ENGINEERING-CONSUMPTION.md"
+      ],
+      "reopenPolicy": "Use owner-declared FoundationReopenConditions; task completion, numbering or engineering convenience does not reopen frozen research.",
+      "researchRef": "research:runtime:core-materialization-20260818",
+      "residualState": "OPEN_OR_UNKNOWN_RESIDUALS",
+      "resultRefs": [
+        "result:runtime:architecture-current-interface",
+        "result:runtime:rf0-rf16-frozen",
+        "result:runtime:ef0-ef26-frozen",
+        "result:runtime:ef27-historical-superseded",
+        "result:runtime:whole-domain-exhaustive-closure-unknown"
+      ],
+      "scopeRefs": [
+        "research-owner:runtime"
+      ],
+      "standing": [
+        "CURRENT",
+        "FROZEN"
+      ]
+    },
+    {
+      "closure": [
+        {
+          "scope": "RUNTIME_OWNER_PUBLICATION_PILOT",
+          "status": "ESTABLISHED"
+        }
+      ],
+      "contractRef": "host:task:ordivon-research-system-owner-authority-closeout-materialization-20260818@rev2",
+      "epistemicVerdict": "SUPPORTED_IN_SCOPE",
+      "evaluation": {
+        "criterion": "CURRENT resolves to an immutable payload whose SHA-256 equals currentAuthorityVersionRef; owner/authority identities and recovery/provenance pointers resolve; the path is tracked by Git and does not collide with ignored Runtime operational state.",
+        "outcome": "PASS"
+      },
+      "evidenceRefs": [
+        "authority-version:sha256:a39e5ec16ed955bc02b1e11db6f120f5f812e093324a6a3171d368f710a8665b",
+        "runtime-job:job-01a014e4-6dee-72d0-b03f-33284e1f67a9",
+        "git-commit:9c93d5fa9e3fe9f267f6b46fe67af965f7f39f2a"
+      ],
+      "evidenceScope": "Runtime research corpus publication adapter at source revision 9c93d5fa9e3fe9f267f6b46fe67af965f7f39f2a; not a universal owner-storage requirement.",
+      "investigationKind": "ENGINEERING_DOGFOOD",
+      "investigationRef": "investigation:runtime:owner-publication-surface-v1",
+      "negativeRoute": "research/.ordivon was rejected because Runtime .gitignore reserves .ordivon/ for operational/private state; the publication surface moved to research/authority.",
+      "profile": "NATIVE",
+      "provenance": [
+        "research/authority/CURRENT.json",
+        "research/authority/publications/a39e5ec16ed955bc02b1e11db6f120f5f812e093324a6a3171d368f710a8665b.json",
+        ".gitignore"
+      ],
+      "questionRef": "question:runtime:owner-publication-surface-v1",
+      "reopenPolicy": "Reopen if current pointer cannot resolve uniquely, digest verification fails, owner authority cannot advance without rewriting history, or Atlas requires Runtime execution truth to determine semantic currentness.",
+      "researchRef": "research:runtime:owner-publication-surface-dogfood-20260818",
+      "residualState": "OTHER_OWNER_ADAPTERS_NOT_ASSESSED",
+      "resultRefs": [
+        "result:runtime:owner-publication-surface-supported-in-scope"
+      ],
+      "scopeRefs": [
+        "research-owner:runtime",
+        "research-system:owner-publication-surface"
+      ],
+      "standing": [
+        "CURRENT",
+        "FROZEN"
+      ]
+    },
+    {
+      "closure": [
+        {
+          "scope": "RUNTIME_TO_ATLAS_PUBLICATION_CONSUMPTION_PILOT",
+          "status": "ESTABLISHED"
+        }
+      ],
+      "contractRef": "host:task:ordivon-atlas-generated-projection-observatory-mvp-20260818@rev2",
+      "epistemicVerdict": "SUPPORTED_IN_SCOPE",
+      "evaluation": {
+        "criterion": "Atlas resolves Runtime remote main, verifies CURRENT and publication digest/identity/recovery, projects source-fenced Runtime results/history, and classifies Runtime v1 historical while v2 current without becoming Runtime semantic authority.",
+        "outcome": "PASS"
+      },
+      "evidenceRefs": [
+        "git:zycxfyh/ordivon-atlas@12aa6064f9d7e589614585a7c6d3e207378236fb:evidence/ATLAS-MVP-ACCEPTANCE-20260818.json",
+        "runtime-job:job-01a014ef-9f0d-74a3-9ec4-7357ca2569a8",
+        "authority-version:sha256:e2eb5a6d46c50390ec4b666cd6faba5528ff42b2c9e1bfb75cb45b6c0c4177ed"
+      ],
+      "evidenceScope": "Atlas MVP commit 12aa6064f9d7e589614585a7c6d3e207378236fb consuming Runtime authority v2 only; no claim about all future Atlas adapters or owners.",
+      "investigationKind": "ENGINEERING_DOGFOOD",
+      "investigationRef": "investigation:runtime:atlas-live-consumption-v1",
+      "profile": "NATIVE",
+      "provenance": [
+        "git:zycxfyh/ordivon-atlas@12aa6064f9d7e589614585a7c6d3e207378236fb",
+        "research/authority/CURRENT.json"
+      ],
+      "questionRef": "question:runtime:can-atlas-consume-owner-publication-without-authority-laundering",
+      "reopenPolicy": "Reopen if Atlas must copy Runtime semantic authority, cannot verify owner currentness from source fences, loses historical authority versions, or a later adapter contradicts this bounded consumption result.",
+      "researchRef": "research:runtime:atlas-consumption-20260818",
+      "residualState": "OTHER_OWNERS_AND_FUTURE_ADAPTERS_NOT_ASSESSED",
+      "resultRefs": [
+        "result:runtime:atlas-consumption-supported-in-scope"
+      ],
+      "scopeRefs": [
+        "research-owner:runtime",
+        "research-system:atlas-consumption"
+      ],
+      "standing": [
+        "CURRENT",
+        "FROZEN"
+      ]
+    },
+    {
+      "closure": [
+        {
+          "scope": "RUNTIME_OWNER_AUTHORITY_TRANSITION_MARKER",
+          "status": "ESTABLISHED"
+        }
+      ],
+      "contractRef": "host:task:ordivon-atlas-end-to-end-live-transition-dogfood-20260818@rev4",
+      "epistemicVerdict": "ESTABLISHED_IN_SCOPE",
+      "evaluation": {
+        "criterion": "A new immutable publication preserves prior authority history and explicitly classifies the transition-marker ResultRef without asserting downstream Atlas success.",
+        "outcome": "CONSTRUCTION_VALIDATED"
+      },
+      "evidenceRefs": [
+        "authority-version:sha256:227cc7e253de5fa10be7cbecdfd2e7d84724b507c4a0504836fc63996ac53497",
+        "git-base:6724b6c7a7a2832cdb77eeb792bf23ca79861ad5"
+      ],
+      "evidenceScope": "Runtime owner-native authority transition from v4 at source transport revision 6724b6c only. No claim about Atlas response until downstream J evidence.",
+      "investigationKind": "ENGINEERING_DOGFOOD",
+      "investigationRef": "investigation:runtime:atlas-postrepair-transition-marker-v1",
+      "profile": "NATIVE",
+      "provenance": [
+        "research/authority/CURRENT.json",
+        "research/authority/publications/227cc7e253de5fa10be7cbecdfd2e7d84724b507c4a0504836fc63996ac53497.json",
+        "research/programme/README.md"
+      ],
+      "questionRef": "question:runtime:can-owner-authority-advance-independently-before-atlas-refresh",
+      "reopenPolicy": "Reopen if durable publication fails, prior authority history is lost, result classification is ambiguous, or downstream Atlas cannot distinguish this new owner fence from retained v4.",
+      "researchRef": "research:runtime:atlas-postrepair-transition-marker-20260818",
+      "residualState": "ATLAS_STALE_DETECTION_AND_REFRESH_NOT_YET_EVALUATED",
+      "resultRefs": [
+        "result:runtime:atlas-postrepair-transition-marker-published"
+      ],
+      "scopeRefs": [
+        "research-owner:runtime",
+        "research-system:atlas-postrepair-transition"
+      ],
+      "standing": [
+        "CURRENT",
+        "FROZEN"
+      ]
+    }
+  ],
+  "currentRecovery": {
+    "locator": "research/README.md",
+    "targetRole": "OWNER_RESEARCH_CORPUS"
+  },
+  "kind": "ordivon.research-owner-publication",
+  "ownerResearchRef": "research-owner:runtime",
+  "profile": "NATIVE",
+  "schemaVersion": 1,
+  "source": {
+    "authorityBranch": "refs/heads/main",
+    "corpusRoot": "research",
+    "kind": "git",
+    "repository": "git@github.com:zycxfyh/ordivon-runtime.git",
+    "sourceRevision": "6724b6c7a7a2832cdb77eeb792bf23ca79861ad5"
+  },
+  "statements": [
+    {
+      "predicate": "OWNER_BINDING",
+      "scope": "OWNER",
+      "subjectRef": "research-owner:runtime",
+      "value": "runtime"
+    },
+    {
+      "predicate": "STANDING:CURRENT",
+      "scope": "OWNER",
+      "subjectRef": "research-owner:runtime",
+      "value": true
+    },
+    {
+      "predicate": "CLOSURE",
+      "scope": "WHOLE_DOMAIN_EXHAUSTIVE",
+      "subjectRef": "research-owner:runtime",
+      "value": "UNKNOWN"
+    },
+    {
+      "predicate": "RESEARCH_PUBLICATION_SURFACE",
+      "scope": "OWNER_RESEARCH_METADATA",
+      "subjectRef": "research-owner:runtime",
+      "value": "DIGEST_BOUND_CURRENT_POINTER"
+    },
+    {
+      "predicate": "STANDING:CURRENT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:architecture-current-interface",
+      "value": true
+    },
+    {
+      "predicate": "EPISTEMIC_VERDICT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:architecture-current-interface",
+      "value": "ESTABLISHED_IN_SCOPE"
+    },
+    {
+      "predicate": "EVIDENCE_SCOPE",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:architecture-current-interface",
+      "value": "Current manually consolidated Runtime research corpus at source revision 95116717e576b078ecd57338aea85b7d372946b3."
+    },
+    {
+      "predicate": "STANDING:CURRENT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:rf0-rf16-frozen",
+      "value": true
+    },
+    {
+      "predicate": "STANDING:FROZEN",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:rf0-rf16-frozen",
+      "value": true
+    },
+    {
+      "predicate": "EPISTEMIC_VERDICT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:rf0-rf16-frozen",
+      "value": "ESTABLISHED_IN_SCOPE"
+    },
+    {
+      "predicate": "EVIDENCE_SCOPE",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:rf0-rf16-frozen",
+      "value": "Current manually consolidated Runtime research corpus at source revision 95116717e576b078ecd57338aea85b7d372946b3."
+    },
+    {
+      "predicate": "STANDING:CURRENT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:ef0-ef26-frozen",
+      "value": true
+    },
+    {
+      "predicate": "STANDING:FROZEN",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:ef0-ef26-frozen",
+      "value": true
+    },
+    {
+      "predicate": "EPISTEMIC_VERDICT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:ef0-ef26-frozen",
+      "value": "ESTABLISHED_IN_SCOPE"
+    },
+    {
+      "predicate": "EVIDENCE_SCOPE",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:ef0-ef26-frozen",
+      "value": "Current manually consolidated Runtime research corpus at source revision 95116717e576b078ecd57338aea85b7d372946b3."
+    },
+    {
+      "predicate": "STANDING:HISTORICAL_PRESERVED",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:ef27-historical-superseded",
+      "value": true
+    },
+    {
+      "predicate": "STANDING:WITHDRAWN",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:ef27-historical-superseded",
+      "value": true
+    },
+    {
+      "predicate": "STANDING:SUPERSEDED",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:ef27-historical-superseded",
+      "value": true
+    },
+    {
+      "predicate": "EPISTEMIC_VERDICT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:ef27-historical-superseded",
+      "value": "ESTABLISHED_IN_SCOPE"
+    },
+    {
+      "predicate": "EVIDENCE_SCOPE",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:ef27-historical-superseded",
+      "value": "Historical EF27 research preserved at its original evidence horizon; current numbered Runtime standing is superseded/withdrawn and merged into EF26."
+    },
+    {
+      "predicate": "STANDING:CURRENT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:whole-domain-exhaustive-closure-unknown",
+      "value": true
+    },
+    {
+      "predicate": "EPISTEMIC_VERDICT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:whole-domain-exhaustive-closure-unknown",
+      "value": "UNDERDETERMINED"
+    },
+    {
+      "predicate": "EVIDENCE_SCOPE",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:whole-domain-exhaustive-closure-unknown",
+      "value": "Runtime whole-domain exhaustive closure is not established by the current corpus."
+    },
+    {
+      "predicate": "STANDING:CURRENT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:owner-publication-surface-supported-in-scope",
+      "value": true
+    },
+    {
+      "predicate": "STANDING:FROZEN",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:owner-publication-surface-supported-in-scope",
+      "value": true
+    },
+    {
+      "predicate": "EPISTEMIC_VERDICT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:owner-publication-surface-supported-in-scope",
+      "value": "SUPPORTED_IN_SCOPE"
+    },
+    {
+      "predicate": "EVIDENCE_SCOPE",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:owner-publication-surface-supported-in-scope",
+      "value": "Runtime owner publication surface dogfood only."
+    },
+    {
+      "predicate": "STANDING:CURRENT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:atlas-consumption-supported-in-scope",
+      "value": true
+    },
+    {
+      "predicate": "STANDING:FROZEN",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:atlas-consumption-supported-in-scope",
+      "value": true
+    },
+    {
+      "predicate": "EPISTEMIC_VERDICT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:atlas-consumption-supported-in-scope",
+      "value": "SUPPORTED_IN_SCOPE"
+    },
+    {
+      "predicate": "EVIDENCE_SCOPE",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:atlas-consumption-supported-in-scope",
+      "value": "Atlas MVP consumption of Runtime owner publication, bounded to the tested adapter/currentness contract."
+    },
+    {
+      "predicate": "STANDING:CURRENT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:atlas-postrepair-transition-marker-published",
+      "value": true
+    },
+    {
+      "predicate": "STANDING:FROZEN",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:atlas-postrepair-transition-marker-published",
+      "value": true
+    },
+    {
+      "predicate": "EPISTEMIC_VERDICT",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:atlas-postrepair-transition-marker-published",
+      "value": "ESTABLISHED_IN_SCOPE"
+    },
+    {
+      "predicate": "EVIDENCE_SCOPE",
+      "scope": "RESULT",
+      "subjectRef": "result:runtime:atlas-postrepair-transition-marker-published",
+      "value": "Runtime owner-native v4→v5 transition-marker publication at source revision 6724b6c only; Atlas response is out of scope."
+    }
+  ]
+}

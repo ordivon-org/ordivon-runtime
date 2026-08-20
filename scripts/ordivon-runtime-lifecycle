@@ -128,6 +128,57 @@ def run_json(command: list[str], *, accepted_codes: tuple[int, ...] = (0,)) -> d
     value = json.loads(result.stdout)
     if not isinstance(value, dict):
         raise RuntimeError("command did not return a JSON object")
+    if value.get("schemaVersion") != SCHEMA_VERSION:
+        raise RuntimeError("subordinate Runtime tool returned an unsupported schemaVersion")
+    return value
+
+
+def validate_reclaim_inspect(value: dict[str, object]) -> dict[str, object]:
+    summary = value.get("summary")
+    candidates = value.get("candidates")
+    if not isinstance(summary, dict):
+        raise RuntimeError("reclaim inspect result summary must be an object")
+    if not isinstance(candidates, list):
+        raise RuntimeError("reclaim inspect result candidates must be an array")
+    seen: set[str] = set()
+    for item in candidates:
+        if not isinstance(item, dict):
+            raise RuntimeError("reclaim inspect candidate must be an object")
+        workspace_id = item.get("workspaceId")
+        classification = item.get("classification")
+        if not isinstance(workspace_id, str) or not workspace_id:
+            raise RuntimeError("reclaim inspect candidate workspaceId must be a non-empty string")
+        if workspace_id in seen:
+            raise RuntimeError("reclaim inspect result contains duplicate workspaceId")
+        seen.add(workspace_id)
+        if not isinstance(classification, str) or not classification:
+            raise RuntimeError("reclaim inspect candidate classification must be a non-empty string")
+        created_ms = item.get("createdUnixMs")
+        if created_ms is not None and not isinstance(created_ms, int):
+            raise RuntimeError("reclaim inspect candidate createdUnixMs must be an integer when present")
+        estimated_bytes = item.get("estimatedBytes")
+        if estimated_bytes is not None and (
+            not isinstance(estimated_bytes, int) or estimated_bytes < 0
+        ):
+            raise RuntimeError("reclaim inspect candidate estimatedBytes must be non-negative when present")
+    return value
+
+
+def validate_reclaim_apply(value: dict[str, object]) -> dict[str, object]:
+    if value.get("status") not in {"completed", "partial"}:
+        raise RuntimeError("reclaim apply result status is invalid")
+    actions = value.get("actions")
+    failures = value.get("failures")
+    receipt = value.get("receipt")
+    if not isinstance(actions, list) or any(not isinstance(item, dict) for item in actions):
+        raise RuntimeError("reclaim apply result actions must be an array of objects")
+    if not isinstance(failures, list) or any(not isinstance(item, dict) for item in failures):
+        raise RuntimeError("reclaim apply result failures must be an array of objects")
+    if not isinstance(receipt, str) or not receipt:
+        raise RuntimeError("reclaim apply result receipt must be a non-empty string")
+    for item in actions:
+        if not isinstance(item.get("workspaceId"), str) or not isinstance(item.get("action"), str):
+            raise RuntimeError("reclaim apply action requires string workspaceId and action")
     return value
 
 
@@ -147,7 +198,7 @@ def reclaim_inspect(args: argparse.Namespace) -> dict[str, object]:
         command.extend(["--workspace-root", str(args.workspace_root)])
     if args.measure_bytes:
         command.append("--measure-bytes")
-    return run_json(command)
+    return validate_reclaim_inspect(run_json(command))
 
 
 def load_policy(path: Path | None) -> dict[str, object]:
@@ -379,7 +430,7 @@ def sweep(args: argparse.Namespace) -> dict[str, object]:
             command.extend(["--workspace-root", str(args.workspace_root)])
         for workspace_id in selected:
             command.extend(["--workspace-id", workspace_id])
-        subordinate = run_json(command, accepted_codes=(0, 2))
+        subordinate = validate_reclaim_apply(run_json(command, accepted_codes=(0, 2)))
         after = enrich_report(args)
         write_json_atomic(receipt / "after.json", after)
         result = {
