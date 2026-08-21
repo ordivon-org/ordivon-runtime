@@ -51,6 +51,8 @@ internal static class OrdivonWindowsJobLauncher
     private const uint PowerRequestContextSimpleString = 0x00000001;
     private const int PowerRequestSystemRequired = 1;
     private const uint ProcessQueryLimitedInformation = 0x00001000;
+    private const uint ProcessTerminate = 0x00000001;
+    private const uint Synchronize = 0x00100000;
     private const uint StillActive = 259;
     private const int ErrorInvalidParameter = 87;
 
@@ -289,7 +291,9 @@ internal static class OrdivonWindowsJobLauncher
         public ulong? TimeoutMs;
         public bool DescribeRuntimeContext;
         public bool DescribeProcessOwner;
+        public bool TerminateProcessOwnerForDeadline;
         public uint? DescribeProcessId;
+        public ulong? ExpectedProcessCreationTimeFileTime;
         public bool EmitLauncherStartEvidence;
         public ExecutionAuthority Authority = ExecutionAuthority.Limited;
         public readonly List<string> ContextEnvironmentNames = new List<string>();
@@ -471,6 +475,7 @@ internal static class OrdivonWindowsJobLauncher
             Options options = ParseOptions(args);
             if (options.DescribeRuntimeContext) return DescribeRuntimeContext(options);
             if (options.DescribeProcessOwner) return DescribeProcessOwner(options);
+            if (options.TerminateProcessOwnerForDeadline) return TerminateProcessOwnerForDeadline(options);
             return Run(options);
         }
         catch (Exception error)
@@ -509,6 +514,11 @@ internal static class OrdivonWindowsJobLauncher
                 options.DescribeProcessOwner = true;
                 continue;
             }
+            if (current == "--terminate-process-owner-for-deadline")
+            {
+                options.TerminateProcessOwnerForDeadline = true;
+                continue;
+            }
             if (current == "--diagnostics")
             {
                 options.Diagnostics = true;
@@ -528,6 +538,15 @@ internal static class OrdivonWindowsJobLauncher
                     throw new InvalidOperationException("--process-id must be a positive integer");
                 }
                 options.DescribeProcessId = parsed;
+            }
+            else if (current == "--process-creation-time-file-time")
+            {
+                ulong parsed;
+                if (!UInt64.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) || parsed == 0)
+                {
+                    throw new InvalidOperationException("--process-creation-time-file-time must be a positive integer");
+                }
+                options.ExpectedProcessCreationTimeFileTime = parsed;
             }
             else if (current == "--authority")
             {
@@ -673,13 +692,29 @@ internal static class OrdivonWindowsJobLauncher
         if (options.DescribeProcessOwner)
         {
             if (options.DescribeRuntimeContext
+                || options.TerminateProcessOwnerForDeadline
                 || options.RuntimeMode
                 || !String.IsNullOrWhiteSpace(options.Executable)
                 || options.TargetArguments.Count != 0
                 || options.ContextEnvironmentNames.Count != 0
-                || !options.DescribeProcessId.HasValue)
+                || !options.DescribeProcessId.HasValue
+                || options.ExpectedProcessCreationTimeFileTime.HasValue)
             {
                 throw new InvalidOperationException("process owner description requires only --describe-process-owner --process-id PID");
+            }
+            return options;
+        }
+        if (options.TerminateProcessOwnerForDeadline)
+        {
+            if (options.DescribeRuntimeContext
+                || options.RuntimeMode
+                || !String.IsNullOrWhiteSpace(options.Executable)
+                || options.TargetArguments.Count != 0
+                || options.ContextEnvironmentNames.Count != 0
+                || !options.DescribeProcessId.HasValue
+                || !options.ExpectedProcessCreationTimeFileTime.HasValue)
+            {
+                throw new InvalidOperationException("deadline owner termination requires only --terminate-process-owner-for-deadline --process-id PID --process-creation-time-file-time FILETIME");
             }
             return options;
         }
@@ -856,6 +891,94 @@ internal static class OrdivonWindowsJobLauncher
                 "\"processCreationTimeFileTime\":" + creationValue.ToString(CultureInfo.InvariantCulture) +
                 "}";
             Console.Out.WriteLine(json);
+            return 0;
+        }
+        finally
+        {
+            CloseHandle(process);
+        }
+    }
+
+    private static int TerminateProcessOwnerForDeadline(Options options)
+    {
+        uint processId = options.DescribeProcessId.Value;
+        ulong expectedCreation = options.ExpectedProcessCreationTimeFileTime.Value;
+        IntPtr process = OpenProcess(
+            ProcessQueryLimitedInformation | ProcessTerminate | Synchronize,
+            false,
+            processId);
+        if (process == IntPtr.Zero)
+        {
+            int error = Marshal.GetLastWin32Error();
+            if (error == ErrorInvalidParameter)
+            {
+                Console.Out.WriteLine(
+                    "{\"schemaVersion\":1,\"processId\":"
+                    + processId.ToString(CultureInfo.InvariantCulture)
+                    + ",\"expectedProcessCreationTimeFileTime\":"
+                    + expectedCreation.ToString(CultureInfo.InvariantCulture)
+                    + ",\"disposition\":\"already_absent\"}");
+                return 0;
+            }
+            throw new Win32Exception(error, "OpenProcess(deadline owner termination)");
+        }
+        try
+        {
+            uint exitCode;
+            if (!GetExitCodeProcess(process, out exitCode))
+            {
+                ThrowWin32("GetExitCodeProcess(deadline owner termination)");
+            }
+            if (exitCode != StillActive)
+            {
+                Console.Out.WriteLine(
+                    "{\"schemaVersion\":1,\"processId\":"
+                    + processId.ToString(CultureInfo.InvariantCulture)
+                    + ",\"expectedProcessCreationTimeFileTime\":"
+                    + expectedCreation.ToString(CultureInfo.InvariantCulture)
+                    + ",\"disposition\":\"already_absent\"}");
+                return 0;
+            }
+            FileTime creation;
+            FileTime exit;
+            FileTime kernel;
+            FileTime user;
+            if (!GetProcessTimes(process, out creation, out exit, out kernel, out user))
+            {
+                ThrowWin32("GetProcessTimes(deadline owner termination)");
+            }
+            ulong observedCreation =
+                ((ulong)creation.dwHighDateTime << 32) | creation.dwLowDateTime;
+            if (observedCreation != expectedCreation)
+            {
+                Console.Out.WriteLine(
+                    "{\"schemaVersion\":1,\"processId\":"
+                    + processId.ToString(CultureInfo.InvariantCulture)
+                    + ",\"expectedProcessCreationTimeFileTime\":"
+                    + expectedCreation.ToString(CultureInfo.InvariantCulture)
+                    + ",\"observedProcessCreationTimeFileTime\":"
+                    + observedCreation.ToString(CultureInfo.InvariantCulture)
+                    + ",\"disposition\":\"identity_mismatch\"}");
+                return 0;
+            }
+            if (!TerminateProcess(process, TimedOutExit))
+            {
+                ThrowWin32("TerminateProcess(deadline owner termination)");
+            }
+            uint wait = WaitForSingleObject(process, 5000);
+            if (wait != 0)
+            {
+                throw new InvalidOperationException(
+                    "deadline owner did not terminate after exact-identity kill");
+            }
+            Console.Out.WriteLine(
+                "{\"schemaVersion\":1,\"processId\":"
+                + processId.ToString(CultureInfo.InvariantCulture)
+                + ",\"expectedProcessCreationTimeFileTime\":"
+                + expectedCreation.ToString(CultureInfo.InvariantCulture)
+                + ",\"observedProcessCreationTimeFileTime\":"
+                + observedCreation.ToString(CultureInfo.InvariantCulture)
+                + ",\"disposition\":\"terminated\"}");
             return 0;
         }
         finally

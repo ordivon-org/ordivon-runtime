@@ -478,6 +478,91 @@ def main() -> int:
             fail(f'CPU hard cap did not reduce CPU time enough: {limited_cpu} vs {control_cpu}')
         summary['cpu'] = {'controlCpuMs': control_cpu, 'limitedCpuMs': limited_cpu, 'quotaPercent': 25}
 
+        watchdog_marker = f'ORDIVON_W3_WATCHDOG_TREE_{os.getpid()}'
+        watchdog_bundle = temp / 'native watchdog bundle'
+        watchdog_bundle.mkdir()
+        watchdog_process = subprocess.Popen(
+            runtime_launcher_args(
+                launcher,
+                fixture,
+                watchdog_bundle,
+                'job-accept-watchdog',
+                'attempt-accept-watchdog',
+                context_env,
+                '--emit-launcher-start',
+                target_args=['tree', watchdog_marker],
+            ),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            watchdog_start_path = watchdog_bundle / 'windows-launcher-start.json'
+            watchdog_target_start_path = watchdog_bundle / 'windows-start.json'
+            wait_for_file(watchdog_start_path)
+            wait_for_file(watchdog_target_start_path)
+            watchdog_start = json.loads(watchdog_start_path.read_text(encoding='utf-8'))
+            watchdog_pid = int(watchdog_start['launcherProcessId'])
+            watchdog_creation = int(watchdog_start['launcherProcessCreationTimeFileTime'])
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and marker_process_count(watchdog_marker) < 2:
+                time.sleep(0.05)
+            if marker_process_count(watchdog_marker) < 2:
+                fail('watchdog fixture did not create descendants before owner termination')
+            mismatch = run([
+                str(launcher),
+                '--terminate-process-owner-for-deadline',
+                '--process-id', str(watchdog_pid),
+                '--process-creation-time-file-time', str(watchdog_creation + 1),
+            ])
+            if mismatch.returncode != 0:
+                fail('watchdog identity-mismatch probe failed: ' + mismatch.stderr)
+            mismatch_value = json.loads(mismatch.stdout)
+            if mismatch_value.get('disposition') != 'identity_mismatch':
+                fail('wrong watchdog creation identity did not fail closed')
+            if watchdog_process.poll() is not None:
+                fail('wrong watchdog creation identity killed the launcher')
+            if marker_process_count(watchdog_marker) < 2:
+                fail('wrong watchdog creation identity disturbed the Job tree')
+            terminated = run([
+                str(launcher),
+                '--terminate-process-owner-for-deadline',
+                '--process-id', str(watchdog_pid),
+                '--process-creation-time-file-time', str(watchdog_creation),
+            ])
+            if terminated.returncode != 0:
+                fail('exact watchdog owner termination failed: ' + terminated.stderr)
+            terminated_value = json.loads(terminated.stdout)
+            if terminated_value.get('disposition') != 'terminated':
+                fail('exact watchdog owner termination did not report terminated')
+            watchdog_process.wait(timeout=5)
+            time.sleep(0.7)
+            remaining = marker_process_count(watchdog_marker)
+            if remaining != 0:
+                fail(f'watchdog exact owner termination left Job descendants: {remaining}')
+            absent = run([
+                str(launcher),
+                '--terminate-process-owner-for-deadline',
+                '--process-id', str(watchdog_pid),
+                '--process-creation-time-file-time', str(watchdog_creation),
+            ])
+            if absent.returncode != 0 or json.loads(absent.stdout).get('disposition') != 'already_absent':
+                fail('watchdog exact owner termination was not replay-safe after owner absence')
+            summary['deadlineOwnerTermination'] = {
+                'identityMismatchFailsClosed': True,
+                'exactIdentityTerminates': True,
+                'remainingAfterTermination': remaining,
+                'replayDisposition': 'already_absent',
+            }
+        finally:
+            if watchdog_process.poll() is None:
+                watchdog_process.kill()
+                watchdog_process.wait(timeout=5)
+            if watchdog_process.stdout is not None:
+                watchdog_process.stdout.close()
+            if watchdog_process.stderr is not None:
+                watchdog_process.stderr.close()
+
         marker = f'ORDIVON_W1_ACCEPT_TREE_{os.getpid()}'
         tree_command = launcher_args(
             launcher,
