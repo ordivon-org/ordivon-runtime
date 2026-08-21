@@ -50,6 +50,9 @@ internal static class OrdivonWindowsJobLauncher
     private const int MediumIntegrityRid = 8192;
     private const uint PowerRequestContextSimpleString = 0x00000001;
     private const int PowerRequestSystemRequired = 1;
+    private const uint ProcessQueryLimitedInformation = 0x00001000;
+    private const uint StillActive = 259;
+    private const int ErrorInvalidParameter = 87;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct JobObjectBasicLimitInformation
@@ -285,6 +288,9 @@ internal static class OrdivonWindowsJobLauncher
         public ulong? StderrLimitBytes;
         public ulong? TimeoutMs;
         public bool DescribeRuntimeContext;
+        public bool DescribeProcessOwner;
+        public uint? DescribeProcessId;
+        public bool EmitLauncherStartEvidence;
         public ExecutionAuthority Authority = ExecutionAuthority.Limited;
         public readonly List<string> ContextEnvironmentNames = new List<string>();
 
@@ -327,6 +333,9 @@ internal static class OrdivonWindowsJobLauncher
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
@@ -460,7 +469,9 @@ internal static class OrdivonWindowsJobLauncher
         try
         {
             Options options = ParseOptions(args);
-            return options.DescribeRuntimeContext ? DescribeRuntimeContext(options) : Run(options);
+            if (options.DescribeRuntimeContext) return DescribeRuntimeContext(options);
+            if (options.DescribeProcessOwner) return DescribeProcessOwner(options);
+            return Run(options);
         }
         catch (Exception error)
         {
@@ -493,13 +504,32 @@ internal static class OrdivonWindowsJobLauncher
                 options.DescribeRuntimeContext = true;
                 continue;
             }
+            if (current == "--describe-process-owner")
+            {
+                options.DescribeProcessOwner = true;
+                continue;
+            }
             if (current == "--diagnostics")
             {
                 options.Diagnostics = true;
                 continue;
             }
+            if (current == "--emit-launcher-start")
+            {
+                options.EmitLauncherStartEvidence = true;
+                continue;
+            }
             string value = RequireValue(args, ref index, current);
-            if (current == "--authority")
+            if (current == "--process-id")
+            {
+                uint parsed;
+                if (!UInt32.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) || parsed == 0)
+                {
+                    throw new InvalidOperationException("--process-id must be a positive integer");
+                }
+                options.DescribeProcessId = parsed;
+            }
+            else if (current == "--authority")
             {
                 if (String.Equals(value, "limited", StringComparison.OrdinalIgnoreCase)) options.Authority = ExecutionAuthority.Limited;
                 else if (String.Equals(value, "elevated", StringComparison.OrdinalIgnoreCase)) options.Authority = ExecutionAuthority.Elevated;
@@ -640,6 +670,19 @@ internal static class OrdivonWindowsJobLauncher
             }
         }
 
+        if (options.DescribeProcessOwner)
+        {
+            if (options.DescribeRuntimeContext
+                || options.RuntimeMode
+                || !String.IsNullOrWhiteSpace(options.Executable)
+                || options.TargetArguments.Count != 0
+                || options.ContextEnvironmentNames.Count != 0
+                || !options.DescribeProcessId.HasValue)
+            {
+                throw new InvalidOperationException("process owner description requires only --describe-process-owner --process-id PID");
+            }
+            return options;
+        }
         if (options.DescribeRuntimeContext)
         {
             if (options.RuntimeMode || !String.IsNullOrWhiteSpace(options.Executable) || options.TargetArguments.Count != 0)
@@ -763,6 +806,62 @@ internal static class OrdivonWindowsJobLauncher
             throw new InvalidOperationException(option + " requires a value");
         }
         return args[index++];
+    }
+
+    private static int DescribeProcessOwner(Options options)
+    {
+        uint processId = options.DescribeProcessId.Value;
+        IntPtr process = OpenProcess(ProcessQueryLimitedInformation, false, processId);
+        if (process == IntPtr.Zero)
+        {
+            int error = Marshal.GetLastWin32Error();
+            if (error == ErrorInvalidParameter)
+            {
+                Console.Out.WriteLine(
+                    "{\"schemaVersion\":1,\"processId\":"
+                    + processId.ToString(CultureInfo.InvariantCulture)
+                    + ",\"processAlive\":false}");
+                return 0;
+            }
+            throw new Win32Exception(error, "OpenProcess(process owner)");
+        }
+        try
+        {
+            uint exitCode;
+            if (!GetExitCodeProcess(process, out exitCode))
+            {
+                ThrowWin32("GetExitCodeProcess(process owner)");
+            }
+            if (exitCode != StillActive)
+            {
+                Console.Out.WriteLine(
+                    "{\"schemaVersion\":1,\"processId\":"
+                    + processId.ToString(CultureInfo.InvariantCulture)
+                    + ",\"processAlive\":false}");
+                return 0;
+            }
+            FileTime creation;
+            FileTime exit;
+            FileTime kernel;
+            FileTime user;
+            if (!GetProcessTimes(process, out creation, out exit, out kernel, out user))
+            {
+                ThrowWin32("GetProcessTimes(process owner)");
+            }
+            ulong creationValue = ((ulong)creation.dwHighDateTime << 32) | creation.dwLowDateTime;
+            string json = "{" +
+                "\"schemaVersion\":1," +
+                "\"processId\":" + processId.ToString(CultureInfo.InvariantCulture) + "," +
+                "\"processAlive\":true," +
+                "\"processCreationTimeFileTime\":" + creationValue.ToString(CultureInfo.InvariantCulture) +
+                "}";
+            Console.Out.WriteLine(json);
+            return 0;
+        }
+        finally
+        {
+            CloseHandle(process);
+        }
     }
 
     private static int DescribeRuntimeContext(Options options)
@@ -1204,6 +1303,10 @@ internal static class OrdivonWindowsJobLauncher
             }
             ConfigureExtendedLimits(job, options);
             uint cpuRate = ConfigureCpuRate(job, options.CpuQuotaPercent);
+            if (options.EmitLauncherStartEvidence)
+            {
+                WriteWindowsLauncherStartEvidence(options);
+            }
             powerRequest = AcquireSystemPowerRequest(options.RuntimeAttemptId);
             executionToken = AcquireExecutionToken(options.Authority, out tokenEvidence);
             PrepareImmutableInputs(options, tokenEvidence);
@@ -1282,12 +1385,20 @@ internal static class OrdivonWindowsJobLauncher
                     Environment.ProcessorCount);
             }
 
-            uint resume = ResumeThread(pi.hThread);
-            if (resume == 0xffffffff)
+            if (File.Exists(Path.Combine(options.RuntimeBundle, "cancel-requested.json")))
             {
-                ThrowWin32("ResumeThread");
+                cancelled = true;
+                TerminateWholeJob(job, CancelledExit);
             }
-            resumed = true;
+            else
+            {
+                uint resume = ResumeThread(pi.hThread);
+                if (resume == 0xffffffff)
+                {
+                    ThrowWin32("ResumeThread");
+                }
+                resumed = true;
+            }
 
             while (true)
             {
@@ -1560,6 +1671,34 @@ internal static class OrdivonWindowsJobLauncher
         }
     }
 
+    private static void WriteWindowsLauncherStartEvidence(Options options)
+    {
+        IntPtr launcherProcess = GetCurrentProcess();
+        FileTime creation;
+        FileTime exit;
+        FileTime kernel;
+        FileTime user;
+        if (!GetProcessTimes(launcherProcess, out creation, out exit, out kernel, out user))
+        {
+            ThrowWin32("GetProcessTimes(launcher start)");
+        }
+        ulong creationValue = ((ulong)creation.dwHighDateTime << 32) | creation.dwLowDateTime;
+        string launcherImagePath = QueryProcessImagePath(launcherProcess);
+        string launcherImageDigest = Sha256File(launcherImagePath);
+        string json = "{" +
+            "\"schemaVersion\":1," +
+            "\"jobId\":" + JsonString(options.RuntimeJobId) + "," +
+            "\"attemptId\":" + JsonString(options.RuntimeAttemptId) + "," +
+            "\"launchTokenDigest\":" + JsonString(options.RuntimeLaunchTokenDigest) + "," +
+            "\"jobName\":" + JsonString(options.JobName) + "," +
+            "\"launcherProcessId\":" + GetCurrentProcessId().ToString(CultureInfo.InvariantCulture) + "," +
+            "\"launcherProcessCreationTimeFileTime\":" + creationValue.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"launcherImageDigest\":" + JsonString(launcherImageDigest) + "," +
+            "\"observedUnixMs\":" + UnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) +
+            "}";
+        WriteTextAtomic(Path.Combine(options.RuntimeBundle, "windows-launcher-start.json"), json);
+    }
+
     private static void WriteWindowsStartEvidence(
         Options options,
         ProcessInformation pi,
@@ -1572,9 +1711,27 @@ internal static class OrdivonWindowsJobLauncher
         FileTime user;
         if (!GetProcessTimes(pi.hProcess, out creation, out exit, out kernel, out user))
         {
-            ThrowWin32("GetProcessTimes");
+            ThrowWin32("GetProcessTimes(target)");
         }
         ulong creationValue = ((ulong)creation.dwHighDateTime << 32) | creation.dwLowDateTime;
+        IntPtr launcherProcess = GetCurrentProcess();
+        FileTime launcherCreation;
+        FileTime launcherExit;
+        FileTime launcherKernel;
+        FileTime launcherUser;
+        if (!GetProcessTimes(
+                launcherProcess,
+                out launcherCreation,
+                out launcherExit,
+                out launcherKernel,
+                out launcherUser))
+        {
+            ThrowWin32("GetProcessTimes(launcher)");
+        }
+        ulong launcherCreationValue =
+            ((ulong)launcherCreation.dwHighDateTime << 32) | launcherCreation.dwLowDateTime;
+        string launcherImagePath = QueryProcessImagePath(launcherProcess);
+        string launcherImageDigest = Sha256File(launcherImagePath);
         string imagePath = QueryProcessImagePath(pi.hProcess);
         string imageDigest = Sha256File(options.Executable);
         string json = "{" +
@@ -1584,6 +1741,8 @@ internal static class OrdivonWindowsJobLauncher
             "\"launchTokenDigest\":" + JsonString(options.RuntimeLaunchTokenDigest) + "," +
             "\"jobName\":" + JsonString(options.JobName) + "," +
             "\"launcherProcessId\":" + GetCurrentProcessId().ToString(CultureInfo.InvariantCulture) + "," +
+            "\"launcherProcessCreationTimeFileTime\":" + launcherCreationValue.ToString(CultureInfo.InvariantCulture) + "," +
+            "\"launcherImageDigest\":" + JsonString(launcherImageDigest) + "," +
             "\"processId\":" + pi.dwProcessId.ToString(CultureInfo.InvariantCulture) + "," +
             "\"processCreationTimeFileTime\":" + creationValue.ToString(CultureInfo.InvariantCulture) + "," +
             "\"imagePath\":" + JsonString(imagePath) + "," +

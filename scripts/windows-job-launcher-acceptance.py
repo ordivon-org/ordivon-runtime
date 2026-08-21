@@ -54,6 +54,47 @@ def launcher_args(launcher: Path, target: Path, *options: str, target_args: list
     ]
 
 
+def runtime_launcher_args(
+    launcher: Path,
+    target: Path,
+    bundle: Path,
+    job_id: str,
+    attempt_id: str,
+    environment: dict[str, str],
+    *options: str,
+    target_args: list[str],
+) -> list[str]:
+    command = [
+        str(launcher),
+        '--runtime-bundle', windows_path(bundle),
+        '--runtime-job-id', job_id,
+        '--runtime-attempt-id', attempt_id,
+        '--runtime-launch-token-digest', 'sha256:' + ('a' * 64),
+        '--job-name', 'Ordivon.' + attempt_id,
+        '--authority', 'limited',
+        '--timeout-ms', '10000',
+        '--stdout-limit-bytes', '65536',
+        '--stderr-limit-bytes', '65536',
+        '--executable', windows_path(target),
+        '--cwd', windows_path(target.parent),
+        '--inherit-environment', 'false',
+    ]
+    for name, value in environment.items():
+        command.extend(['--env', f'{name}={value}'])
+    command.extend(options)
+    command.extend(['--', *target_args])
+    return command
+
+
+def wait_for_file(path: Path, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return
+        time.sleep(0.02)
+    fail('timed out waiting for file: ' + str(path))
+
+
 def run(command: list[str], *, timeout: float = 20) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, text=True, capture_output=True, timeout=timeout)
 
@@ -113,6 +154,72 @@ def main() -> int:
         spaced_dir.mkdir()
         spaced_fixture = spaced_dir / 'fixture with spaces.exe'
         shutil.copyfile(fixture, spaced_fixture)
+
+        owner_process = subprocess.Popen(
+            [str(POWERSHELL), '-NoProfile', '-Command', '$PID; Start-Sleep -Seconds 30'],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        owner_pid = 0
+        try:
+            owner_pid_line = owner_process.stdout.readline() if owner_process.stdout is not None else ''
+            owner_pid = int(owner_pid_line.strip())
+            owner_probe = run([
+                str(launcher), '--describe-process-owner', '--process-id', str(owner_pid)
+            ])
+            if owner_probe.returncode != 0:
+                fail('process-owner live probe failed: ' + owner_probe.stderr)
+            owner_value = json.loads(owner_probe.stdout)
+            if owner_value.get('processId') != owner_pid or owner_value.get('processAlive') is not True:
+                fail('process-owner live probe returned inconsistent process identity')
+            creation_identity = int(owner_value.get('processCreationTimeFileTime', 0))
+            if creation_identity <= 0:
+                fail('process-owner live probe omitted creation identity')
+            owner_probe_replay = run([
+                str(launcher), '--describe-process-owner', '--process-id', str(owner_pid)
+            ])
+            replay_value = json.loads(owner_probe_replay.stdout)
+            if replay_value.get('processCreationTimeFileTime') != creation_identity:
+                fail('process-owner creation identity was not stable across observations')
+            stop = run([
+                str(POWERSHELL), '-NoProfile', '-Command',
+                f'Stop-Process -Id {owner_pid} -Force -ErrorAction SilentlyContinue'
+            ])
+            if stop.returncode != 0:
+                fail('cannot stop process-owner acceptance fixture: ' + stop.stderr)
+            owner_process.wait(timeout=5)
+            time.sleep(0.2)
+            absent_probe = run([
+                str(launcher), '--describe-process-owner', '--process-id', str(owner_pid)
+            ])
+            if absent_probe.returncode != 0:
+                fail('process-owner absent probe failed: ' + absent_probe.stderr)
+            absent_value = json.loads(absent_probe.stdout)
+            if absent_value.get('processId') != owner_pid or absent_value.get('processAlive') is not False:
+                fail('process-owner absent probe did not prove original owner absence')
+            if 'processCreationTimeFileTime' in absent_value:
+                fail('process-owner absent probe retained a stale creation identity')
+            summary['processOwnerProbe'] = {
+                'liveCreationIdentityStable': True,
+                'absenceObserved': True,
+            }
+        finally:
+            if owner_process.poll() is None:
+                if owner_pid:
+                    run([
+                        str(POWERSHELL), '-NoProfile', '-Command',
+                        f'Stop-Process -Id {owner_pid} -Force -ErrorAction SilentlyContinue'
+                    ])
+                try:
+                    owner_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    owner_process.kill()
+                    owner_process.wait(timeout=5)
+            if owner_process.stdout is not None:
+                owner_process.stdout.close()
+            if owner_process.stderr is not None:
+                owner_process.stderr.close()
 
         context_names = [
             'APPDATA', 'CommonProgramFiles', 'CommonProgramW6432', 'COMPUTERNAME', 'ComSpec',
@@ -187,6 +294,112 @@ def main() -> int:
             'administratorsGroupAttributes': elevated_admin_attrs,
             'sameUserSid': True,
             'sameEnvironment': True,
+        }
+
+        native_bundle = temp / 'native direct bundle'
+        native_bundle.mkdir()
+        native_command = runtime_launcher_args(
+            launcher,
+            POWERSHELL,
+            native_bundle,
+            'job-accept-native-direct',
+            'attempt-accept-native-direct',
+            context_env,
+            '--emit-launcher-start',
+            target_args=['-NoProfile', '-Command', 'Start-Sleep -Milliseconds 3000'],
+        )
+        native_process = subprocess.Popen(
+            native_command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        try:
+            launcher_start_path = native_bundle / 'windows-launcher-start.json'
+            target_start_path = native_bundle / 'windows-start.json'
+            wait_for_file(launcher_start_path)
+            launcher_start = json.loads(launcher_start_path.read_text(encoding='utf-8'))
+            owner_probe = run([
+                str(launcher),
+                '--describe-process-owner',
+                '--process-id',
+                str(launcher_start['launcherProcessId']),
+            ])
+            if owner_probe.returncode != 0:
+                fail('native direct provisional owner probe failed: ' + owner_probe.stderr)
+            owner_value = json.loads(owner_probe.stdout)
+            if owner_value.get('processAlive') is not True:
+                fail('native direct provisional launcher was not live')
+            if owner_value.get('processCreationTimeFileTime') != launcher_start.get('launcherProcessCreationTimeFileTime'):
+                fail('native direct provisional launcher creation identity mismatch')
+            wait_for_file(target_start_path)
+            target_start = json.loads(target_start_path.read_text(encoding='utf-8'))
+            for field in [
+                'jobId', 'attemptId', 'launchTokenDigest', 'jobName',
+                'launcherProcessId', 'launcherProcessCreationTimeFileTime', 'launcherImageDigest',
+            ]:
+                if launcher_start.get(field) != target_start.get(field):
+                    fail(f'native direct launcher/start identity mismatch for {field}')
+            native_process.wait(timeout=8)
+            if native_process.returncode != 0:
+                stderr = native_process.stderr.read() if native_process.stderr is not None else ''
+                fail('native direct runtime fixture failed: ' + stderr)
+            result = json.loads((native_bundle / 'result.json').read_text(encoding='utf-8'))
+            if result.get('status') != 'COMPLETED':
+                fail('native direct runtime fixture did not complete')
+            summary['nativeDirectOwnerEvidence'] = {
+                'provisionalOwnerLive': True,
+                'launcherAndTargetStartIdentityMatch': True,
+            }
+        finally:
+            if native_process.poll() is None:
+                native_process.kill()
+                native_process.wait(timeout=5)
+            if native_process.stdout is not None:
+                native_process.stdout.close()
+            if native_process.stderr is not None:
+                native_process.stderr.close()
+
+        cancel_bundle = temp / 'native pre resume cancel'
+        cancel_bundle.mkdir()
+        (cancel_bundle / 'cancel-requested.json').write_text(
+            json.dumps({
+                'schemaVersion': 1,
+                'jobId': 'job-accept-pre-resume-cancel',
+                'attemptId': 'attempt-accept-pre-resume-cancel',
+                'requestedAtMs': 1,
+            }),
+            encoding='utf-8',
+        )
+        target_effect = temp / 'pre-resume-target-effect.txt'
+        effect_script = (
+            "Set-Content -LiteralPath '"
+            + windows_path(target_effect).replace("'", "''")
+            + "' -Value executed"
+        )
+        pre_cancel = run(
+            runtime_launcher_args(
+                launcher,
+                POWERSHELL,
+                cancel_bundle,
+                'job-accept-pre-resume-cancel',
+                'attempt-accept-pre-resume-cancel',
+                context_env,
+                '--emit-launcher-start',
+                target_args=['-NoProfile', '-Command', effect_script],
+            )
+        )
+        if not (cancel_bundle / 'windows-launcher-start.json').is_file():
+            fail('pre-resume cancel omitted provisional launcher evidence')
+        if not (cancel_bundle / 'windows-start.json').is_file():
+            fail('pre-resume cancel omitted target-start evidence boundary')
+        if target_effect.exists():
+            fail('target side effect occurred despite cancel committed before ResumeThread')
+        cancel_result = json.loads((cancel_bundle / 'result.json').read_text(encoding='utf-8'))
+        if cancel_result.get('status') != 'CANCELLED':
+            fail('pre-resume cancel did not publish CANCELLED result')
+        summary['preResumeCancel'] = {
+            'windowsStartPublished': True,
+            'targetSideEffectObserved': False,
+            'resultStatus': cancel_result.get('status'),
+            'launcherExitCode': pre_cancel.returncode,
         }
 
         normal = run(launcher_args(

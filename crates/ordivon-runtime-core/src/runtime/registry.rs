@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use super::repair::{AdminRepairAudit, AdminRepairOperation};
+use super::supervisor::{validate_attempt_supervisor_owner, AttemptSupervisorOwner};
 use super::{
     operation_request_identity_digest_from_plan, validate_client_request_id, AdmissionOutcome,
     ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,
@@ -52,6 +53,9 @@ const WORKSPACE_PATCH_TABLE: &str = "workspace_patch_operations";
 const WORKSPACE_PATCH_INDEX: &str = "idx_workspace_patch_operations_workspace";
 const EXECUTION_PROVIDER_STORAGE_SQL: &str = include_str!("execution_provider_storage.sql");
 const EXECUTION_PROVIDER_TABLE: &str = "job_execution_providers";
+const ATTEMPT_SUPERVISOR_OWNER_STORAGE_SQL: &str =
+    include_str!("attempt_supervisor_owner_storage.sql");
+const ATTEMPT_SUPERVISOR_OWNER_TABLE: &str = "attempt_supervisor_owners";
 const HOST_DEPENDENCY_STORAGE_SQL: &str = include_str!("host_dependency_storage.sql");
 const HOST_DEPENDENCY_TABLE: &str = "job_host_dependencies";
 const RUNTIME_RELEASE_STORAGE_SQL: &str = include_str!("runtime_release_storage.sql");
@@ -256,6 +260,7 @@ impl Registry {
         registry.ensure_query_indexes(&mut connection)?;
         registry.ensure_workspace_patch_storage(&mut connection)?;
         registry.ensure_execution_provider_storage(&mut connection)?;
+        registry.ensure_attempt_supervisor_owner_storage(&mut connection)?;
         registry.ensure_host_dependency_storage(&mut connection)?;
         registry.ensure_runtime_release_storage(&mut connection)?;
         registry.validate_database(&connection)?;
@@ -594,6 +599,42 @@ impl Registry {
             return Err(RuntimeError::new(
                 RuntimeErrorCode::RegistryCorrupt,
                 "Execution Provider storage is missing after maintenance",
+                None,
+                false,
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_attempt_supervisor_owner_storage(
+        &self,
+        connection: &mut Connection,
+    ) -> RuntimeResult<()> {
+        let transaction = immediate(connection, "Attempt Supervisor Owner storage maintenance")?;
+        transaction
+            .execute_batch(ATTEMPT_SUPERVISOR_OWNER_STORAGE_SQL)
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot ensure Attempt Supervisor Owner storage")
+            })?;
+        transaction.commit().map_err(|error| {
+            RuntimeError::from_sql(
+                error,
+                "cannot commit Attempt Supervisor Owner storage maintenance",
+            )
+        })?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [ATTEMPT_SUPERVISOR_OWNER_TABLE],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot verify Attempt Supervisor Owner storage")
+            })?;
+        if !exists {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "Attempt Supervisor Owner storage is missing after maintenance",
                 None,
                 false,
             ));
@@ -2522,6 +2563,169 @@ impl Registry {
         transaction
             .commit()
             .map_err(|error| RuntimeError::from_sql(error, "cannot commit Runner identity"))?;
+        load_attempt(&connection, attempt_id)
+    }
+
+    pub(crate) fn attempt_supervisor_owner(
+        &self,
+        attempt_id: &str,
+    ) -> RuntimeResult<Option<AttemptSupervisorOwner>> {
+        let connection = self.open_connection()?;
+        let row: Option<(String, String)> = connection
+            .query_row(
+                "SELECT owner_json,owner_digest FROM attempt_supervisor_owners WHERE attempt_id=?1",
+                [attempt_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot read Attempt Supervisor Owner")
+            })?;
+        let Some((owner_json, owner_digest)) = row else {
+            return Ok(None);
+        };
+        if sha256_bytes(owner_json.as_bytes()) != owner_digest {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "stored Attempt Supervisor Owner digest does not match side truth",
+                Some("attemptSupervisorOwner"),
+                false,
+            ));
+        }
+        let owner: AttemptSupervisorOwner = serde_json::from_str(&owner_json).map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                format!("stored Attempt Supervisor Owner is invalid: {error}"),
+                Some("attemptSupervisorOwner"),
+                false,
+            )
+        })?;
+        validate_attempt_supervisor_owner(&owner)?;
+        Ok(Some(owner))
+    }
+
+    pub(crate) fn bind_supervisor_owner(
+        &self,
+        attempt_id: &str,
+        expected_row_version: u64,
+        owner: &AttemptSupervisorOwner,
+        observed_at_ms: u64,
+    ) -> RuntimeResult<AttemptRecord> {
+        validate_attempt_supervisor_owner(owner)?;
+        let owner_json = serde_json::to_string(owner).map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                format!("cannot serialize Attempt Supervisor Owner: {error}"),
+                Some("attemptSupervisorOwner"),
+                false,
+            )
+        })?;
+        let owner_digest = sha256_bytes(owner_json.as_bytes());
+        let start_evidence_digest = owner.start_evidence_digest();
+        let mut connection = self.open_connection()?;
+        let transaction = immediate(&mut connection, "supervisor-owner bind transaction")?;
+        let attempt = load_attempt(&transaction, attempt_id)?;
+        let existing: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT owner_json,owner_digest FROM attempt_supervisor_owners WHERE attempt_id=?1",
+                [attempt_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot inspect existing Attempt Supervisor Owner")
+            })?;
+        let bound_state = if attempt.state == AttemptState::Stopping {
+            AttemptState::Stopping
+        } else {
+            AttemptState::Running
+        };
+        if let Some((existing_json, existing_digest)) = existing {
+            if sha256_bytes(existing_json.as_bytes()) != existing_digest {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "stored Attempt Supervisor Owner digest does not match side truth",
+                    Some("attemptSupervisorOwner"),
+                    false,
+                ));
+            }
+            if existing_digest == owner_digest
+                && matches!(
+                    attempt.state,
+                    AttemptState::Running | AttemptState::Stopping
+                )
+                && attempt.runner_start_digest.as_deref() == Some(start_evidence_digest)
+            {
+                return Ok(attempt);
+            }
+            return Err(state_conflict(
+                "Attempt is already bound to a different Supervisor Owner",
+            ));
+        }
+        if !matches!(
+            attempt.state,
+            AttemptState::Starting | AttemptState::Recovering | AttemptState::Stopping
+        ) || attempt.row_version != expected_row_version
+        {
+            return Err(state_conflict(
+                "Attempt is not bindable to this Supervisor Owner",
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT INTO attempt_supervisor_owners(attempt_id,owner_json,owner_digest) VALUES(?1,?2,?3)",
+                params![attempt_id, owner_json, owner_digest],
+            )
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot persist Attempt Supervisor Owner")
+            })?;
+        let changed = transaction
+            .execute(
+                "UPDATE attempts SET state=CASE WHEN state='stopping' THEN 'stopping' ELSE 'running' END,runner_start_digest=?1,started_at_ms=COALESCE(started_at_ms,?2),row_version=row_version+1 WHERE attempt_id=?3 AND row_version=?4 AND state IN ('starting','recovering','stopping')",
+                params![
+                    start_evidence_digest,
+                    observed_at_ms,
+                    attempt_id,
+                    expected_row_version,
+                ],
+            )
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot bind Attempt Supervisor Owner")
+            })?;
+        if changed != 1 {
+            return Err(state_conflict(
+                "Attempt changed while binding Supervisor Owner",
+            ));
+        }
+        upsert_condition(
+            &transaction,
+            attempt_id,
+            &ConditionUpdate {
+                condition_type: "runner_bound".to_string(),
+                status: "true".to_string(),
+                reason_code: "SUPERVISOR_OWNER_MATCHED".to_string(),
+                evidence_digest: start_evidence_digest.to_string(),
+                observed_at_ms,
+            },
+        )?;
+        append_event(
+            &transaction,
+            &attempt.job_id,
+            Some(attempt_id),
+            "RUNNER_BOUND",
+            "SYSTEM_OBSERVED",
+            Some(attempt.state),
+            Some(bound_state),
+            "SUPERVISOR_OWNER_MATCHED",
+            serde_json::json!({
+                "ownerContract": owner.contract_name(),
+                "ownerDigest": owner_digest,
+            }),
+            observed_at_ms,
+        )?;
+        transaction.commit().map_err(|error| {
+            RuntimeError::from_sql(error, "cannot commit Attempt Supervisor Owner")
+        })?;
         load_attempt(&connection, attempt_id)
     }
 

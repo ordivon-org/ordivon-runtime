@@ -17,8 +17,8 @@ use super::patch::{
 };
 use super::registry::JobSnapshot;
 use super::supervisor::{
-    classify_supervisor_recovery, SupervisorObservation, SupervisorRecoveryDisposition,
-    SupervisorUnitState, TerminationIntent,
+    classify_supervisor_recovery, classify_windows_launcher_recovery, AttemptSupervisorOwner,
+    SupervisorObservation, SupervisorRecoveryDisposition, SupervisorUnitState, TerminationIntent,
 };
 use super::systemd::*;
 use super::windows::*;
@@ -60,6 +60,7 @@ const RUNNER_REQUEST_FILE: &str = "request.json";
 const PLAN_FILE: &str = "plan.json";
 const BUNDLE_MANIFEST_FILE: &str = "bundle-manifest.json";
 const RUNNER_START_FILE: &str = "runner-start.json";
+const WINDOWS_LAUNCHER_START_FILE: &str = "windows-launcher-start.json";
 const WINDOWS_START_FILE: &str = "windows-start.json";
 const RESULT_FILE: &str = "result.json";
 const STDOUT_FILE: &str = "stdout.log";
@@ -1502,7 +1503,7 @@ impl Runtime {
                 Ok(ExecutionProviderSnapshot {
                     contract: ExecutionProviderContract::WindowsNativeLauncherV1,
                     executable_digest: sha256_file(&launcher).map_err(map_universal_error)?,
-                    wsl_distribution: Some(windows.wsl_distribution.clone()),
+                    wsl_distribution: windows.wsl_distribution.clone(),
                 })
             }
         }
@@ -2543,6 +2544,41 @@ impl Runtime {
                         "executionPlan.env",
                     )?)
                 };
+                if windows.wsl_distribution.is_none() {
+                    let dispatch = spawn_windows_native(&WindowsNativeRunSpec {
+                        config: windows,
+                        bundle_path: &bundle_path,
+                        job_id: &starting.job_id,
+                        attempt_id: &starting.attempt_id,
+                        launch_token_digest: &starting.launch_token_digest,
+                        authority: plan.windows_authority,
+                        executable: Path::new(&plan.executable),
+                        args: &plan.args,
+                        cwd: Path::new(&plan.cwd),
+                        environment: &plan.env,
+                        input_source_root: input_source_root.as_deref(),
+                        input_set_id: plan.input_set_id.as_deref(),
+                        input_presentation_root,
+                        input_bindings_digest: input_bindings_digest.as_deref(),
+                        budget: &plan.budget,
+                        timeout_ms: plan.timeout_ms,
+                        stdout_limit_bytes: plan.stdout_limit_bytes,
+                        stderr_limit_bytes: plan.stderr_limit_bytes,
+                    });
+                    if let Err(error) = dispatch {
+                        self.commit_control_terminal(
+                            &starting,
+                            AttemptState::Failed,
+                            "RUNNER_START_FAILED",
+                            Some(format!(
+                                "native Windows launcher spawn failed: {}",
+                                error.message
+                            )),
+                        )?;
+                        return Ok(());
+                    }
+                    return self.await_launch_evidence(&starting);
+                }
                 windows_systemd_run(&WindowsSystemdRunSpec {
                     config: windows,
                     unit_name: &starting.unit_name,
@@ -2640,6 +2676,90 @@ impl Runtime {
             super::ExecutionTarget::LocalLinux => self.bind_runner_start(attempt),
             super::ExecutionTarget::WindowsNative => self.bind_windows_start(attempt),
         }
+    }
+
+    fn validate_windows_launcher_start_evidence(
+        &self,
+        attempt: &AttemptRecord,
+    ) -> RuntimeResult<(WindowsLauncherStartEvidence, String)> {
+        let path = Path::new(&attempt.bundle_path).join(WINDOWS_LAUNCHER_START_FILE);
+        let bytes = fs::read(&path)
+            .map_err(|error| io_error("read Windows launcher start evidence", error))?;
+        let evidence: WindowsLauncherStartEvidence =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                RuntimeError::new(
+                    RuntimeErrorCode::LaunchIdentityMismatch,
+                    format!("invalid Windows launcher start evidence: {error}"),
+                    Some("windowsLauncherStart"),
+                    false,
+                )
+            })?;
+        let plan = self.registry.execution_plan(&attempt.job_id)?;
+        if plan.execution_target != super::ExecutionTarget::WindowsNative {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "Windows launcher start evidence belongs to a non-Windows execution plan",
+                Some("windowsLauncherStart"),
+                false,
+            ));
+        }
+        let windows = self.windows.as_ref().ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "committed windows_native Job has no configured Windows provider",
+                Some("executionTarget"),
+                true,
+            )
+        })?;
+        if windows.wsl_distribution.is_some() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "early Windows launcher evidence is reserved for native control-plane dispatch",
+                Some("windowsLauncherStart"),
+                false,
+            ));
+        }
+        let provider = self
+            .registry
+            .execution_provider(&attempt.job_id)?
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "native Windows Attempt has no committed execution provider",
+                    Some("executionProvider"),
+                    false,
+                )
+            })?;
+        let expected_job_name = format!("Ordivon.{}", attempt.attempt_id);
+        if evidence.schema_version != RUNTIME_SCHEMA_VERSION
+            || evidence.job_id != attempt.job_id
+            || evidence.attempt_id != attempt.attempt_id
+            || evidence.launch_token_digest != attempt.launch_token_digest
+            || evidence.job_name != expected_job_name
+            || evidence.launcher_process_id == 0
+            || evidence.launcher_process_creation_time_file_time == 0
+            || evidence.observed_unix_ms == 0
+            || provider.contract != ExecutionProviderContract::WindowsNativeLauncherV1
+            || provider.wsl_distribution.is_some()
+            || evidence.launcher_image_digest != provider.executable_digest
+        {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::LaunchIdentityMismatch,
+                "Windows launcher start identity does not match committed native Attempt",
+                Some("windowsLauncherStart"),
+                false,
+            ));
+        }
+        let digest = sha256_bytes(&bytes);
+        if digest != sha256_file(&path).map_err(map_universal_error)? {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::LaunchIdentityMismatch,
+                "Windows launcher start evidence digest changed while reading",
+                Some("windowsLauncherStart"),
+                false,
+            ));
+        }
+        Ok((evidence, digest))
     }
 
     fn validate_windows_start_evidence(
@@ -2787,11 +2907,81 @@ impl Runtime {
                 false,
             ));
         }
+        if windows.wsl_distribution.is_none() {
+            let provider = self
+                .registry
+                .execution_provider(&attempt.job_id)?
+                .ok_or_else(|| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::RegistryCorrupt,
+                        "native Windows Attempt has no committed execution provider",
+                        Some("executionProvider"),
+                        false,
+                    )
+                })?;
+            if provider.contract != ExecutionProviderContract::WindowsNativeLauncherV1
+                || provider.wsl_distribution.is_some()
+                || evidence
+                    .launcher_process_creation_time_file_time
+                    .is_none_or(|identity| identity == 0)
+                || evidence.launcher_image_digest.as_deref()
+                    != Some(provider.executable_digest.as_str())
+            {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::LaunchIdentityMismatch,
+                    "native Windows launcher owner identity does not match the committed provider",
+                    Some("windowsStart"),
+                    false,
+                ));
+            }
+        }
         Ok((evidence, start_digest))
     }
 
     fn bind_windows_start(&self, attempt: &AttemptRecord) -> RuntimeResult<AttemptRecord> {
         let (evidence, start_digest) = self.validate_windows_start_evidence(attempt)?;
+        let windows = self.windows.as_ref().ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "committed windows_native Job has no configured Windows provider",
+                Some("executionTarget"),
+                true,
+            )
+        })?;
+        if windows.wsl_distribution.is_none() {
+            let launcher_process_creation_time_file_time = evidence
+                .launcher_process_creation_time_file_time
+                .filter(|identity| *identity != 0)
+                .ok_or_else(|| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::LaunchIdentityMismatch,
+                        "native Windows start evidence omitted launcher process creation identity",
+                        Some("windowsStart.launcherProcessCreationTimeFileTime"),
+                        false,
+                    )
+                })?;
+            let launcher_image_digest =
+                evidence.launcher_image_digest.clone().ok_or_else(|| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::LaunchIdentityMismatch,
+                        "native Windows start evidence omitted launcher image digest",
+                        Some("windowsStart.launcherImageDigest"),
+                        false,
+                    )
+                })?;
+            return self.registry.bind_supervisor_owner(
+                &attempt.attempt_id,
+                attempt.row_version,
+                &AttemptSupervisorOwner::WindowsLauncherV1 {
+                    launcher_process_id: evidence.launcher_process_id,
+                    launcher_process_creation_time_file_time,
+                    launcher_image_digest,
+                    job_name: evidence.job_name.clone(),
+                    start_evidence_digest: start_digest,
+                },
+                evidence.observed_unix_ms,
+            );
+        }
         let properties = systemctl_show(&attempt.unit_name)?;
         let invocation_id = nonempty_property(&properties, "InvocationID")
             .ok_or_else(|| missing_systemd_property("InvocationID"))?;
@@ -3001,7 +3191,7 @@ impl Runtime {
             }
             if current.state.is_terminal() {
                 if current.state != AttemptState::Orphaned {
-                    release_terminal_unit(&current.unit_name);
+                    self.release_attempt_supervisor(&current)?;
                 }
                 return self.observation_from_registry(&current.job_id, 0, 0);
             }
@@ -3009,7 +3199,7 @@ impl Runtime {
             self.append_terminal_evidence(&current, &mut terminal)?;
             match self.registry.commit_terminal(&terminal) {
                 Ok(_) => {
-                    release_terminal_unit(&current.unit_name);
+                    self.release_attempt_supervisor(&current)?;
                     self.cleanup_payload_view(&current.attempt_id)?;
                     return self.observation_from_registry(&current.job_id, 4096, 4096);
                 }
@@ -3677,12 +3867,34 @@ impl Runtime {
         terminal.reason_code = "LATE_IDENTITY_BOUND_RUNNER_RESULT".to_string();
         self.append_terminal_evidence(&current, &mut terminal)?;
         self.registry.recover_orphaned_terminal(&terminal)?;
-        release_terminal_unit(&current.unit_name);
+        self.release_attempt_supervisor(&current)?;
         self.cleanup_payload_view(&current.attempt_id)?;
         Ok(true)
     }
 
     fn orphan_process_tree_alive(&self, attempt: &AttemptRecord) -> RuntimeResult<bool> {
+        if let Some(owner) = self
+            .registry
+            .attempt_supervisor_owner(&attempt.attempt_id)?
+        {
+            let windows = self.windows.as_ref().ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "Attempt Supervisor Owner exists without a configured Windows provider",
+                    Some("attemptSupervisorOwner"),
+                    false,
+                )
+            })?;
+            let AttemptSupervisorOwner::WindowsLauncherV1 {
+                launcher_process_id,
+                launcher_process_creation_time_file_time,
+                ..
+            } = owner;
+            let observed = observe_windows_launcher_owner(windows, launcher_process_id)?;
+            return Ok(observed.process_alive
+                && observed.process_creation_time_file_time
+                    == Some(launcher_process_creation_time_file_time));
+        }
         attempt_process_tree_alive(attempt)
     }
 
@@ -3700,20 +3912,44 @@ impl Runtime {
             super::ExecutionTarget::LocalLinux => RUNNER_START_FILE,
             super::ExecutionTarget::WindowsNative => WINDOWS_START_FILE,
         });
-        if attempt.state == AttemptState::Starting && start_path.exists() {
-            let running = self.bind_attempt_start(&attempt, plan.execution_target)?;
-            if Path::new(&running.bundle_path).join(RESULT_FILE).exists() {
-                return self.reconcile_runner_result(&running);
+        let native_unbound_stopping = attempt.state == AttemptState::Stopping
+            && plan.execution_target == super::ExecutionTarget::WindowsNative
+            && self
+                .windows
+                .as_ref()
+                .is_some_and(|windows| windows.wsl_distribution.is_none())
+            && self
+                .registry
+                .attempt_supervisor_owner(&attempt.attempt_id)?
+                .is_none();
+        if (attempt.state == AttemptState::Starting || native_unbound_stopping)
+            && start_path.exists()
+        {
+            let bound = self.bind_attempt_start(&attempt, plan.execution_target)?;
+            if Path::new(&bound.bundle_path).join(RESULT_FILE).exists() {
+                return self.reconcile_runner_result(&bound);
+            }
+            if native_unbound_stopping {
+                return self.reconcile_bound_attempt(&bound);
             }
             return Ok(());
         }
-        if attempt.state == AttemptState::Starting {
+        if attempt.state == AttemptState::Starting || native_unbound_stopping {
             return self.reconcile_starting_without_token(&attempt);
         }
         self.reconcile_bound_attempt(&attempt)
     }
 
     fn reconcile_starting_without_token(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
+        let plan = self.registry.execution_plan(&attempt.job_id)?;
+        if plan.execution_target == super::ExecutionTarget::WindowsNative
+            && self
+                .windows
+                .as_ref()
+                .is_some_and(|windows| windows.wsl_distribution.is_none())
+        {
+            return self.reconcile_native_starting_without_target_evidence(attempt);
+        }
         let properties = systemctl_show(&attempt.unit_name)?;
         let active = unit_is_active(&properties);
         let age_ms = now_ms()?.saturating_sub(attempt.created_at_ms);
@@ -3744,8 +3980,172 @@ impl Runtime {
         Ok(())
     }
 
+    fn reconcile_native_starting_without_target_evidence(
+        &self,
+        attempt: &AttemptRecord,
+    ) -> RuntimeResult<()> {
+        let launcher_start_path = Path::new(&attempt.bundle_path).join(WINDOWS_LAUNCHER_START_FILE);
+        if launcher_start_path.is_file() {
+            let (evidence, _) = self.validate_windows_launcher_start_evidence(attempt)?;
+            let windows = self.windows.as_ref().ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RegistryCorrupt,
+                    "native Windows Starting Attempt has no configured provider",
+                    Some("executionTarget"),
+                    true,
+                )
+            })?;
+            let observation =
+                observe_windows_launcher_owner(windows, evidence.launcher_process_id)?;
+            if Path::new(&attempt.bundle_path).join(RESULT_FILE).is_file() {
+                return self.reconcile_runner_result(attempt);
+            }
+            if Path::new(&attempt.bundle_path)
+                .join(WINDOWS_START_FILE)
+                .is_file()
+            {
+                let running =
+                    self.bind_attempt_start(attempt, super::ExecutionTarget::WindowsNative)?;
+                if Path::new(&running.bundle_path).join(RESULT_FILE).is_file() {
+                    return self.reconcile_runner_result(&running);
+                }
+                return Ok(());
+            }
+            if observation.process_alive
+                && observation.process_creation_time_file_time
+                    == Some(evidence.launcher_process_creation_time_file_time)
+            {
+                return Ok(());
+            }
+            // The actual target is created suspended and windows-start.json is published before
+            // ResumeThread. Once the original provisional launcher owner is gone, no future target
+            // effect can emerge from this dispatch if target-start evidence is still absent.
+            let (terminal_state, reason_code) = match attempt.termination_intent {
+                AttemptTerminationIntent::StopRequested => (
+                    AttemptState::Cancelled,
+                    "STOP_REQUESTED_WINDOWS_LAUNCHER_PRESTART_GONE",
+                ),
+                AttemptTerminationIntent::DeadlineExceeded => (
+                    AttemptState::TimedOut,
+                    "DEADLINE_WINDOWS_LAUNCHER_PRESTART_GONE",
+                ),
+                AttemptTerminationIntent::Natural => {
+                    (AttemptState::Failed, "WINDOWS_LAUNCHER_PRESTART_GONE")
+                }
+            };
+            self.commit_control_terminal(
+                attempt,
+                terminal_state,
+                reason_code,
+                Some(
+                    "native launcher owner disappeared before durable target-start evidence; the target could not have been resumed"
+                        .to_string(),
+                ),
+            )?;
+            return Ok(());
+        }
+        let age_ms = now_ms()?.saturating_sub(attempt.created_at_ms);
+        if age_ms < self.startup_grace_ms {
+            return Ok(());
+        }
+        Err(RuntimeError::new(
+            RuntimeErrorCode::LaunchIdentityMismatch,
+            "native dispatch intent has no launcher-start, target-start, or result evidence; retain the Starting Attempt and capacity until new evidence appears or an operator reconciles it",
+            Some("windowsLauncherStart"),
+            true,
+        ))
+    }
+
+    fn reconcile_provider_owned_attempt(
+        &self,
+        attempt: &AttemptRecord,
+        plan: &RuntimeExecutionPlan,
+        owner: &AttemptSupervisorOwner,
+    ) -> RuntimeResult<()> {
+        if plan.execution_target != super::ExecutionTarget::WindowsNative {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "Attempt Supervisor Owner is bound to a non-Windows execution target",
+                Some("attemptSupervisorOwner"),
+                false,
+            ));
+        }
+        if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
+            return self.reconcile_runner_result(attempt);
+        }
+        let windows = self.windows.as_ref().ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "provider-owned Windows Attempt has no configured Windows provider",
+                Some("executionTarget"),
+                true,
+            )
+        })?;
+        if windows.wsl_distribution.is_some() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "native Attempt Supervisor Owner cannot be reconciled through a WSL provider",
+                Some("attemptSupervisorOwner"),
+                false,
+            ));
+        }
+        let AttemptSupervisorOwner::WindowsLauncherV1 {
+            launcher_process_id,
+            ..
+        } = owner;
+        let observation = observe_windows_launcher_owner(windows, *launcher_process_id)?;
+        if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
+            return self.reconcile_runner_result(attempt);
+        }
+        let intent = match attempt.termination_intent {
+            AttemptTerminationIntent::Natural => TerminationIntent::Natural,
+            AttemptTerminationIntent::StopRequested => TerminationIntent::StopRequested,
+            AttemptTerminationIntent::DeadlineExceeded => TerminationIntent::DeadlineExceeded,
+        };
+        match classify_windows_launcher_recovery(owner, &observation, intent)? {
+            SupervisorRecoveryDisposition::Running => Ok(()),
+            SupervisorRecoveryDisposition::Terminal(state) => {
+                let reason_code = match intent {
+                    TerminationIntent::StopRequested => "STOP_REQUESTED_PROCESS_TREE_GONE",
+                    TerminationIntent::DeadlineExceeded => "DEADLINE_EXCEEDED",
+                    TerminationIntent::Natural => "WINDOWS_LAUNCHER_LINEAGE_GONE",
+                };
+                self.commit_control_terminal(
+                    attempt,
+                    state,
+                    reason_code,
+                    (intent == TerminationIntent::Natural).then(|| {
+                        "native Windows launcher owner identity is gone; JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE makes the Attempt process tree definitively non-running and no result evidence exists".to_string()
+                    }),
+                )?;
+                Ok(())
+            }
+            SupervisorRecoveryDisposition::Orphaned(reason) => {
+                self.commit_control_terminal(
+                    attempt,
+                    AttemptState::Orphaned,
+                    "SUPERVISOR_IDENTITY_ORPHANED",
+                    Some(reason),
+                )?;
+                Ok(())
+            }
+            SupervisorRecoveryDisposition::Lost => Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "native Windows launcher classifier returned unsupported lost disposition",
+                Some("attemptSupervisorOwner"),
+                false,
+            )),
+        }
+    }
+
     fn reconcile_bound_attempt(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
         let plan = self.registry.execution_plan(&attempt.job_id)?;
+        if let Some(owner) = self
+            .registry
+            .attempt_supervisor_owner(&attempt.attempt_id)?
+        {
+            return self.reconcile_provider_owned_attempt(attempt, &plan, &owner);
+        }
         let expected = supervisor_identity(attempt)?;
         let properties = systemctl_show(&attempt.unit_name)?;
         let current_boot_id = read_trimmed("/proc/sys/kernel/random/boot_id")?;
@@ -3962,7 +4362,7 @@ impl Runtime {
         let _ = self.registry.commit_terminal(&terminal)?;
         drop(control_terminal_guard);
         if state != AttemptState::Orphaned {
-            release_terminal_unit(&current.unit_name);
+            self.release_attempt_supervisor(&current)?;
             self.cleanup_payload_view(&current.attempt_id)?;
         }
         self.observation_from_registry(&current.job_id, 4096, 4096)
@@ -4007,7 +4407,18 @@ impl Runtime {
                 return self.observation_from_registry(&request.job_id, 4096, 4096);
             }
         }
-        self.reconcile_job(&request.job_id)?;
+        let cancel_plan = self.registry.execution_plan(&request.job_id)?;
+        let native_direct = cancel_plan.execution_target == super::ExecutionTarget::WindowsNative
+            && self
+                .windows
+                .as_ref()
+                .is_some_and(|windows| windows.wsl_distribution.is_none());
+        match self.reconcile_job(&request.job_id) {
+            Ok(()) => {}
+            Err(error)
+                if native_direct && error.code == RuntimeErrorCode::LaunchIdentityMismatch => {}
+            Err(error) => return Err(error),
+        }
         let projection = self.registry.request_cancel(&request.job_id, now_ms()?)?;
         if projection.result_available {
             return self.observation_from_registry(&request.job_id, 4096, 4096);
@@ -4033,6 +4444,9 @@ impl Runtime {
             }),
         )
         .map_err(map_universal_error)?;
+        if native_direct {
+            return self.cancel_native_windows_attempt(&request.job_id, &attempt);
+        }
         let output = Command::new("systemctl")
             .args(["--no-block", "stop", &attempt.unit_name])
             .output()
@@ -4067,6 +4481,93 @@ impl Runtime {
         }
         self.reconcile_attempt(&attempt.attempt_id)?;
         self.observation_from_registry(&request.job_id, 4096, 4096)
+    }
+
+    fn cancel_native_windows_attempt(
+        &self,
+        job_id: &str,
+        attempt: &AttemptRecord,
+    ) -> RuntimeResult<TaskObservation> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut poll_index = 0;
+        loop {
+            let current = self.registry.get_attempt(&attempt.attempt_id)?;
+            if Path::new(&current.bundle_path).join(RESULT_FILE).exists() {
+                return self.commit_runner_result(&current);
+            }
+            if self
+                .registry
+                .attempt_supervisor_owner(&current.attempt_id)?
+                .is_some()
+            {
+                if !self.orphan_process_tree_alive(&current)? {
+                    if Path::new(&current.bundle_path).join(RESULT_FILE).exists() {
+                        return self.commit_runner_result(&current);
+                    }
+                    return self.commit_control_terminal(
+                        &current,
+                        AttemptState::Cancelled,
+                        "STOP_REQUESTED_PROCESS_TREE_GONE",
+                        Some(
+                            "native Windows launcher owner identity is gone after committed cancel intent; JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE makes the Attempt process tree definitively non-running"
+                                .to_string(),
+                        ),
+                    );
+                }
+            } else {
+                let target_start = Path::new(&current.bundle_path).join(WINDOWS_START_FILE);
+                if target_start.is_file() {
+                    let _ =
+                        self.bind_attempt_start(&current, super::ExecutionTarget::WindowsNative)?;
+                    continue;
+                }
+                let launcher_start =
+                    Path::new(&current.bundle_path).join(WINDOWS_LAUNCHER_START_FILE);
+                if launcher_start.is_file() {
+                    let (evidence, _) = self.validate_windows_launcher_start_evidence(&current)?;
+                    let windows = self.windows.as_ref().ok_or_else(|| {
+                        RuntimeError::new(
+                            RuntimeErrorCode::RegistryCorrupt,
+                            "native Windows cancel has no configured provider",
+                            Some("executionTarget"),
+                            true,
+                        )
+                    })?;
+                    let observed =
+                        observe_windows_launcher_owner(windows, evidence.launcher_process_id)?;
+                    if target_start.is_file() {
+                        continue;
+                    }
+                    let original_launcher_alive = observed.process_alive
+                        && observed.process_creation_time_file_time
+                            == Some(evidence.launcher_process_creation_time_file_time);
+                    if !original_launcher_alive {
+                        if target_start.is_file() {
+                            continue;
+                        }
+                        return self.commit_control_terminal(
+                            &current,
+                            AttemptState::Cancelled,
+                            "STOP_REQUESTED_WINDOWS_LAUNCHER_PRESTART_GONE",
+                            Some(
+                                "committed cancel intent outlived the provisional native launcher before target-start evidence; the suspended target could not have executed"
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            sleep_until_poll(deadline, &mut poll_index);
+        }
+        match self.reconcile_attempt(&attempt.attempt_id) {
+            Ok(()) => {}
+            Err(error) if error.code == RuntimeErrorCode::LaunchIdentityMismatch => {}
+            Err(error) => return Err(error),
+        }
+        self.observation_from_registry(job_id, 4096, 4096)
     }
 
     pub fn list_jobs(
@@ -4150,6 +4651,26 @@ impl Runtime {
             eof: range.next_offset >= artifact.byte_length,
             digest: artifact.digest,
         })
+    }
+
+    fn release_attempt_supervisor(&self, attempt: &AttemptRecord) -> RuntimeResult<()> {
+        let plan = self.registry.execution_plan(&attempt.job_id)?;
+        if plan.execution_target == super::ExecutionTarget::WindowsNative
+            && self
+                .windows
+                .as_ref()
+                .is_some_and(|windows| windows.wsl_distribution.is_none())
+        {
+            return Ok(());
+        }
+        if self
+            .registry
+            .attempt_supervisor_owner(&attempt.attempt_id)?
+            .is_none()
+        {
+            release_terminal_unit(&attempt.unit_name);
+        }
+        Ok(())
     }
 
     fn cleanup_payload_view(&self, _attempt_id: &str) -> RuntimeResult<()> {

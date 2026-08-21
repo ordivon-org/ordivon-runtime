@@ -1,19 +1,22 @@
-//! Windows-native execution target launched from WSL.
+//! Windows-native execution provider.
 //!
-//! Runtime retains Job/Attempt authority.  systemd temporarily supervises the WSL interop
-//! launcher lifetime, while the launcher owns the Windows Job Object and emits Windows-native
-//! child identity into the Attempt bundle.  The Windows identity is deliberately separate from
-//! the outer systemd supervisor identity; later recovery work can promote it without lying about
-//! which substrate each observation came from.
+//! Runtime retains Job/Attempt authority while the repository-owned launcher owns the Windows
+//! Job Object. Linux/WSL control planes may still wrap that launcher in systemd; a native Windows
+//! control plane starts the same launcher contract directly and relies on durable launcher/start
+//! evidence rather than inventing systemd identity.
 
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Stdio;
 use std::process::{Command, Output};
 
 use serde::Deserialize;
 
+use super::supervisor::WindowsLauncherOwnerObservation;
 use super::{ExecutionBudget, RuntimeError, RuntimeErrorCode, RuntimeResult, WindowsAuthority};
 
 const WINDOWS_BASELINE_ENVIRONMENT_NAMES: &[&str] = &[
@@ -61,11 +64,13 @@ const REQUIRED_WINDOWS_BASELINE_ENVIRONMENT_NAMES: &[&str] = &[
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowsExecutionConfig {
-    /// WSL-visible path to the exact Windows launcher executable, normally under /mnt/<drive>/.
+    /// Exact Windows launcher executable. A Linux/WSL control plane normally sees this under
+    /// `/mnt/<drive>/`; a native Windows control plane uses the native absolute path directly.
     pub launcher_path: PathBuf,
-    /// Explicit WSL distribution authority used to project Linux Workspace paths through
-    /// \\wsl.localhost.  This is provider configuration, never inherited process environment.
-    pub wsl_distribution: String,
+    /// WSL distribution authority used only when the Runtime control plane is Linux/WSL-hosted.
+    /// `None` is reserved for a native Windows control plane and removes WSL from the provider
+    /// identity rather than inventing a sentinel distribution name.
+    pub wsl_distribution: Option<String>,
 }
 
 impl WindowsExecutionConfig {
@@ -86,32 +91,68 @@ impl WindowsExecutionConfig {
         })?;
         if metadata.file_type().is_symlink()
             || !metadata.is_file()
-            || metadata.permissions().mode() & 0o111 == 0
+            || !launcher_is_executable(&metadata)
         {
             return Err(RuntimeError::invalid(
                 "Windows launcher must be a non-symlink executable file",
                 "windows.launcherPath",
             ));
         }
-        mounted_windows_path(&self.launcher_path).ok_or_else(|| {
-            RuntimeError::invalid(
-                "Windows launcher must reside on a WSL-mounted Windows drive",
-                "windows.launcherPath",
-            )
-        })?;
-        if self.wsl_distribution.is_empty()
-            || !self
-                .wsl_distribution
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        {
-            return Err(RuntimeError::invalid(
-                "WSL distribution name contains unsupported characters",
-                "windows.wslDistribution",
-            ));
-        }
+        validate_windows_control_plane(self)?;
         Ok(())
     }
+
+    fn wsl_distribution(&self) -> RuntimeResult<&str> {
+        self.wsl_distribution.as_deref().ok_or_else(|| {
+            RuntimeError::invalid(
+                "WSL-hosted Windows execution requires an explicit distribution",
+                "windows.wslDistribution",
+            )
+        })
+    }
+}
+
+#[cfg(unix)]
+fn launcher_is_executable(metadata: &fs::Metadata) -> bool {
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(windows)]
+fn launcher_is_executable(_metadata: &fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn validate_windows_control_plane(config: &WindowsExecutionConfig) -> RuntimeResult<()> {
+    mounted_windows_path(&config.launcher_path).ok_or_else(|| {
+        RuntimeError::invalid(
+            "Windows launcher must reside on a WSL-mounted Windows drive",
+            "windows.launcherPath",
+        )
+    })?;
+    let distribution = config.wsl_distribution()?;
+    if distribution.is_empty()
+        || !distribution
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(RuntimeError::invalid(
+            "WSL distribution name contains unsupported characters",
+            "windows.wslDistribution",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_windows_control_plane(config: &WindowsExecutionConfig) -> RuntimeResult<()> {
+    if config.wsl_distribution.is_some() {
+        return Err(RuntimeError::invalid(
+            "native Windows Runtime must not configure a WSL distribution",
+            "windows.wslDistribution",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -138,6 +179,10 @@ pub(crate) struct WindowsStartEvidence {
     pub launch_token_digest: String,
     pub job_name: String,
     pub launcher_process_id: u32,
+    #[serde(default)]
+    pub launcher_process_creation_time_file_time: Option<u64>,
+    #[serde(default)]
+    pub launcher_image_digest: Option<String>,
     pub process_id: u32,
     pub process_creation_time_file_time: u64,
     pub image_path: String,
@@ -161,6 +206,106 @@ pub(crate) struct WindowsStartEvidence {
     pub observed_unix_ms: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct WindowsLauncherStartEvidence {
+    pub schema_version: u32,
+    pub job_id: String,
+    pub attempt_id: String,
+    pub launch_token_digest: String,
+    pub job_name: String,
+    pub launcher_process_id: u32,
+    pub launcher_process_creation_time_file_time: u64,
+    pub launcher_image_digest: String,
+    pub observed_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WindowsProcessOwnerSnapshot {
+    schema_version: u32,
+    process_id: u32,
+    process_alive: bool,
+    #[serde(default)]
+    process_creation_time_file_time: Option<u64>,
+}
+
+pub(crate) fn observe_windows_launcher_owner(
+    config: &WindowsExecutionConfig,
+    process_id: u32,
+) -> RuntimeResult<WindowsLauncherOwnerObservation> {
+    config.validate()?;
+    if process_id == 0 {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
+            "persisted Windows launcher process id is zero",
+            Some("attemptSupervisorOwner.launcherProcessId"),
+            false,
+        ));
+    }
+    let launcher = fs::canonicalize(&config.launcher_path).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::IoError,
+            format!("canonicalize Windows launcher owner probe: {error}"),
+            Some("windows.launcherPath"),
+            false,
+        )
+    })?;
+    let output = Command::new(launcher)
+        .arg("--describe-process-owner")
+        .arg("--process-id")
+        .arg(process_id.to_string())
+        .output()
+        .map_err(|error| tool_error("describe Windows launcher owner", error))?;
+    if !output.status.success() {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::IoError,
+            format!(
+                "Windows launcher owner probe failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Some("windows.launcherOwner"),
+            true,
+        ));
+    }
+    if output.stdout.len() > 64 * 1024 || output.stderr.len() > 64 * 1024 {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::InvalidRequest,
+            "Windows launcher owner probe output exceeded bounded size",
+            Some("windows.launcherOwner"),
+            false,
+        ));
+    }
+    let snapshot: WindowsProcessOwnerSnapshot =
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::InvalidRequest,
+                format!("invalid Windows launcher owner evidence: {error}"),
+                Some("windows.launcherOwner"),
+                false,
+            )
+        })?;
+    if snapshot.schema_version != 1
+        || snapshot.process_id != process_id
+        || (snapshot.process_alive
+            && snapshot
+                .process_creation_time_file_time
+                .is_none_or(|identity| identity == 0))
+        || (!snapshot.process_alive && snapshot.process_creation_time_file_time.is_some())
+    {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::LaunchIdentityMismatch,
+            "Windows launcher owner probe returned inconsistent identity",
+            Some("windows.launcherOwner"),
+            false,
+        ));
+    }
+    Ok(WindowsLauncherOwnerObservation {
+        process_alive: snapshot.process_alive,
+        process_creation_time_file_time: snapshot.process_creation_time_file_time,
+    })
+}
+
 pub(crate) struct WindowsSystemdRunSpec<'a> {
     pub config: &'a WindowsExecutionConfig,
     pub unit_name: &'a str,
@@ -182,6 +327,54 @@ pub(crate) struct WindowsSystemdRunSpec<'a> {
     pub timeout_ms: u64,
     pub stdout_limit_bytes: u64,
     pub stderr_limit_bytes: u64,
+}
+
+pub(crate) struct WindowsNativeRunSpec<'a> {
+    pub config: &'a WindowsExecutionConfig,
+    pub bundle_path: &'a Path,
+    pub job_id: &'a str,
+    pub attempt_id: &'a str,
+    pub launch_token_digest: &'a str,
+    pub authority: WindowsAuthority,
+    pub executable: &'a Path,
+    pub args: &'a [String],
+    pub cwd: &'a Path,
+    pub environment: &'a BTreeMap<String, String>,
+    pub input_source_root: Option<&'a Path>,
+    pub input_set_id: Option<&'a str>,
+    pub input_presentation_root: Option<&'a str>,
+    pub input_bindings_digest: Option<&'a str>,
+    pub budget: &'a ExecutionBudget,
+    pub timeout_ms: u64,
+    pub stdout_limit_bytes: u64,
+    pub stderr_limit_bytes: u64,
+}
+
+/// Windows-native launcher contract after all control-plane path projection has completed.
+///
+/// The launcher semantics are intentionally independent from the transport that starts it.
+/// The current provider wraps this contract in `systemd-run` from WSL; a native Windows
+/// provider can invoke the same contract directly without changing Job/Attempt semantics.
+pub(crate) struct WindowsLauncherInvocationSpec<'a> {
+    pub bundle: &'a str,
+    pub job_id: &'a str,
+    pub attempt_id: &'a str,
+    pub launch_token_digest: &'a str,
+    pub job_name: &'a str,
+    pub authority: WindowsAuthority,
+    pub executable: &'a str,
+    pub args: &'a [String],
+    pub cwd: &'a str,
+    pub environment: &'a BTreeMap<String, String>,
+    pub input_source_root: Option<&'a str>,
+    pub input_set_id: Option<&'a str>,
+    pub input_presentation_root: Option<&'a str>,
+    pub input_bindings_digest: Option<&'a str>,
+    pub budget: &'a ExecutionBudget,
+    pub timeout_ms: u64,
+    pub stdout_limit_bytes: u64,
+    pub stderr_limit_bytes: u64,
+    pub emit_launcher_start: bool,
 }
 
 pub(crate) fn snapshot_windows_runtime_context(
@@ -350,6 +543,96 @@ pub(crate) fn merge_windows_environment(
     Ok(result)
 }
 
+#[cfg(windows)]
+pub(crate) fn spawn_windows_native(spec: &WindowsNativeRunSpec<'_>) -> RuntimeResult<u32> {
+    spec.config.validate()?;
+    if spec.config.wsl_distribution.is_some() {
+        return Err(RuntimeError::invalid(
+            "native Windows dispatch must not configure a WSL distribution",
+            "windows.wslDistribution",
+        ));
+    }
+    let launcher = fs::canonicalize(&spec.config.launcher_path).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::IoError,
+            format!("canonicalize native Windows launcher: {error}"),
+            Some("windows.launcherPath"),
+            false,
+        )
+    })?;
+    let executable = windows_visible_path(spec.config, spec.executable, "execution.executable")?;
+    let cwd = windows_visible_path(spec.config, spec.cwd, "execution.cwdRelative")?;
+    let bundle = windows_visible_path(spec.config, spec.bundle_path, "bundlePath")?;
+    let input_source_root = spec
+        .input_source_root
+        .map(|source_root| {
+            windows_visible_path(spec.config, source_root, "execution.effectiveInputs")
+        })
+        .transpose()?;
+    let job_name = format!("Ordivon.{}", spec.attempt_id);
+    let invocation = WindowsLauncherInvocationSpec {
+        bundle: &bundle,
+        job_id: spec.job_id,
+        attempt_id: spec.attempt_id,
+        launch_token_digest: spec.launch_token_digest,
+        job_name: &job_name,
+        authority: spec.authority,
+        executable: &executable,
+        args: spec.args,
+        cwd: &cwd,
+        environment: spec.environment,
+        input_source_root: input_source_root.as_deref(),
+        input_set_id: spec.input_set_id,
+        input_presentation_root: spec.input_presentation_root,
+        input_bindings_digest: spec.input_bindings_digest,
+        budget: spec.budget,
+        timeout_ms: spec.timeout_ms,
+        stdout_limit_bytes: spec.stdout_limit_bytes,
+        stderr_limit_bytes: spec.stderr_limit_bytes,
+        emit_launcher_start: true,
+    };
+    let mut command = Command::new(launcher);
+    append_windows_launcher_arguments(&mut command, &invocation)?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = command
+        .spawn()
+        .map_err(|error| tool_error("spawn native Windows launcher", error))?;
+    Ok(child.id())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn spawn_windows_native(spec: &WindowsNativeRunSpec<'_>) -> RuntimeResult<u32> {
+    let _ = (
+        spec.config,
+        spec.bundle_path,
+        spec.job_id,
+        spec.attempt_id,
+        spec.launch_token_digest,
+        spec.authority,
+        spec.executable,
+        spec.args,
+        spec.cwd,
+        spec.environment,
+        spec.input_source_root,
+        spec.input_set_id,
+        spec.input_presentation_root,
+        spec.input_bindings_digest,
+        spec.budget,
+        spec.timeout_ms,
+        spec.stdout_limit_bytes,
+        spec.stderr_limit_bytes,
+    );
+    Err(RuntimeError::new(
+        RuntimeErrorCode::InvalidRequest,
+        "direct native Windows dispatch is unavailable on a non-Windows control plane",
+        Some("executionTarget"),
+        false,
+    ))
+}
+
 pub(crate) fn windows_systemd_run(spec: &WindowsSystemdRunSpec<'_>) -> RuntimeResult<Output> {
     build_windows_systemd_run_command(spec)?
         .output()
@@ -378,6 +661,13 @@ pub(crate) fn build_windows_systemd_run_command(
     let bundle = windows_visible_path(spec.config, spec.bundle_path, "bundlePath")?;
     let job_name = format!("Ordivon.{}", spec.attempt_id);
 
+    let input_source_root = spec
+        .input_source_root
+        .map(|source_root| {
+            windows_visible_path(spec.config, source_root, "execution.effectiveInputs")
+        })
+        .transpose()?;
+
     let mut command = Command::new("systemd-run");
     command
         .arg(format!("--unit={}", spec.unit_name))
@@ -398,9 +688,40 @@ pub(crate) fn build_windows_systemd_run_command(
             "--property=RuntimeMaxSec={}ms",
             spec.runtime_ceiling_ms
         ))
-        .arg(launcher)
+        .arg(launcher);
+
+    let invocation = WindowsLauncherInvocationSpec {
+        bundle: &bundle,
+        job_id: spec.job_id,
+        attempt_id: spec.attempt_id,
+        launch_token_digest: spec.launch_token_digest,
+        job_name: &job_name,
+        authority: spec.authority,
+        executable: &executable,
+        args: spec.args,
+        cwd: &cwd,
+        environment: spec.environment,
+        input_source_root: input_source_root.as_deref(),
+        input_set_id: spec.input_set_id,
+        input_presentation_root: spec.input_presentation_root,
+        input_bindings_digest: spec.input_bindings_digest,
+        budget: spec.budget,
+        timeout_ms: spec.timeout_ms,
+        stdout_limit_bytes: spec.stdout_limit_bytes,
+        stderr_limit_bytes: spec.stderr_limit_bytes,
+        emit_launcher_start: false,
+    };
+    append_windows_launcher_arguments(&mut command, &invocation)?;
+    Ok(command)
+}
+
+fn append_windows_launcher_arguments(
+    command: &mut Command,
+    spec: &WindowsLauncherInvocationSpec<'_>,
+) -> RuntimeResult<()> {
+    command
         .arg("--runtime-bundle")
-        .arg(bundle)
+        .arg(spec.bundle)
         .arg("--runtime-job-id")
         .arg(spec.job_id)
         .arg("--runtime-attempt-id")
@@ -408,7 +729,7 @@ pub(crate) fn build_windows_systemd_run_command(
         .arg("--runtime-launch-token-digest")
         .arg(spec.launch_token_digest)
         .arg("--job-name")
-        .arg(job_name)
+        .arg(spec.job_name)
         .arg("--authority")
         .arg(spec.authority.as_str())
         .arg("--timeout-ms")
@@ -418,11 +739,14 @@ pub(crate) fn build_windows_systemd_run_command(
         .arg("--stderr-limit-bytes")
         .arg(spec.stderr_limit_bytes.to_string())
         .arg("--executable")
-        .arg(executable)
+        .arg(spec.executable)
         .arg("--cwd")
-        .arg(cwd)
+        .arg(spec.cwd)
         .arg("--inherit-environment")
         .arg("false");
+    if spec.emit_launcher_start {
+        command.arg("--emit-launcher-start");
+    }
 
     match (
         spec.input_source_root,
@@ -434,11 +758,7 @@ pub(crate) fn build_windows_systemd_run_command(
         (Some(source_root), Some(input_set_id), Some(presentation_root), Some(bindings_digest)) => {
             command
                 .arg("--input-source-root")
-                .arg(windows_visible_path(
-                    spec.config,
-                    source_root,
-                    "execution.effectiveInputs",
-                )?)
+                .arg(source_root)
                 .arg("--input-set-id")
                 .arg(input_set_id)
                 .arg("--input-presentation-root")
@@ -468,7 +788,7 @@ pub(crate) fn build_windows_systemd_run_command(
         command.arg("--cpu-quota-percent").arg(value.to_string());
     }
     command.arg("--").args(spec.args);
-    Ok(command)
+    Ok(())
 }
 
 pub(crate) fn windows_visible_path(
@@ -476,23 +796,46 @@ pub(crate) fn windows_visible_path(
     path: &Path,
     field: &str,
 ) -> RuntimeResult<String> {
-    if let Some(path) = mounted_windows_path(path) {
-        return Ok(path);
+    #[cfg(windows)]
+    {
+        if config.wsl_distribution.is_some() {
+            return Err(RuntimeError::invalid(
+                "native Windows path projection must not configure a WSL distribution",
+                "windows.wslDistribution",
+            ));
+        }
+        if !path.is_absolute() {
+            return Err(RuntimeError::invalid(
+                "Windows-visible path source must be absolute",
+                field,
+            ));
+        }
+        return path
+            .to_str()
+            .map(str::to_string)
+            .ok_or_else(|| RuntimeError::invalid("Windows-visible path must be UTF-8", field));
     }
-    if !path.is_absolute() {
-        return Err(RuntimeError::invalid(
-            "Windows-visible path source must be absolute",
-            field,
-        ));
+    #[cfg(not(windows))]
+    {
+        if let Some(path) = mounted_windows_path(path) {
+            return Ok(path);
+        }
+        if !path.is_absolute() {
+            return Err(RuntimeError::invalid(
+                "Windows-visible path source must be absolute",
+                field,
+            ));
+        }
+        let text = path
+            .to_str()
+            .ok_or_else(|| RuntimeError::invalid("Windows-visible path must be UTF-8", field))?;
+        let relative = text.trim_start_matches('/').replace('/', "\\");
+        Ok(format!(
+            "\\\\wsl.localhost\\{}\\{}",
+            config.wsl_distribution()?,
+            relative
+        ))
     }
-    let text = path
-        .to_str()
-        .ok_or_else(|| RuntimeError::invalid("Windows-visible path must be UTF-8", field))?;
-    let relative = text.trim_start_matches('/').replace('/', "\\");
-    Ok(format!(
-        "\\\\wsl.localhost\\{}\\{}",
-        config.wsl_distribution, relative
-    ))
 }
 
 pub(crate) fn mounted_windows_path(path: &Path) -> Option<String> {
@@ -605,7 +948,7 @@ mod tests {
         );
         let config = WindowsExecutionConfig {
             launcher_path: PathBuf::from("/mnt/c/launcher.exe"),
-            wsl_distribution: "archlinux".to_string(),
+            wsl_distribution: Some("archlinux".to_string()),
         };
         assert_eq!(
             windows_visible_path(
@@ -690,5 +1033,125 @@ mod tests {
         assert!(validate_windows_runtime_context(&elevated, WindowsAuthority::Limited).is_err());
         elevated.token_is_elevated = false;
         assert!(validate_windows_runtime_context(&elevated, WindowsAuthority::Elevated).is_err());
+    }
+
+    #[test]
+    fn launcher_argument_contract_is_independent_from_systemd_transport() {
+        let args = vec!["--literal=$HOME".to_string(), "a b".to_string()];
+        let environment = BTreeMap::from([("AgentFlag".to_string(), "1".to_string())]);
+        let budget = ExecutionBudget {
+            memory_max_bytes: Some(268_435_456),
+            tasks_max: Some(3),
+            cpu_quota_percent: Some(50),
+        };
+        let spec = WindowsLauncherInvocationSpec {
+            bundle: "C:\\ProgramData\\Ordivon\\attempts\\attempt-1",
+            job_id: "job-1",
+            attempt_id: "attempt-1",
+            launch_token_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            job_name: "Ordivon.attempt-1",
+            authority: WindowsAuthority::Limited,
+            executable: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            args: &args,
+            cwd: "C:\\Work",
+            environment: &environment,
+            input_source_root: None,
+            input_set_id: None,
+            input_presentation_root: None,
+            input_bindings_digest: None,
+            budget: &budget,
+            timeout_ms: 30_000,
+            stdout_limit_bytes: 4096,
+            stderr_limit_bytes: 4096,
+            emit_launcher_start: false,
+        };
+        let mut command = Command::new("/native/Ordivon.WindowsJobLauncher.exe");
+        append_windows_launcher_arguments(&mut command, &spec).unwrap();
+        let observed = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            vec![
+                "--runtime-bundle",
+                "C:\\ProgramData\\Ordivon\\attempts\\attempt-1",
+                "--runtime-job-id",
+                "job-1",
+                "--runtime-attempt-id",
+                "attempt-1",
+                "--runtime-launch-token-digest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--job-name",
+                "Ordivon.attempt-1",
+                "--authority",
+                "limited",
+                "--timeout-ms",
+                "30000",
+                "--stdout-limit-bytes",
+                "4096",
+                "--stderr-limit-bytes",
+                "4096",
+                "--executable",
+                "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                "--cwd",
+                "C:\\Work",
+                "--inherit-environment",
+                "false",
+                "--env",
+                "AgentFlag=1",
+                "--memory-max-bytes",
+                "268435456",
+                "--active-process-limit",
+                "3",
+                "--cpu-quota-percent",
+                "50",
+                "--",
+                "--literal=$HOME",
+                "a b",
+            ]
+        );
+    }
+    #[test]
+    fn launcher_start_evidence_is_explicit_opt_in() {
+        let args = Vec::<String>::new();
+        let environment = BTreeMap::new();
+        let budget = ExecutionBudget::default();
+        let spec = WindowsLauncherInvocationSpec {
+            bundle: "C:\\ProgramData\\Ordivon\\attempts\\attempt-2",
+            job_id: "job-2",
+            attempt_id: "attempt-2",
+            launch_token_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            job_name: "Ordivon.attempt-2",
+            authority: WindowsAuthority::Limited,
+            executable: "C:\\Windows\\System32\\cmd.exe",
+            args: &args,
+            cwd: "C:\\Work",
+            environment: &environment,
+            input_source_root: None,
+            input_set_id: None,
+            input_presentation_root: None,
+            input_bindings_digest: None,
+            budget: &budget,
+            timeout_ms: 1000,
+            stdout_limit_bytes: 1024,
+            stderr_limit_bytes: 1024,
+            emit_launcher_start: true,
+        };
+        let mut command = Command::new("/native/Ordivon.WindowsJobLauncher.exe");
+        append_windows_launcher_arguments(&mut command, &spec).unwrap();
+        let observed = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|arg| arg.as_str() == "--emit-launcher-start")
+                .count(),
+            1
+        );
     }
 }

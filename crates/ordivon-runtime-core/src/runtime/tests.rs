@@ -1,5 +1,6 @@
 use super::registry::{set_test_commit_fault, TestCommitFault, TestCommitPoint};
 use super::repair::{AdminRepairAudit, AdminRepairOperation};
+use super::supervisor::AttemptSupervisorOwner;
 use super::*;
 use crate::universal::{
     CapturedOutput, RunnerTaskResult, TaskTerminalStatus, UniversalExecutorConfig,
@@ -6052,6 +6053,182 @@ fn execution_provider_storage_is_recreated_without_advancing_schema_version() {
     let table_exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_execution_providers')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(table_exists);
+    let max_version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(max_version, 4);
+}
+
+#[test]
+fn attempt_supervisor_owner_binding_is_atomic_idempotent_and_tamper_evident() {
+    let sandbox = Sandbox::new("attempt-supervisor-owner-binding", 5_000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(
+                &sandbox,
+                "request:attempt-supervisor-owner-binding",
+                1,
+            ))
+            .unwrap(),
+    );
+    let ready = sandbox
+        .registry
+        .mark_bundle_ready(
+            &created.attempt.attempt_id,
+            created.attempt.row_version,
+            &digest(b"bundle"),
+            10,
+        )
+        .unwrap();
+    let starting = sandbox
+        .registry
+        .mark_dispatch_issued(&ready.attempt_id, ready.row_version, 11)
+        .unwrap();
+    let start_evidence_digest = digest(b"windows-start");
+    let owner = AttemptSupervisorOwner::WindowsLauncherV1 {
+        launcher_process_id: 4242,
+        launcher_process_creation_time_file_time: 123_456_789,
+        launcher_image_digest: digest(b"launcher-image"),
+        job_name: format!("Ordivon.{}", starting.attempt_id),
+        start_evidence_digest: start_evidence_digest.clone(),
+    };
+    let running = sandbox
+        .registry
+        .bind_supervisor_owner(&starting.attempt_id, starting.row_version, &owner, 12)
+        .unwrap();
+    assert_eq!(running.state, AttemptState::Running);
+    assert_eq!(
+        running.runner_start_digest.as_deref(),
+        Some(start_evidence_digest.as_str())
+    );
+    assert!(running.boot_id.is_none());
+    assert!(running.invocation_id.is_none());
+    assert!(running.control_group.is_none());
+    assert!(running.main_pid.is_none());
+    assert!(running.process_start_identity.is_none());
+    assert_eq!(
+        sandbox
+            .registry
+            .attempt_supervisor_owner(&starting.attempt_id)
+            .unwrap(),
+        Some(owner.clone())
+    );
+
+    let replay = sandbox
+        .registry
+        .bind_supervisor_owner(&starting.attempt_id, starting.row_version, &owner, 99)
+        .unwrap();
+    assert_eq!(replay.row_version, running.row_version);
+
+    let connection = Connection::open(&sandbox.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE attempt_supervisor_owners SET owner_json='{}' WHERE attempt_id=?1",
+            [&starting.attempt_id],
+        )
+        .unwrap();
+    let error = sandbox
+        .registry
+        .attempt_supervisor_owner(&starting.attempt_id)
+        .unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt);
+}
+
+#[test]
+fn stopping_attempt_can_bind_native_supervisor_owner_without_reentering_running() {
+    let sandbox = Sandbox::new("stopping-attempt-supervisor-owner", 5_000);
+    let created = created(
+        sandbox
+            .registry
+            .submit(&request(
+                &sandbox,
+                "request:stopping-attempt-supervisor-owner",
+                1,
+            ))
+            .unwrap(),
+    );
+    let ready = sandbox
+        .registry
+        .mark_bundle_ready(
+            &created.attempt.attempt_id,
+            created.attempt.row_version,
+            &digest(b"bundle"),
+            10,
+        )
+        .unwrap();
+    let starting = sandbox
+        .registry
+        .mark_dispatch_issued(&ready.attempt_id, ready.row_version, 11)
+        .unwrap();
+    sandbox
+        .registry
+        .request_cancel(&created.job.job_id, 12)
+        .unwrap();
+    let stopping = sandbox.registry.get_attempt(&starting.attempt_id).unwrap();
+    assert_eq!(stopping.state, AttemptState::Stopping);
+    assert_eq!(
+        stopping.termination_intent,
+        AttemptTerminationIntent::StopRequested
+    );
+    let start_evidence_digest = digest(b"windows-start-after-cancel");
+    let owner = AttemptSupervisorOwner::WindowsLauncherV1 {
+        launcher_process_id: 4243,
+        launcher_process_creation_time_file_time: 223_456_789,
+        launcher_image_digest: digest(b"launcher-image"),
+        job_name: format!("Ordivon.{}", stopping.attempt_id),
+        start_evidence_digest: start_evidence_digest.clone(),
+    };
+    let bound = sandbox
+        .registry
+        .bind_supervisor_owner(&stopping.attempt_id, stopping.row_version, &owner, 13)
+        .unwrap();
+    assert_eq!(bound.state, AttemptState::Stopping);
+    assert_eq!(
+        bound.termination_intent,
+        AttemptTerminationIntent::StopRequested
+    );
+    assert_eq!(
+        bound.runner_start_digest.as_deref(),
+        Some(start_evidence_digest.as_str())
+    );
+    assert_eq!(
+        sandbox
+            .registry
+            .attempt_supervisor_owner(&bound.attempt_id)
+            .unwrap(),
+        Some(owner.clone())
+    );
+    let replay = sandbox
+        .registry
+        .bind_supervisor_owner(&bound.attempt_id, stopping.row_version, &owner, 99)
+        .unwrap();
+    assert_eq!(replay.state, AttemptState::Stopping);
+    assert_eq!(replay.row_version, bound.row_version);
+}
+
+#[test]
+fn attempt_supervisor_owner_storage_is_recreated_without_advancing_schema_version() {
+    let sandbox = Sandbox::new("attempt-supervisor-owner-storage", 5_000);
+    let config = sandbox.registry.config().clone();
+    let connection = Connection::open(&config.db_path).unwrap();
+    connection
+        .execute("DROP TABLE attempt_supervisor_owners", [])
+        .unwrap();
+    drop(connection);
+
+    let registry = Registry::initialize(config).unwrap();
+    let connection = Connection::open(&registry.config().db_path).unwrap();
+    let table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='attempt_supervisor_owners')",
             [],
             |row| row.get(0),
         )

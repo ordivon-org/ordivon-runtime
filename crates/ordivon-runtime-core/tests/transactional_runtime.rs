@@ -409,8 +409,9 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
             startup_grace_ms: 2_000,
             windows: Some(WindowsExecutionConfig {
                 launcher_path: launcher.clone(),
-                wsl_distribution: std::env::var("WSL_DISTRO_NAME")
-                    .unwrap_or_else(|_| "archlinux".to_string()),
+                wsl_distribution: Some(
+                    std::env::var("WSL_DISTRO_NAME").unwrap_or_else(|_| "archlinux".to_string()),
+                ),
             }),
         },
         vec![InputAuthority {
@@ -961,8 +962,9 @@ fn runtime_windows_native_executes_as_real_job_attempt_and_replays() {
         startup_grace_ms: 2_000,
         windows: Some(WindowsExecutionConfig {
             launcher_path: launcher.clone(),
-            wsl_distribution: std::env::var("WSL_DISTRO_NAME")
-                .unwrap_or_else(|_| "archlinux".to_string()),
+            wsl_distribution: Some(
+                std::env::var("WSL_DISTRO_NAME").unwrap_or_else(|_| "archlinux".to_string()),
+            ),
         }),
     })
     .unwrap();
@@ -1443,8 +1445,9 @@ fn runtime_windows_native_wsl_restart_prepare_or_recover() {
         startup_grace_ms: 2_000,
         windows: Some(WindowsExecutionConfig {
             launcher_path: launcher.clone(),
-            wsl_distribution: std::env::var("WSL_DISTRO_NAME")
-                .unwrap_or_else(|_| "archlinux".to_string()),
+            wsl_distribution: Some(
+                std::env::var("WSL_DISTRO_NAME").unwrap_or_else(|_| "archlinux".to_string()),
+            ),
         }),
     };
     let windows_drive_path = |path: &Path| -> String {
@@ -4432,7 +4435,7 @@ fn runtime_provider_bound_job_rejects_windows_launcher_drift_before_dispatch() {
         startup_grace_ms: 1_000,
         windows: Some(WindowsExecutionConfig {
             launcher_path: staged_launcher.clone(),
-            wsl_distribution: wsl_distribution.clone(),
+            wsl_distribution: Some(wsl_distribution.clone()),
         }),
     })
     .unwrap();

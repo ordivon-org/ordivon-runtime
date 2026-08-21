@@ -365,11 +365,21 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         (None, None) => None,
         (Some(launcher), Some(wsl_distribution)) => Some(WindowsExecutionConfig {
             launcher_path: PathBuf::from(launcher),
-            wsl_distribution,
+            wsl_distribution: Some(wsl_distribution),
         }),
-        _ => {
+        (Some(launcher), None) if cfg!(windows) => Some(WindowsExecutionConfig {
+            launcher_path: PathBuf::from(launcher),
+            wsl_distribution: None,
+        }),
+        (Some(_), None) => {
             return Err(
-                "ORDIVON_WINDOWS_LAUNCHER_PATH and ORDIVON_WINDOWS_WSL_DISTRIBUTION must appear together"
+                "ORDIVON_WINDOWS_WSL_DISTRIBUTION is required when Windows execution is hosted from Linux/WSL"
+                    .into(),
+            )
+        }
+        (None, Some(_)) => {
+            return Err(
+                "ORDIVON_WINDOWS_WSL_DISTRIBUTION requires ORDIVON_WINDOWS_LAUNCHER_PATH"
                     .into(),
             )
         }
