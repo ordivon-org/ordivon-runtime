@@ -5402,6 +5402,12 @@ fn query_indexes_are_recreated_without_advancing_schema_version() {
             .execute(&format!("DROP INDEX {index}"), [])
             .unwrap();
     }
+    connection
+        .execute(
+            "CREATE INDEX idx_events_job_sequence ON job_events(job_id,event_sequence)",
+            [],
+        )
+        .unwrap();
     drop(connection);
 
     Registry::initialize(sandbox.registry.config().clone()).unwrap();
@@ -5426,6 +5432,14 @@ fn query_indexes_are_recreated_without_advancing_schema_version() {
             .unwrap();
         assert_eq!(actual, index);
     }
+    let redundant_event_index_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_events_job_sequence')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!redundant_event_index_exists);
 }
 
 #[test]

@@ -44,6 +44,9 @@ const MIGRATION_V4_SQL: &str = include_str!("../../migrations/runtime/0004_orpha
 pub const RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM: &str =
     "sha256:b76afbfaf70645b60456b08ad257e5ac2be1f63499f24a555cbf0157791e19ad";
 pub(crate) const MAX_MIGRATION_VERSION: i64 = 4;
+const REDUNDANT_EVENT_SEQUENCE_INDEX: &str = "idx_events_job_sequence";
+const DROP_REDUNDANT_EVENT_SEQUENCE_INDEX_SQL: &str =
+    "DROP INDEX IF EXISTS idx_events_job_sequence";
 const WORKSPACE_PATCH_STORAGE_SQL: &str = include_str!("workspace_patch_storage.sql");
 const WORKSPACE_PATCH_TABLE: &str = "workspace_patch_operations";
 const WORKSPACE_PATCH_INDEX: &str = "idx_workspace_patch_operations_workspace";
@@ -448,6 +451,11 @@ impl Registry {
 
     fn ensure_query_indexes(&self, connection: &mut Connection) -> RuntimeResult<()> {
         let transaction = immediate(connection, "Runtime query index maintenance")?;
+        transaction
+            .execute(DROP_REDUNDANT_EVENT_SEQUENCE_INDEX_SQL, [])
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot drop redundant Job event lookup index")
+            })?;
         for (sql, error_context) in [
             (
                 JOB_CLIENT_REQUEST_LOOKUP_INDEX_SQL,
@@ -469,6 +477,26 @@ impl Registry {
         transaction.commit().map_err(|error| {
             RuntimeError::from_sql(error, "cannot commit Runtime query index maintenance")
         })?;
+        let redundant_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)",
+                [REDUNDANT_EVENT_SEQUENCE_INDEX],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                RuntimeError::from_sql(
+                    error,
+                    "cannot verify redundant Job event lookup index removal",
+                )
+            })?;
+        if redundant_exists {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "redundant Job event lookup index remains after maintenance",
+                None,
+                false,
+            ));
+        }
         for (index, verify_context, missing_message) in [
             (
                 JOB_CLIENT_REQUEST_LOOKUP_INDEX,
