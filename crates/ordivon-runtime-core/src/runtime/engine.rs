@@ -75,6 +75,7 @@ const ADAPTIVE_POLL_DELAYS_MS: [u64; 5] = [2, 5, 10, 20, 50];
 const DEFAULT_EXECUTION_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const DEFAULT_EXECUTION_HOME: &str = "/root";
 const STALE_PREPARED_INPUT_AGE_MS: u64 = 60_000;
+const WINDOWS_NATIVE_OUTER_DEADLINE_GRACE_MS: u64 = 5_000;
 const HOST_DEPENDENCY_CONTINUITY_SCOPE: &str = "runtime_host_namespace_path_witness";
 const TRUSTED_BUILD_TARGET_PRESENTATION: &str = "/proc/self/fd/198";
 const WINDOWS_INPUT_PRESENTATION_COMPONENTS: [&str; 1] = ["OrdivonImmutableInputs"];
@@ -3980,10 +3981,102 @@ impl Runtime {
         Ok(())
     }
 
+    fn enforce_native_windows_outer_deadline(
+        &self,
+        attempt: &AttemptRecord,
+        plan: &RuntimeExecutionPlan,
+        deadline_started_at_ms: u64,
+        launcher_process_id: u32,
+        launcher_process_creation_time_file_time: u64,
+        pre_target_start: bool,
+    ) -> RuntimeResult<bool> {
+        let observed_at_ms = now_ms()?;
+        let current = match attempt.termination_intent {
+            AttemptTerminationIntent::Natural
+                if native_windows_outer_deadline_due(
+                    deadline_started_at_ms,
+                    plan.timeout_ms,
+                    observed_at_ms,
+                ) =>
+            {
+                self.registry
+                    .request_deadline_termination(&attempt.attempt_id, observed_at_ms)?
+            }
+            AttemptTerminationIntent::DeadlineExceeded => {
+                self.registry.get_attempt(&attempt.attempt_id)?
+            }
+            AttemptTerminationIntent::Natural | AttemptTerminationIntent::StopRequested => {
+                return Ok(false);
+            }
+        };
+        if current.state.is_terminal() {
+            return Ok(true);
+        }
+        if current.termination_intent != AttemptTerminationIntent::DeadlineExceeded {
+            return Ok(false);
+        }
+        if Path::new(&current.bundle_path).join(RESULT_FILE).is_file() {
+            self.reconcile_runner_result(&current)?;
+            return Ok(true);
+        }
+        let windows = self.windows.as_ref().ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "native Windows deadline enforcement has no configured provider",
+                Some("executionTarget"),
+                true,
+            )
+        })?;
+        if windows.wsl_distribution.is_some() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "direct native Windows deadline enforcement cannot use a WSL provider",
+                Some("executionTarget"),
+                false,
+            ));
+        }
+        let disposition = terminate_windows_launcher_owner_for_deadline(
+            windows,
+            launcher_process_id,
+            launcher_process_creation_time_file_time,
+        )?;
+        let mut current = self.registry.get_attempt(&current.attempt_id)?;
+        if Path::new(&current.bundle_path).join(RESULT_FILE).is_file() {
+            self.reconcile_runner_result(&current)?;
+            return Ok(true);
+        }
+        if pre_target_start
+            && Path::new(&current.bundle_path)
+                .join(WINDOWS_START_FILE)
+                .is_file()
+        {
+            current = self.bind_attempt_start(&current, super::ExecutionTarget::WindowsNative)?;
+            if Path::new(&current.bundle_path).join(RESULT_FILE).is_file() {
+                self.reconcile_runner_result(&current)?;
+                return Ok(true);
+            }
+        }
+        let disposition = match disposition {
+            WindowsDeadlineOwnerTerminationDisposition::Terminated => "terminated",
+            WindowsDeadlineOwnerTerminationDisposition::AlreadyAbsent => "already_absent",
+            WindowsDeadlineOwnerTerminationDisposition::IdentityMismatch => return Ok(false),
+        };
+        self.commit_control_terminal(
+            &current,
+            AttemptState::TimedOut,
+            "NATIVE_WINDOWS_OUTER_DEADLINE_CONTROL_TERMINAL",
+            Some(format!(
+                "outer deadline intent was durably committed before exact launcher-owner termination; disposition={disposition}; no runner result was available. TimedOut is derived from the persisted outer deadline and proven loss of the exact owner, not from owner death alone"
+            )),
+        )?;
+        Ok(true)
+    }
+
     fn reconcile_native_starting_without_target_evidence(
         &self,
         attempt: &AttemptRecord,
     ) -> RuntimeResult<()> {
+        let plan = self.registry.execution_plan(&attempt.job_id)?;
         let launcher_start_path = Path::new(&attempt.bundle_path).join(WINDOWS_LAUNCHER_START_FILE);
         if launcher_start_path.is_file() {
             let (evidence, _) = self.validate_windows_launcher_start_evidence(attempt)?;
@@ -4015,6 +4108,16 @@ impl Runtime {
                 && observation.process_creation_time_file_time
                     == Some(evidence.launcher_process_creation_time_file_time)
             {
+                if self.enforce_native_windows_outer_deadline(
+                    attempt,
+                    &plan,
+                    evidence.observed_unix_ms,
+                    evidence.launcher_process_id,
+                    evidence.launcher_process_creation_time_file_time,
+                    true,
+                )? {
+                    return Ok(());
+                }
                 return Ok(());
             }
             // The actual target is created suspended and windows-start.json is published before
@@ -4091,8 +4194,27 @@ impl Runtime {
         }
         let AttemptSupervisorOwner::WindowsLauncherV1 {
             launcher_process_id,
+            launcher_process_creation_time_file_time,
             ..
         } = owner;
+        let deadline_started_at_ms = attempt.started_at_ms.ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                "native Attempt Supervisor Owner has no durable execution start time",
+                Some("attemptSupervisorOwner"),
+                false,
+            )
+        })?;
+        if self.enforce_native_windows_outer_deadline(
+            attempt,
+            plan,
+            deadline_started_at_ms,
+            *launcher_process_id,
+            *launcher_process_creation_time_file_time,
+            false,
+        )? {
+            return Ok(());
+        }
         let observation = observe_windows_launcher_owner(windows, *launcher_process_id)?;
         if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
             return self.reconcile_runner_result(attempt);
@@ -6257,6 +6379,17 @@ fn read_tail_text(path: &Path, max_bytes: u64) -> RuntimeResult<String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+fn native_windows_outer_deadline_due(
+    execution_started_at_ms: u64,
+    timeout_ms: u64,
+    observed_at_ms: u64,
+) -> bool {
+    observed_at_ms
+        >= execution_started_at_ms
+            .saturating_add(timeout_ms)
+            .saturating_add(WINDOWS_NATIVE_OUTER_DEADLINE_GRACE_MS)
+}
+
 fn windows_native_launcher_lineage_is_definite_failure(
     execution_target: super::ExecutionTarget,
     termination_intent: super::AttemptTerminationIntent,
@@ -6272,6 +6405,17 @@ fn windows_native_launcher_lineage_is_definite_failure(
 #[cfg(test)]
 mod windows_lineage_tests {
     use super::*;
+
+    #[test]
+    fn native_windows_outer_deadline_uses_durable_start_time_and_outer_grace() {
+        assert!(!native_windows_outer_deadline_due(200, 1_000, 6_199));
+        assert!(native_windows_outer_deadline_due(200, 1_000, 6_200));
+        assert!(!native_windows_outer_deadline_due(
+            100,
+            u64::MAX,
+            u64::MAX - 1
+        ));
+    }
 
     #[test]
     fn missing_windows_launcher_lineage_is_failed_only_for_natural_windows_execution() {

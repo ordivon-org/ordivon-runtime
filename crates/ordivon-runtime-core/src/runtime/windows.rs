@@ -230,6 +230,24 @@ struct WindowsProcessOwnerSnapshot {
     process_creation_time_file_time: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WindowsDeadlineOwnerTerminationDisposition {
+    Terminated,
+    AlreadyAbsent,
+    IdentityMismatch,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WindowsDeadlineOwnerTerminationSnapshot {
+    schema_version: u32,
+    process_id: u32,
+    expected_process_creation_time_file_time: u64,
+    #[serde(default)]
+    observed_process_creation_time_file_time: Option<u64>,
+    disposition: String,
+}
+
 pub(crate) fn observe_windows_launcher_owner(
     config: &WindowsExecutionConfig,
     process_id: u32,
@@ -304,6 +322,116 @@ pub(crate) fn observe_windows_launcher_owner(
         process_alive: snapshot.process_alive,
         process_creation_time_file_time: snapshot.process_creation_time_file_time,
     })
+}
+
+pub(crate) fn terminate_windows_launcher_owner_for_deadline(
+    config: &WindowsExecutionConfig,
+    process_id: u32,
+    process_creation_time_file_time: u64,
+) -> RuntimeResult<WindowsDeadlineOwnerTerminationDisposition> {
+    config.validate()?;
+    if process_id == 0 || process_creation_time_file_time == 0 {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::RegistryCorrupt,
+            "persisted Windows launcher deadline owner identity is incomplete",
+            Some("attemptSupervisorOwner"),
+            false,
+        ));
+    }
+    let launcher = fs::canonicalize(&config.launcher_path).map_err(|error| {
+        RuntimeError::new(
+            RuntimeErrorCode::IoError,
+            format!("canonicalize Windows launcher deadline owner: {error}"),
+            Some("windows.launcherPath"),
+            false,
+        )
+    })?;
+    let output = Command::new(launcher)
+        .arg("--terminate-process-owner-for-deadline")
+        .arg("--process-id")
+        .arg(process_id.to_string())
+        .arg("--process-creation-time-file-time")
+        .arg(process_creation_time_file_time.to_string())
+        .output()
+        .map_err(|error| tool_error("terminate Windows launcher deadline owner", error))?;
+    if output.stdout.len() > 64 * 1024 || output.stderr.len() > 64 * 1024 {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::InvalidRequest,
+            "Windows launcher deadline owner termination output exceeded bounded size",
+            Some("windows.launcherDeadlineOwner"),
+            false,
+        ));
+    }
+    if !output.status.success() {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::IoError,
+            format!(
+                "Windows launcher deadline owner termination failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Some("windows.launcherDeadlineOwner"),
+            true,
+        ));
+    }
+    parse_windows_deadline_owner_termination(
+        &output.stdout,
+        process_id,
+        process_creation_time_file_time,
+    )
+}
+
+fn parse_windows_deadline_owner_termination(
+    output: &[u8],
+    process_id: u32,
+    process_creation_time_file_time: u64,
+) -> RuntimeResult<WindowsDeadlineOwnerTerminationDisposition> {
+    let snapshot: WindowsDeadlineOwnerTerminationSnapshot = serde_json::from_slice(output)
+        .map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::InvalidRequest,
+                format!("invalid Windows launcher deadline termination evidence: {error}"),
+                Some("windows.launcherDeadlineOwner"),
+                false,
+            )
+        })?;
+    let disposition = match snapshot.disposition.as_str() {
+        "terminated" => WindowsDeadlineOwnerTerminationDisposition::Terminated,
+        "already_absent" => WindowsDeadlineOwnerTerminationDisposition::AlreadyAbsent,
+        "identity_mismatch" => WindowsDeadlineOwnerTerminationDisposition::IdentityMismatch,
+        _ => {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::InvalidRequest,
+                "Windows launcher deadline termination returned an unknown disposition",
+                Some("windows.launcherDeadlineOwner.disposition"),
+                false,
+            ));
+        }
+    };
+    let observed_identity_valid = match disposition {
+        WindowsDeadlineOwnerTerminationDisposition::Terminated => {
+            snapshot.observed_process_creation_time_file_time
+                == Some(process_creation_time_file_time)
+        }
+        WindowsDeadlineOwnerTerminationDisposition::AlreadyAbsent => {
+            snapshot.observed_process_creation_time_file_time.is_none()
+        }
+        WindowsDeadlineOwnerTerminationDisposition::IdentityMismatch => snapshot
+            .observed_process_creation_time_file_time
+            .is_some_and(|observed| observed != 0 && observed != process_creation_time_file_time),
+    };
+    if snapshot.schema_version != 1
+        || snapshot.process_id != process_id
+        || snapshot.expected_process_creation_time_file_time != process_creation_time_file_time
+        || !observed_identity_valid
+    {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::LaunchIdentityMismatch,
+            "Windows launcher deadline termination returned inconsistent identity evidence",
+            Some("windows.launcherDeadlineOwner"),
+            false,
+        ));
+    }
+    Ok(disposition)
 }
 
 pub(crate) struct WindowsSystemdRunSpec<'a> {
@@ -1113,6 +1241,35 @@ mod tests {
             ]
         );
     }
+    #[test]
+    fn deadline_owner_termination_receipt_is_identity_bound_and_replay_safe() {
+        let terminated = br#"{"schemaVersion":1,"processId":42,"expectedProcessCreationTimeFileTime":123,"observedProcessCreationTimeFileTime":123,"disposition":"terminated"}"#;
+        assert_eq!(
+            parse_windows_deadline_owner_termination(terminated, 42, 123).unwrap(),
+            WindowsDeadlineOwnerTerminationDisposition::Terminated
+        );
+
+        let absent = br#"{"schemaVersion":1,"processId":42,"expectedProcessCreationTimeFileTime":123,"disposition":"already_absent"}"#;
+        assert_eq!(
+            parse_windows_deadline_owner_termination(absent, 42, 123).unwrap(),
+            WindowsDeadlineOwnerTerminationDisposition::AlreadyAbsent
+        );
+
+        let mismatch = br#"{"schemaVersion":1,"processId":42,"expectedProcessCreationTimeFileTime":123,"observedProcessCreationTimeFileTime":456,"disposition":"identity_mismatch"}"#;
+        assert_eq!(
+            parse_windows_deadline_owner_termination(mismatch, 42, 123).unwrap(),
+            WindowsDeadlineOwnerTerminationDisposition::IdentityMismatch
+        );
+
+        let invalid = br#"{"schemaVersion":1,"processId":42,"expectedProcessCreationTimeFileTime":123,"observedProcessCreationTimeFileTime":123,"disposition":"identity_mismatch"}"#;
+        assert_eq!(
+            parse_windows_deadline_owner_termination(invalid, 42, 123)
+                .unwrap_err()
+                .code,
+            RuntimeErrorCode::LaunchIdentityMismatch
+        );
+    }
+
     #[test]
     fn launcher_start_evidence_is_explicit_opt_in() {
         let args = Vec::<String>::new();

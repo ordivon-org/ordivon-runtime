@@ -2729,6 +2729,78 @@ impl Registry {
         load_attempt(&connection, attempt_id)
     }
 
+    pub fn request_deadline_termination(
+        &self,
+        attempt_id: &str,
+        observed_at_ms: u64,
+    ) -> RuntimeResult<AttemptRecord> {
+        let mut connection = self.open_connection()?;
+        let transaction = immediate(&mut connection, "deadline-intent transaction")?;
+        let attempt = load_attempt(&transaction, attempt_id)?;
+        let job = load_job(&transaction, &attempt.job_id)?;
+        if attempt.state.is_terminal()
+            || attempt.termination_intent == AttemptTerminationIntent::DeadlineExceeded
+            || attempt.termination_intent == AttemptTerminationIntent::StopRequested
+            || job.desired_state == JobDesiredState::Cancelled
+        {
+            transaction.commit().map_err(|error| {
+                RuntimeError::from_sql(error, "cannot close deadline-intent replay")
+            })?;
+            return load_attempt(&connection, attempt_id);
+        }
+        if job.resolution.is_some() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::ReconciliationRequired,
+                "unresolved Attempt belongs to a resolved Job",
+                Some("attemptId"),
+                false,
+            ));
+        }
+        if !matches!(
+            attempt.state,
+            AttemptState::Starting
+                | AttemptState::Running
+                | AttemptState::Recovering
+                | AttemptState::Stopping
+        ) {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::AttemptStateConflict,
+                "deadline termination requires a dispatched nonterminal Attempt",
+                Some("attemptId"),
+                false,
+            ));
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE attempts SET state='stopping',termination_intent='deadline_exceeded',row_version=row_version+1 WHERE attempt_id=?1 AND row_version=?2 AND state IN ('starting','running','recovering','stopping') AND termination_intent='natural'",
+                params![attempt_id, attempt.row_version],
+            )
+            .map_err(|error| {
+                RuntimeError::from_sql(error, "cannot persist Attempt deadline intent")
+            })?;
+        if changed != 1 {
+            return Err(state_conflict(
+                "Attempt changed while committing outer deadline intent",
+            ));
+        }
+        append_event(
+            &transaction,
+            &attempt.job_id,
+            Some(attempt_id),
+            "DEADLINE_EXCEEDED",
+            "SYSTEM_DERIVED",
+            Some(attempt.state),
+            Some(AttemptState::Stopping),
+            "OUTER_DEADLINE_INTENT_COMMITTED",
+            serde_json::json!({}),
+            observed_at_ms,
+        )?;
+        transaction.commit().map_err(|error| {
+            RuntimeError::from_sql(error, "cannot commit Attempt deadline intent")
+        })?;
+        load_attempt(&connection, attempt_id)
+    }
+
     pub fn request_cancel(
         &self,
         job_id: &str,

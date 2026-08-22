@@ -6143,6 +6143,95 @@ fn attempt_supervisor_owner_binding_is_atomic_idempotent_and_tamper_evident() {
 }
 
 #[test]
+fn outer_deadline_intent_is_durable_replay_safe_and_does_not_override_cancel() {
+    let sandbox = Sandbox::new("outer-deadline-intent", 5_000);
+    let admission = created(
+        sandbox
+            .registry
+            .submit(&request(&sandbox, "request:outer-deadline-intent", 1))
+            .unwrap(),
+    );
+    let ready = sandbox
+        .registry
+        .mark_bundle_ready(
+            &admission.attempt.attempt_id,
+            admission.attempt.row_version,
+            &digest(b"bundle"),
+            10,
+        )
+        .unwrap();
+    let starting = sandbox
+        .registry
+        .mark_dispatch_issued(&ready.attempt_id, ready.row_version, 11)
+        .unwrap();
+
+    let deadline = sandbox
+        .registry
+        .request_deadline_termination(&starting.attempt_id, 12)
+        .unwrap();
+    assert_eq!(deadline.state, AttemptState::Stopping);
+    assert_eq!(
+        deadline.termination_intent,
+        AttemptTerminationIntent::DeadlineExceeded
+    );
+    assert_eq!(
+        sandbox
+            .registry
+            .get_job(&admission.job.job_id)
+            .unwrap()
+            .desired_state,
+        JobDesiredState::Run
+    );
+    let replay = sandbox
+        .registry
+        .request_deadline_termination(&deadline.attempt_id, 99)
+        .unwrap();
+    assert_eq!(replay.row_version, deadline.row_version);
+    assert_eq!(
+        replay.termination_intent,
+        AttemptTerminationIntent::DeadlineExceeded
+    );
+
+    let cancel_sandbox = Sandbox::new("cancel-before-outer-deadline", 5_000);
+    let cancelled = created(
+        cancel_sandbox
+            .registry
+            .submit(&request(
+                &cancel_sandbox,
+                "request:cancel-wins-before-deadline",
+                2,
+            ))
+            .unwrap(),
+    );
+    let cancel_ready = cancel_sandbox
+        .registry
+        .mark_bundle_ready(
+            &cancelled.attempt.attempt_id,
+            cancelled.attempt.row_version,
+            &digest(b"cancel-bundle"),
+            20,
+        )
+        .unwrap();
+    let cancel_starting = cancel_sandbox
+        .registry
+        .mark_dispatch_issued(&cancel_ready.attempt_id, cancel_ready.row_version, 21)
+        .unwrap();
+    cancel_sandbox
+        .registry
+        .request_cancel(&cancelled.job.job_id, 22)
+        .unwrap();
+    let after_deadline = cancel_sandbox
+        .registry
+        .request_deadline_termination(&cancel_starting.attempt_id, 23)
+        .unwrap();
+    assert_eq!(after_deadline.state, AttemptState::Stopping);
+    assert_eq!(
+        after_deadline.termination_intent,
+        AttemptTerminationIntent::StopRequested
+    );
+}
+
+#[test]
 fn stopping_attempt_can_bind_native_supervisor_owner_without_reentering_running() {
     let sandbox = Sandbox::new("stopping-attempt-supervisor-owner", 5_000);
     let created = created(
