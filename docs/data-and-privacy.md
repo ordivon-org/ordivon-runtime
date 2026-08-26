@@ -103,6 +103,7 @@ These controls protect against ordinary local disclosure. They do not protect da
 ## Retention
 
 Workspace retention is policy-driven and implemented through `ordivon-runtime-lifecycle`; it never deletes dirty, active, pinned, unknown, or orphan-directory state automatically.
+`dirty-checkpoint` may explicitly convert one owner-selected dirty Workspace's Git-relevant state into an immutable recovery ref in that Workspace's source repository. The checkpoint preserves physical state without changing semantic ownership or permitting automatic deletion; later release still uses the exact Runtime `workspace.close` fence.
 
 Job, Attempt, event, Artifact, and terminal-evidence history is currently append-oriented and has no automatic per-record deletion path. This preserves idempotency, reconciliation, and recovery evidence. Operators who require bounded historical retention must use one of two explicit models:
 

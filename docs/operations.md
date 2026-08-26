@@ -229,6 +229,51 @@ scripts/ordivon-runtime-reclaim apply \
 
 The default policy is seven days and includes only `stale_record` and `closable`. A `stale_record` candidate carries a digest from inspection; apply requires the record to remain a regular file with the same digest, rechecks Workspace absence and active Jobs, copies it into the receipt, and only then deletes it. `closable` Workspaces are never removed directly; the tool calls the Runtime's `workspace.close` contract with `force=false`, preserving active-Job exclusion, dirty-state refusal, rescue refs, tombstones, and idempotency.
 
+Dirty Workspaces remain outside automatic reclaim. Use the evidence-only review first:
+
+```bash
+ordivon-runtime-lifecycle dirty-review \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --runtime-store-root /var/lib/ordivon/runtime \
+  --receipt-root /var/lib/ordivon/runtime/lifecycle-receipts \
+  --lock-file /run/ordivon-runtime-lifecycle.lock \
+  --workspace-id <workspace-id>
+```
+
+When owner review needs the Workspace bytes to become recoverable independently of the live worktree, `dirty-checkpoint` implements the previously advisory `checkpoint_or_export` step:
+
+```bash
+ordivon-runtime-lifecycle dirty-checkpoint \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --runtime-store-root /var/lib/ordivon/runtime \
+  --receipt-root /var/lib/ordivon/runtime/lifecycle-receipts \
+  --lock-file /run/ordivon-runtime-lifecycle.lock \
+  --workspace-id <workspace-id> \
+  --confirm-policy CHECKPOINT_DIRTY_WORKSPACE_STATE
+```
+
+The command is a **physical recovery operation, not a semantic disposition and not a release operation**. It refuses active/held Jobs, requires the current lifecycle classification to remain `blocked_dirty`, leaves the Workspace dirty and open, and sets `automaticDeletionAllowed=false`. It writes one immutable source-repository ref under `refs/ordivon/checkpoints/<workspace>/<stateDigest>`. The bundle retains:
+
+- original `HEAD` as the checkpoint commit parent;
+- exact raw Git index serialization in `index.raw`;
+- stable index/stage projections;
+- a complete `worktree/` tree containing tracked working bytes plus non-ignored untracked paths;
+- an `index/` tree for the staged state; v1 fails closed on unmerged indexes and in-progress Git operations rather than pretending their continuation metadata is recoverable;
+- a manifest whose `truthRole` is `physical-recovery-carrier-not-semantic-standing`.
+
+`stateDigest` identifies this Git recovery representation. It is **not** Runtime `sourceStateDigest` and must never substitute for it. The safe release sequence remains:
+
+```text
+workspace.get -> exact Runtime sourceStateDigest
+-> dirty-review / owner adjudication
+-> dirty-checkpoint when independent recovery is required
+-> workspace.get again (checkpoint must not change Runtime state)
+-> owner explicitly chooses release
+-> workspace.close(force=true, expectedSourceStateDigest=<exact current Runtime digest>)
+```
+
+A checkpoint does not imply that the state is current, useful, admitted, superseded, or safe to delete. It only removes the false coupling `preserve dirty bytes == keep a live worktree forever`. Sparse-checkout, split-index, gitlink/submodule, unmerged-index, and in-progress merge/rebase/cherry-pick/revert/sequencer Workspaces fail closed until an exact recovery contract exists for those cases.
+
 The apply command is a policy executor, not a timer. Scheduling is intentionally separate because retention age and cadence are user policy. Failed items are recorded independently and produce a partial result instead of hiding successful actions or deleting a broader set.
 
 ### Policy-driven lifecycle

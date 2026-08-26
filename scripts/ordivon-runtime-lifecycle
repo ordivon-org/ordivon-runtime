@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,6 +23,7 @@ SCHEMA_VERSION = 1
 SWEEP_CONFIRMATION = "APPLY_WORKSPACE_RETENTION_POLICY"
 REPAIR_CONFIRMATION = "REPAIR_WORKSPACE_IDENTITIES"
 QUARANTINE_CONFIRMATION = "QUARANTINE_BROKEN_WORKSPACES"
+DIRTY_CHECKPOINT_CONFIRMATION = "CHECKPOINT_DIRTY_WORKSPACE_STATE"
 MAX_DIRTY_PATHS = 10_000
 DEFAULT_POLICY = {
     "schemaVersion": 1,
@@ -105,6 +107,17 @@ def parse_args() -> argparse.Namespace:
     dirty_review.add_argument("--review-after-hours", type=nonnegative_float, default=72.0)
     dirty_review.add_argument("--quarantine-review-after-hours", type=nonnegative_float, default=168.0)
     dirty_review.add_argument("--pretty", action="store_true")
+
+    dirty_checkpoint = sub.add_parser(
+        "dirty-checkpoint",
+        help="preserve one dirty Workspace Git state as a recoverable source-repo bundle without closing it",
+    )
+    add_common(dirty_checkpoint)
+    dirty_checkpoint.add_argument("--receipt-root", type=absolute_path, required=True)
+    dirty_checkpoint.add_argument("--lock-file", type=absolute_path, required=True)
+    dirty_checkpoint.add_argument("--workspace-id", action="append", dest="workspace_ids", required=True)
+    dirty_checkpoint.add_argument("--confirm-policy", required=True)
+    dirty_checkpoint.add_argument("--pretty", action="store_true")
     return parser.parse_args()
 
 
@@ -691,6 +704,346 @@ def dirty_review(args: argparse.Namespace) -> dict[str, object]:
         return result
 
 
+
+def _git_bytes(repository: Path, arguments: list[str], *, input_bytes: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+    result = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        input=input_bytes,
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.decode("utf-8", "replace").strip()
+            or result.stdout.decode("utf-8", "replace").strip()
+            or "git failed"
+        )
+    return result
+
+
+def _git_temp_index(repository: Path, *, copy_from: Path | None = None) -> tuple[dict[str, str], Path]:
+    descriptor, raw = tempfile.mkstemp(prefix="ordivon-workspace-state-", dir="/tmp")
+    os.close(descriptor)
+    temporary = Path(raw)
+    if copy_from is None:
+        temporary.unlink()
+    else:
+        shutil.copy2(copy_from, temporary)
+    environment = os.environ.copy()
+    environment["GIT_INDEX_FILE"] = str(temporary)
+    return environment, temporary
+
+
+def _run_git_with_environment(
+    repository: Path,
+    arguments: list[str],
+    environment: dict[str, str],
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        env=environment,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if check and result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git failed")
+    return result
+
+
+def _workspace_index_path(workspace: Path) -> Path:
+    raw = git(workspace, ["rev-parse", "--git-path", "index"]).stdout.strip()
+    path = Path(raw)
+    return path if path.is_absolute() else (workspace / path).resolve()
+
+
+def _workspace_common_source(workspace: Path) -> Path:
+    raw = git(workspace, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).stdout.strip()
+    common = Path(raw).resolve()
+    return common.parent if common.name == ".git" else common
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return _sha256_bytes(encoded)
+
+
+def _hash_object(repository: Path, value: bytes) -> str:
+    return _git_bytes(repository, ["hash-object", "-w", "--stdin"], input_bytes=value).stdout.decode().strip()
+
+
+def _workspace_has_sparse_checkout(workspace: Path) -> bool:
+    for key in ("core.sparseCheckout", "index.sparse"):
+        result = git(workspace, ["config", "--bool", key], check=False)
+        if result.returncode == 0 and result.stdout.strip().lower() == "true":
+            return True
+    return False
+
+
+def _workspace_has_gitlinks(workspace: Path) -> bool:
+    output = git(workspace, ["ls-files", "-s"]).stdout
+    return any(line.startswith("160000 ") for line in output.splitlines())
+
+
+def _workspace_has_split_index(workspace: Path) -> bool:
+    result = git(workspace, ["rev-parse", "--shared-index-path"], check=False)
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _workspace_git_operation_markers(workspace: Path) -> list[str]:
+    markers = [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "REBASE_HEAD",
+        "BISECT_LOG",
+        "rebase-merge",
+        "rebase-apply",
+        "sequencer",
+    ]
+    present: list[str] = []
+    for marker in markers:
+        raw = git(workspace, ["rev-parse", "--git-path", marker]).stdout.strip()
+        path = Path(raw)
+        resolved = path if path.is_absolute() else (workspace / path).resolve()
+        if resolved.exists():
+            present.append(marker)
+    return present
+
+
+def _build_worktree_tree(workspace: Path) -> str:
+    environment, temporary = _git_temp_index(workspace)
+    try:
+        _run_git_with_environment(workspace, ["read-tree", "HEAD"], environment)
+        _run_git_with_environment(workspace, ["add", "-A", "--", "."], environment)
+        return _run_git_with_environment(workspace, ["write-tree"], environment).stdout.strip()
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _build_index_tree(workspace: Path, index_path: Path, has_unmerged: bool) -> str | None:
+    environment, temporary = _git_temp_index(workspace, copy_from=index_path)
+    try:
+        result = _run_git_with_environment(workspace, ["write-tree"], environment, check=False)
+        if result.returncode == 0:
+            return result.stdout.strip()
+        if has_unmerged:
+            return None
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "cannot materialize index tree")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def dirty_checkpoint_one(
+    args: argparse.Namespace,
+    item: dict[str, object],
+) -> dict[str, object]:
+    workspace_id = str(item["workspaceId"])
+    workspace_root = args.workspace_root or args.runtime_store_root / "workspaces"
+    workspace = workspace_root / workspace_id
+    record_path = args.runtime_store_root / "workspace-records" / f"{workspace_id}.json"
+    if item.get("classification") != "blocked_dirty":
+        raise RuntimeError(f"Workspace is not blocked_dirty: {item.get('classification')}")
+    if active_jobs(args.database, args.busy_timeout_ms, workspace_id):
+        raise RuntimeError("workspace acquired an active or held Job")
+    record_digest = sha256_file(record_path)
+    record = load_open_record(record_path, workspace_id, workspace)
+    source_repo = Path(str(record.get("sourceRepo"))).resolve()
+    if not source_repo.is_dir():
+        raise RuntimeError(f"source repository is unavailable: {source_repo}")
+    if _workspace_common_source(workspace) != source_repo:
+        raise RuntimeError("Workspace Git authority differs from recorded sourceRepo")
+    if _workspace_has_sparse_checkout(workspace):
+        raise RuntimeError("dirty checkpoint does not support sparse Workspaces")
+    if _workspace_has_gitlinks(workspace):
+        raise RuntimeError("dirty checkpoint does not support submodule/gitlink Workspaces")
+    if _workspace_has_split_index(workspace):
+        raise RuntimeError("dirty checkpoint does not support split-index Workspaces")
+    operation_markers = _workspace_git_operation_markers(workspace)
+    if operation_markers:
+        raise RuntimeError("dirty checkpoint does not support in-progress Git operations: " + ",".join(operation_markers))
+    if git(workspace, ["ls-files", "-u"]).stdout:
+        raise RuntimeError("dirty checkpoint does not support unmerged index state")
+    unsupported = [entry for entry in untracked_manifest(workspace) if entry.get("kind") == "other"]
+    if unsupported:
+        raise RuntimeError("dirty checkpoint does not support non-file/non-symlink untracked paths")
+
+    head = git(workspace, ["rev-parse", "HEAD"]).stdout.strip()
+    status = git(workspace, ["status", "--porcelain=v1", "--untracked-files=all"]).stdout
+    if not status.strip():
+        raise RuntimeError("Workspace is no longer dirty")
+    index_path = _workspace_index_path(workspace)
+    raw_index = index_path.read_bytes()
+    raw_index_digest = _sha256_bytes(raw_index)
+    stage_projection = git(workspace, ["ls-files", "-s"]).stdout.encode("utf-8")
+    index_flag_projection = git(workspace, ["ls-files", "-v", "-z"]).stdout.encode("utf-8")
+    unmerged_projection = git(workspace, ["ls-files", "-u"]).stdout.encode("utf-8")
+    worktree_tree = _build_worktree_tree(workspace)
+    index_tree = _build_index_tree(workspace, index_path, bool(unmerged_projection))
+    state_basis = {
+        "schemaVersion": SCHEMA_VERSION,
+        "kind": "ordivon.workspace-git-state-basis",
+        "workspaceId": workspace_id,
+        "sourceRepo": str(record.get("sourceRepo")),
+        "sourceRevision": record.get("sourceRevision"),
+        "currentHeadRevision": head,
+        "statusDigest": _sha256_bytes(status.encode("utf-8")),
+        "stageProjectionDigest": _sha256_bytes(stage_projection),
+        "indexFlagProjectionDigest": _sha256_bytes(index_flag_projection),
+        "unmergedProjectionDigest": _sha256_bytes(unmerged_projection),
+        "indexTree": index_tree,
+        "worktreeTree": worktree_tree,
+    }
+    state_digest = _canonical_digest(state_basis)
+    state_hex = state_digest.split(":", 1)[1]
+    workspace_ref_id = quote(workspace_id, safe="-._")
+    checkpoint_ref = f"refs/ordivon/checkpoints/{workspace_ref_id}/{state_hex}"
+    existing = git(source_repo, ["rev-parse", "--verify", "--quiet", checkpoint_ref], check=False)
+    if existing.returncode == 0:
+        manifest_raw = git(source_repo, ["show", f"{checkpoint_ref}:manifest.json"]).stdout
+        manifest = json.loads(manifest_raw)
+        if not isinstance(manifest, dict) or manifest.get("stateDigest") != state_digest:
+            raise RuntimeError("existing dirty checkpoint ref does not match current state digest")
+        checkpoint_commit = existing.stdout.strip()
+        disposition = "existing"
+    else:
+        raw_index_blob = _hash_object(source_repo, raw_index)
+        stage_blob = _hash_object(source_repo, stage_projection)
+        index_flags_blob = _hash_object(source_repo, index_flag_projection)
+        unmerged_blob = _hash_object(source_repo, unmerged_projection)
+        manifest = {
+            **state_basis,
+            "kind": "ordivon.workspace-state-bundle",
+            "stateDigest": state_digest,
+            "rawIndexBlob": raw_index_blob,
+            "rawIndexDigest": raw_index_digest,
+            "worktreeCarrier": "worktree/",
+            "indexCarrier": "index/" if index_tree is not None else None,
+            "truthRole": "physical-recovery-carrier-not-semantic-standing",
+            "automaticDeletionAllowed": False,
+        }
+        manifest_bytes = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        manifest_blob = _hash_object(source_repo, manifest_bytes)
+        entries = [
+            f"100644 blob {index_flags_blob}\tindex-flags.txt",
+            f"100644 blob {stage_blob}\tindex-stages.txt",
+            f"100644 blob {raw_index_blob}\tindex.raw",
+            f"100644 blob {manifest_blob}\tmanifest.json",
+            f"100644 blob {unmerged_blob}\tunmerged-stages.txt",
+            f"040000 tree {worktree_tree}\tworktree",
+        ]
+        if index_tree is not None:
+            entries.append(f"040000 tree {index_tree}\tindex")
+        tree_result = subprocess.run(
+            ["git", "-C", str(source_repo), "mktree"],
+            input="\n".join(entries) + "\n",
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if tree_result.returncode != 0:
+            raise RuntimeError(tree_result.stderr.strip() or tree_result.stdout.strip() or "git mktree failed")
+        bundle_tree_id = tree_result.stdout.strip()
+        message = (
+            f"Ordivon dirty Workspace checkpoint: {workspace_id}\n\n"
+            f"Physical recovery carrier {state_digest}. "
+            "This does not assert semantic currentness, admission, owner standing, or deletion authority.\n"
+        )
+        commit_result = subprocess.run(
+            ["git", "-C", str(source_repo), "commit-tree", bundle_tree_id, "-p", head],
+            input=message,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if commit_result.returncode != 0:
+            raise RuntimeError(commit_result.stderr.strip() or commit_result.stdout.strip() or "git commit-tree failed")
+        checkpoint_commit = commit_result.stdout.strip()
+        update = subprocess.run(
+            ["git", "-C", str(source_repo), "update-ref", checkpoint_ref, checkpoint_commit, "0" * 40],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if update.returncode != 0:
+            replay = git(source_repo, ["rev-parse", "--verify", "--quiet", checkpoint_ref], check=False)
+            if replay.returncode != 0:
+                raise RuntimeError(update.stderr.strip() or update.stdout.strip() or "git update-ref failed")
+            manifest_raw = git(source_repo, ["show", f"{checkpoint_ref}:manifest.json"]).stdout
+            replay_manifest = json.loads(manifest_raw)
+            if not isinstance(replay_manifest, dict) or replay_manifest.get("stateDigest") != state_digest:
+                raise RuntimeError("dirty checkpoint ref race resolved to different state")
+            checkpoint_commit = replay.stdout.strip()
+            manifest = replay_manifest
+            disposition = "existing"
+        else:
+            disposition = "created"
+
+    if sha256_file(record_path) != record_digest:
+        raise RuntimeError("workspace record changed during dirty checkpoint")
+    if active_jobs(args.database, args.busy_timeout_ms, workspace_id):
+        raise RuntimeError("workspace acquired an active or held Job during dirty checkpoint")
+    if _sha256_bytes(index_path.read_bytes()) != raw_index_digest:
+        raise RuntimeError("Workspace index changed during dirty checkpoint")
+    if _build_worktree_tree(workspace) != worktree_tree:
+        raise RuntimeError("Workspace worktree changed during dirty checkpoint")
+    return {
+        "workspaceId": workspace_id,
+        "sourceRepo": str(record.get("sourceRepo")),
+        "sourceRevision": record.get("sourceRevision"),
+        "currentHeadRevision": head,
+        "recordDigest": record_digest,
+        "stateDigest": state_digest,
+        "checkpointRef": checkpoint_ref,
+        "checkpointCommit": checkpoint_commit,
+        "checkpointDisposition": disposition,
+        "indexTree": index_tree,
+        "worktreeTree": worktree_tree,
+        "rawIndexDigest": raw_index_digest,
+        "hasUnmergedIndex": bool(unmerged_projection),
+        "truthRole": "physical-recovery-carrier-not-semantic-standing",
+        "automaticDeletionAllowed": False,
+        "recommendedNextAction": "owner_disposition_then_runtime_exact_compare_close",
+    }
+
+
+def dirty_checkpoint(args: argparse.Namespace) -> dict[str, object]:
+    if args.confirm_policy != DIRTY_CHECKPOINT_CONFIRMATION:
+        raise RuntimeError(f"confirm-policy must equal {DIRTY_CHECKPOINT_CONFIRMATION}")
+    requested = list(dict.fromkeys(args.workspace_ids or []))
+    with exclusive_lock(args.lock_file):
+        report = enrich_report(args)
+        by_id = {str(item["workspaceId"]): item for item in report.get("candidates", []) if isinstance(item, dict)}
+        receipt = receipt_path(args.receipt_root, "dirty-checkpoint")
+        actions: list[dict[str, object]] = []
+        failures: list[dict[str, object]] = []
+        for workspace_id in requested:
+            item = by_id.get(workspace_id)
+            if item is None:
+                failures.append({"workspaceId": workspace_id, "error": "Workspace is absent from current lifecycle candidates"})
+                continue
+            try:
+                actions.append(dirty_checkpoint_one(args, item))
+            except Exception as error:
+                failures.append({"workspaceId": workspace_id, "error": str(error)})
+        result = {
+            "schemaVersion": SCHEMA_VERSION,
+            "status": "completed" if not failures else "partial",
+            "truthRole": "physical-recovery-carrier-not-semantic-standing",
+            "automaticDeletionAllowed": False,
+            "actions": actions,
+            "failures": failures,
+            "receipt": str(receipt),
+        }
+        write_json_atomic(receipt / "result.json", result)
+        return result
+
 def repair(args: argparse.Namespace) -> dict[str, object]:
     if args.confirm_policy != REPAIR_CONFIRMATION:
         raise RuntimeError(f"confirm-policy must equal {REPAIR_CONFIRMATION}")
@@ -758,6 +1111,8 @@ def main() -> int:
             value = repair(args)
         elif args.command == "dirty-review":
             value = dirty_review(args)
+        elif args.command == "dirty-checkpoint":
+            value = dirty_checkpoint(args)
         else:
             raise RuntimeError(f"unsupported command: {args.command}")
         print(json.dumps(value, indent=2 if args.pretty else None, sort_keys=args.pretty))
