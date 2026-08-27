@@ -108,12 +108,12 @@ Portable unit and protocol checks run on ordinary Linux CI. Real Linux process-s
 Build and run the portable verification contract:
 
 ```bash
-cargo build --workspace --all-features
-cargo test --workspace --all-targets --all-features
-python3 -m unittest discover -s scripts/tests -v
-python3 scripts/check_docs.py
-scripts/local-acceptance check
+scripts/owner-environment bootstrap
+scripts/owner-environment doctor
+scripts/owner-environment test
 ```
+
+`scripts/owner-environment cold-start` uses a fresh Python tooling environment and a fresh Cargo target directory while consuming the repository-pinned Rust toolchain and `Cargo.lock`. This proves the portable development/test profile without claiming systemd/cgroup authority. The intentionally long 512-case Registry reference-model property is retained as `scripts/owner-environment extended` rather than making environment reconstruction depend on a multi-minute stress property.
 
 Run the complete real-system journey on a disposable or owner-trusted machine:
 

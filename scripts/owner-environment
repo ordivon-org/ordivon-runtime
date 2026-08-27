@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+mode=${1:-}
+uv_bin=${UV_BIN:-$(command -v uv || true)}
+cargo_bin=${CARGO_BIN:-$(command -v cargo || true)}
+rustc_bin=${RUSTC_BIN:-$(command -v rustc || true)}
+env_dir=${ORDIVON_OWNER_ENV_DIR:-"$repo/.venv"}
+python_bin="$env_dir/bin/python"
+python_version=${ORDIVON_OWNER_PYTHON:-3.12.13}
+tooling_lock="$repo/requirements-tooling.lock.txt"
+
+usage() {
+  cat <<'TXT'
+usage: scripts/owner-environment bootstrap|doctor|test|cold-start|extended
+
+bootstrap   materialize pinned Python tooling and fetch Cargo.lock dependencies
+doctor      verify Rust toolchain, Cargo.lock, Python and exact Ruff tooling
+test        bootstrap, doctor, Rust workspace tests, Python gates, and local acceptance contract check
+cold-start  prove the default test profile with fresh Python env and Cargo target directory
+extended    run the intentionally long 512-case Registry reference-model property test
+
+Root/systemd/cgroup/MCP live acceptance remains `sudo scripts/local-acceptance run`.
+TXT
+}
+require_tools() {
+  [[ -n "$uv_bin" ]] || { echo 'Runtime owner environment requires uv' >&2; exit 1; }
+  [[ -n "$cargo_bin" ]] || { echo 'Runtime owner environment requires cargo/rustup substrate' >&2; exit 1; }
+  [[ -n "$rustc_bin" ]] || { echo 'Runtime owner environment requires rustc/rustup substrate' >&2; exit 1; }
+}
+bootstrap() {
+  require_tools
+  if [[ ! -x "$python_bin" ]]; then
+    "$uv_bin" venv --python "$python_version" "$env_dir"
+  fi
+  "$uv_bin" pip sync --python "$python_bin" "$tooling_lock"
+  (cd "$repo" && "$cargo_bin" fetch --locked)
+}
+doctor() {
+  require_tools
+  [[ -f "$repo/Cargo.lock" ]] || { echo 'Runtime Cargo.lock is absent' >&2; exit 1; }
+  rust=$($rustc_bin --version)
+  cargo=$($cargo_bin --version)
+  [[ "$rust" == rustc\ 1.95.0* ]] || { echo "unexpected rustc: $rust" >&2; exit 1; }
+  [[ "$cargo" == cargo\ 1.95.0* ]] || { echo "unexpected cargo: $cargo" >&2; exit 1; }
+  [[ -x "$python_bin" ]] || { echo "Runtime tooling environment is not materialized: $python_bin" >&2; exit 1; }
+  "$python_bin" - <<'PY'
+import importlib.metadata as md
+import sys
+if sys.version_info[:3] != (3, 12, 13):
+    raise SystemExit(f"Runtime tooling profile expects Python 3.12.13, got {sys.version.split()[0]}")
+if md.version('ruff') != '0.15.17':
+    raise SystemExit(f"unexpected Ruff version: {md.version('ruff')}")
+print('owner environment doctor: valid profile=test rust=1.95.0 python=3.12.13 ruff=0.15.17')
+PY
+}
+run_tests() {
+  bootstrap
+  doctor
+  cd "$repo"
+  "$python_bin" -m ruff check scripts/
+  "$cargo_bin" test --workspace --all-targets --all-features -- --skip request_identity_and_terminal_winner_match_reference_model
+  "$python_bin" -m unittest discover -s scripts/tests -q
+  PYTHON_BIN="$python_bin" scripts/local-acceptance check
+}
+run_extended() {
+  bootstrap
+  doctor
+  cd "$repo"
+  "$cargo_bin" test -p ordivon-runtime-core request_identity_and_terminal_winner_match_reference_model -- --nocapture
+}
+case "$mode" in
+  bootstrap) bootstrap ;;
+  doctor) doctor ;;
+  test) run_tests ;;
+  extended) run_extended ;;
+  cold-start)
+    tmp=$(mktemp -d -t ordivon-runtime-owner-env-XXXXXX)
+    trap 'rm -rf "$tmp"' EXIT
+    ORDIVON_OWNER_ENV_DIR="$tmp/.venv" CARGO_TARGET_DIR="$tmp/target" "$0" test
+    ;;
+  --help|-h) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
