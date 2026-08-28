@@ -2556,41 +2556,71 @@ fn runtime_systemd_path_rejects_source_drift_before_target_spawn() {
         return;
     }
     let context = IntegrationContext::new("systemd-source-drift");
-    context.write(
-        "source_drift.py",
-        "from pathlib import Path\nPath('effect-marker').write_text('spawned')\n",
+    context.write("source_drift.py", "print('BASELINE', flush=True)\n");
+    let runtime = context.runtime(10_000);
+
+    // Resolve one real current Runtime plan first so the falsifier inherits the exact
+    // Workspace source commitment that normal admission would freeze. The earlier
+    // wrapper-Runner apparatus became invalid once Runner image identity itself became
+    // an execution-provider commitment: it was correctly rejected as provider drift
+    // before the workspace-source boundary could be exercised.
+    let baseline = runtime
+        .run_task(&context.request("source_drift.py", 10_000))
+        .unwrap();
+    assert_eq!(baseline.status, "succeeded");
+    let plan = runtime.registry().execution_plan(&baseline.job_id).unwrap();
+    let committed_source = plan
+        .workspace_source_digest
+        .clone()
+        .expect("normal Runtime admission must bind Workspace source state");
+    let runner_digest = file_digest(&context.executor.runner_path);
+    let created = created_admission(
+        runtime
+            .registry()
+            .submit(&SubmitRequest {
+                schema_version: RUNTIME_SCHEMA_VERSION,
+                client_request_id: format!("request:systemd-source-drift:{}", Uuid::now_v7()),
+                request_identity_digest: None,
+                execution_provider: Some(ordivon_runtime_core::ExecutionProviderSnapshot {
+                    contract: ordivon_runtime_core::ExecutionProviderContract::LocalLinuxRunnerV1,
+                    executable_digest: runner_digest.clone(),
+                    wsl_distribution: None,
+                }),
+                runtime_release_effect: None,
+                host_dependencies: Vec::new(),
+                plan,
+                global_limit: 8,
+            })
+            .unwrap(),
     );
-    let real_runner = context.executor.runner_path.clone();
-    let delayed_runner = context.root.join("delayed-runner.sh");
+    assert_eq!(created.attempt.state, AttemptState::Accepted);
+
+    // Simulate an out-of-band source mutation after durable admission but before the
+    // accepted Attempt is observed/dispatched. This preserves the committed Runner
+    // identity while creating exactly the source-currentness violation under test.
     let workspace = context
         .executor
         .store_root
         .join("workspaces")
         .join(&context.workspace_id);
     fs::write(
-        &delayed_runner,
-        format!(
-            "#!/bin/sh\nprintf 'trusted-host drift\n' > '{}/README.md'\nexec '{}' \"$@\"\n",
-            workspace.display(),
-            real_runner.display()
-        ),
+        workspace.join("source_drift.py"),
+        "from pathlib import Path\nPath('effect-marker').write_text('spawned')\n",
     )
     .unwrap();
-    let mut permissions = fs::metadata(&delayed_runner).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&delayed_runner, permissions).unwrap();
 
-    let mut executor = context.executor.clone();
-    executor.runner_path = delayed_runner;
-    let runtime = Runtime::new(RuntimeConfig {
-        registry: context.registry.clone(),
-        executor,
-        startup_grace_ms: 10_000,
-        windows: None,
-    })
-    .unwrap();
-    let request = context.request("source_drift.py", 10_000);
-    let observed = runtime.run_task(&request).unwrap();
+    let observed = runtime
+        .observe_task(&TaskObserveRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            job_id: created.job.job_id.clone(),
+            wait_ms: 10_000,
+            wait_until: TaskObserveWaitUntil::Terminal,
+            stdout_tail_bytes: 8_192,
+            stderr_tail_bytes: 8_192,
+            stdout_offset: None,
+            stderr_offset: None,
+        })
+        .unwrap();
     assert_eq!(observed.status, "failed");
     assert_eq!(observed.exit_code, None);
     assert!(observed
@@ -2608,18 +2638,18 @@ fn runtime_systemd_path_rejects_source_drift_before_target_spawn() {
         &fs::read(Path::new(&attempt.bundle_path).join("runner-start.json")).unwrap(),
     )
     .unwrap();
+    assert_eq!(
+        runner_start
+            .get("runnerExecutableDigest")
+            .and_then(serde_json::Value::as_str),
+        Some(runner_digest.as_str()),
+        "the source-drift falsifier must not substitute the committed Runner provider"
+    );
     let runner_observed_source = runner_start
         .get("observedWorkspaceSourceDigest")
         .and_then(serde_json::Value::as_str)
         .expect("Runner start must record observed Workspace source state");
-    let job = runtime.registry().get_job(&observed.job_id).unwrap();
-    let plan: RuntimeExecutionPlan = serde_json::from_str(&job.execution_plan_json).unwrap();
-    assert_ne!(
-        runner_observed_source,
-        plan.workspace_source_digest
-            .as_deref()
-            .expect("Job must commit Workspace source state")
-    );
+    assert_ne!(runner_observed_source, committed_source);
 
     let connection = Connection::open(&context.registry.db_path).unwrap();
     let reason: String = connection
