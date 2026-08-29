@@ -75,16 +75,33 @@ class LifecycleTests(unittest.TestCase):
 
     def test_trusted_tmp_presentation_matches_runtime_hash_vector(self) -> None:
         self.assertEqual(
-            self.module["trusted_tmp_presentation_path"](Path("/tmp/runtime-store-a"), "workspace-env"),
-            Path("/tmp/ordivon-t/a6043ab2cc565b9ff75e"),
+            self.module["trusted_tmp_presentation_path"](Path("/tmp"), "workspace-env"),
+            Path("/tmp/ordivon-t/3536fc95f765287c720c"),
         )
 
     def test_trusted_tmp_presentation_separates_runtime_store_namespaces(self) -> None:
-        first = self.module["trusted_tmp_presentation_path"](Path("/tmp/runtime-store-a"), "same-workspace-id")
-        second = self.module["trusted_tmp_presentation_path"](Path("/tmp/runtime-store-b"), "same-workspace-id")
-        self.assertNotEqual(first, second)
-        self.assertEqual(len(str(first)), 35)
-        self.assertEqual(len(str(second)), 35)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first_store = root / "store-a"
+            second_store = root / "store-b"
+            first_store.mkdir()
+            second_store.mkdir()
+            first = self.module["trusted_tmp_presentation_path"](first_store, "same-workspace-id")
+            second = self.module["trusted_tmp_presentation_path"](second_store, "same-workspace-id")
+            self.assertNotEqual(first, second)
+            self.assertEqual(len(str(first)), 35)
+            self.assertEqual(len(str(second)), 35)
+
+    def test_trusted_tmp_presentation_converges_equivalent_store_spelling(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = root / "store"
+            store.mkdir()
+            alias = root / "store-link"
+            alias.symlink_to(store, target_is_directory=True)
+            direct = self.module["trusted_tmp_presentation_path"](store, "same-workspace-id")
+            through_alias = self.module["trusted_tmp_presentation_path"](alias, "same-workspace-id")
+            self.assertEqual(direct, through_alias)
 
     def test_policy_numbers_follow_real_representation_not_legacy_round_limits(self) -> None:
         self.assertEqual(cls_timeout := self.module["positive_timeout"]("60001"), 60_001)

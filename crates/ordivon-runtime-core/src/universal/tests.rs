@@ -2073,9 +2073,15 @@ fn clean_workspace_close_succeeds_without_force() {
         fs::create_dir_all(&cache).unwrap();
         fs::write(cache.join("cached"), b"cache").unwrap();
     }
-    let tmp_presentation = config.workspace_tmp_presentation_path(workspace_id);
+    let tmp_presentation = config
+        .workspace_tmp_presentation_path(workspace_id)
+        .unwrap();
     let _ = fs::remove_file(&tmp_presentation);
-    std::os::unix::fs::symlink(config.workspace_tmp_path(workspace_id), &tmp_presentation).unwrap();
+    std::os::unix::fs::symlink(
+        config.canonical_workspace_tmp_path(workspace_id).unwrap(),
+        &tmp_presentation,
+    )
+    .unwrap();
     let closed = remove_git_workspace(
         &config,
         &WorkspaceCloseRequest {

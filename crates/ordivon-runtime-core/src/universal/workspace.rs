@@ -2132,7 +2132,8 @@ fn cleanup_workspace_caches(
     workspace_id: &str,
 ) -> Result<(), UniversalExecError> {
     let tmp_backing = config.workspace_tmp_path(workspace_id);
-    let tmp_presentation = config.workspace_tmp_presentation_path(workspace_id);
+    let canonical_tmp_backing = config.canonical_workspace_tmp_path(workspace_id)?;
+    let tmp_presentation = config.workspace_tmp_presentation_path(workspace_id)?;
     match fs::symlink_metadata(&tmp_presentation) {
         Ok(metadata) => {
             if !metadata.file_type().is_symlink() {
@@ -2153,14 +2154,14 @@ fn cleanup_workspace_caches(
                     error,
                 )
             })?;
-            if target != tmp_backing {
+            if target != canonical_tmp_backing {
                 return Err(UniversalExecError::new(
                     UniversalExecErrorCode::MetadataCorrupt,
                     format!(
                         "Workspace temporary presentation {} points at {}, expected {}",
                         tmp_presentation.display(),
                         target.display(),
-                        tmp_backing.display()
+                        canonical_tmp_backing.display()
                     ),
                     Some("workspaceId"),
                     false,

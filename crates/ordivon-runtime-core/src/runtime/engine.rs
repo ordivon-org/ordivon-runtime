@@ -2147,9 +2147,15 @@ impl Runtime {
     fn ensure_trusted_workspace_tmp_presentation(
         &self,
         workspace_id: &str,
-        backing: &Path,
     ) -> RuntimeResult<PathBuf> {
-        let presentation = self.executor.workspace_tmp_presentation_path(workspace_id);
+        let presentation = self
+            .executor
+            .workspace_tmp_presentation_path(workspace_id)
+            .map_err(map_universal_error)?;
+        let canonical_backing = self
+            .executor
+            .canonical_workspace_tmp_path(workspace_id)
+            .map_err(map_universal_error)?;
         let parent = presentation.parent().ok_or_else(|| {
             RuntimeError::new(
                 RuntimeErrorCode::IoError,
@@ -2224,14 +2230,14 @@ impl Runtime {
                             error,
                         )
                     })?;
-                    if target != backing {
+                    if target != canonical_backing {
                         return Err(RuntimeError::new(
                             RuntimeErrorCode::WorkspaceStateMismatch,
                             format!(
                                 "trusted temporary presentation {} points at {}, expected {}",
                                 presentation.display(),
                                 target.display(),
-                                backing.display()
+                                canonical_backing.display()
                             ),
                             Some("workspaceId"),
                             false,
@@ -2240,7 +2246,7 @@ impl Runtime {
                     return Ok(presentation);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    match std::os::unix::fs::symlink(backing, &presentation) {
+                    match std::os::unix::fs::symlink(&canonical_backing, &presentation) {
                         Ok(()) => return Ok(presentation),
                         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                             continue;
@@ -2320,8 +2326,9 @@ impl Runtime {
         environment.insert("LANG".to_string(), "C.UTF-8".to_string());
         environment.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
         let tmp_presentation = match execution_profile {
-            super::ExecutionProfile::TrustedLocal => self
-                .ensure_trusted_workspace_tmp_presentation(&record.workspace_id, &workspace_tmp)?,
+            super::ExecutionProfile::TrustedLocal => {
+                self.ensure_trusted_workspace_tmp_presentation(&record.workspace_id)?
+            }
             super::ExecutionProfile::ContainedLocal => workspace_tmp.clone(),
         };
         environment.insert(
@@ -7558,19 +7565,47 @@ mod trusted_systemd_command_tests {
             runtime.executor.workspace_tmp_path("workspace-other")
         );
         assert!(trusted_tmp.is_dir());
+        let vector_store = UniversalExecutorConfig {
+            store_root: PathBuf::from("/tmp"),
+            ..runtime.executor.clone()
+        };
+        assert_eq!(
+            vector_store
+                .workspace_tmp_presentation_path("workspace-env")
+                .unwrap(),
+            PathBuf::from("/tmp/ordivon-t/3536fc95f765287c720c")
+        );
         let deep_store = UniversalExecutorConfig {
             store_root: PathBuf::from(format!("/{}", "deep/".repeat(80))),
             ..runtime.executor.clone()
         };
-        let deep_tmp = deep_store.workspace_tmp_presentation_path("workspace-env");
+        fs::create_dir_all(&deep_store.store_root).unwrap();
+        let deep_tmp = deep_store
+            .workspace_tmp_presentation_path("workspace-env")
+            .unwrap();
         assert_eq!(deep_tmp.as_os_str().len(), 35);
         assert_ne!(deep_tmp, trusted_tmp);
         let sibling_store = UniversalExecutorConfig {
             store_root: root.join("runtime-sibling"),
             ..runtime.executor.clone()
         };
+        fs::create_dir_all(&sibling_store.store_root).unwrap();
         assert_ne!(
-            sibling_store.workspace_tmp_presentation_path("workspace-env"),
+            sibling_store
+                .workspace_tmp_presentation_path("workspace-env")
+                .unwrap(),
+            trusted_tmp
+        );
+        let store_alias = root.join("runtime-alias");
+        std::os::unix::fs::symlink(&runtime.executor.store_root, &store_alias).unwrap();
+        let alias_store = UniversalExecutorConfig {
+            store_root: store_alias,
+            ..runtime.executor.clone()
+        };
+        assert_eq!(
+            alias_store
+                .workspace_tmp_presentation_path("workspace-env")
+                .unwrap(),
             trusted_tmp
         );
 

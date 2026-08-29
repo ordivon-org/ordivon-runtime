@@ -159,19 +159,40 @@ impl UniversalExecutorConfig {
         self.workspace_tmp_root().join(workspace_id)
     }
 
-    pub(crate) fn workspace_tmp_presentation_path(&self, workspace_id: &str) -> PathBuf {
+    pub(crate) fn canonical_store_root(&self) -> Result<PathBuf, UniversalExecError> {
+        fs::canonicalize(&self.store_root)
+            .map_err(|error| io_error(&self.store_root, "canonicalize Runtime store root", error))
+    }
+
+    pub(crate) fn workspace_tmp_presentation_path(
+        &self,
+        workspace_id: &str,
+    ) -> Result<PathBuf, UniversalExecError> {
         // Trusted-local tools can derive Unix-domain sockets below TMPDIR. Keep the
         // child-visible pathname bounded independently of store_root/workspace-id length
         // while retaining all bytes in the Workspace-owned backing under cache/tmp.
-        // Workspace IDs are store-local, so bind the presentation locator to both the
-        // configured Runtime store namespace and Workspace identity. The digest is only a
-        // locator; exact symlink-target verification remains the authority check.
-        let mut identity = self.store_root.as_os_str().as_encoded_bytes().to_vec();
+        // Workspace IDs are store-local. Canonicalize the already-materialized store root
+        // before hashing so equivalent absolute spellings or symlink aliases of one physical
+        // Runtime store converge on one presentation namespace. The digest is only a locator;
+        // exact symlink-target verification remains the authority check.
+        let canonical_store = self.canonical_store_root()?;
+        let mut identity = canonical_store.as_os_str().as_encoded_bytes().to_vec();
         identity.push(0);
         identity.extend_from_slice(workspace_id.as_bytes());
         let digest = sha256_bytes(&identity);
         let hex = digest.strip_prefix("sha256:").unwrap_or(&digest);
-        PathBuf::from("/tmp/ordivon-t").join(&hex[..20])
+        Ok(PathBuf::from("/tmp/ordivon-t").join(&hex[..20]))
+    }
+
+    pub(crate) fn canonical_workspace_tmp_path(
+        &self,
+        workspace_id: &str,
+    ) -> Result<PathBuf, UniversalExecError> {
+        Ok(self
+            .canonical_store_root()?
+            .join("cache")
+            .join("tmp")
+            .join(workspace_id))
     }
 
     pub(crate) fn workspace_path(&self, workspace_id: &str) -> PathBuf {
