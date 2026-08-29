@@ -163,7 +163,13 @@ impl UniversalExecutorConfig {
         // Trusted-local tools can derive Unix-domain sockets below TMPDIR. Keep the
         // child-visible pathname bounded independently of store_root/workspace-id length
         // while retaining all bytes in the Workspace-owned backing under cache/tmp.
-        let digest = sha256_bytes(workspace_id.as_bytes());
+        // Workspace IDs are store-local, so bind the presentation locator to both the
+        // configured Runtime store namespace and Workspace identity. The digest is only a
+        // locator; exact symlink-target verification remains the authority check.
+        let mut identity = self.store_root.as_os_str().as_encoded_bytes().to_vec();
+        identity.push(0);
+        identity.extend_from_slice(workspace_id.as_bytes());
+        let digest = sha256_bytes(&identity);
         let hex = digest.strip_prefix("sha256:").unwrap_or(&digest);
         PathBuf::from("/tmp/ordivon-t").join(&hex[..20])
     }

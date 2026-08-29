@@ -7537,10 +7537,6 @@ mod trusted_systemd_command_tests {
         let trusted_tmp = Path::new(environment.get("TMPDIR").unwrap());
         let peer_tmp = Path::new(peer_environment.get("TMPDIR").unwrap());
         let other_tmp = Path::new(other_environment.get("TMPDIR").unwrap());
-        assert_eq!(
-            trusted_tmp,
-            Path::new("/tmp/ordivon-t/95f8bd7cc99126f1a2c6")
-        );
         assert!(trusted_tmp.to_string_lossy().starts_with("/tmp/ordivon-t/"));
         assert!(peer_tmp.to_string_lossy().starts_with("/tmp/ordivon-t/"));
         assert!(other_tmp.to_string_lossy().starts_with("/tmp/ordivon-t/"));
@@ -7566,8 +7562,15 @@ mod trusted_systemd_command_tests {
             store_root: PathBuf::from(format!("/{}", "deep/".repeat(80))),
             ..runtime.executor.clone()
         };
-        assert_eq!(
-            deep_store.workspace_tmp_presentation_path("workspace-env"),
+        let deep_tmp = deep_store.workspace_tmp_presentation_path("workspace-env");
+        assert_eq!(deep_tmp.as_os_str().len(), 35);
+        assert_ne!(deep_tmp, trusted_tmp);
+        let sibling_store = UniversalExecutorConfig {
+            store_root: root.join("runtime-sibling"),
+            ..runtime.executor.clone()
+        };
+        assert_ne!(
+            sibling_store.workspace_tmp_presentation_path("workspace-env"),
             trusted_tmp
         );
 

@@ -75,9 +75,16 @@ class LifecycleTests(unittest.TestCase):
 
     def test_trusted_tmp_presentation_matches_runtime_hash_vector(self) -> None:
         self.assertEqual(
-            self.module["trusted_tmp_presentation_path"]("workspace-env"),
-            Path("/tmp/ordivon-t/95f8bd7cc99126f1a2c6"),
+            self.module["trusted_tmp_presentation_path"](Path("/tmp/runtime-store-a"), "workspace-env"),
+            Path("/tmp/ordivon-t/a6043ab2cc565b9ff75e"),
         )
+
+    def test_trusted_tmp_presentation_separates_runtime_store_namespaces(self) -> None:
+        first = self.module["trusted_tmp_presentation_path"](Path("/tmp/runtime-store-a"), "same-workspace-id")
+        second = self.module["trusted_tmp_presentation_path"](Path("/tmp/runtime-store-b"), "same-workspace-id")
+        self.assertNotEqual(first, second)
+        self.assertEqual(len(str(first)), 35)
+        self.assertEqual(len(str(second)), 35)
 
     def test_policy_numbers_follow_real_representation_not_legacy_round_limits(self) -> None:
         self.assertEqual(cls_timeout := self.module["positive_timeout"]("60001"), 60_001)
@@ -346,7 +353,7 @@ class LifecycleTests(unittest.TestCase):
             (workspace / "important.txt").write_text("preserve me\n", encoding="utf-8")
             tmp_backing = runtime / "cache" / "tmp" / workspace_id
             tmp_backing.mkdir(parents=True)
-            tmp_presentation = self.module["trusted_tmp_presentation_path"](workspace_id)
+            tmp_presentation = self.module["trusted_tmp_presentation_path"](runtime, workspace_id)
             tmp_presentation.parent.mkdir(mode=0o700, exist_ok=True)
             try:
                 tmp_presentation.unlink()
@@ -416,7 +423,7 @@ class LifecycleTests(unittest.TestCase):
             wrong = runtime / "cache" / "tmp" / "another-workspace"
             expected.mkdir(parents=True)
             wrong.mkdir(parents=True)
-            presentation = self.module["trusted_tmp_presentation_path"](workspace_id)
+            presentation = self.module["trusted_tmp_presentation_path"](runtime, workspace_id)
             presentation.parent.mkdir(mode=0o700, exist_ok=True)
             try:
                 presentation.unlink()

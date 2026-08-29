@@ -564,13 +564,14 @@ def repair_one(
     }
 
 
-def trusted_tmp_presentation_path(workspace_id: str) -> Path:
-    digest = hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()[:20]
+def trusted_tmp_presentation_path(runtime_store_root: Path, workspace_id: str) -> Path:
+    identity = os.fsencode(runtime_store_root) + b"\0" + workspace_id.encode("utf-8")
+    digest = hashlib.sha256(identity).hexdigest()[:20]
     return TRUSTED_TMP_PRESENTATION_ROOT / digest
 
 
 def remove_trusted_tmp_presentation(runtime_store_root: Path, workspace_id: str) -> Path | None:
-    presentation = trusted_tmp_presentation_path(workspace_id)
+    presentation = trusted_tmp_presentation_path(runtime_store_root, workspace_id)
     backing = runtime_store_root / "cache" / "tmp" / workspace_id
     try:
         presentation.lstat()
