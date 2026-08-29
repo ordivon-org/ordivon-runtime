@@ -3954,7 +3954,17 @@ impl Runtime {
         let properties = systemctl_show(&attempt.unit_name)?;
         let active = unit_is_active(&properties);
         let age_ms = now_ms()?.saturating_sub(attempt.created_at_ms);
-        if active && age_ms < self.startup_grace_ms {
+        let wsl_distribution_configured = self
+            .windows
+            .as_ref()
+            .is_some_and(|windows| windows.wsl_distribution.is_some());
+        if (active && age_ms < self.startup_grace_ms)
+            || wsl_backed_windows_live_unit_must_wait(
+                plan.execution_target,
+                wsl_distribution_configured,
+                active,
+            )
+        {
             return Ok(());
         }
         if active {
@@ -6402,6 +6412,16 @@ fn windows_native_launcher_lineage_is_definite_failure(
         && !recorded_pid_alive
 }
 
+fn wsl_backed_windows_live_unit_must_wait(
+    execution_target: super::ExecutionTarget,
+    wsl_distribution_configured: bool,
+    unit_active: bool,
+) -> bool {
+    execution_target == super::ExecutionTarget::WindowsNative
+        && wsl_distribution_configured
+        && unit_active
+}
+
 #[cfg(test)]
 mod windows_lineage_tests {
     use super::*;
@@ -6414,6 +6434,30 @@ mod windows_lineage_tests {
             100,
             u64::MAX,
             u64::MAX - 1
+        ));
+    }
+
+    #[test]
+    fn wsl_backed_windows_live_unit_remains_starting_without_target_evidence() {
+        assert!(wsl_backed_windows_live_unit_must_wait(
+            crate::runtime::ExecutionTarget::WindowsNative,
+            true,
+            true,
+        ));
+        assert!(!wsl_backed_windows_live_unit_must_wait(
+            crate::runtime::ExecutionTarget::WindowsNative,
+            true,
+            false,
+        ));
+        assert!(!wsl_backed_windows_live_unit_must_wait(
+            crate::runtime::ExecutionTarget::WindowsNative,
+            false,
+            true,
+        ));
+        assert!(!wsl_backed_windows_live_unit_must_wait(
+            crate::runtime::ExecutionTarget::LocalLinux,
+            true,
+            true,
         ));
     }
 
