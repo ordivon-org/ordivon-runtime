@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -2158,12 +2158,51 @@ impl Runtime {
                 false,
             )
         })?;
-        fs::create_dir_all(parent).map_err(|error| {
-            io_error(
-                &format!("create temporary presentation root {}", parent.display()),
-                error,
-            )
-        })?;
+        for _ in 0..2 {
+            match fs::symlink_metadata(parent) {
+                Ok(metadata) => {
+                    let mode = metadata.mode() & 0o777;
+                    let owner = metadata.uid();
+                    let effective_uid = unsafe { libc::geteuid() };
+                    if metadata.file_type().is_symlink()
+                        || !metadata.is_dir()
+                        || owner != effective_uid
+                        || mode != 0o700
+                    {
+                        return Err(RuntimeError::new(
+                            RuntimeErrorCode::WorkspaceStateMismatch,
+                            format!(
+                                "trusted temporary presentation root {} must be a non-symlink directory owned by uid {} with mode 0700; observed uid {} mode {:04o}",
+                                parent.display(), effective_uid, owner, mode
+                            ),
+                            Some("workspaceId"),
+                            false,
+                        ));
+                    }
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let mut builder = fs::DirBuilder::new();
+                    builder.mode(0o700);
+                    match builder.create(parent) {
+                        Ok(()) => continue,
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                        Err(error) => {
+                            return Err(io_error(
+                                &format!("create temporary presentation root {}", parent.display()),
+                                error,
+                            ));
+                        }
+                    }
+                }
+                Err(error) => {
+                    return Err(io_error(
+                        &format!("inspect temporary presentation root {}", parent.display()),
+                        error,
+                    ));
+                }
+            }
+        }
 
         for _ in 0..2 {
             match fs::symlink_metadata(&presentation) {
@@ -7498,9 +7537,16 @@ mod trusted_systemd_command_tests {
         let trusted_tmp = Path::new(environment.get("TMPDIR").unwrap());
         let peer_tmp = Path::new(peer_environment.get("TMPDIR").unwrap());
         let other_tmp = Path::new(other_environment.get("TMPDIR").unwrap());
-        assert!(trusted_tmp.starts_with(root.join("runtime/cache/t")));
-        assert!(peer_tmp.starts_with(root.join("runtime/cache/t")));
-        assert!(other_tmp.starts_with(root.join("runtime/cache/t")));
+        assert_eq!(
+            trusted_tmp,
+            Path::new("/tmp/ordivon-t/95f8bd7cc99126f1a2c6")
+        );
+        assert!(trusted_tmp.to_string_lossy().starts_with("/tmp/ordivon-t/"));
+        assert!(peer_tmp.to_string_lossy().starts_with("/tmp/ordivon-t/"));
+        assert!(other_tmp.to_string_lossy().starts_with("/tmp/ordivon-t/"));
+        assert_eq!(trusted_tmp.as_os_str().len(), 35);
+        assert_eq!(peer_tmp.as_os_str().len(), 35);
+        assert_eq!(other_tmp.as_os_str().len(), 35);
         assert_ne!(trusted_tmp, peer_tmp);
         assert_ne!(trusted_tmp, other_tmp);
         assert_eq!(
@@ -7516,13 +7562,13 @@ mod trusted_systemd_command_tests {
             runtime.executor.workspace_tmp_path("workspace-other")
         );
         assert!(trusted_tmp.is_dir());
-        assert!(
-            trusted_tmp.as_os_str().len()
-                < runtime
-                    .executor
-                    .workspace_tmp_path(&"w".repeat(crate::universal::WORKSPACE_ID_MAX_LENGTH))
-                    .as_os_str()
-                    .len()
+        let deep_store = UniversalExecutorConfig {
+            store_root: PathBuf::from(format!("/{}", "deep/".repeat(80))),
+            ..runtime.executor.clone()
+        };
+        assert_eq!(
+            deep_store.workspace_tmp_presentation_path("workspace-env"),
+            trusted_tmp
         );
 
         let contained = runtime
@@ -7548,6 +7594,9 @@ mod trusted_systemd_command_tests {
             .unwrap_err();
         assert_eq!(mismatch.code, RuntimeErrorCode::WorkspaceStateMismatch);
         assert!(mismatch.message.contains("points at"));
+        for path in [trusted_tmp, peer_tmp, other_tmp] {
+            let _ = fs::remove_file(path);
+        }
         drop(runtime);
         fs::remove_dir_all(root).unwrap();
     }

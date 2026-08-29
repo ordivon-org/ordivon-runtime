@@ -73,6 +73,12 @@ class LifecycleTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-lifecycle"))
 
+    def test_trusted_tmp_presentation_matches_runtime_hash_vector(self) -> None:
+        self.assertEqual(
+            self.module["trusted_tmp_presentation_path"]("workspace-env"),
+            Path("/tmp/ordivon-t/95f8bd7cc99126f1a2c6"),
+        )
+
     def test_policy_numbers_follow_real_representation_not_legacy_round_limits(self) -> None:
         self.assertEqual(cls_timeout := self.module["positive_timeout"]("60001"), 60_001)
         self.assertEqual(cls_timeout, 60_001)
@@ -334,10 +340,19 @@ class LifecycleTests(unittest.TestCase):
             workspaces = runtime / "workspaces"
             records.mkdir(parents=True)
             workspaces.mkdir()
-            workspace_id = "broken"
+            workspace_id = "broken-quarantine-tmp-presentation"
             workspace = workspaces / workspace_id
             workspace.mkdir()
             (workspace / "important.txt").write_text("preserve me\n", encoding="utf-8")
+            tmp_backing = runtime / "cache" / "tmp" / workspace_id
+            tmp_backing.mkdir(parents=True)
+            tmp_presentation = self.module["trusted_tmp_presentation_path"](workspace_id)
+            tmp_presentation.parent.mkdir(mode=0o700, exist_ok=True)
+            try:
+                tmp_presentation.unlink()
+            except FileNotFoundError:
+                pass
+            tmp_presentation.symlink_to(tmp_backing, target_is_directory=True)
             record = records / f"{workspace_id}.json"
             record.write_text(
                 json.dumps(
@@ -390,7 +405,34 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(tombstone["removalResult"], "quarantined_broken")
             quarantined = Path(report["actions"][0]["quarantinePath"])
             self.assertEqual((quarantined / "important.txt").read_text(), "preserve me\n")
+            self.assertEqual(report["actions"][0]["removedTmpPresentation"], str(tmp_presentation))
+            self.assertFalse(tmp_presentation.is_symlink())
 
+    def test_quarantine_tmp_presentation_wrong_target_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            workspace_id = "wrong-target-quarantine"
+            expected = runtime / "cache" / "tmp" / workspace_id
+            wrong = runtime / "cache" / "tmp" / "another-workspace"
+            expected.mkdir(parents=True)
+            wrong.mkdir(parents=True)
+            presentation = self.module["trusted_tmp_presentation_path"](workspace_id)
+            presentation.parent.mkdir(mode=0o700, exist_ok=True)
+            try:
+                presentation.unlink()
+            except FileNotFoundError:
+                pass
+            presentation.symlink_to(wrong, target_is_directory=True)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "points at"):
+                    self.module["remove_trusted_tmp_presentation"](runtime, workspace_id)
+                self.assertTrue(presentation.is_symlink())
+                self.assertEqual(Path(os.readlink(presentation)), wrong)
+            finally:
+                try:
+                    presentation.unlink()
+                except FileNotFoundError:
+                    pass
 
     def test_dirty_review_records_exact_evidence_without_mutating_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

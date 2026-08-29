@@ -25,6 +25,7 @@ REPAIR_CONFIRMATION = "REPAIR_WORKSPACE_IDENTITIES"
 QUARANTINE_CONFIRMATION = "QUARANTINE_BROKEN_WORKSPACES"
 DIRTY_CHECKPOINT_CONFIRMATION = "CHECKPOINT_DIRTY_WORKSPACE_STATE"
 MAX_DIRTY_PATHS = 10_000
+TRUSTED_TMP_PRESENTATION_ROOT = Path("/tmp/ordivon-t")
 DEFAULT_POLICY = {
     "schemaVersion": 1,
     "defaultClass": "ephemeral",
@@ -563,6 +564,29 @@ def repair_one(
     }
 
 
+def trusted_tmp_presentation_path(workspace_id: str) -> Path:
+    digest = hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()[:20]
+    return TRUSTED_TMP_PRESENTATION_ROOT / digest
+
+
+def remove_trusted_tmp_presentation(runtime_store_root: Path, workspace_id: str) -> Path | None:
+    presentation = trusted_tmp_presentation_path(workspace_id)
+    backing = runtime_store_root / "cache" / "tmp" / workspace_id
+    try:
+        presentation.lstat()
+    except FileNotFoundError:
+        return None
+    if not presentation.is_symlink():
+        raise RuntimeError(f"trusted temporary presentation is not a symlink: {presentation}")
+    target = Path(os.readlink(presentation))
+    if target != backing:
+        raise RuntimeError(
+            f"trusted temporary presentation {presentation} points at {target}, expected {backing}"
+        )
+    presentation.unlink()
+    return presentation
+
+
 def quarantine_one(
     args: argparse.Namespace,
     item: dict[str, object],
@@ -584,6 +608,9 @@ def quarantine_one(
     backup = receipt / "records" / record_path.name
     backup.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(record_path, backup)
+    removed_tmp_presentation = remove_trusted_tmp_presentation(
+        args.runtime_store_root, workspace_id
+    )
     os.replace(workspace_path, target)
     closed = {
         "schemaVersion": SCHEMA_VERSION,
@@ -601,6 +628,9 @@ def quarantine_one(
         "action": "workspace_quarantined",
         "quarantinePath": str(target),
         "recordBackup": str(backup),
+        "removedTmpPresentation": (
+            str(removed_tmp_presentation) if removed_tmp_presentation is not None else None
+        ),
     }
 
 
