@@ -722,6 +722,40 @@ class DeployReclaimTests(unittest.TestCase):
         with self.assertRaises(Exception):
             module["nonnegative_float"]("nan")
 
+    def test_reclaim_inspect_reports_orphan_directory_without_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            workspace = runtime / "workspaces/orphan"
+            workspace.mkdir(parents=True)
+            (workspace / "payload.txt").write_text("orphan\n", encoding="utf-8")
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-reclaim",
+                    "inspect",
+                    "--database",
+                    str(database),
+                    "--runtime-store-root",
+                    str(runtime),
+                    "--measure-bytes",
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            report = json.loads(result.stdout)
+            self.assertEqual(report["summary"]["counts"], {"orphan_directory": 1})
+            self.assertEqual(len(report["candidates"]), 1)
+            orphan = report["candidates"][0]
+            self.assertEqual(orphan["workspaceId"], "orphan")
+            self.assertEqual(orphan["classification"], "orphan_directory")
+            self.assertEqual(orphan["detail"], "physical Workspace has no identity record")
+            self.assertGreater(orphan["estimatedBytes"], 0)
+
     def test_deploy_prepare_binds_binaries_to_exact_clean_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

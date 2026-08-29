@@ -107,15 +107,15 @@ def inspect_workspaces(args: argparse.Namespace) -> dict[str, object]:
     for record_path in sorted(records_root.glob("*.json")) if records_root.exists() else []:
         workspace_id = record_path.stem
         record_ids.add(workspace_id)
-        candidate = classify_record(
+        record_candidate = classify_record(
             connection,
             record_path,
             workspace_root / workspace_id,
             workspace_id,
             measure_bytes=args.measure_bytes,
         )
-        if candidate is not None:
-            candidates.append(candidate)
+        if record_candidate is not None:
+            candidates.append(record_candidate)
 
     if workspace_root.exists():
         for workspace_path in sorted(
