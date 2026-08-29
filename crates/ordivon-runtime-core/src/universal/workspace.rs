@@ -2131,10 +2131,62 @@ fn cleanup_workspace_caches(
     config: &UniversalExecutorConfig,
     workspace_id: &str,
 ) -> Result<(), UniversalExecError> {
+    let tmp_backing = config.workspace_tmp_path(workspace_id);
+    let tmp_presentation = config.workspace_tmp_presentation_path(workspace_id);
+    match fs::symlink_metadata(&tmp_presentation) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_symlink() {
+                return Err(UniversalExecError::new(
+                    UniversalExecErrorCode::MetadataCorrupt,
+                    format!(
+                        "Workspace temporary presentation {} is not a symlink",
+                        tmp_presentation.display()
+                    ),
+                    Some("workspaceId"),
+                    false,
+                ));
+            }
+            let target = fs::read_link(&tmp_presentation).map_err(|error| {
+                io_error(
+                    &tmp_presentation,
+                    "read Workspace temporary presentation",
+                    error,
+                )
+            })?;
+            if target != tmp_backing {
+                return Err(UniversalExecError::new(
+                    UniversalExecErrorCode::MetadataCorrupt,
+                    format!(
+                        "Workspace temporary presentation {} points at {}, expected {}",
+                        tmp_presentation.display(),
+                        target.display(),
+                        tmp_backing.display()
+                    ),
+                    Some("workspaceId"),
+                    false,
+                ));
+            }
+            fs::remove_file(&tmp_presentation).map_err(|error| {
+                io_error(
+                    &tmp_presentation,
+                    "remove Workspace temporary presentation",
+                    error,
+                )
+            })?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(io_error(
+                &tmp_presentation,
+                "inspect Workspace temporary presentation",
+                error,
+            ));
+        }
+    }
     for path in [
         config.workspace_cache_path(workspace_id),
         config.workspace_build_cache_path(workspace_id),
-        config.workspace_tmp_path(workspace_id),
+        tmp_backing,
     ] {
         match fs::remove_dir_all(&path) {
             Ok(()) => {}

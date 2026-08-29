@@ -2073,6 +2073,9 @@ fn clean_workspace_close_succeeds_without_force() {
         fs::create_dir_all(&cache).unwrap();
         fs::write(cache.join("cached"), b"cache").unwrap();
     }
+    let tmp_presentation = config.workspace_tmp_presentation_path(workspace_id);
+    fs::create_dir_all(config.workspace_tmp_presentation_root()).unwrap();
+    std::os::unix::fs::symlink(config.workspace_tmp_path(workspace_id), &tmp_presentation).unwrap();
     let closed = remove_git_workspace(
         &config,
         &WorkspaceCloseRequest {
@@ -2087,6 +2090,7 @@ fn clean_workspace_close_succeeds_without_force() {
     assert!(!config.workspace_cache_path(workspace_id).exists());
     assert!(!config.workspace_build_cache_path(workspace_id).exists());
     assert!(!config.workspace_tmp_path(workspace_id).exists());
+    assert!(fs::symlink_metadata(&tmp_presentation).is_err());
 }
 
 #[test]

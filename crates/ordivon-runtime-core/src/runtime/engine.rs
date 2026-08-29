@@ -2144,6 +2144,95 @@ impl Runtime {
         false
     }
 
+    fn ensure_trusted_workspace_tmp_presentation(
+        &self,
+        workspace_id: &str,
+        backing: &Path,
+    ) -> RuntimeResult<PathBuf> {
+        let presentation = self.executor.workspace_tmp_presentation_path(workspace_id);
+        let parent = presentation.parent().ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::IoError,
+                "trusted temporary presentation has no parent directory",
+                Some("workspaceId"),
+                false,
+            )
+        })?;
+        fs::create_dir_all(parent).map_err(|error| {
+            io_error(
+                &format!("create temporary presentation root {}", parent.display()),
+                error,
+            )
+        })?;
+
+        for _ in 0..2 {
+            match fs::symlink_metadata(&presentation) {
+                Ok(metadata) => {
+                    if !metadata.file_type().is_symlink() {
+                        return Err(RuntimeError::new(
+                            RuntimeErrorCode::WorkspaceStateMismatch,
+                            format!(
+                                "trusted temporary presentation {} is not a symlink",
+                                presentation.display()
+                            ),
+                            Some("workspaceId"),
+                            false,
+                        ));
+                    }
+                    let target = fs::read_link(&presentation).map_err(|error| {
+                        io_error(
+                            &format!("read temporary presentation {}", presentation.display()),
+                            error,
+                        )
+                    })?;
+                    if target != backing {
+                        return Err(RuntimeError::new(
+                            RuntimeErrorCode::WorkspaceStateMismatch,
+                            format!(
+                                "trusted temporary presentation {} points at {}, expected {}",
+                                presentation.display(),
+                                target.display(),
+                                backing.display()
+                            ),
+                            Some("workspaceId"),
+                            false,
+                        ));
+                    }
+                    return Ok(presentation);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    match std::os::unix::fs::symlink(backing, &presentation) {
+                        Ok(()) => return Ok(presentation),
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(io_error(
+                                &format!(
+                                    "create temporary presentation {}",
+                                    presentation.display()
+                                ),
+                                error,
+                            ));
+                        }
+                    }
+                }
+                Err(error) => {
+                    return Err(io_error(
+                        &format!("inspect temporary presentation {}", presentation.display()),
+                        error,
+                    ));
+                }
+            }
+        }
+        Err(RuntimeError::new(
+            RuntimeErrorCode::WorkspaceStateMismatch,
+            "trusted temporary presentation changed concurrently during creation",
+            Some("workspaceId"),
+            true,
+        ))
+    }
+
     fn execution_environment(
         &self,
         record: &crate::universal::WorkspaceRecord,
@@ -2191,9 +2280,14 @@ impl Runtime {
         environment.insert("HOME".to_string(), execution_home);
         environment.insert("LANG".to_string(), "C.UTF-8".to_string());
         environment.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
+        let tmp_presentation = match execution_profile {
+            super::ExecutionProfile::TrustedLocal => self
+                .ensure_trusted_workspace_tmp_presentation(&record.workspace_id, &workspace_tmp)?,
+            super::ExecutionProfile::ContainedLocal => workspace_tmp.clone(),
+        };
         environment.insert(
             "TMPDIR".to_string(),
-            workspace_tmp.to_string_lossy().into_owned(),
+            tmp_presentation.to_string_lossy().into_owned(),
         );
         environment.insert(
             "XDG_CACHE_HOME".to_string(),
@@ -7396,13 +7490,40 @@ mod trusted_systemd_command_tests {
                 .starts_with(root.join("runtime/cache/shared")));
         }
         let workspace_root = root.join("runtime/workspaces/workspace-env");
-        for name in ["XDG_CACHE_HOME", "TMPDIR"] {
-            let value = Path::new(environment.get(name).unwrap());
-            assert!(value.starts_with(root.join("runtime/cache")));
-            assert!(!value.starts_with(&workspace_root));
-        }
-        assert!(Path::new(environment.get("XDG_CACHE_HOME").unwrap()).is_dir());
-        assert!(Path::new(environment.get("TMPDIR").unwrap()).is_dir());
+        let cache_path = Path::new(environment.get("XDG_CACHE_HOME").unwrap());
+        assert!(cache_path.starts_with(root.join("runtime/cache")));
+        assert!(!cache_path.starts_with(&workspace_root));
+        assert!(cache_path.is_dir());
+
+        let trusted_tmp = Path::new(environment.get("TMPDIR").unwrap());
+        let peer_tmp = Path::new(peer_environment.get("TMPDIR").unwrap());
+        let other_tmp = Path::new(other_environment.get("TMPDIR").unwrap());
+        assert!(trusted_tmp.starts_with(root.join("runtime/cache/t")));
+        assert!(peer_tmp.starts_with(root.join("runtime/cache/t")));
+        assert!(other_tmp.starts_with(root.join("runtime/cache/t")));
+        assert_ne!(trusted_tmp, peer_tmp);
+        assert_ne!(trusted_tmp, other_tmp);
+        assert_eq!(
+            fs::read_link(trusted_tmp).unwrap(),
+            runtime.executor.workspace_tmp_path("workspace-env")
+        );
+        assert_eq!(
+            fs::read_link(peer_tmp).unwrap(),
+            runtime.executor.workspace_tmp_path("workspace-peer")
+        );
+        assert_eq!(
+            fs::read_link(other_tmp).unwrap(),
+            runtime.executor.workspace_tmp_path("workspace-other")
+        );
+        assert!(trusted_tmp.is_dir());
+        assert!(
+            trusted_tmp.as_os_str().len()
+                < runtime
+                    .executor
+                    .workspace_tmp_path(&"w".repeat(crate::universal::WORKSPACE_ID_MAX_LENGTH))
+                    .as_os_str()
+                    .len()
+        );
 
         let contained = runtime
             .execution_environment(&record, crate::runtime::ExecutionProfile::ContainedLocal)
@@ -7411,6 +7532,22 @@ mod trusted_systemd_command_tests {
             .starts_with(root.join("runtime/cache/build/workspace-env")));
         assert!(Path::new(contained.get("UV_CACHE_DIR").unwrap())
             .starts_with(root.join("runtime/cache/workspaces/workspace-env/tooling")));
+        assert_eq!(
+            Path::new(contained.get("TMPDIR").unwrap()),
+            runtime.executor.workspace_tmp_path("workspace-env")
+        );
+
+        fs::remove_file(other_tmp).unwrap();
+        std::os::unix::fs::symlink(
+            runtime.executor.workspace_tmp_path("workspace-env"),
+            other_tmp,
+        )
+        .unwrap();
+        let mismatch = runtime
+            .execution_environment(&other, crate::runtime::ExecutionProfile::TrustedLocal)
+            .unwrap_err();
+        assert_eq!(mismatch.code, RuntimeErrorCode::WorkspaceStateMismatch);
+        assert!(mismatch.message.contains("points at"));
         drop(runtime);
         fs::remove_dir_all(root).unwrap();
     }
