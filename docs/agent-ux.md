@@ -95,6 +95,29 @@ The Workspace lifecycle mutex is not the capacity authority and is not held acro
 
 Compiler-report normalization, Git publication, GitHub orchestration, coding-agent evaluation, and benchmark harnesses are not Runtime state owners. They remain outside the Runtime repository unless a concrete execution contract requires them.
 
+## Workspace carrier disposition projection
+
+`scripts/ordivon-runtime-lifecycle inspect` adds a recomputable
+`carrierProjection` to every lifecycle candidate. It translates only current
+Runtime-owned physical classification and configured retention policy into the next
+safe protocol step:
+
+| Lifecycle classification | Physical projection | Next protocol step |
+| --- | --- | --- |
+| `closable` | `CLEAN_IDLE` | owner declares `CLOSE_CLEAN` or `RETAIN` |
+| `blocked_dirty` | `DIRTY_IDLE` | owner records `DIRTY_HANDOFF` or creates a recoverable dirty checkpoint |
+| `blocked_active` | `ACTIVE_DIRTY_STATE_UNINSPECTED` | observe/reconcile the active Job, then re-read the Workspace |
+| `stale_record` | `MISSING_WITH_OPEN_RECORD` | reconcile the stale Runtime record |
+| any unproven class | `UNPROVEN` | inspect before making a disposition |
+
+`policyClosureEligible` reports only whether the current operator retention policy
+would select that clean/stale candidate. It is not semantic completion, owner
+standing, or permission inferred from a missing Host reference.
+`semanticCompletionEvaluated` therefore remains `false`. A Host checkpoint may
+carry a checkpoint-authored `CARRIER=...` hint, but the caller must compare that
+semantic claim with this fresh physical projection; neither owner silently promotes
+the other's state.
+
 ## Execution semantic projection
 
 Runtime preserves state distinctions that change a caller's safe next action. `status` remains a coarse compatibility summary (`queued`, `working`, or a terminal resolution) and must not be used as the sole control signal. `workspace.exec`, `workspace.execBound`, `workspace.execPlan`, `task.observe`, and `task.list` project the following explicit execution semantics:

@@ -115,6 +115,58 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.module["nonnegative_float"]("-1")
 
+    def test_carrier_projection_preserves_physical_and_semantic_boundaries(self) -> None:
+        cases = (
+            (
+                {
+                    "classification": "closable",
+                    "policyEligible": True,
+                    "retentionHours": 24.0,
+                },
+                "CLEAN_IDLE",
+                "DECLARE_CLOSE_CLEAN_OR_RETAIN",
+                "ELIGIBLE",
+            ),
+            (
+                {"classification": "blocked_dirty", "policyEligible": False},
+                "DIRTY_IDLE",
+                "DECLARE_DIRTY_HANDOFF_OR_CHECKPOINT",
+                "NOT_APPLICABLE",
+            ),
+            (
+                {"classification": "blocked_active", "policyEligible": False},
+                "ACTIVE_DIRTY_STATE_UNINSPECTED",
+                "OBSERVE_OR_RECONCILE_ACTIVE_JOB",
+                "NOT_APPLICABLE",
+            ),
+            (
+                {
+                    "classification": "stale_record",
+                    "policyEligible": False,
+                    "retentionHours": 24.0,
+                },
+                "MISSING_WITH_OPEN_RECORD",
+                "RECONCILE_STALE_RECORD",
+                "WAITING",
+            ),
+            (
+                {"classification": "unknown", "policyEligible": False},
+                "UNPROVEN",
+                "INSPECT_BEFORE_DISPOSITION",
+                "NOT_APPLICABLE",
+            ),
+        )
+        for item, physical_state, next_step, retention_state in cases:
+            with self.subTest(classification=item["classification"]):
+                projection = self.module["carrier_projection"](item)
+                self.assertEqual(projection["physicalState"], physical_state)
+                self.assertEqual(projection["nextProtocolStep"], next_step)
+                self.assertEqual(
+                    projection["retentionPolicyState"], retention_state
+                )
+                self.assertFalse(projection["semanticCompletionEvaluated"])
+                self.assertIn("Host/owner", projection["interpretation"])
+
     def test_packaged_lifecycle_unit_only_invokes_supported_lifecycle_commands(self) -> None:
         unit = (REPO / "packaging/systemd/ordivon-runtime-lifecycle.service").read_text(
             encoding="utf-8"
@@ -184,6 +236,16 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(item["lastActivityUnixMs"], 2_000)
             self.assertEqual(item["retentionBasisUnixMs"], 2_000)
             self.assertTrue(item["policyEligible"])
+            self.assertEqual(
+                item["carrierProjection"]["physicalState"], "CLEAN_IDLE"
+            )
+            self.assertEqual(
+                item["carrierProjection"]["nextProtocolStep"],
+                "DECLARE_CLOSE_CLEAN_OR_RETAIN",
+            )
+            self.assertFalse(
+                item["carrierProjection"]["semanticCompletionEvaluated"]
+            )
 
 
     def test_sweep_selects_only_policy_expired_reclaimable_workspaces(self) -> None:

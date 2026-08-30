@@ -280,6 +280,70 @@ def retention_class(policy: dict[str, object], workspace_id: str) -> tuple[str, 
     return selected, float(hours) if isinstance(hours, (int, float)) else None
 
 
+def carrier_projection(item: dict[str, object]) -> dict[str, object]:
+    """Translate lifecycle evidence into a physical Agent next-step projection."""
+
+    classification = str(item.get("classification", "unknown"))
+    policy_eligible = item.get("policyEligible") is True
+    retention_hours = item.get("retentionHours")
+    if classification in {"closable", "stale_record"}:
+        if policy_eligible:
+            retention_state = "ELIGIBLE"
+        elif retention_hours is None:
+            retention_state = "PINNED"
+        else:
+            retention_state = "WAITING"
+    else:
+        retention_state = "NOT_APPLICABLE"
+
+    if classification == "closable":
+        physical_state = "CLEAN_IDLE"
+        next_step = "DECLARE_CLOSE_CLEAN_OR_RETAIN"
+        clean_close_candidate = True
+        dirty_handoff_required = False
+        owner_disposition_required = True
+    elif classification == "blocked_dirty":
+        physical_state = "DIRTY_IDLE"
+        next_step = "DECLARE_DIRTY_HANDOFF_OR_CHECKPOINT"
+        clean_close_candidate = False
+        dirty_handoff_required = True
+        owner_disposition_required = True
+    elif classification == "blocked_active":
+        physical_state = "ACTIVE_DIRTY_STATE_UNINSPECTED"
+        next_step = "OBSERVE_OR_RECONCILE_ACTIVE_JOB"
+        clean_close_candidate = False
+        dirty_handoff_required = False
+        owner_disposition_required = False
+    elif classification == "stale_record":
+        physical_state = "MISSING_WITH_OPEN_RECORD"
+        next_step = "RECONCILE_STALE_RECORD"
+        clean_close_candidate = False
+        dirty_handoff_required = False
+        owner_disposition_required = False
+    else:
+        physical_state = "UNPROVEN"
+        next_step = "INSPECT_BEFORE_DISPOSITION"
+        clean_close_candidate = False
+        dirty_handoff_required = False
+        owner_disposition_required = False
+
+    return {
+        "truthRole": "derived-runtime-physical-carrier-projection",
+        "physicalState": physical_state,
+        "nextProtocolStep": next_step,
+        "cleanCloseCandidate": clean_close_candidate,
+        "dirtyHandoffRequired": dirty_handoff_required,
+        "ownerDispositionRequired": owner_disposition_required,
+        "retentionPolicyState": retention_state,
+        "policyClosureEligible": policy_eligible,
+        "semanticCompletionEvaluated": False,
+        "interpretation": (
+            "Runtime physical state and operator retention policy only; Host/owner "
+            "semantic disposition and current task standing are not evaluated"
+        ),
+    }
+
+
 def open_registry(database: Path, timeout_ms: int) -> sqlite3.Connection:
     connection = sqlite3.connect(
         f"file:{quote(str(database))}?mode=ro", uri=True, timeout=timeout_ms / 1000
@@ -348,6 +412,7 @@ def enrich_report(args: argparse.Namespace) -> dict[str, object]:
                     "policyEligible": eligible,
                 }
             )
+            item["carrierProjection"] = carrier_projection(item)
             if eligible:
                 eligible_count += 1
                 if isinstance(item.get("estimatedBytes"), int):
