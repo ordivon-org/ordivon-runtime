@@ -28,8 +28,10 @@ struct ClosedWorkspaceRecord {
     schema_version: u32,
     state: String,
     workspace_id: String,
-    source_repo: String,
-    source_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     final_head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2209,8 +2211,8 @@ fn write_closed_workspace_record(
         schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
         state: "closed".to_string(),
         workspace_id: open.workspace_id.clone(),
-        source_repo: open.source_repo.clone(),
-        source_revision: open.source_revision.clone(),
+        source_repo: Some(open.source_repo.clone()),
+        source_revision: Some(open.source_revision.clone()),
         final_head,
         source_state_digest,
         closed_unix_ms: now_unix_ms()?,

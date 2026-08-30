@@ -197,7 +197,7 @@ Workspace lifecycle has separate states and release rules:
 | `blocked_active` | an unresolved Job or active/held reservation exists | never |
 | `blocked_dirty` | tracked, staged, deleted, or untracked state exists | never |
 | `unknown` | identity, metadata, or Git health cannot be proven | never |
-| `orphan_directory` | directory exists without an identity record | never |
+| `orphan_directory` | directory exists without an identity record | never automatically; exact-ID quarantine only |
 | `stale_record` | open record exists but the physical Workspace is absent | old record may be archived and deleted |
 | `closable` | Workspace is healthy, clean, and has no active Job | old Workspace may be released through `workspace.close` |
 
@@ -301,7 +301,7 @@ The packaged timer runs the Runtime lifecycle service daily with a randomized de
 
 The `--confirm-policy` / `--confirm-quarantine` phrases on these root-operated maintenance CLIs are human/operator anti-mistake ceremony, not semantic authority. The actual protection comes from classification, exact Workspace identity, active-Job checks, locks, before/after receipts, and preserved bytes. Future Agent-facing control surfaces should express deliberate intent and affected identities structurally rather than asking an Agent to echo a magic phrase.
 
-Repository renames can leave a healthy worktree registered in the new Git repository while its `.git` file and Runtime record still name the old path. The repair command accepts exact `sourceRepoAliases`, verifies the recorded commit in the mapped repository, runs `git worktree repair`, rechecks the exact HEAD, and updates only the record's source repository. Unrepairable data may be moved atomically to a quarantine directory and replaced by a valid closed tombstone only with a second explicit confirmation; bytes are preserved rather than deleted.
+Repository renames can leave a healthy worktree registered in the new Git repository while its `.git` file and Runtime record still name the old path. The repair command accepts exact `sourceRepoAliases`, verifies the recorded commit in the mapped repository, runs `git worktree repair`, rechecks the exact HEAD, and updates only the record's source repository. Unrepairable recorded data may be moved atomically to a quarantine directory and replaced by a valid closed tombstone only with a second explicit confirmation; bytes are preserved rather than deleted. A true `orphan_directory` has no Runtime opening record to repair, so it is never selected in bulk: only an exact `--workspace-id` together with the explicit quarantine flags may quarantine it. Runtime first commits an identity-unknown closed tombstone (no invented `sourceRepo`/`sourceRevision`) to fence same-ID reuse, atomically moves the bytes, and repairs linked-Git worktree registration when Git evidence is available. The quarantine receipt retains the observed current Git HEAD/status as observation only, not reconstructed opening identity.
 
 ```bash
 scripts/ordivon-runtime-lifecycle repair \

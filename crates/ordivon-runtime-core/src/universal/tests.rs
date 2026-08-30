@@ -2346,6 +2346,61 @@ fn workspace_close_repairs_missing_directory_but_rejects_orphan_directory() {
 }
 
 #[test]
+fn workspace_close_accepts_identity_unknown_orphan_quarantine_tombstone() {
+    let sandbox = Sandbox::new("close-orphan-quarantine-tombstone");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-quarantined-orphan";
+    config.ensure_store().unwrap();
+    let record_path = config.workspace_record_path(workspace_id);
+    fs::write(
+        &record_path,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": UNIVERSAL_EXEC_SCHEMA_VERSION,
+            "state": "closed",
+            "workspaceId": workspace_id,
+            "finalHead": null,
+            "closedUnixMs": 1,
+            "removalResult": "quarantined_orphan"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let closed = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: false,
+            expected_source_state_digest: None,
+        },
+    )
+    .unwrap();
+    assert!(!closed.removed);
+    assert_eq!(
+        closed.closure_disposition,
+        WorkspaceClosureDisposition::AlreadyClosed
+    );
+    assert!(closed.source_state_digest.is_none());
+    assert_eq!(
+        create_git_workspace(
+            &config,
+            &GitWorkspaceCreateRequest {
+                schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+                workspace_id: workspace_id.to_string(),
+                source_repo: source.to_string_lossy().into_owned(),
+                source_revision: "HEAD".to_string(),
+            },
+        )
+        .unwrap_err()
+        .code,
+        UniversalExecErrorCode::WorkspaceExists
+    );
+}
+
+#[test]
 fn workspace_close_uses_live_git_identity_when_source_record_drifts() {
     let sandbox = Sandbox::new("close-source-drift");
     let source = sandbox.root.join("source");

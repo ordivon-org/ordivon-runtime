@@ -494,6 +494,130 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(report["actions"][0]["removedTmpPresentation"], str(tmp_presentation))
             self.assertFalse(tmp_presentation.is_symlink())
 
+    def test_repair_explicitly_quarantines_true_orphan_without_inventing_source_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            revision = init_repository(source)
+            runtime = root / "runtime"
+            records = runtime / "workspace-records"
+            workspaces = runtime / "workspaces"
+            records.mkdir(parents=True)
+            workspaces.mkdir()
+            workspace_id = "true-orphan-worktree"
+            workspace = workspaces / workspace_id
+            subprocess.run(
+                ["git", "-C", str(source), "worktree", "add", "--detach", str(workspace), revision],
+                check=True, capture_output=True,
+            )
+            (workspace / "important-untracked.txt").write_text("preserve uncertain bytes\n", encoding="utf-8")
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            quarantine = root / "quarantine"
+            result = subprocess.run(
+                [
+                    sys.executable, "scripts/ordivon-runtime-lifecycle", "repair",
+                    "--database", str(database),
+                    "--runtime-store-root", str(runtime),
+                    "--receipt-root", str(root / "receipts"),
+                    "--lock-file", str(root / "lifecycle.lock"),
+                    "--workspace-id", workspace_id,
+                    "--confirm-policy", "REPAIR_WORKSPACE_IDENTITIES",
+                    "--quarantine-unrepairable",
+                    "--quarantine-root", str(quarantine),
+                    "--confirm-quarantine", "QUARANTINE_BROKEN_WORKSPACES",
+                ],
+                cwd=REPO, check=True, text=True, capture_output=True,
+            )
+            report = json.loads(result.stdout)
+            action = report["actions"][0]
+            self.assertEqual(action["action"], "orphan_workspace_quarantined")
+            self.assertEqual(action["sourceIdentityStanding"], "UNKNOWN_NO_RUNTIME_RECORD")
+            self.assertFalse(workspace.exists())
+            target = Path(action["quarantinePath"])
+            self.assertEqual((target / "important-untracked.txt").read_text(), "preserve uncertain bytes\n")
+            self.assertEqual(
+                subprocess.run(["git", "-C", str(target), "rev-parse", "HEAD"], check=True, text=True, capture_output=True).stdout.strip(),
+                revision,
+            )
+            self.assertEqual(action["gitRegistrationRepair"]["standing"], "REPAIRED")
+            worktrees = subprocess.run(["git", "-C", str(source), "worktree", "list", "--porcelain"], check=True, text=True, capture_output=True).stdout
+            self.assertIn(str(target), worktrees)
+            self.assertNotIn(str(workspace) + "\n", worktrees)
+            tombstone = json.loads((records / f"{workspace_id}.json").read_text(encoding="utf-8"))
+            self.assertEqual(tombstone["state"], "closed")
+            self.assertEqual(tombstone["removalResult"], "quarantined_orphan")
+            self.assertEqual(tombstone["finalHead"], revision)
+            self.assertNotIn("sourceRepo", tombstone)
+            self.assertNotIn("sourceRevision", tombstone)
+            inspect = subprocess.run(
+                [sys.executable, "scripts/ordivon-runtime-reclaim", "inspect", "--database", str(database), "--runtime-store-root", str(runtime)],
+                cwd=REPO, check=True, text=True, capture_output=True,
+            )
+            candidates = json.loads(inspect.stdout)["candidates"]
+            self.assertFalse(any(row["workspaceId"] == workspace_id for row in candidates))
+
+    def test_true_orphan_quarantine_is_never_bulk_or_implicit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            (runtime / "workspace-records").mkdir(parents=True)
+            workspaces = runtime / "workspaces"
+            workspaces.mkdir()
+            workspace_id = "true-orphan-explicit-only"
+            workspace = workspaces / workspace_id
+            workspace.mkdir()
+            (workspace / "important.txt").write_text("keep\n", encoding="utf-8")
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            base = [
+                sys.executable, "scripts/ordivon-runtime-lifecycle", "repair",
+                "--database", str(database), "--runtime-store-root", str(runtime),
+                "--receipt-root", str(root / "receipts"), "--lock-file", str(root / "lifecycle.lock"),
+                "--confirm-policy", "REPAIR_WORKSPACE_IDENTITIES",
+            ]
+            bulk = subprocess.run(base + ["--quarantine-unrepairable", "--quarantine-root", str(root / "q"), "--confirm-quarantine", "QUARANTINE_BROKEN_WORKSPACES"], cwd=REPO, check=True, text=True, capture_output=True)
+            self.assertEqual(json.loads(bulk.stdout)["actions"], [])
+            self.assertTrue(workspace.exists())
+            implicit = subprocess.run(base + ["--workspace-id", workspace_id], cwd=REPO, check=False, text=True, capture_output=True)
+            self.assertEqual(implicit.returncode, 2)
+            self.assertIn("explicit --quarantine-unrepairable", implicit.stdout)
+            self.assertTrue(workspace.exists())
+            self.assertFalse((runtime / "workspace-records" / f"{workspace_id}.json").exists())
+
+    def test_true_orphan_quarantine_refuses_active_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            (runtime / "workspace-records").mkdir(parents=True)
+            workspaces = runtime / "workspaces"
+            workspaces.mkdir()
+            workspace_id = "true-orphan-active"
+            workspace = workspaces / workspace_id
+            workspace.mkdir()
+            database = root / "registry.sqlite3"
+            initialize_registry(database, workspace_id, 1)
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute("UPDATE jobs SET resolution=NULL WHERE workspace_id=?", (workspace_id,))
+                connection.execute("UPDATE attempts SET state='running',finished_at_ms=NULL WHERE job_id='job-1'")
+                connection.execute("INSERT INTO concurrency_reservations VALUES ('attempt-1','active')")
+                connection.commit()
+            result = subprocess.run(
+                [
+                    sys.executable, "scripts/ordivon-runtime-lifecycle", "repair",
+                    "--database", str(database), "--runtime-store-root", str(runtime),
+                    "--receipt-root", str(root / "receipts"), "--lock-file", str(root / "lifecycle.lock"),
+                    "--workspace-id", workspace_id, "--confirm-policy", "REPAIR_WORKSPACE_IDENTITIES",
+                    "--quarantine-unrepairable", "--quarantine-root", str(root / "q"),
+                    "--confirm-quarantine", "QUARANTINE_BROKEN_WORKSPACES",
+                ],
+                cwd=REPO, check=False, text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("active or held Job", result.stdout)
+            self.assertTrue(workspace.exists())
+            self.assertFalse((runtime / "workspace-records" / f"{workspace_id}.json").exists())
+
     def test_quarantine_tmp_presentation_wrong_target_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary) / "runtime"

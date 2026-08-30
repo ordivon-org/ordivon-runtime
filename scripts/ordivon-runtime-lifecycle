@@ -320,6 +320,12 @@ def carrier_projection(item: dict[str, object]) -> dict[str, object]:
         clean_close_candidate = False
         dirty_handoff_required = False
         owner_disposition_required = False
+    elif classification == "orphan_directory":
+        physical_state = "ORPHAN_DIRECTORY_WITHOUT_IDENTITY"
+        next_step = "EXPLICIT_QUARANTINE_OR_IDENTITY_RECOVERY"
+        clean_close_candidate = False
+        dirty_handoff_required = False
+        owner_disposition_required = False
     else:
         physical_state = "UNPROVEN"
         next_step = "INSPECT_BEFORE_DISPOSITION"
@@ -661,6 +667,167 @@ def remove_trusted_tmp_presentation(runtime_store_root: Path, workspace_id: str)
         )
     presentation.unlink()
     return presentation
+
+
+def orphan_git_evidence(workspace_path: Path) -> dict[str, object]:
+    def run(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(workspace_path), *arguments],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    inside = run(["rev-parse", "--is-inside-work-tree"])
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        return {"available": False, "reason": "not-a-readable-git-worktree"}
+    head = run(["rev-parse", "HEAD"])
+    common = run(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    branch = run(["symbolic-ref", "--quiet", "--short", "HEAD"])
+    status = subprocess.run(
+        ["git", "-C", str(workspace_path), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        check=False,
+        capture_output=True,
+    )
+    if head.returncode != 0 or common.returncode != 0 or status.returncode != 0:
+        return {"available": False, "reason": "git-evidence-incomplete"}
+    common_path = Path(common.stdout.strip())
+    if not common_path.is_absolute():
+        common_path = (workspace_path / common_path).resolve()
+    return {
+        "available": True,
+        "observedHead": head.stdout.strip(),
+        "observedBranch": branch.stdout.strip() if branch.returncode == 0 else None,
+        "observedGitCommonDir": str(common_path),
+        "dirty": bool(status.stdout),
+        "statusDigest": "sha256:" + hashlib.sha256(status.stdout).hexdigest(),
+    }
+
+
+def repair_quarantined_git_registration(
+    target: Path, git_evidence: dict[str, object]
+) -> dict[str, object]:
+    common = git_evidence.get("observedGitCommonDir")
+    expected_head = git_evidence.get("observedHead")
+    if git_evidence.get("available") is not True or not isinstance(common, str):
+        return {"attempted": False, "standing": "NOT_APPLICABLE"}
+    result = subprocess.run(
+        ["git", "--git-dir", common, "worktree", "repair", str(target)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    observed = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "HEAD"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    head = observed.stdout.strip() if observed.returncode == 0 else None
+    standing = (
+        "REPAIRED"
+        if result.returncode == 0 and isinstance(expected_head, str) and head == expected_head
+        else "UNRESOLVED"
+    )
+    return {
+        "attempted": True,
+        "standing": standing,
+        "returnCode": result.returncode,
+        "observedHeadAfter": head,
+        "stderr": result.stderr.strip()[:1000],
+    }
+
+
+def quarantine_orphan_directory(
+    args: argparse.Namespace,
+    item: dict[str, object],
+    receipt: Path,
+) -> dict[str, object]:
+    if item.get("classification") != "orphan_directory":
+        raise RuntimeError("Workspace is not orphan_directory")
+    if not args.quarantine_root:
+        raise RuntimeError("quarantine-root is required for orphan quarantine")
+    workspace_id = str(item["workspaceId"])
+    workspace_root = (args.workspace_root or args.runtime_store_root / "workspaces").resolve()
+    workspace_path = workspace_root / workspace_id
+    record_path = args.runtime_store_root / "workspace-records" / f"{workspace_id}.json"
+    if record_path.exists() or record_path.is_symlink():
+        raise RuntimeError("orphan Workspace acquired an identity record")
+    try:
+        metadata = workspace_path.lstat()
+    except FileNotFoundError as error:
+        raise RuntimeError("orphan Workspace directory disappeared") from error
+    if workspace_path.is_symlink() or not workspace_path.is_dir():
+        raise RuntimeError("orphan Workspace target is not a non-symlink directory")
+    if active_jobs(args.database, args.busy_timeout_ms, workspace_id):
+        raise RuntimeError("orphan Workspace acquired an active or held Job")
+
+    args.quarantine_root.mkdir(parents=True, exist_ok=True)
+    quarantine_root = args.quarantine_root.resolve()
+    if quarantine_root == workspace_root or quarantine_root.is_relative_to(workspace_root):
+        raise RuntimeError("quarantine-root must be outside the Runtime Workspace root")
+    target = quarantine_root / f"{int(time.time() * 1000)}-{workspace_id}"
+    if target.exists() or target.is_symlink():
+        raise RuntimeError("quarantine target already exists")
+
+    git_evidence = orphan_git_evidence(workspace_path)
+    observed_head = git_evidence.get("observedHead")
+    tombstone = {
+        "schemaVersion": SCHEMA_VERSION,
+        "state": "closed",
+        "workspaceId": workspace_id,
+        "finalHead": observed_head if isinstance(observed_head, str) else None,
+        "closedUnixMs": int(time.time() * 1000),
+        "removalResult": "quarantined_orphan",
+    }
+    # The tombstone is committed before the move so another Runtime process cannot
+    # reuse this identity in the rename window. sourceRepo/sourceRevision are
+    # intentionally absent: no Runtime opening record survived to prove them.
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(record_path, tombstone)
+    try:
+        # Recheck the physical inode after publishing the identity fence.
+        after = workspace_path.lstat()
+        if (metadata.st_dev, metadata.st_ino) != (after.st_dev, after.st_ino):
+            raise RuntimeError("orphan Workspace directory changed before quarantine")
+        os.replace(workspace_path, target)
+    except Exception:
+        try:
+            if workspace_path.exists() and not target.exists():
+                record_path.unlink(missing_ok=True)
+        finally:
+            pass
+        raise
+
+    git_repair = repair_quarantined_git_registration(target, git_evidence)
+    warnings: list[str] = []
+    if git_repair.get("standing") == "UNRESOLVED":
+        warnings.append("Git linked-worktree registration could not be fully repaired")
+    try:
+        removed_tmp_presentation = remove_trusted_tmp_presentation(
+            args.runtime_store_root, workspace_id
+        )
+    except Exception as error:
+        removed_tmp_presentation = None
+        warnings.append(f"trusted tmp presentation cleanup requires review: {error}")
+
+    action = {
+        "workspaceId": workspace_id,
+        "classification": "orphan_directory",
+        "action": "orphan_workspace_quarantined",
+        "quarantinePath": str(target),
+        "closedRecord": str(record_path),
+        "closedRecordDigest": sha256_file(record_path),
+        "sourceIdentityStanding": "UNKNOWN_NO_RUNTIME_RECORD",
+        "gitEvidence": git_evidence,
+        "gitRegistrationRepair": git_repair,
+        "removedTmpPresentation": (
+            str(removed_tmp_presentation) if removed_tmp_presentation is not None else None
+        ),
+        "warnings": warnings,
+    }
+    write_json_atomic(receipt / f"orphan-{workspace_id}.json", action)
+    return action
 
 
 def quarantine_one(
@@ -1170,7 +1337,24 @@ def repair(args: argparse.Namespace) -> dict[str, object]:
             workspace_id = str(raw["workspaceId"])
             if requested and workspace_id not in requested:
                 continue
-            if raw.get("classification") != "unknown":
+            classification = raw.get("classification")
+            if classification == "orphan_directory":
+                # True orphans never participate in bulk repair/quarantine. An exact
+                # workspace-id plus both quarantine confirmations are required.
+                if workspace_id not in requested:
+                    continue
+                if not args.quarantine_unrepairable:
+                    failures.append({
+                        "workspaceId": workspace_id,
+                        "error": "true orphan requires explicit --quarantine-unrepairable",
+                    })
+                    continue
+                try:
+                    actions.append(quarantine_orphan_directory(args, raw, receipt))
+                except Exception as orphan_error:
+                    failures.append({"workspaceId": workspace_id, "error": str(orphan_error)})
+                continue
+            if classification != "unknown":
                 continue
             created = raw.get("createdUnixMs")
             if not isinstance(created, int) or created > cutoff_ms:
