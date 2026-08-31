@@ -4270,32 +4270,12 @@ impl Runtime {
                 }
                 return Ok(());
             }
-            // The actual target is created suspended and windows-start.json is published before
-            // ResumeThread. Once the original provisional launcher owner is gone, no future target
-            // effect can emerge from this dispatch if target-start evidence is still absent.
-            let (terminal_state, reason_code) = match attempt.termination_intent {
-                AttemptTerminationIntent::StopRequested => (
-                    AttemptState::Cancelled,
-                    "STOP_REQUESTED_WINDOWS_LAUNCHER_PRESTART_GONE",
-                ),
-                AttemptTerminationIntent::DeadlineExceeded => (
-                    AttemptState::TimedOut,
-                    "DEADLINE_WINDOWS_LAUNCHER_PRESTART_GONE",
-                ),
-                AttemptTerminationIntent::Natural => {
-                    (AttemptState::Failed, "WINDOWS_LAUNCHER_PRESTART_GONE")
-                }
-            };
-            self.commit_control_terminal(
-                attempt,
-                terminal_state,
-                reason_code,
-                Some(
-                    "native launcher owner disappeared before durable target-start evidence; the target could not have been resumed"
-                        .to_string(),
-                ),
-            )?;
-            return Ok(());
+            // windows-start.json is currently carried inside the target-writable Attempt bundle.
+            // Its absence after launcher-owner loss therefore cannot prove that ResumeThread never
+            // happened: a resumed target can delete this evidence before launcher result publication.
+            // Preserve the nonterminal Attempt/capacity and require fresh recovery evidence; never
+            // turn this ambiguity into a no-effect/redrive-safe terminal standing.
+            return Err(native_windows_pre_target_evidence_gap());
         }
         let age_ms = now_ms()?.saturating_sub(attempt.created_at_ms);
         if age_ms < self.startup_grace_ms {
@@ -4817,15 +4797,11 @@ impl Runtime {
                         if target_start.is_file() {
                             continue;
                         }
-                        return self.commit_control_terminal(
-                            &current,
-                            AttemptState::Cancelled,
-                            "STOP_REQUESTED_WINDOWS_LAUNCHER_PRESTART_GONE",
-                            Some(
-                                "committed cancel intent outlived the provisional native launcher before target-start evidence; the suspended target could not have executed"
-                                    .to_string(),
-                            ),
-                        );
+                        // Preserve the committed cancel intent and Stopping reservation. The
+                        // missing target-start carrier is target-mutable, so launcher-owner loss
+                        // does not prove that the target never executed. The reconciliation below
+                        // returns the same evidence-gap standing and cancel keeps it nonterminal.
+                        break;
                     }
                 }
             }
@@ -4960,6 +4936,15 @@ impl Runtime {
     fn payload_evidence_matches(&self, uid: Option<u32>, gid: Option<u32>) -> bool {
         uid.is_none() && gid.is_none()
     }
+}
+
+pub(super) fn native_windows_pre_target_evidence_gap() -> RuntimeError {
+    RuntimeError::new(
+        RuntimeErrorCode::LaunchIdentityMismatch,
+        "native launcher owner is gone while target-start/result evidence is absent; target execution is unknown because windows-start evidence is target-mutable. Retain the Attempt and capacity and do not redrive automatically",
+        Some("windowsStart"),
+        true,
+    )
 }
 
 fn configured_execution_path() -> RuntimeResult<String> {

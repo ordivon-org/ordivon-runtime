@@ -1,3 +1,4 @@
+use super::engine::native_windows_pre_target_evidence_gap;
 use super::registry::{set_test_commit_fault, TestCommitFault, TestCommitPoint};
 use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::supervisor::AttemptSupervisorOwner;
@@ -6140,6 +6141,17 @@ fn attempt_supervisor_owner_binding_is_atomic_idempotent_and_tamper_evident() {
         .attempt_supervisor_owner(&starting.attempt_id)
         .unwrap_err();
     assert_eq!(error.code, RuntimeErrorCode::RegistryCorrupt);
+}
+
+#[test]
+fn native_windows_pre_target_evidence_gap_preserves_unknown_no_redrive_semantics() {
+    let error = native_windows_pre_target_evidence_gap();
+    assert_eq!(error.code, RuntimeErrorCode::LaunchIdentityMismatch);
+    assert_eq!(error.field.as_deref(), Some("windowsStart"));
+    assert!(error.retryable);
+    assert!(error.message.contains("target execution is unknown"));
+    assert!(error.message.contains("do not redrive automatically"));
+    assert!(!error.message.contains("could not have"));
 }
 
 #[test]
