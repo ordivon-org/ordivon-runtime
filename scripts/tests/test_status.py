@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import runpy
 import sqlite3
 import subprocess
 import sys
@@ -236,6 +237,15 @@ def raw_command(paths: dict[str, Path], *extra: str) -> list[str]:
 def command(paths: dict[str, Path], *extra: str) -> list[str]:
     mode = [] if any(value in {"--health", "--diagnose", "--dashboard"} for value in extra) else ["--diagnose"]
     return raw_command(paths, *mode, *extra)
+
+
+class RuntimeStatusDefaultTests(unittest.TestCase):
+    def test_default_deployment_root_matches_runtime_owner_receipt_root(self) -> None:
+        namespace = runpy.run_path(str(SCRIPT))
+        self.assertEqual(
+            namespace["DEFAULT_DEPLOYMENT_ROOT"],
+            Path("/var/lib/ordivon/runtime/deployments"),
+        )
 
 
 class RuntimeStatusTests(unittest.TestCase):
