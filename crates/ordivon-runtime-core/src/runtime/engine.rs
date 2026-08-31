@@ -610,12 +610,11 @@ impl Runtime {
     ) -> RuntimeResult<String> {
         match request.execution.execution_target {
             super::ExecutionTarget::LocalLinux => {
-                if request.execution.execution_profile != super::ExecutionProfile::ContainedLocal {
-                    return Err(RuntimeError::invalid(
-                        "local_linux immutable input bindings require contained_local execution",
-                        "execution.executionProfile",
-                    ));
-                }
+                // Linux immutable inputs may be combined with either authority profile.
+                // contained_local remains the reduced-authority default used by
+                // workspace.execBound; trusted_local is reserved for an explicit
+                // higher-authority public admission surface whose operation identity
+                // still binds the exact input set.
             }
             super::ExecutionTarget::WindowsNative => {
                 if request.execution.execution_profile != super::ExecutionProfile::TrustedLocal {
@@ -7045,7 +7044,10 @@ mod trusted_systemd_command_tests {
             .map(|value| value.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(" ");
-        assert!(!trusted_args.contains(CONTAINED_INPUT_ROOT));
+        assert!(trusted_args.contains(&format!(
+            "BindReadOnlyPaths={}:{CONTAINED_INPUT_ROOT}",
+            inputs.display()
+        )));
         fs::remove_dir_all(root).unwrap();
     }
 

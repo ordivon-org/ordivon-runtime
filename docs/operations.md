@@ -128,7 +128,7 @@ scripts/ordivon-runtime-deploy plan \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --env-file /etc/ordivon/ordivon-runtime.env \
   --receipt-root /var/lib/ordivon/deployments \
-  --expected-tool-count 22 \
+  --expected-tool-count 23 \
   --pretty
 
 scripts/ordivon-runtime-deploy apply \
@@ -141,7 +141,7 @@ scripts/ordivon-runtime-deploy apply \
   --database /var/lib/ordivon/registry/registry.sqlite3 \
   --env-file /etc/ordivon/ordivon-runtime.env \
   --receipt-root /var/lib/ordivon/deployments \
-  --expected-tool-count 22 \
+  --expected-tool-count 23 \
   --drain-seconds 30
 ```
 
@@ -160,7 +160,7 @@ Eligibility requires:
 - `plan` reports any active or held Job (except a provable deployment Job) as an eligibility blocker; `apply` may proceed past that single blocker only to stage a reversible candidate and acquire the Registry admission fence, then it must drain those Jobs naturally within `--drain-seconds`;
 - the confirmation commit exactly matches the requested commit.
 
-The tool first stages `.next` files and receipt-local previous artifacts without replacing the running release. It then takes an exclusive Registry `admission.lock`. Runtime new admission takes a shared lock only after exact replay has been checked, so a deployed Runtime returns retryable `DEPLOYMENT_IN_PROGRESS` for new work while already committed requests remain replayable. Under the exclusive fence, `apply` waits for active/held reservations to drain naturally and then stops MCP ingress immediately. It rechecks the Registry with ingress closed, reruns the complete deployment plan, and writes that final plan to the receipt before any release replacement. Only then are installed `.previous` artifacts refreshed and the staged Runtime release set is atomically committed below `--install-dir`. If the post-commit probe fails, recovery restores the receipt-local previous Runtime artifact set. The new service must become `active`, complete modern discovery, expose the expected 22-Tool catalog including `release.apply`, `release.get`, `runtime.describe`, and `workspace.content`, and match the bound candidate identities.
+The tool first stages `.next` files and receipt-local previous artifacts without replacing the running release. It then takes an exclusive Registry `admission.lock`. Runtime new admission takes a shared lock only after exact replay has been checked, so a deployed Runtime returns retryable `DEPLOYMENT_IN_PROGRESS` for new work while already committed requests remain replayable. Under the exclusive fence, `apply` waits for active/held reservations to drain naturally and then stops MCP ingress immediately. It rechecks the Registry with ingress closed, reruns the complete deployment plan, and writes that final plan to the receipt before any release replacement. Only then are installed `.previous` artifacts refreshed and the staged Runtime release set is atomically committed below `--install-dir`. If the post-commit probe fails, recovery restores the receipt-local previous Runtime artifact set. The new service must become `active`, complete modern discovery, expose the expected 23-Tool catalog including `release.apply`, `release.get`, `runtime.describe`, and `workspace.content`, and match the bound candidate identities.
 
 Structured self-release is opt-in operator authority. Set `ORDIVON_RELEASE_SOURCE_REPO` to the canonical Runtime source repository; optional `ORDIVON_RELEASE_INSTALL_DIR`, `ORDIVON_RELEASE_ENV_FILE`, `ORDIVON_RELEASE_RECEIPT_ROOT`, `ORDIVON_RELEASE_REQUIRED_REF`, and `ORDIVON_RELEASE_TIMEOUT_MS` refine the installation-owned boundary. The Registry database is derived from `ORDIVON_REGISTRY_ROOT`. Callers do not provide these host paths. `runtime.describe.structuredReleaseConfigured` reports whether the authority exists. `release.apply` accepts only a Workspace identity, exact Commit, exact candidate-manifest digest, expected Tool count, and durable `clientRequestId`. If the initiating connection disappears while Runtime replaces itself, do **not** send a new release request: reconnect and call `release.get` with the same `clientRequestId`. A deterministic `effect-<effectId>` receipt is the release-effect evidence; generic process exit or transport loss is not. Explicit rollback remains `ordivon-runtime-deploy rollback --receipt <receipt>` and is never selected automatically by Runtime.
 

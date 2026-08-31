@@ -150,6 +150,7 @@ fn every_workspace_id_tool_schema_projects_the_core_workspace_id_law() {
         "workspace.diff",
         "workspace.exec",
         "workspace.execBound",
+        "workspace.execBoundTrusted",
         "workspace.execPlan",
         "task.list",
     ];
@@ -210,6 +211,7 @@ fn execution_schemas_project_agent_authored_logical_id_law() {
     for tool_name in [
         "workspace.exec",
         "workspace.execBound",
+        "workspace.execBoundTrusted",
         "workspace.execPlan",
     ] {
         let tool = tools
@@ -277,6 +279,7 @@ fn every_client_request_id_tool_schema_projects_one_runtime_identity_law() {
         "workspace.patch.get",
         "workspace.exec",
         "workspace.execBound",
+        "workspace.execBoundTrusted",
         "workspace.execPlan",
         "task.list",
     ] {
@@ -339,6 +342,7 @@ fn execution_tool_schemas_project_environment_name_law() {
     for name in [
         "workspace.exec",
         "workspace.execBound",
+        "workspace.execBoundTrusted",
         "workspace.execPlan",
     ] {
         let tool = tools
@@ -516,6 +520,98 @@ fn workspace_exec_bound_binding_selects_runtime_owned_profile_by_target() {
     assert_eq!(proposal.execution.timeout_ms, None);
     assert_eq!(inputs.len(), 1);
     assert_eq!(inputs[0].authority, "finance-prepared");
+}
+
+#[test]
+fn workspace_exec_bound_trusted_binding_is_explicit_local_linux_trusted_authority() {
+    let server = Sandbox::new("bound-trusted-binding").server();
+    let request = WorkspaceExecBoundRequest {
+        schema_version: 1,
+        client_request_id: "request:bound-trusted".to_string(),
+        execution: WorkspaceExecBoundExecution {
+            workspace_id: "workspace:test".to_string(),
+            executable: "/usr/bin/true".to_string(),
+            args: Vec::new(),
+            cwd_relative: ".".to_string(),
+            env: Default::default(),
+            timeout_ms: None,
+            stdout_limit_bytes: None,
+            stderr_limit_bytes: None,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            execution_target: ExecutionTarget::LocalLinux,
+            windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
+            foreign_references: Vec::new(),
+        },
+        inputs: vec![InputBindingRequest {
+            authority: "finance-provider-observer-materials".to_string(),
+            relative_object: "config.toml".to_string(),
+            expected_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            presentation_relative_path: "finance-okx/config.toml".to_string(),
+        }],
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    let (proposal, inputs) = server.state.execution.bind_bound_trusted(request).unwrap();
+    assert_eq!(
+        proposal.execution.execution_target,
+        ExecutionTarget::LocalLinux
+    );
+    assert_eq!(
+        proposal.execution.execution_profile,
+        ExecutionProfile::TrustedLocal
+    );
+    assert_eq!(
+        proposal.execution.windows_authority,
+        ordivon_runtime_core::WindowsAuthority::Limited
+    );
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].authority, "finance-provider-observer-materials");
+}
+
+#[test]
+fn workspace_exec_bound_trusted_rejects_windows_target_before_runtime_admission() {
+    let server = Sandbox::new("bound-trusted-windows-reject").server();
+    let request = WorkspaceExecBoundRequest {
+        schema_version: 1,
+        client_request_id: "request:bound-trusted-windows".to_string(),
+        execution: WorkspaceExecBoundExecution {
+            workspace_id: "workspace:test".to_string(),
+            executable: "/usr/bin/true".to_string(),
+            args: Vec::new(),
+            cwd_relative: ".".to_string(),
+            env: Default::default(),
+            timeout_ms: None,
+            stdout_limit_bytes: None,
+            stderr_limit_bytes: None,
+            steps: Vec::new(),
+            budget: ExecutionBudget::default(),
+            execution_target: ExecutionTarget::WindowsNative,
+            windows_authority: ordivon_runtime_core::WindowsAuthority::Limited,
+            foreign_references: Vec::new(),
+        },
+        inputs: vec![InputBindingRequest {
+            authority: "finance-provider-observer-materials".to_string(),
+            relative_object: "config.toml".to_string(),
+            expected_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            presentation_relative_path: "finance-okx/config.toml".to_string(),
+        }],
+        wait_ms: 0,
+        stdout_tail_bytes: 0,
+        stderr_tail_bytes: 0,
+    };
+    let error = server
+        .state
+        .execution
+        .bind_bound_trusted(request)
+        .unwrap_err();
+    assert_eq!(error.code, "INVALID_REQUEST");
+    assert_eq!(error.field.as_deref(), Some("execution.executionTarget"));
 }
 
 #[test]
@@ -710,6 +806,7 @@ fn tool_effect_annotations_match_runtime_behavior() {
         ("workspace.diff", true, false, true, false),
         ("workspace.exec", false, true, false, true),
         ("workspace.execBound", false, true, false, false),
+        ("workspace.execBoundTrusted", false, true, false, true),
         ("workspace.execPlan", false, true, false, true),
         ("workspace.get", true, false, true, false),
         ("workspace.list", true, false, true, false),
@@ -783,7 +880,7 @@ fn tool_inputs_default_missing_schema_version_to_pinned_version() {
     let describe: RuntimeDescribeRequest = serde_json::from_str("{}").unwrap();
     assert_eq!(describe.schema_version, 1);
     let release_apply: RuntimeReleaseApplyToolRequest = serde_json::from_str(
-        r#"{"clientRequestId":"release-1","workspaceId":"ws-1","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","candidateManifestDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expectedToolCount":22}"#,
+        r#"{"clientRequestId":"release-1","workspaceId":"ws-1","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","candidateManifestDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expectedToolCount":23}"#,
     )
     .unwrap();
     assert_eq!(release_apply.schema_version, 1);
@@ -835,6 +932,7 @@ fn tool_catalog_uses_transactional_job_contract() {
             "workspace.diff",
             "workspace.exec",
             "workspace.execBound",
+            "workspace.execBoundTrusted",
             "workspace.execPlan",
             "workspace.get",
             "workspace.list",
@@ -1473,7 +1571,7 @@ fn every_public_tool_publishes_structured_output_contract() {
     let sandbox = Sandbox::new("all-output-schemas");
     let server = sandbox.server();
     let tools = server.tool_router.list_all();
-    assert_eq!(tools.len(), 22);
+    assert_eq!(tools.len(), 23);
     for tool in tools {
         let schema = tool
             .output_schema

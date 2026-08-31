@@ -1676,14 +1676,21 @@ fn input_bound_proposal_identity_preserves_proposal_and_binding_semantics() {
 }
 
 #[test]
-fn local_linux_immutable_inputs_reject_trusted_local_before_workspace_resolution() {
-    let sandbox = Sandbox::new("input-trusted-reject", 5000);
-    let runtime = Runtime::new(runtime_config(&sandbox)).unwrap();
-    let mut request = input_bound_task_request("workspace-does-not-exist", "request:input-trusted");
-    request.execution.execution_profile = ExecutionProfile::TrustedLocal;
+fn local_linux_immutable_inputs_accept_trusted_local_and_continue_to_workspace_resolution() {
+    let sandbox = Sandbox::new("input-trusted-admit", 5000);
     let authority = sandbox.root.join("authority");
     fs::create_dir_all(&authority).unwrap();
     fs::write(authority.join("input.bin"), b"payload").unwrap();
+    let runtime = Runtime::new_with_input_authorities(
+        runtime_config(&sandbox),
+        vec![InputAuthority {
+            name: "finance".to_string(),
+            root: authority,
+        }],
+    )
+    .unwrap();
+    let mut request = input_bound_task_request("workspace-does-not-exist", "request:input-trusted");
+    request.execution.execution_profile = ExecutionProfile::TrustedLocal;
     let error = runtime
         .run_task_with_inputs(
             &request,
@@ -1695,8 +1702,8 @@ fn local_linux_immutable_inputs_reject_trusted_local_before_workspace_resolution
             }],
         )
         .unwrap_err();
-    assert_eq!(error.code, RuntimeErrorCode::InvalidRequest);
-    assert_eq!(error.field.as_deref(), Some("execution.executionProfile"));
+    assert_eq!(error.code, RuntimeErrorCode::WorkspaceNotFound);
+    assert_ne!(error.field.as_deref(), Some("execution.executionProfile"));
     assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
 }
 

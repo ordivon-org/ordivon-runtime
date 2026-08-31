@@ -643,6 +643,35 @@ impl RuntimeServer {
     }
 
     #[tool(
+        name = "workspace.execBoundTrusted",
+        description = "Admit one trusted-local Linux execution with exact immutable inputs from operator-configured named authorities. This is an explicit higher-authority sibling of workspace.execBound: it preserves exact digest-bound Job-owned input materialization and read-only /run/ordivon/inputs presentation, but intentionally retains trusted_local ambient host and network authority. It supports local_linux only, does not infer provider/domain permission from input presence, and does not make external effects idempotent or reconcilable. Exact replay returns the historical Job before consulting current authority state.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),
+        annotations(
+            title = "Execute trusted-local with immutable inputs",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn workspace_exec_bound_trusted(
+        &self,
+        Parameters(request): Parameters<WorkspaceExecBoundRequest>,
+    ) -> ToolOutcome<TaskObservation> {
+        let runtime = self.state.runtime.clone();
+        let (proposal, inputs) = match self.state.execution.bind_bound_trusted(request) {
+            Ok(bound) => bound,
+            Err(error) => return ToolOutcome::Error(error),
+        };
+        self.run_core("workspace.execBoundTrusted", move || {
+            runtime
+                .run_task_proposal_with_inputs(&proposal, &inputs)
+                .map_err(ToolError::from)
+        })
+        .await
+    }
+
+    #[tool(
         name = "workspace.execPlan",
         description = "Run an ordered structured execution plan inside one Workspace. Steps use absolute executables and explicit args, run sequentially, stop on the first failure by default, and continue only when that step explicitly sets continueOnError. For trusted_local local_linux only, execution.hostDependencies may bind known absolute regular host prerequisite files by exact SHA-256 across the whole Job. Runtime validates them at admission and before dispatch; Runner then establishes path/topology drift witnesses before final digest validation and keeps them active across the complete plan, while each target executable path is independently witnessed through its step. Runtime fails closed on witnessed runtime drift without pretending that the files are immutable or that it inferred a complete environment closure. Exact replay resolves the committed Job before current dependency checks. Omitted waitMs performs only a brief 2-second observation after durable admission; long work returns the same Job for task.observe. The Job exposes step progress plus exact Attempt state, execution and delivery disposition, and recovery requirement without asking the caller to infer them from output.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<TaskObservation>>(),

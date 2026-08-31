@@ -5001,12 +5001,9 @@ fn validate_submit(request: &SubmitRequest) -> RuntimeResult<()> {
             }
             match request.plan.execution_target {
                 super::ExecutionTarget::LocalLinux => {
-                    if request.plan.execution_profile != super::ExecutionProfile::ContainedLocal {
-                        return Err(RuntimeError::invalid(
-                            "local_linux effective inputs require contained_local execution",
-                            "plan.executionProfile",
-                        ));
-                    }
+                    // Immutable input identity/presentation is independent of the
+                    // local Linux authority profile. Public admission decides whether
+                    // contained_local or trusted_local is appropriate.
                 }
                 super::ExecutionTarget::WindowsNative => {
                     if request.plan.execution_profile != super::ExecutionProfile::TrustedLocal {

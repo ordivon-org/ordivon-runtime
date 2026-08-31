@@ -132,7 +132,7 @@ A normal client journey is:
 ```text
 workspace.open
 → workspace.read / workspace.patch / workspace.content
-→ workspace.exec / workspace.execPlan / workspace.execBound
+→ workspace.exec / workspace.execPlan / workspace.execBound / workspace.execBoundTrusted
 → task.observe
 → artifact.read
 → workspace.diff

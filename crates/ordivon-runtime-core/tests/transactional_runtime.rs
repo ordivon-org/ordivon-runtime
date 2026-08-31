@@ -1853,6 +1853,71 @@ print(json.dumps({"input": path.read_text().strip(), "write": write_result}, sor
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_trusted_local_immutable_input_is_read_only_without_private_network() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("immutable-input-trusted-network");
+    context.write(
+        "trusted_input_probe.py",
+        r#"import json, os
+from pathlib import Path
+path = Path(os.environ["ORDIVON_INPUT_ROOT"]) / "finance" / "config.toml"
+write_result = "unexpected-success"
+try:
+    path.write_text("MUTATED\n")
+except Exception as error:
+    write_result = f"{type(error).__name__}:{error}"
+print(json.dumps({
+    "input": path.read_text().strip(),
+    "write": write_result,
+    "netns": os.readlink("/proc/self/ns/net"),
+}, sort_keys=True), flush=True)
+"#,
+    );
+    let authority_root = context.root.join("finance-observer-authority");
+    fs::create_dir_all(&authority_root).unwrap();
+    fs::write(authority_root.join("config.toml"), b"OPAQUE-CONFIG\n").unwrap();
+    let runtime = context.runtime_with_input_authorities(
+        2_000,
+        vec![InputAuthority {
+            name: "finance-provider-observer-materials".to_string(),
+            root: authority_root,
+        }],
+    );
+    let mut request = context.request("trusted_input_probe.py", 30_000);
+    request.client_request_id = format!("request:immutable-input-trusted:{}", Uuid::now_v7());
+    request.execution.execution_profile = ordivon_runtime_core::ExecutionProfile::TrustedLocal;
+    let inputs = vec![InputBindingRequest {
+        authority: "finance-provider-observer-materials".to_string(),
+        relative_object: "config.toml".to_string(),
+        expected_digest: digest(b"OPAQUE-CONFIG\n"),
+        presentation_relative_path: "finance/config.toml".to_string(),
+    }];
+    let host_netns = fs::read_link("/proc/self/ns/net").unwrap();
+    let terminal = runtime.run_task_with_inputs(&request, &inputs).unwrap();
+    assert_eq!(terminal.status, "succeeded", "{}", terminal.stderr_tail);
+    let stdout: serde_json::Value = serde_json::from_str(terminal.stdout_tail.trim()).unwrap();
+    assert_eq!(stdout["input"], "OPAQUE-CONFIG");
+    assert!(stdout["write"]
+        .as_str()
+        .unwrap()
+        .contains("Read-only file system"));
+    assert_eq!(stdout["netns"], host_netns.to_string_lossy().as_ref());
+    let plan = runtime.registry().execution_plan(&terminal.job_id).unwrap();
+    assert_eq!(
+        plan.execution_profile,
+        ordivon_runtime_core::ExecutionProfile::TrustedLocal
+    );
+    assert_eq!(plan.effective_inputs.len(), 1);
+    assert_eq!(
+        plan.effective_inputs[0].authority,
+        "finance-provider-observer-materials"
+    );
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
 fn runtime_failed_capacity_admission_discards_prepared_state_and_rechecks_current_authority() {
     if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;

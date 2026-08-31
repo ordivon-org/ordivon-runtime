@@ -152,7 +152,15 @@ pub(super) fn build_systemd_run_command(spec: &SystemdRunSpec<'_>) -> RuntimeRes
     }
 
     match execution_profile {
-        crate::runtime::ExecutionProfile::TrustedLocal => append_trusted_environment(&mut command),
+        crate::runtime::ExecutionProfile::TrustedLocal => {
+            append_trusted_environment(&mut command);
+            if let Some(input_set_path) = input_set_path {
+                let source = systemd_path_value(input_set_path)?;
+                command.arg(format!(
+                    "--property=BindReadOnlyPaths={source}:{CONTAINED_INPUT_ROOT}"
+                ));
+            }
+        }
         super::ExecutionProfile::ContainedLocal => {
             append_contained_properties(
                 &mut command,

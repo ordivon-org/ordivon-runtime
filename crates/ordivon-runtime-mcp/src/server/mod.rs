@@ -566,6 +566,54 @@ impl ExecutionContext {
         )
     }
 
+    fn bind_bound_trusted(
+        &self,
+        request: WorkspaceExecBoundRequest,
+    ) -> Result<(TaskRunProposal, Vec<InputBindingRequest>), ToolError> {
+        if request.execution.execution_target != ExecutionTarget::LocalLinux {
+            return Err(ToolError::invalid(
+                "workspace.execBoundTrusted supports local_linux only",
+                "execution.executionTarget",
+            ));
+        }
+        if request.execution.windows_authority != WindowsAuthority::Limited {
+            return Err(ToolError::invalid(
+                "workspace.execBoundTrusted does not accept Windows authority selection",
+                "execution.windowsAuthority",
+            ));
+        }
+        let execution = request.execution;
+        Ok((
+            TaskRunProposal {
+                schema_version: request.schema_version,
+                client_request_id: request.client_request_id,
+                principal: self.principal.clone(),
+                global_limit: self.global_limit,
+                execution: ExecutionProposal {
+                    workspace_id: execution.workspace_id,
+                    executable: execution.executable,
+                    args: execution.args,
+                    cwd_relative: execution.cwd_relative,
+                    env: execution.env,
+                    timeout_ms: execution.timeout_ms,
+                    stdout_limit_bytes: execution.stdout_limit_bytes,
+                    stderr_limit_bytes: execution.stderr_limit_bytes,
+                    steps: execution.steps,
+                    budget: execution.budget,
+                    execution_profile: ExecutionProfile::TrustedLocal,
+                    execution_target: ExecutionTarget::LocalLinux,
+                    windows_authority: WindowsAuthority::Limited,
+                    foreign_references: execution.foreign_references,
+                    host_dependencies: Vec::new(),
+                },
+                wait_ms: request.wait_ms,
+                stdout_tail_bytes: request.stdout_tail_bytes,
+                stderr_tail_bytes: request.stderr_tail_bytes,
+            },
+            request.inputs,
+        ))
+    }
+
     fn bind_plan(&self, request: WorkspaceExecPlanRequest) -> Result<BoundTaskRun, ToolError> {
         let first = request.execution.steps.first().cloned().ok_or_else(|| {
             ToolError::invalid("steps must contain at least one item", "execution.steps")

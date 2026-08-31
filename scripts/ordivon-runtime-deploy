@@ -51,6 +51,7 @@ DEFAULT_REQUIRED_TOOLS = (
     "release.get",
     "runtime.describe",
     "workspace.content",
+    "workspace.execBoundTrusted",
     "workspace.execPlan",
     "workspace.get",
     "workspace.list",

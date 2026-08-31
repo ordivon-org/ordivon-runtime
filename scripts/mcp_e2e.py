@@ -42,6 +42,7 @@ EXPECTED_TOOLS = {
     "workspace.diff",
     "workspace.exec",
     "workspace.execBound",
+    "workspace.execBoundTrusted",
     "workspace.execPlan",
     "workspace.get",
     "workspace.list",

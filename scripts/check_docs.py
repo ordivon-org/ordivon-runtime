@@ -110,8 +110,8 @@ def parse_tools() -> list[tuple[str, str]]:
     source = TOOL_SOURCE.read_text(encoding="utf-8")
     tools = [(name, " ".join(description.split())) for name, description in TOOL_PATTERN.findall(source)]
     names = [name for name, _ in tools]
-    if len(tools) != 22 or len(names) != len(set(names)):
-        raise DocumentError(f"expected 22 unique public Tools, found {len(tools)}")
+    if len(tools) != 23 or len(names) != len(set(names)):
+        raise DocumentError(f"expected 23 unique public Tools, found {len(tools)}")
     return sorted(tools)
 
 
