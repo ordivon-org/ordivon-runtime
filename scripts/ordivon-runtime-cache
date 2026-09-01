@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect and migrate Ordivon Runtime execution caches without deleting fallbacks."""
+"""Inspect and prune Ordivon Runtime execution caches under explicit retention authority."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ SCHEMA_VERSION = 1
 PRUNE_CONFIRMATION = "PRUNE_EXECUTION_CACHES"
 DEFAULT_HIGH_WATERMARK_BYTES = 64 * 1024 * 1024 * 1024
 DEFAULT_LOW_WATERMARK_BYTES = 48 * 1024 * 1024 * 1024
+CACHE_RETENTION_METRIC_IDENTITY = "path-apparent-nondirectory-bytes-count-hardlinks-v1"
 PACKAGE_CACHE_DIRS = (
     "uv",
     "pip",
@@ -77,8 +78,19 @@ def source_key(source_repo: str) -> str:
     return hashlib.sha256(source_repo.encode()).hexdigest()
 
 
-def directory_bytes(path: Path) -> int:
+def cache_retention_measurement(path: Path) -> dict[str, object]:
+    """Measure additive retention payload bytes with one explicit metric identity."""
+
+    if not path.exists():
+        return {
+            "metricIdentity": CACHE_RETENTION_METRIC_IDENTITY,
+            "standing": "absent",
+            "bytes": 0,
+            "lowerBoundBytes": 0,
+            "errors": 0,
+        }
     total = 0
+    errors = 0
     stack = [path]
     while stack:
         current = stack.pop()
@@ -93,10 +105,27 @@ def directory_bytes(path: Path) -> int:
                         elif entry.is_file(follow_symlinks=False):
                             total += entry.stat(follow_symlinks=False).st_size
                     except OSError:
-                        continue
+                        errors += 1
         except OSError:
-            continue
-    return total
+            errors += 1
+    return {
+        "metricIdentity": CACHE_RETENTION_METRIC_IDENTITY,
+        "standing": "measured" if errors == 0 else "incomplete",
+        "bytes": total if errors == 0 else None,
+        "lowerBoundBytes": total,
+        "errors": errors,
+    }
+
+
+def directory_bytes(path: Path) -> int:
+    measurement = cache_retention_measurement(path)
+    byte_count = measurement["bytes"]
+    if not isinstance(byte_count, int):
+        raise RuntimeError(
+            "cache retention measurement is incomplete: "
+            f"errors={measurement['errors']} lowerBoundBytes={measurement['lowerBoundBytes']}"
+        )
+    return byte_count
 
 
 def active_workspace_ids(database: Path) -> set[str]:
@@ -116,7 +145,7 @@ def active_workspace_ids(database: Path) -> set[str]:
             missing = columns - present
             if missing:
                 raise RuntimeError(
-                    "Runtime Registry lacks cache migration capabilities: "
+                    "Runtime Registry lacks cache retention capabilities: "
                     + ", ".join(f"{table}.{column}" for column in sorted(missing))
                 )
         rows = connection.execute(
@@ -131,6 +160,106 @@ def active_workspace_ids(database: Path) -> set[str]:
             """
         ).fetchall()
     return {str(row[0]) for row in rows}
+
+
+EMPTY_WORKSPACE_ACTIVITY_MARKER = "sha256:" + hashlib.sha256(b"").hexdigest()
+
+
+def workspace_activity_markers(database: Path) -> dict[str, str]:
+    """Digest Registry activity identity without introducing a time policy."""
+
+    uri = f"file:{quote(str(database))}?mode=ro"
+    digests: dict[str, object] = {}
+
+    def marker(workspace_id: str):
+        return digests.setdefault(workspace_id, hashlib.sha256())
+
+    with closing(sqlite3.connect(uri, uri=True, timeout=5)) as connection:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+        for workspace_id, job_id, resolution in connection.execute(
+            """
+            SELECT workspace_id, job_id, resolution
+            FROM jobs
+            ORDER BY workspace_id, job_id
+            """
+        ):
+            digest = marker(str(workspace_id))
+            assert hasattr(digest, "update")
+            digest.update(b"J\0")
+            digest.update(str(job_id).encode())
+            digest.update(b"\0")
+            digest.update(("" if resolution is None else str(resolution)).encode())
+            digest.update(b"\0")
+        for workspace_id, attempt_id in connection.execute(
+            """
+            SELECT jobs.workspace_id, attempts.attempt_id
+            FROM attempts
+            JOIN jobs ON jobs.job_id=attempts.job_id
+            ORDER BY jobs.workspace_id, attempts.attempt_id
+            """
+        ):
+            digest = marker(str(workspace_id))
+            assert hasattr(digest, "update")
+            digest.update(b"A\0")
+            digest.update(str(attempt_id).encode())
+            digest.update(b"\0")
+    return {
+        workspace_id: "sha256:" + digest.hexdigest()
+        for workspace_id, digest in digests.items()
+        if hasattr(digest, "hexdigest")
+    }
+
+
+def workspace_activity_marker_for(database: Path, workspace_id: str) -> str:
+    uri = f"file:{quote(str(database))}?mode=ro"
+    digest = hashlib.sha256()
+    with closing(sqlite3.connect(uri, uri=True, timeout=5)) as connection:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+        for job_id, resolution in connection.execute(
+            """
+            SELECT job_id, resolution
+            FROM jobs
+            WHERE workspace_id=?1
+            ORDER BY job_id
+            """,
+            [workspace_id],
+        ):
+            digest.update(b"J\0")
+            digest.update(str(job_id).encode())
+            digest.update(b"\0")
+            digest.update(("" if resolution is None else str(resolution)).encode())
+            digest.update(b"\0")
+        for (attempt_id,) in connection.execute(
+            """
+            SELECT attempts.attempt_id
+            FROM attempts
+            JOIN jobs ON jobs.job_id=attempts.job_id
+            WHERE jobs.workspace_id=?1
+            ORDER BY attempts.attempt_id
+            """,
+            [workspace_id],
+        ):
+            digest.update(b"A\0")
+            digest.update(str(attempt_id).encode())
+            digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+def workspace_record_standing(store_root: Path, workspace_id: str) -> str:
+    path = store_root / "workspace-records" / f"{workspace_id}.json"
+    if not path.exists():
+        return "absent"
+    if path.is_symlink() or not path.is_file():
+        return "unknown"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "unknown"
+    if value.get("workspaceId") != workspace_id:
+        return "unknown"
+    return "closed" if value.get("state", "open") == "closed" else "open"
 
 
 def load_open_records(store_root: Path) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -164,7 +293,19 @@ def load_open_records(store_root: Path) -> tuple[list[dict[str, str]], list[dict
 
 def inspect(database: Path, store_root: Path) -> dict[str, object]:
     cache_root = store_root / "cache"
-    total_bytes, candidates = cache_prune_candidates(database, store_root)
+    total_bytes, all_candidates = cache_prune_candidates(
+        database, store_root, include_idle_open_build=True
+    )
+    direct_candidates = [
+        candidate
+        for candidate in all_candidates
+        if candidate.get("requiresAdmissionFence") is not True
+    ]
+    fenced_idle_build = [
+        candidate
+        for candidate in all_candidates
+        if candidate.get("requiresAdmissionFence") is True
+    ]
     active = active_workspace_ids(database)
     records, issues = load_open_records(store_root)
     open_ids = {record["workspaceId"] for record in records}
@@ -172,7 +313,7 @@ def inspect(database: Path, store_root: Path) -> dict[str, object]:
 
     candidate_bytes_by_kind: dict[str, int] = {}
     candidate_count_by_kind: dict[str, int] = {}
-    for candidate in candidates:
+    for candidate in direct_candidates:
         kind = str(candidate["kind"])
         candidate_bytes_by_kind[kind] = candidate_bytes_by_kind.get(kind, 0) + int(
             candidate["bytes"]
@@ -180,8 +321,11 @@ def inspect(database: Path, store_root: Path) -> dict[str, object]:
         candidate_count_by_kind[kind] = candidate_count_by_kind.get(kind, 0) + 1
 
     package_bytes = directory_bytes(package_root)
-    reclaimable_bytes = sum(int(candidate["bytes"]) for candidate in candidates)
-    protected_or_external_bytes = max(0, total_bytes - reclaimable_bytes)
+    reclaimable_bytes = sum(int(candidate["bytes"]) for candidate in direct_candidates)
+    fenced_idle_build_bytes = sum(int(candidate["bytes"]) for candidate in fenced_idle_build)
+    protected_or_external_bytes = max(
+        0, total_bytes - reclaimable_bytes - fenced_idle_build_bytes
+    )
     return {
         "schemaVersion": SCHEMA_VERSION,
         "kind": "ordivon.runtime-cache-retention-inspection",
@@ -189,8 +333,11 @@ def inspect(database: Path, store_root: Path) -> dict[str, object]:
         "cacheRoot": str(cache_root),
         "summary": {
             "totalBytes": total_bytes,
+            "retentionMetricIdentity": CACHE_RETENTION_METRIC_IDENTITY,
             "runtimeReclaimableBytes": reclaimable_bytes,
-            "runtimeReclaimableCandidates": len(candidates),
+            "runtimeReclaimableCandidates": len(direct_candidates),
+            "fencedIdleWorkspaceBuildBytes": fenced_idle_build_bytes,
+            "fencedIdleWorkspaceBuildCandidates": len(fenced_idle_build),
             "packageManagerOwnedBytes": package_bytes,
             "protectedOrExternalBytes": protected_or_external_bytes,
             "openWorkspaces": len(open_ids),
@@ -201,12 +348,17 @@ def inspect(database: Path, store_root: Path) -> dict[str, object]:
             "runtimeReclaimable": {
                 "candidateBytesByKind": candidate_bytes_by_kind,
                 "candidateCountByKind": candidate_count_by_kind,
-                "candidates": candidates,
+                "candidates": direct_candidates,
+            },
+            "fencedIdleWorkspaceBuild": {
+                "bytes": fenced_idle_build_bytes,
+                "candidates": fenced_idle_build,
+                "law": "idle open Workspace build targets are reclaimable only after an exclusive admission fence plus in-fence active/held, Workspace-record, and planned-activity currentness rechecks; this is cache eviction, not Workspace semantic disposition",
             },
             "workspaceProtected": {
                 "openWorkspaceIds": sorted(open_ids),
                 "activeWorkspaceIds": sorted(active),
-                "law": "current Workspace-scoped build/generic/tmp caches are protected while the Workspace is open or active",
+                "law": "active/held Workspace build targets remain protected; generic and temporary Workspace caches remain protected for every open Workspace",
             },
             "packageManagerOwned": {
                 "root": str(package_root),
@@ -232,37 +384,76 @@ def cache_mtime_ms(path: Path) -> int:
     return int(latest * 1000)
 
 
-def cache_prune_candidates(database: Path, store_root: Path) -> tuple[int, list[dict[str, object]]]:
+def cache_prune_candidates(
+    database: Path,
+    store_root: Path,
+    *,
+    include_idle_open_build: bool = False,
+) -> tuple[int, list[dict[str, object]]]:
     cache_root = store_root / "cache"
     total_bytes = directory_bytes(cache_root)
     active = active_workspace_ids(database)
     records, _ = load_open_records(store_root)
     open_ids = {record["workspaceId"] for record in records}
+    activity_markers = workspace_activity_markers(database) if include_idle_open_build else {}
     candidates: list[dict[str, object]] = []
 
-    def add_children(root: Path, kind: str, protected: set[str]) -> None:
+    def add_children(
+        root: Path,
+        kind: str,
+        protected: set[str],
+        *,
+        fence_idle_open: bool = False,
+        idle_open_kind: str | None = None,
+    ) -> None:
         if not root.is_dir():
             return
         for child in root.iterdir():
             if child.name in protected or child.is_symlink() or not child.is_dir():
                 continue
-            candidates.append(
-                {
-                    "kind": kind,
-                    "path": str(child),
-                    "bytes": directory_bytes(child),
-                    "modifiedUnixMs": cache_mtime_ms(child),
-                }
-            )
+            idle_open = fence_idle_open and child.name in open_ids and child.name not in active
+            candidate_kind = idle_open_kind if idle_open and idle_open_kind else kind
+            candidate_bytes = directory_bytes(child)
+            if candidate_bytes <= 0:
+                continue
+            candidate = {
+                "kind": candidate_kind,
+                "path": str(child),
+                "bytes": candidate_bytes,
+                "modifiedUnixMs": cache_mtime_ms(child),
+                "workspaceId": child.name if candidate_kind != "source_build" else None,
+                "requiresAdmissionFence": idle_open,
+            }
+            if idle_open:
+                candidate["workspaceActivityMarker"] = activity_markers.get(
+                    child.name, EMPTY_WORKSPACE_ACTIVITY_MARKER
+                )
+            candidates.append(candidate)
 
-    add_children(cache_root / "build", "legacy_build", open_ids | active | {"sources"})
+    build_protected = active | {"sources"}
+    if not include_idle_open_build:
+        build_protected |= open_ids
+    add_children(
+        cache_root / "build",
+        "legacy_build",
+        build_protected,
+        fence_idle_open=include_idle_open_build,
+        idle_open_kind="idle_open_workspace_build",
+    )
     add_children(cache_root / "workspaces", "workspace_cache", open_ids | active)
     add_children(cache_root / "tmp", "workspace_tmp", open_ids | active)
     # Source-scoped build caches are legacy realization state. Current execution
     # always uses Workspace-scoped build targets, so no open Workspace or active
     # Job can hold a runtime dependency on cache/build/sources/<sourceKey>.
     add_children(cache_root / "build" / "sources", "source_build", set())
-    candidates.sort(key=lambda item: (int(item["modifiedUnixMs"]), -int(item["bytes"]), str(item["path"])))
+    add_children(cache_root / ".prune-detached", "detached_eviction", set())
+    candidates.sort(
+        key=lambda item: (
+            int(item["modifiedUnixMs"]),
+            -int(item["bytes"]),
+            str(item["path"]),
+        )
+    )
     return total_bytes, candidates
 
 
@@ -297,12 +488,85 @@ def resolve_prune_watermarks(args: argparse.Namespace) -> tuple[int, int]:
     return high, low
 
 
+def admission_fence_path(database: Path) -> Path:
+    return database.parent / "admission.lock"
+
+
+@contextmanager
+def exclusive_admission_fence(database: Path):
+    path = admission_fence_path(database)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def validate_cache_candidate(cache_root: Path, path: Path) -> Path:
+    if path.is_symlink() or not path.is_dir():
+        raise RuntimeError("cache candidate is not a regular directory")
+    resolved = path.resolve()
+    if resolved == cache_root or cache_root not in resolved.parents:
+        raise RuntimeError("cache candidate escapes cache root")
+    return resolved
+
+
+def detach_idle_open_build_candidate(
+    database: Path,
+    store_root: Path,
+    candidate: dict[str, object],
+    receipt_id: str,
+) -> tuple[Path | None, str | None]:
+    workspace_id = candidate.get("workspaceId")
+    if not isinstance(workspace_id, str) or not workspace_id:
+        raise RuntimeError("fenced Workspace build candidate lacks workspaceId")
+    if candidate.get("kind") != "idle_open_workspace_build":
+        raise RuntimeError("admission-fenced cache candidate has unexpected kind")
+    planned_activity = candidate.get("workspaceActivityMarker")
+    if not isinstance(planned_activity, str) or not planned_activity.startswith("sha256:"):
+        raise RuntimeError("fenced Workspace build candidate lacks activity currentness")
+    path = Path(str(candidate["path"]))
+    cache_root = (store_root / "cache").resolve()
+    expected = store_root / "cache" / "build" / workspace_id
+    if path != expected:
+        raise RuntimeError("fenced Workspace build candidate path/identity mismatch")
+
+    with exclusive_admission_fence(database):
+        if workspace_id in active_workspace_ids(database):
+            return None, "workspace_active_after_plan"
+        standing = workspace_record_standing(store_root, workspace_id)
+        if standing in {"absent", "unknown"}:
+            return None, f"workspace_record_{standing}_after_plan"
+        if standing == "open":
+            current_activity = workspace_activity_marker_for(database, workspace_id)
+            if current_activity != planned_activity:
+                return None, "workspace_activity_changed_after_plan"
+        validate_cache_candidate(cache_root, path)
+        detached_root = cache_root / ".prune-detached"
+        detached_root.mkdir(parents=True, exist_ok=True)
+        if detached_root.is_symlink() or not detached_root.is_dir():
+            raise RuntimeError("cache detach root is not a regular directory")
+        detached_name = hashlib.sha256(
+            f"{receipt_id}\0{workspace_id}\0{path}".encode()
+        ).hexdigest()
+        detached = detached_root / detached_name
+        if detached.exists() or detached.is_symlink():
+            raise RuntimeError("cache detach destination already exists")
+        os.rename(path, detached)
+        fsync_directory(path.parent)
+        fsync_directory(detached_root)
+        return detached, None
+
+
 def prune(args: argparse.Namespace) -> dict[str, object]:
     if args.confirm_policy != PRUNE_CONFIRMATION:
         raise RuntimeError(f"--confirm-policy must equal {PRUNE_CONFIRMATION}")
     high_watermark_bytes, low_watermark_bytes = resolve_prune_watermarks(args)
     with exclusive_lock(args.lock_file):
-        before_bytes, candidates = cache_prune_candidates(args.database, args.runtime_store_root)
+        before_bytes, candidates = cache_prune_candidates(
+            args.database,
+            args.runtime_store_root,
+            include_idle_open_build=True,
+        )
         selected: list[dict[str, object]] = []
         retained = before_bytes
         if before_bytes > high_watermark_bytes:
@@ -323,23 +587,54 @@ def prune(args: argparse.Namespace) -> dict[str, object]:
             "candidateCount": len(candidates),
             "selected": selected,
         }
+        # The destructive plan must exist before any candidate crosses its effect boundary.
+        write_json_atomic(receipt / "plan.json", plan)
         actions: list[dict[str, object]] = []
         failures: list[dict[str, object]] = []
         cache_root = (args.runtime_store_root / "cache").resolve()
         for candidate in selected:
             path = Path(str(candidate["path"]))
+            detached: Path | None = None
             try:
-                resolved = path.resolve()
-                if resolved == cache_root or cache_root not in resolved.parents:
-                    raise RuntimeError("cache candidate escapes cache root")
-                if path.is_symlink() or not path.is_dir():
-                    raise RuntimeError("cache candidate is not a regular directory")
-                shutil.rmtree(path)
-                actions.append({**candidate, "action": "cache_removed"})
+                if candidate.get("requiresAdmissionFence") is True:
+                    detached, retained_reason = detach_idle_open_build_candidate(
+                        args.database,
+                        args.runtime_store_root,
+                        candidate,
+                        receipt.name,
+                    )
+                    if detached is None:
+                        actions.append(
+                            {
+                                **candidate,
+                                "action": "cache_retained",
+                                "reason": retained_reason,
+                            }
+                        )
+                        continue
+                    shutil.rmtree(detached)
+                    fsync_directory(detached.parent)
+                    actions.append(
+                        {
+                            **candidate,
+                            "action": "idle_workspace_build_evicted",
+                            "detachedPath": str(detached),
+                        }
+                    )
+                else:
+                    validate_cache_candidate(cache_root, path)
+                    shutil.rmtree(path)
+                    fsync_directory(path.parent)
+                    actions.append({**candidate, "action": "cache_removed"})
             except (OSError, RuntimeError) as error:
-                failures.append({**candidate, "error": str(error)})
+                failure = {**candidate, "error": str(error)}
+                if detached is not None:
+                    failure["detachedPath"] = str(detached)
+                failures.append(failure)
         after_bytes, remaining_candidates = cache_prune_candidates(
-            args.database, args.runtime_store_root
+            args.database,
+            args.runtime_store_root,
+            include_idle_open_build=True,
         )
         remaining_candidate_bytes = sum(
             int(candidate["bytes"]) for candidate in remaining_candidates
@@ -372,7 +667,6 @@ def prune(args: argparse.Namespace) -> dict[str, object]:
             "failures": failures,
             "receipt": str(receipt),
         }
-        write_json_atomic(receipt / "plan.json", plan)
         write_json_atomic(receipt / "result.json", result)
         return result
 
@@ -385,6 +679,15 @@ def exclusive_lock(path: Path):
         yield
 
 
+def fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def write_json_atomic(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
@@ -394,6 +697,7 @@ def write_json_atomic(path: Path, value: object) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+    fsync_directory(path.parent)
 
 
 def main() -> int:

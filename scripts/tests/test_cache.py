@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import runpy
+import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -111,7 +115,8 @@ class CacheRetentionTests(unittest.TestCase):
         self.assertIn("{inspect,prune}", completed.stdout)
         self.assertNotIn("migrate", completed.stdout)
 
-    def test_prune_uses_watermarks_and_preserves_open_workspace_cache(self) -> None:
+    def test_zero_byte_cache_directories_are_not_retention_candidates(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runtime = root / "runtime"
@@ -119,13 +124,55 @@ class CacheRetentionTests(unittest.TestCase):
             initialize_registry(database)
             source = root / "source"
             source.mkdir()
-            record(runtime, "workspace-protected", source)
-            protected = runtime / "cache" / "build" / "workspace-protected"
-            protected.mkdir(parents=True)
-            (protected / "artifact").write_bytes(b"p" * 5)
-            stale = runtime / "cache" / "build" / "workspace-stale"
-            stale.mkdir(parents=True)
-            (stale / "artifact").write_bytes(b"s" * 120)
+            workspace_id = "workspace-empty-build"
+            record(runtime, workspace_id, source)
+            empty_build = runtime / "cache" / "build" / workspace_id
+            (empty_build / "cargo").mkdir(parents=True)
+
+            _total, candidates = module["cache_prune_candidates"](
+                database, runtime, include_idle_open_build=True
+            )
+            self.assertNotIn(str(empty_build), [str(row["path"]) for row in candidates])
+
+    def test_prune_evicts_idle_open_build_but_keeps_open_generic_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            source = root / "source"
+            source.mkdir()
+            workspace_id = "workspace-idle"
+            record(runtime, workspace_id, source)
+            build = runtime / "cache" / "build" / workspace_id
+            build.mkdir(parents=True)
+            (build / "artifact").write_bytes(b"b" * 120)
+            generic = runtime / "cache" / "workspaces" / workspace_id
+            generic.mkdir(parents=True)
+            (generic / "state").write_bytes(b"g" * 5)
+
+            inspected = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-cache",
+                    "inspect",
+                    "--database",
+                    str(database),
+                    "--runtime-store-root",
+                    str(runtime),
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            inspection = json.loads(inspected.stdout)
+            self.assertGreater(inspection["summary"]["fencedIdleWorkspaceBuildBytes"], 0)
+            fenced = inspection["authority"]["fencedIdleWorkspaceBuild"]["candidates"]
+            self.assertEqual(len(fenced), 1)
+            self.assertEqual(fenced[0]["workspaceId"], workspace_id)
+            self.assertEqual(fenced[0]["kind"], "idle_open_workspace_build")
+            self.assertTrue(fenced[0]["requiresAdmissionFence"])
 
             completed = subprocess.run(
                 [
@@ -154,18 +201,60 @@ class CacheRetentionTests(unittest.TestCase):
             )
             report = json.loads(completed.stdout)
             self.assertEqual(report["status"], "completed")
-            self.assertTrue(protected.is_dir())
-            self.assertFalse(stale.exists())
+            self.assertFalse(build.exists())
+            self.assertTrue(generic.is_dir())
             self.assertLessEqual(report["afterBytes"], 50)
-            self.assertEqual(report["actions"][0]["action"], "cache_removed")
+            self.assertEqual(report["actions"][0]["action"], "idle_workspace_build_evicted")
             self.assertTrue(Path(report["receipt"], "plan.json").is_file())
 
-    def test_prune_reports_protected_residual_without_execution_failure(self) -> None:
+    def test_unresolved_and_held_jobs_protect_workspace_build_targets(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runtime = root / "runtime"
             database = root / "registry.sqlite3"
             initialize_registry(database)
+            source = root / "source"
+            source.mkdir()
+            unresolved_id = "workspace-unresolved"
+            held_id = "workspace-held"
+            record(runtime, unresolved_id, source)
+            record(runtime, held_id, source)
+            for workspace_id in (unresolved_id, held_id):
+                build = runtime / "cache" / "build" / workspace_id
+                build.mkdir(parents=True)
+                (build / "artifact").write_bytes(b"b" * 120)
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute(
+                    "INSERT INTO jobs VALUES ('job-unresolved',?,NULL)", (unresolved_id,)
+                )
+                connection.execute(
+                    "INSERT INTO jobs VALUES ('job-held',?,'failed')", (held_id,)
+                )
+                connection.execute(
+                    "INSERT INTO attempts VALUES ('attempt-held','job-held')"
+                )
+                connection.execute(
+                    "INSERT INTO concurrency_reservations VALUES ('attempt-held','held_orphaned')"
+                )
+                connection.commit()
+
+            _total, candidates = module["cache_prune_candidates"](
+                database, runtime, include_idle_open_build=True
+            )
+            candidate_ids = {item.get("workspaceId") for item in candidates}
+            self.assertNotIn(unresolved_id, candidate_ids)
+            self.assertNotIn(held_id, candidate_ids)
+            active = module["active_workspace_ids"](database)
+            self.assertIn(unresolved_id, active)
+            self.assertIn(held_id, active)
+
+    def test_prune_reports_active_workspace_build_as_protected_residual(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database, "workspace-protected")
             source = root / "source"
             source.mkdir()
             record(runtime, "workspace-protected", source)
@@ -207,6 +296,312 @@ class CacheRetentionTests(unittest.TestCase):
             self.assertEqual(report["actions"], [])
             self.assertEqual(report["failures"], [])
             self.assertTrue(protected.is_dir())
+
+    def test_prune_rechecks_idle_workspace_under_admission_fence(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            source = root / "source"
+            source.mkdir()
+            workspace_id = "workspace-raced-active"
+            record(runtime, workspace_id, source)
+            build = runtime / "cache" / "build" / workspace_id
+            build.mkdir(parents=True)
+            (build / "artifact").write_bytes(b"b" * 120)
+            args = type(
+                "Args",
+                (),
+                {
+                    "database": database,
+                    "runtime_store_root": runtime,
+                    "receipt_root": root / "receipts",
+                    "lock_file": root / "cache.lock",
+                    "env_file": None,
+                    "confirm_policy": "PRUNE_EXECUTION_CACHES",
+                    "high_watermark_bytes": 50,
+                    "low_watermark_bytes": 10,
+                },
+            )()
+            fence = module["admission_fence_path"](database)
+            fence.parent.mkdir(parents=True, exist_ok=True)
+            result: dict[str, object] = {}
+            errors: list[BaseException] = []
+
+            def run_prune() -> None:
+                try:
+                    result["report"] = module["prune"](args)
+                except BaseException as error:  # pragma: no cover - surfaced below
+                    errors.append(error)
+
+            with fence.open("a+", encoding="utf-8") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+                thread = threading.Thread(target=run_prune)
+                thread.start()
+                deadline = time.monotonic() + 2
+                plan_paths: list[Path] = []
+                while time.monotonic() < deadline:
+                    plan_paths = list((root / "receipts").glob("*/plan.json"))
+                    if plan_paths:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(len(plan_paths), 1)
+                self.assertTrue(thread.is_alive())
+                with closing(sqlite3.connect(database)) as connection:
+                    connection.execute(
+                        "INSERT INTO jobs VALUES ('job-race',?,NULL)", (workspace_id,)
+                    )
+                    connection.execute(
+                        "INSERT INTO attempts VALUES ('attempt-race','job-race')"
+                    )
+                    connection.execute(
+                        "INSERT INTO concurrency_reservations VALUES ('attempt-race','active')"
+                    )
+                    connection.commit()
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            report = result["report"]
+            self.assertIsInstance(report, dict)
+            assert isinstance(report, dict)
+            self.assertEqual(report["status"], "completed")
+            self.assertEqual(report["capacityDisposition"], "protected_residual")
+            self.assertEqual(report["failures"], [])
+            self.assertEqual(len(report["actions"]), 1)
+            self.assertEqual(report["actions"][0]["action"], "cache_retained")
+            self.assertEqual(
+                report["actions"][0]["reason"], "workspace_active_after_plan"
+            )
+            self.assertTrue(build.is_dir())
+            self.assertTrue(Path(report["receipt"], "plan.json").is_file())
+
+    def test_plan_then_terminal_reuse_invalidates_idle_build_candidate(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            source = root / "source"
+            source.mkdir()
+            workspace_id = "workspace-raced-terminal"
+            record(runtime, workspace_id, source)
+            build = runtime / "cache" / "build" / workspace_id
+            build.mkdir(parents=True)
+            (build / "artifact").write_bytes(b"b" * 120)
+            args = type(
+                "Args",
+                (),
+                {
+                    "database": database,
+                    "runtime_store_root": runtime,
+                    "receipt_root": root / "receipts",
+                    "lock_file": root / "cache.lock",
+                    "env_file": None,
+                    "confirm_policy": "PRUNE_EXECUTION_CACHES",
+                    "high_watermark_bytes": 50,
+                    "low_watermark_bytes": 10,
+                },
+            )()
+            fence = module["admission_fence_path"](database)
+            fence.parent.mkdir(parents=True, exist_ok=True)
+            result: dict[str, object] = {}
+            errors: list[BaseException] = []
+
+            def run_prune() -> None:
+                try:
+                    result["report"] = module["prune"](args)
+                except BaseException as error:  # pragma: no cover - surfaced below
+                    errors.append(error)
+
+            with fence.open("a+", encoding="utf-8") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+                thread = threading.Thread(target=run_prune)
+                thread.start()
+                deadline = time.monotonic() + 2
+                plan_paths: list[Path] = []
+                while time.monotonic() < deadline:
+                    plan_paths = list((root / "receipts").glob("*/plan.json"))
+                    if plan_paths:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(len(plan_paths), 1)
+                self.assertTrue(thread.is_alive())
+                with closing(sqlite3.connect(database)) as connection:
+                    connection.execute(
+                        "INSERT INTO jobs VALUES ('job-terminal-race',?,'succeeded')",
+                        (workspace_id,),
+                    )
+                    connection.execute(
+                        "INSERT INTO attempts VALUES ('attempt-terminal-race','job-terminal-race')"
+                    )
+                    connection.commit()
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            report = result["report"]
+            self.assertIsInstance(report, dict)
+            assert isinstance(report, dict)
+            self.assertEqual(report["status"], "partial")
+            self.assertEqual(report["capacityDisposition"], "reclaimable_residual")
+            self.assertEqual(report["failures"], [])
+            self.assertEqual(len(report["actions"]), 1)
+            self.assertEqual(report["actions"][0]["action"], "cache_retained")
+            self.assertEqual(
+                report["actions"][0]["reason"],
+                "workspace_activity_changed_after_plan",
+            )
+            self.assertTrue(build.is_dir())
+
+    def test_plan_then_workspace_record_unknown_retains_idle_build(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            source = root / "source"
+            source.mkdir()
+            workspace_id = "workspace-record-race"
+            record(runtime, workspace_id, source)
+            build = runtime / "cache" / "build" / workspace_id
+            build.mkdir(parents=True)
+            (build / "artifact").write_bytes(b"b" * 120)
+            _total, candidates = module["cache_prune_candidates"](
+                database, runtime, include_idle_open_build=True
+            )
+            candidate = next(
+                item for item in candidates if item.get("workspaceId") == workspace_id
+            )
+            record_path = runtime / "workspace-records" / f"{workspace_id}.json"
+            record_path.write_text("{", encoding="utf-8")
+
+            detached, retained_reason = module["detach_idle_open_build_candidate"](
+                database, runtime, candidate, "receipt-test"
+            )
+            self.assertIsNone(detached)
+            self.assertEqual(retained_reason, "workspace_record_unknown_after_plan")
+            self.assertTrue(build.is_dir())
+
+    def test_idle_build_detach_waits_for_runtime_admission_fence(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            source = root / "source"
+            source.mkdir()
+            workspace_id = "workspace-fenced"
+            record(runtime, workspace_id, source)
+            build = runtime / "cache" / "build" / workspace_id
+            build.mkdir(parents=True)
+            (build / "artifact").write_bytes(b"b" * 120)
+            _total, candidates = module["cache_prune_candidates"](
+                database, runtime, include_idle_open_build=True
+            )
+            candidate = next(
+                item for item in candidates if item.get("workspaceId") == workspace_id
+            )
+            fence = module["admission_fence_path"](database)
+            fence.parent.mkdir(parents=True, exist_ok=True)
+            result: dict[str, object] = {}
+            errors: list[BaseException] = []
+
+            def detach() -> None:
+                try:
+                    result["path"] = module["detach_idle_open_build_candidate"](
+                        database, runtime, candidate, "receipt-test"
+                    )
+                except BaseException as error:  # pragma: no cover - surfaced below
+                    errors.append(error)
+
+            with fence.open("a+", encoding="utf-8") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+                thread = threading.Thread(target=detach)
+                thread.start()
+                time.sleep(0.05)
+                self.assertTrue(thread.is_alive())
+                self.assertTrue(build.is_dir())
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            detached_result = result["path"]
+            self.assertIsInstance(detached_result, tuple)
+            assert isinstance(detached_result, tuple)
+            detached, retained_reason = detached_result
+            self.assertIsInstance(detached, Path)
+            assert isinstance(detached, Path)
+            self.assertIsNone(retained_reason)
+            self.assertFalse(build.exists())
+            self.assertTrue(detached.is_dir())
+            shutil.rmtree(detached)
+
+    def test_idle_build_delete_failure_leaves_reclaimable_detached_residual(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            source = root / "source"
+            source.mkdir()
+            workspace_id = "workspace-detach-failure"
+            record(runtime, workspace_id, source)
+            build = runtime / "cache" / "build" / workspace_id
+            build.mkdir(parents=True)
+            (build / "artifact").write_bytes(b"b" * 120)
+            args = type(
+                "Args",
+                (),
+                {
+                    "database": database,
+                    "runtime_store_root": runtime,
+                    "receipt_root": root / "receipts",
+                    "lock_file": root / "cache.lock",
+                    "env_file": None,
+                    "confirm_policy": "PRUNE_EXECUTION_CACHES",
+                    "high_watermark_bytes": 50,
+                    "low_watermark_bytes": 10,
+                },
+            )()
+            shutil_module = module["shutil"]
+            original_rmtree = shutil_module.rmtree
+            observed_plan_before_delete = False
+
+            def fail_detached_delete(path: Path) -> None:
+                nonlocal observed_plan_before_delete
+                if ".prune-detached" in path.parts:
+                    observed_plan_before_delete = bool(
+                        list((root / "receipts").glob("*/plan.json"))
+                    )
+                    raise OSError("synthetic detached delete failure")
+                original_rmtree(path)
+
+            shutil_module.rmtree = fail_detached_delete
+            try:
+                report = module["prune"](args)
+            finally:
+                shutil_module.rmtree = original_rmtree
+            self.assertTrue(observed_plan_before_delete)
+            self.assertEqual(report["status"], "partial")
+            self.assertEqual(report["capacityDisposition"], "reclaimable_residual")
+            self.assertFalse(build.exists())
+            detached = list((runtime / "cache" / ".prune-detached").iterdir())
+            self.assertEqual(len(detached), 1)
+            self.assertTrue((detached[0] / "artifact").is_file())
+            self.assertGreaterEqual(report["remainingCandidateBytes"], 120)
+            _total, candidates = module["cache_prune_candidates"](
+                database, runtime, include_idle_open_build=True
+            )
+            stranded = [item for item in candidates if item["kind"] == "detached_eviction"]
+            self.assertEqual(len(stranded), 1)
+            self.assertEqual(Path(stranded[0]["path"]), detached[0])
 
     def test_prune_keeps_reclaimable_residual_partial_after_delete_failure(self) -> None:
         module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
