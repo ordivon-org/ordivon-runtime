@@ -181,6 +181,8 @@ class CacheRetentionTests(unittest.TestCase):
                     "prune",
                     "--database",
                     str(database),
+                    "--registry-root",
+                    str(database.parent),
                     "--runtime-store-root",
                     str(runtime),
                     "--receipt-root",
@@ -269,6 +271,8 @@ class CacheRetentionTests(unittest.TestCase):
                     "prune",
                     "--database",
                     str(database),
+                    "--registry-root",
+                    str(database.parent),
                     "--runtime-store-root",
                     str(runtime),
                     "--receipt-root",
@@ -316,6 +320,7 @@ class CacheRetentionTests(unittest.TestCase):
                 (),
                 {
                     "database": database,
+                    "registry_root": database.parent,
                     "runtime_store_root": runtime,
                     "receipt_root": root / "receipts",
                     "lock_file": root / "cache.lock",
@@ -325,7 +330,7 @@ class CacheRetentionTests(unittest.TestCase):
                     "low_watermark_bytes": 10,
                 },
             )()
-            fence = module["admission_fence_path"](database)
+            fence = module["admission_fence_path"](database, database.parent)
             fence.parent.mkdir(parents=True, exist_ok=True)
             result: dict[str, object] = {}
             errors: list[BaseException] = []
@@ -397,6 +402,7 @@ class CacheRetentionTests(unittest.TestCase):
                 (),
                 {
                     "database": database,
+                    "registry_root": database.parent,
                     "runtime_store_root": runtime,
                     "receipt_root": root / "receipts",
                     "lock_file": root / "cache.lock",
@@ -406,7 +412,7 @@ class CacheRetentionTests(unittest.TestCase):
                     "low_watermark_bytes": 10,
                 },
             )()
-            fence = module["admission_fence_path"](database)
+            fence = module["admission_fence_path"](database, database.parent)
             fence.parent.mkdir(parents=True, exist_ok=True)
             result: dict[str, object] = {}
             errors: list[BaseException] = []
@@ -481,7 +487,7 @@ class CacheRetentionTests(unittest.TestCase):
             record_path.write_text("{", encoding="utf-8")
 
             detached, retained_reason = module["detach_idle_open_build_candidate"](
-                database, runtime, candidate, "receipt-test"
+                database, database.parent, runtime, candidate, "receipt-test"
             )
             self.assertIsNone(detached)
             self.assertEqual(retained_reason, "workspace_record_unknown_after_plan")
@@ -507,7 +513,7 @@ class CacheRetentionTests(unittest.TestCase):
             candidate = next(
                 item for item in candidates if item.get("workspaceId") == workspace_id
             )
-            fence = module["admission_fence_path"](database)
+            fence = module["admission_fence_path"](database, database.parent)
             fence.parent.mkdir(parents=True, exist_ok=True)
             result: dict[str, object] = {}
             errors: list[BaseException] = []
@@ -515,7 +521,7 @@ class CacheRetentionTests(unittest.TestCase):
             def detach() -> None:
                 try:
                     result["path"] = module["detach_idle_open_build_candidate"](
-                        database, runtime, candidate, "receipt-test"
+                        database, database.parent, runtime, candidate, "receipt-test"
                     )
                 except BaseException as error:  # pragma: no cover - surfaced below
                     errors.append(error)
@@ -561,6 +567,7 @@ class CacheRetentionTests(unittest.TestCase):
                 (),
                 {
                     "database": database,
+                    "registry_root": database.parent,
                     "runtime_store_root": runtime,
                     "receipt_root": root / "receipts",
                     "lock_file": root / "cache.lock",
@@ -618,6 +625,7 @@ class CacheRetentionTests(unittest.TestCase):
                 (),
                 {
                     "database": database,
+                    "registry_root": database.parent,
                     "runtime_store_root": runtime,
                     "receipt_root": root / "receipts",
                     "lock_file": root / "cache.lock",
@@ -666,6 +674,8 @@ class CacheRetentionTests(unittest.TestCase):
                     "prune",
                     "--database",
                     str(database),
+                    "--registry-root",
+                    str(database.parent),
                     "--runtime-store-root",
                     str(runtime),
                     "--receipt-root",
@@ -710,6 +720,8 @@ class CacheRetentionTests(unittest.TestCase):
                     "prune",
                     "--database",
                     str(database),
+                    "--registry-root",
+                    str(database.parent),
                     "--runtime-store-root",
                     str(runtime),
                     "--receipt-root",
@@ -754,6 +766,8 @@ class CacheRetentionTests(unittest.TestCase):
                     "prune",
                     "--database",
                     str(database),
+                    "--registry-root",
+                    str(database.parent),
                     "--runtime-store-root",
                     str(runtime),
                     "--receipt-root",
@@ -798,12 +812,84 @@ class CacheRetentionTests(unittest.TestCase):
             )()
             self.assertEqual(module["resolve_prune_watermarks"](args), (50, 10))
 
+    def test_prune_rejects_database_alias_before_effect(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            authority = root / "registry-authority"
+            alias = root / "operator-alias"
+            runtime = root / "runtime"
+            authority.mkdir()
+            alias.mkdir()
+            database = authority / "registry.sqlite3"
+            initialize_registry(database)
+            alias_database = alias / "registry.sqlite3"
+            alias_database.symlink_to(database)
+            source = root / "source"
+            source.mkdir()
+            workspace_id = "workspace-alias-fence"
+            record(runtime, workspace_id, source)
+            build = runtime / "cache" / "build" / workspace_id
+            build.mkdir(parents=True)
+            (build / "artifact").write_bytes(b"b" * 120)
+            args = type(
+                "Args",
+                (),
+                {
+                    "database": alias_database,
+                    "registry_root": alias,
+                    "runtime_store_root": runtime,
+                    "receipt_root": root / "receipts",
+                    "lock_file": root / "cache.lock",
+                    "env_file": None,
+                    "confirm_policy": "PRUNE_EXECUTION_CACHES",
+                    "high_watermark_bytes": 50,
+                    "low_watermark_bytes": 10,
+                },
+            )()
+            with self.assertRaisesRegex(RuntimeError, "Registry database is not a direct regular file"):
+                module["prune"](args)
+            self.assertTrue(build.is_dir())
+            self.assertFalse((root / "receipts").exists())
+
+    def test_prune_rejects_hardlinked_database_alias_before_effect(self) -> None:
+        module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-cache"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            authority = root / "registry-authority"
+            alias = root / "operator-alias"
+            authority.mkdir()
+            alias.mkdir()
+            database = authority / "registry.sqlite3"
+            initialize_registry(database)
+            alias_database = alias / "registry.sqlite3"
+            alias_database.hardlink_to(database)
+            args = type(
+                "Args",
+                (),
+                {
+                    "database": alias_database,
+                    "registry_root": alias,
+                    "runtime_store_root": root / "runtime",
+                    "receipt_root": root / "receipts",
+                    "lock_file": root / "cache.lock",
+                    "env_file": None,
+                    "confirm_policy": "PRUNE_EXECUTION_CACHES",
+                    "high_watermark_bytes": 50,
+                    "low_watermark_bytes": 10,
+                },
+            )()
+            with self.assertRaisesRegex(RuntimeError, "multiple hardlink names"):
+                module["prune"](args)
+            self.assertFalse((root / "receipts").exists())
+
     def test_packaged_lifecycle_uses_operator_cache_policy(self) -> None:
         unit = (REPO / "packaging/systemd/ordivon-runtime-lifecycle.service").read_text(
             encoding="utf-8"
         )
         cache_line = next(line for line in unit.splitlines() if "ordivon-runtime-cache prune" in line)
         self.assertIn("--env-file /etc/ordivon/ordivon-runtime.env", cache_line)
+        self.assertIn("--registry-root /var/lib/ordivon/registry", cache_line)
         self.assertNotIn("--high-watermark-bytes", cache_line)
         self.assertNotIn("--low-watermark-bytes", cache_line)
 
