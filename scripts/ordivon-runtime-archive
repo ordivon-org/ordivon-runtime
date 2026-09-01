@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""Read-only planning for versioned Ordivon Runtime cold-history archival."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sqlite3
+import sys
+import time
+from pathlib import Path
+from urllib.parse import quote
+
+SCHEMA_VERSION = 1
+STABLE_TERMINAL_RESOLUTIONS = ("succeeded", "failed", "timed_out", "cancelled")
+STABLE_TERMINAL_ATTEMPT_STATES = STABLE_TERMINAL_RESOLUTIONS
+REPAIRABLE_TERMINALS = ("lost", "orphaned")
+DEFAULT_MINIMUM_AGE_HOURS = 168.0
+DEFAULT_SAMPLE_LIMIT = 20
+MAX_SAMPLE_LIMIT = 100
+TRUTH_ROLE = "archive-eligibility-observation-not-export-or-deletion-authority"
+
+REQUIRED_REGISTRY_COLUMNS = {
+    "schema_migrations": {"version"},
+    "jobs": {
+        "job_id",
+        "principal",
+        "client_request_id",
+        "request_digest",
+        "operation_digest",
+        "workspace_id",
+        "workspace_snapshot_json",
+        "execution_plan_json",
+        "execution_plan_digest",
+        "created_at_ms",
+        "resolution",
+        "current_attempt_id",
+    },
+    "attempts": {
+        "attempt_id",
+        "job_id",
+        "attempt_number",
+        "state",
+        "bundle_path",
+        "created_at_ms",
+    },
+    "idempotency_keys": {
+        "principal",
+        "client_request_id",
+        "operation_digest",
+        "job_id",
+        "created_at_ms",
+    },
+    "concurrency_reservations": {
+        "reservation_id",
+        "attempt_id",
+        "state",
+    },
+    "job_events": {
+        "event_id",
+        "job_id",
+        "attempt_id",
+        "detail_json",
+        "detail_digest",
+    },
+    "artifacts": {
+        "artifact_id",
+        "job_id",
+        "attempt_id",
+        "kind",
+        "relative_path",
+        "digest",
+        "media_type",
+        "byte_length",
+    },
+    "attempt_conditions": {
+        "attempt_id",
+        "condition_type",
+        "status",
+        "reason_code",
+        "evidence_digest",
+    },
+    "job_execution_providers": {"job_id", "snapshot_json", "snapshot_digest"},
+    "job_runtime_release_effects": {"job_id", "effect_id", "binding_digest"},
+    "job_host_dependencies": {"job_id", "bindings_json", "bindings_digest"},
+    "attempt_supervisor_owners": {"attempt_id", "owner_json", "owner_digest"},
+}
+
+
+def absolute_path(value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("path must be absolute")
+    return path
+
+
+def nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("hours must be finite and non-negative")
+    return parsed
+
+
+def positive_timeout(value: str) -> int:
+    timeout = int(value)
+    if not 1 <= timeout <= 2_147_483_647:
+        raise argparse.ArgumentTypeError(
+            "timeout must fit SQLite's signed 32-bit millisecond busy-timeout range"
+        )
+    return timeout
+
+
+def sample_limit(value: str) -> int:
+    parsed = int(value)
+    if not 0 <= parsed <= MAX_SAMPLE_LIMIT:
+        raise argparse.ArgumentTypeError(
+            f"sample limit must be between 0 and {MAX_SAMPLE_LIMIT}"
+        )
+    return parsed
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="ordivon-runtime-archive",
+        description=(
+            "Inspect cold-history archival eligibility without exporting, deleting, "
+            "vacuuming, or changing Runtime authority."
+        ),
+    )
+    parser.add_argument("--database", type=absolute_path, required=True)
+    parser.add_argument(
+        "--minimum-age-hours",
+        type=nonnegative_float,
+        default=DEFAULT_MINIMUM_AGE_HOURS,
+    )
+    parser.add_argument(
+        "--sample-limit", type=sample_limit, default=DEFAULT_SAMPLE_LIMIT
+    )
+    parser.add_argument("--busy-timeout-ms", type=positive_timeout, default=5_000)
+    parser.add_argument("--now-ms", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--pretty", action="store_true")
+    return parser.parse_args()
+
+
+def open_registry(database: Path, busy_timeout_ms: int) -> sqlite3.Connection:
+    if database.is_symlink() or not database.is_file():
+        raise RuntimeError("Registry database must be an existing regular file")
+    uri = f"file:{quote(str(database))}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=busy_timeout_ms / 1000)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=ON")
+    connection.execute("PRAGMA trusted_schema=OFF")
+    connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+    validate_registry_capabilities(connection)
+    return connection
+
+
+def validate_registry_capabilities(connection: sqlite3.Connection) -> None:
+    missing: list[str] = []
+    for table, required_columns in REQUIRED_REGISTRY_COLUMNS.items():
+        columns = {
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if not columns:
+            missing.append(f"table:{table}")
+            continue
+        for column in sorted(required_columns - columns):
+            missing.append(f"column:{table}.{column}")
+    if missing:
+        raise RuntimeError(
+            "Runtime Registry lacks archive-inspection capabilities: "
+            + ", ".join(missing)
+        )
+
+
+_CLASSIFICATION_SQL = """
+WITH classified AS (
+    SELECT
+        j.job_id,
+        j.created_at_ms,
+        CASE
+            WHEN j.resolution IS NULL THEN 'unresolved'
+            WHEN j.resolution IN ('lost','orphaned') THEN 'repairable_terminal'
+            WHEN j.resolution NOT IN ('succeeded','failed','timed_out','cancelled')
+                THEN 'unsupported_resolution'
+            WHEN j.created_at_ms >= :cutoff_ms THEN 'younger_than_minimum_age'
+            WHEN EXISTS(
+                SELECT 1 FROM job_runtime_release_effects r WHERE r.job_id=j.job_id
+            ) THEN 'runtime_release_effect'
+            WHEN j.current_attempt_id IS NOT NULL AND NOT EXISTS(
+                SELECT 1 FROM attempts a
+                WHERE a.attempt_id=j.current_attempt_id AND a.job_id=j.job_id
+            ) THEN 'current_attempt_invalid'
+            WHEN NOT EXISTS(
+                SELECT 1 FROM attempts a WHERE a.job_id=j.job_id
+            ) THEN 'attempt_missing'
+            WHEN EXISTS(
+                SELECT 1 FROM attempts a
+                WHERE a.job_id=j.job_id
+                  AND a.state NOT IN ('succeeded','failed','timed_out','cancelled')
+            ) THEN 'attempt_not_stable_terminal'
+            WHEN EXISTS(
+                SELECT 1
+                FROM attempts a
+                JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id
+                WHERE a.job_id=j.job_id
+                  AND r.state IN ('active','held_orphaned')
+            ) THEN 'active_or_held_reservation'
+            WHEN EXISTS(
+                SELECT 1
+                FROM attempts a
+                JOIN attempt_supervisor_owners o ON o.attempt_id=a.attempt_id
+                WHERE a.job_id=j.job_id
+            ) THEN 'supervisor_owner_present'
+            ELSE 'eligible'
+        END AS classification
+    FROM jobs j
+)
+"""
+
+
+def classification_summary(
+    connection: sqlite3.Connection, cutoff_ms: int
+) -> list[dict[str, object]]:
+    rows = connection.execute(
+        _CLASSIFICATION_SQL
+        + """
+        SELECT classification, COUNT(*) AS jobs,
+               MIN(created_at_ms) AS oldest_ms,
+               MAX(created_at_ms) AS newest_ms
+        FROM classified
+        GROUP BY classification
+        ORDER BY classification
+        """,
+        {"cutoff_ms": cutoff_ms},
+    ).fetchall()
+    return [
+        {
+            "classification": str(row["classification"]),
+            "jobs": int(row["jobs"]),
+            "oldestCreatedAtMs": int(row["oldest_ms"]),
+            "newestCreatedAtMs": int(row["newest_ms"]),
+        }
+        for row in rows
+    ]
+
+
+def eligible_closure(
+    connection: sqlite3.Connection, cutoff_ms: int
+) -> dict[str, int]:
+    row = connection.execute(
+        _CLASSIFICATION_SQL
+        + """
+        , eligible AS (
+            SELECT job_id FROM classified WHERE classification='eligible'
+        )
+        SELECT
+            (SELECT COUNT(*) FROM eligible) AS jobs,
+            (SELECT COUNT(*) FROM attempts a JOIN eligible e ON e.job_id=a.job_id) AS attempts,
+            (SELECT COUNT(*) FROM idempotency_keys i JOIN eligible e ON e.job_id=i.job_id) AS idempotency_keys,
+            (SELECT COUNT(*) FROM concurrency_reservations r
+                JOIN attempts a ON a.attempt_id=r.attempt_id
+                JOIN eligible e ON e.job_id=a.job_id) AS reservations,
+            (SELECT COUNT(*) FROM job_events x JOIN eligible e ON e.job_id=x.job_id) AS events,
+            (SELECT COUNT(*) FROM artifacts x JOIN eligible e ON e.job_id=x.job_id) AS artifacts,
+            (SELECT COUNT(*) FROM attempt_conditions c
+                JOIN attempts a ON a.attempt_id=c.attempt_id
+                JOIN eligible e ON e.job_id=a.job_id) AS conditions,
+            (SELECT COUNT(*) FROM job_execution_providers p JOIN eligible e ON e.job_id=p.job_id) AS providers,
+            (SELECT COUNT(*) FROM job_host_dependencies h JOIN eligible e ON e.job_id=h.job_id) AS host_dependencies,
+            (SELECT COUNT(*) FROM attempt_supervisor_owners o
+                JOIN attempts a ON a.attempt_id=o.attempt_id
+                JOIN eligible e ON e.job_id=a.job_id) AS supervisor_owners,
+            (SELECT COALESCE(SUM(x.byte_length),0) FROM artifacts x JOIN eligible e ON e.job_id=x.job_id) AS artifact_payload_bytes,
+            (SELECT COALESCE(SUM(LENGTH(j.execution_plan_json)+LENGTH(j.workspace_snapshot_json)),0)
+                FROM jobs j JOIN eligible e ON e.job_id=j.job_id) AS job_json_bytes
+        """,
+        {"cutoff_ms": cutoff_ms},
+    ).fetchone()
+    assert row is not None
+    return {
+        "jobs": int(row["jobs"]),
+        "attempts": int(row["attempts"]),
+        "idempotencyKeys": int(row["idempotency_keys"]),
+        "reservations": int(row["reservations"]),
+        "events": int(row["events"]),
+        "artifacts": int(row["artifacts"]),
+        "conditions": int(row["conditions"]),
+        "executionProviders": int(row["providers"]),
+        "hostDependencies": int(row["host_dependencies"]),
+        "supervisorOwners": int(row["supervisor_owners"]),
+        "artifactLogicalPayloadBytes": int(row["artifact_payload_bytes"]),
+        "jobJsonLogicalBytes": int(row["job_json_bytes"]),
+    }
+
+
+def eligible_sample(
+    connection: sqlite3.Connection, cutoff_ms: int, limit: int
+) -> list[dict[str, object]]:
+    if limit == 0:
+        return []
+    rows = connection.execute(
+        _CLASSIFICATION_SQL
+        + """
+        SELECT c.job_id, c.created_at_ms, j.resolution, j.workspace_id,
+               j.client_request_id, j.current_attempt_id,
+               a.attempt_id AS effective_attempt_id, a.bundle_path
+        FROM classified c
+        JOIN jobs j ON j.job_id=c.job_id
+        JOIN attempts a ON a.attempt_id=COALESCE(
+            j.current_attempt_id,
+            (SELECT latest.attempt_id FROM attempts latest
+             WHERE latest.job_id=j.job_id
+             ORDER BY latest.attempt_number DESC LIMIT 1)
+        )
+        WHERE c.classification='eligible'
+        ORDER BY c.created_at_ms, c.job_id
+        LIMIT :limit
+        """,
+        {"cutoff_ms": cutoff_ms, "limit": limit},
+    ).fetchall()
+    return [
+        {
+            "jobId": str(row["job_id"]),
+            "clientRequestId": str(row["client_request_id"]),
+            "workspaceId": str(row["workspace_id"]),
+            "resolution": str(row["resolution"]),
+            "jobCurrentAttemptId": (
+                None if row["current_attempt_id"] is None else str(row["current_attempt_id"])
+            ),
+            "effectiveAttemptId": str(row["effective_attempt_id"]),
+            "bundlePath": str(row["bundle_path"]),
+            "createdAtMs": int(row["created_at_ms"]),
+        }
+        for row in rows
+    ]
+
+
+def inspect_archive(args: argparse.Namespace) -> dict[str, object]:
+    now_ms = args.now_ms if args.now_ms is not None else int(time.time() * 1000)
+    if now_ms < 0:
+        raise RuntimeError("now-ms must be non-negative")
+    cutoff_ms = max(0, int(now_ms - args.minimum_age_hours * 3_600_000))
+    connection = open_registry(args.database, args.busy_timeout_ms)
+    try:
+        connection.execute("BEGIN")
+        migration_version = connection.execute(
+            "SELECT MAX(version) FROM schema_migrations"
+        ).fetchone()[0]
+        if migration_version is None:
+            raise RuntimeError("schema_migrations is empty")
+        summary = classification_summary(connection, cutoff_ms)
+        closure = eligible_closure(connection, cutoff_ms)
+        sample = eligible_sample(connection, cutoff_ms, args.sample_limit)
+        connection.execute("ROLLBACK")
+    except BaseException:
+        try:
+            connection.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+    finally:
+        connection.close()
+
+    classified_total = sum(int(item["jobs"]) for item in summary)
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "truthRole": TRUTH_ROLE,
+        "generatedAtMs": now_ms,
+        "registryMigrationVersion": int(migration_version),
+        "policy": {
+            "minimumAgeHours": args.minimum_age_hours,
+            "cutoffMs": cutoff_ms,
+            "stableTerminalResolutions": list(STABLE_TERMINAL_RESOLUTIONS),
+            "repairableTerminalsExcluded": list(REPAIRABLE_TERMINALS),
+            "runtimeReleaseEffectsExcluded": True,
+            "activeOrHeldReservationsExcluded": True,
+            "supervisorOwnersExcluded": True,
+        },
+        "summary": {
+            "classifiedJobs": classified_total,
+            "byClassification": summary,
+            "eligibleClosure": closure,
+        },
+        "eligibleSample": sample,
+        "boundaries": {
+            "mutatesRegistry": False,
+            "exportsArchive": False,
+            "deletesHotHistory": False,
+            "measuresPhysicalBundleBytes": False,
+            "logicalByteEstimatesArePhysicalReclaim": False,
+            "exactApplyRequiresFreshFencedRevalidation": True,
+        },
+    }
+
+
+def main() -> int:
+    try:
+        args = parse_args()
+        result = inspect_archive(args)
+        print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=args.pretty))
+        return 0
+    except (OSError, RuntimeError, sqlite3.Error, ValueError) as error:
+        print(f"runtime archive inspection failed: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
