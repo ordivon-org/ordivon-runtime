@@ -188,6 +188,19 @@ Rollback validates the receipt-bound install directory, service, environment fil
 
 The probe identifies itself as `ordivon-mcp-probe/1` instead of inheriting Python urllib's default User-Agent. This is an explicit machine-client identity, not browser impersonation: public edge policy can observe or selectively exempt it without Browser Integrity Check turning a valid MCP route into a false negative. Local bearer credentials remain separate from any Cloudflare Access token required by the public origin.
 
+## Runtime history archival inspection
+
+`scripts/ordivon-runtime-archive` is currently a **repository-owned read-only planning surface** for the append-oriented Runtime Registry and immutable Attempt bundles. It is deliberately not part of the stable schema-v2 installed release artifact set yet: adding an artifact to that set requires its own additive-install/rollback contract instead of weakening the current deployer's pre-install completeness check. The inspector does not export an archive, delete hot rows, move bundles, VACUUM SQLite, or establish deletion authority. The default seven-day policy classifies only stable terminal Jobs (`succeeded`, `failed`, `timed_out`, `cancelled`) as candidates. `lost` and `orphaned` remain excluded because Runtime repair semantics can still strengthen those states; Jobs with Runtime release effects, active/held reservations, or residual supervisor ownership are also excluded. Historical Jobs whose `current_attempt_id` is null use the same latest-`attempt_number` fallback as Runtime Core rather than being misclassified as corrupt.
+
+```bash
+scripts/ordivon-runtime-archive \
+  --database /var/lib/ordivon/registry/registry.sqlite3 \
+  --minimum-age-hours 168 \
+  --pretty
+```
+
+The report is one query-only SQLite snapshot and exposes classification counts, the exact eligible relational-closure row counts, registered Artifact logical payload bytes, and Job plan/snapshot logical bytes. Those logical-byte values are **not** physical reclaim estimates. Attempt bundles are intentionally not recursively measured by the default inspection because live admission creates transient staging directories and an unfenced tree walk is not snapshot-consistent. A future export/apply contract must revalidate the selected identities under the Registry admission fence, preserve exact replay routing and rollback boundaries, and pack cold immutable bundles into archive segments rather than merely moving their small-file directory trees.
+
 ## Workspace lifecycle and reclaim
 
 Workspace lifecycle has separate states and release rules:
