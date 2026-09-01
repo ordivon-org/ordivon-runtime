@@ -63,6 +63,7 @@ def parse_args() -> argparse.Namespace:
 
     prune = commands.add_parser("prune")
     prune.add_argument("--database", type=absolute_path, required=True)
+    prune.add_argument("--registry-root", type=absolute_path, required=True)
     prune.add_argument("--runtime-store-root", type=absolute_path, required=True)
     prune.add_argument("--receipt-root", type=absolute_path, required=True)
     prune.add_argument("--lock-file", type=absolute_path, required=True)
@@ -488,14 +489,24 @@ def resolve_prune_watermarks(args: argparse.Namespace) -> tuple[int, int]:
     return high, low
 
 
-def admission_fence_path(database: Path) -> Path:
-    return database.parent / "admission.lock"
+def admission_fence_path(database: Path, registry_root: Path) -> Path:
+    """Bind the maintenance fence to explicit Registry authority, never a DB alias."""
+
+    if registry_root.is_symlink() or not registry_root.is_dir():
+        raise RuntimeError("registry root is not a direct regular directory")
+    expected_database = registry_root / "registry.sqlite3"
+    if database != expected_database:
+        raise RuntimeError("database path does not match explicit registry-root authority")
+    if database.is_symlink() or not database.is_file():
+        raise RuntimeError("Registry database is not a direct regular file")
+    if database.stat().st_nlink != 1:
+        raise RuntimeError("Registry database has multiple hardlink names")
+    return registry_root / "admission.lock"
 
 
 @contextmanager
-def exclusive_admission_fence(database: Path):
-    path = admission_fence_path(database)
-    path.parent.mkdir(parents=True, exist_ok=True)
+def exclusive_admission_fence(database: Path, registry_root: Path):
+    path = admission_fence_path(database, registry_root)
     with path.open("a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         yield
@@ -512,6 +523,7 @@ def validate_cache_candidate(cache_root: Path, path: Path) -> Path:
 
 def detach_idle_open_build_candidate(
     database: Path,
+    registry_root: Path,
     store_root: Path,
     candidate: dict[str, object],
     receipt_id: str,
@@ -530,7 +542,7 @@ def detach_idle_open_build_candidate(
     if path != expected:
         raise RuntimeError("fenced Workspace build candidate path/identity mismatch")
 
-    with exclusive_admission_fence(database):
+    with exclusive_admission_fence(database, registry_root):
         if workspace_id in active_workspace_ids(database):
             return None, "workspace_active_after_plan"
         standing = workspace_record_standing(store_root, workspace_id)
@@ -561,6 +573,7 @@ def prune(args: argparse.Namespace) -> dict[str, object]:
     if args.confirm_policy != PRUNE_CONFIRMATION:
         raise RuntimeError(f"--confirm-policy must equal {PRUNE_CONFIRMATION}")
     high_watermark_bytes, low_watermark_bytes = resolve_prune_watermarks(args)
+    admission_fence = admission_fence_path(args.database, args.registry_root)
     with exclusive_lock(args.lock_file):
         before_bytes, candidates = cache_prune_candidates(
             args.database,
@@ -581,6 +594,8 @@ def prune(args: argparse.Namespace) -> dict[str, object]:
             "schemaVersion": SCHEMA_VERSION,
             "generatedAtMs": int(time.time() * 1000),
             "cacheRoot": str(args.runtime_store_root / "cache"),
+            "registryRoot": str(args.registry_root),
+            "admissionFence": str(admission_fence),
             "beforeBytes": before_bytes,
             "highWatermarkBytes": high_watermark_bytes,
             "lowWatermarkBytes": low_watermark_bytes,
@@ -599,6 +614,7 @@ def prune(args: argparse.Namespace) -> dict[str, object]:
                 if candidate.get("requiresAdmissionFence") is True:
                     detached, retained_reason = detach_idle_open_build_candidate(
                         args.database,
+                        args.registry_root,
                         args.runtime_store_root,
                         candidate,
                         receipt.name,
