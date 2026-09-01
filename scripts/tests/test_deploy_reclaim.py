@@ -871,8 +871,10 @@ class DeployReclaimTests(unittest.TestCase):
                 capture_output=True,
             )
             report = json.loads(result.stdout)
-            self.assertEqual(report["toolchain"]["cargo"]["resolvedPath"], str(proxy))
-            self.assertEqual(report["toolchain"]["rustc"]["resolvedPath"], str(proxy))
+            self.assertEqual(report["toolchain"]["cargo"]["path"], str(cargo))
+            self.assertEqual(report["toolchain"]["rustc"]["path"], str(rustc))
+            self.assertEqual(report["toolchain"]["cargo"]["resolvedPath"], str(proxy.resolve()))
+            self.assertEqual(report["toolchain"]["rustc"]["resolvedPath"], str(proxy.resolve()))
             self.assertEqual((candidate / "RUSTC_USED").read_text().strip(), str(rustc))
             self.assertEqual((candidate / "RUSTDOC_USED").read_text().strip(), str(rustdoc))
 
