@@ -7539,17 +7539,29 @@ mod trusted_systemd_command_tests {
         assert_eq!(other_tmp.as_os_str().len(), 35);
         assert_ne!(trusted_tmp, peer_tmp);
         assert_ne!(trusted_tmp, other_tmp);
+        // The nested test root may itself be spelled through an outer trusted TMPDIR
+        // presentation symlink. The trusted presentation authority is the canonical
+        // backing target, not the raw spelling used to construct this test Runtime.
         assert_eq!(
             fs::read_link(trusted_tmp).unwrap(),
-            runtime.executor.workspace_tmp_path("workspace-env")
+            runtime
+                .executor
+                .canonical_workspace_tmp_path("workspace-env")
+                .unwrap()
         );
         assert_eq!(
             fs::read_link(peer_tmp).unwrap(),
-            runtime.executor.workspace_tmp_path("workspace-peer")
+            runtime
+                .executor
+                .canonical_workspace_tmp_path("workspace-peer")
+                .unwrap()
         );
         assert_eq!(
             fs::read_link(other_tmp).unwrap(),
-            runtime.executor.workspace_tmp_path("workspace-other")
+            runtime
+                .executor
+                .canonical_workspace_tmp_path("workspace-other")
+                .unwrap()
         );
         assert!(trusted_tmp.is_dir());
         let vector_store = UniversalExecutorConfig {
