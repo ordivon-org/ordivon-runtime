@@ -393,7 +393,7 @@ pub(super) fn systemctl_show(unit_name: &str) -> RuntimeResult<BTreeMap<String, 
     command.args([
         "show",
         unit_name,
-        "--property=LoadState,ActiveState,SubState,InvocationID,ControlGroup,MainPID,Result,ExecMainCode,ExecMainStatus",
+        "--property=LoadState,ActiveState,SubState,Job,InvocationID,ControlGroup,MainPID,Result,ExecMainCode,ExecMainStatus",
     ]);
     let output = bounded_observation_output(
         &mut command,
@@ -430,6 +430,14 @@ pub(super) fn unit_is_active(properties: &BTreeMap<String, String>) -> bool {
     properties
         .get("ActiveState")
         .is_some_and(|state| matches!(state.as_str(), "active" | "activating" | "reloading"))
+}
+
+/// A non-empty Unit.Job means systemd still owns an in-flight manager job for this
+/// exact transient unit. With `systemd-run --no-block`, enqueueing is the physical
+/// dispatch boundary; absence of Runner start evidence while this job exists is not
+/// evidence that dispatch was lost.
+pub(super) fn unit_has_pending_job(properties: &BTreeMap<String, String>) -> bool {
+    properties.get("Job").is_some_and(|job| !job.is_empty())
 }
 
 pub(super) fn nonempty_property(
@@ -721,6 +729,23 @@ mod tests {
         })
         .unwrap();
         assert!(command.get_args().any(|arg| arg == "--no-block"));
+    }
+
+    #[test]
+    fn pending_manager_job_is_distinguished_from_settled_inactive_unit() {
+        let pending = BTreeMap::from([
+            ("ActiveState".to_string(), "inactive".to_string()),
+            ("Job".to_string(), "4242".to_string()),
+        ]);
+        assert!(!unit_is_active(&pending));
+        assert!(unit_has_pending_job(&pending));
+
+        let settled = BTreeMap::from([
+            ("ActiveState".to_string(), "inactive".to_string()),
+            ("Job".to_string(), String::new()),
+        ]);
+        assert!(!unit_is_active(&settled));
+        assert!(!unit_has_pending_job(&settled));
     }
 
     #[test]

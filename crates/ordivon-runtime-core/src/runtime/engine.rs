@@ -4092,12 +4092,19 @@ impl Runtime {
         }
         let properties = systemctl_show(&attempt.unit_name)?;
         let active = unit_is_active(&properties);
+        let pending_manager_job = unit_has_pending_job(&properties);
         let age_ms = now_ms()?.saturating_sub(attempt.created_at_ms);
         let wsl_distribution_configured = self
             .windows
             .as_ref()
             .is_some_and(|windows| windows.wsl_distribution.is_some());
-        if (active && age_ms < self.startup_grace_ms)
+        // `systemd-run --no-block` returns after the start request is verified and
+        // enqueued, not after startup completes. A manager Job therefore proves that
+        // the dispatch outcome is still pending even if the unit is currently inactive
+        // or has not yet published Runner identity evidence. Never collapse that
+        // systemd-owned pending state into Lost.
+        if pending_manager_job
+            || (active && age_ms < self.startup_grace_ms)
             || wsl_backed_windows_live_unit_must_wait(
                 plan.execution_target,
                 wsl_distribution_configured,
