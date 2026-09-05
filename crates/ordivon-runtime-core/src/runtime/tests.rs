@@ -2838,6 +2838,93 @@ fn workspace_close_preserves_git_authority_owned_by_an_open_child() {
 }
 
 #[test]
+fn workspace_close_preserves_child_git_authority_through_store_alias() {
+    let sandbox = Sandbox::new("workspace-dependent-store-alias", 5000);
+    let source = sandbox.root.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("README.md"), "source\n").unwrap();
+    run_git_command(&source, &["init", "-q"]);
+    run_git_command(
+        &source,
+        &["config", "user.email", "runtime-tests@ordivon.local"],
+    );
+    run_git_command(&source, &["config", "user.name", "Ordivon Runtime Tests"]);
+    run_git_command(&source, &["add", "."]);
+    run_git_command(&source, &["commit", "-qm", "source"]);
+
+    let physical_store = sandbox.root.join("runtime-physical");
+    fs::create_dir_all(&physical_store).unwrap();
+    let alias_store = sandbox.root.join("runtime-alias");
+    std::os::unix::fs::symlink(&physical_store, &alias_store).unwrap();
+    let mut config = runtime_config(&sandbox);
+    config.executor.store_root = alias_store;
+    let executor = config.executor.clone();
+    let runtime = Runtime::new(config).unwrap();
+    let parent_id = "workspace-alias-parent";
+    let child_id = "workspace-alias-child";
+    runtime
+        .open_workspace(&crate::GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: parent_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        })
+        .unwrap();
+
+    let child_source = executor.workspace_tmp_path(parent_id).join("child-source");
+    fs::create_dir_all(&child_source).unwrap();
+    fs::write(child_source.join("child.txt"), "child\n").unwrap();
+    run_git_command(&child_source, &["init", "-q"]);
+    run_git_command(
+        &child_source,
+        &["config", "user.email", "runtime-tests@ordivon.local"],
+    );
+    run_git_command(
+        &child_source,
+        &["config", "user.name", "Ordivon Runtime Tests"],
+    );
+    run_git_command(&child_source, &["add", "."]);
+    run_git_command(&child_source, &["commit", "-qm", "child source"]);
+    runtime
+        .open_workspace(&crate::GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: child_id.to_string(),
+            source_repo: child_source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        })
+        .unwrap();
+
+    let blocked = runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: parent_id.to_string(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap_err();
+    assert_eq!(blocked.code, RuntimeErrorCode::WorkspaceBusy);
+    assert!(blocked.message.contains(child_id));
+    assert!(executor.workspace_tmp_path(parent_id).exists());
+
+    runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: child_id.to_string(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap();
+    runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: parent_id.to_string(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap();
+}
+
+#[test]
 fn workspace_close_tracks_git_authority_not_source_path_text() {
     let (_sandbox, runtime, executor) = durable_patch_fixture(
         "workspace-dependent-authority-not-path",

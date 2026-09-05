@@ -426,7 +426,11 @@ pub(crate) fn workspace_cleanup_dependents(
         config.workspace_cache_path(workspace_id),
         config.workspace_build_cache_path(workspace_id),
         config.workspace_tmp_path(workspace_id),
-    ];
+    ]
+    .into_iter()
+    .filter(|root| root.exists())
+    .map(|root| canonical_directory(&root, "workspaceCleanupRoot"))
+    .collect::<Result<Vec<_>, _>>()?;
     let records_root = config.workspace_records_root();
     let mut dependents = Vec::new();
     for entry in
