@@ -7575,7 +7575,7 @@ mod trusted_systemd_command_tests {
             PathBuf::from("/tmp/ordivon-t/3536fc95f765287c720c")
         );
         let deep_store = UniversalExecutorConfig {
-            store_root: PathBuf::from(format!("/{}", "deep/".repeat(80))),
+            store_root: root.join("deep/".repeat(80)),
             ..runtime.executor.clone()
         };
         fs::create_dir_all(&deep_store.store_root).unwrap();
