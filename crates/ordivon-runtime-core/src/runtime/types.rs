@@ -1582,9 +1582,15 @@ pub struct ExecutionProposal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub timeout_ms: Option<u64>,
+    /// Maximum stdout bytes Runtime retains for the Job/Attempt. This is durable output
+    /// capture, not the response tail returned by the admitting MCP call; callers tune that
+    /// separately with top-level `stdoutTailBytes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub stdout_limit_bytes: Option<u64>,
+    /// Maximum stderr bytes Runtime retains for the Job/Attempt. This is durable output
+    /// capture, not the response tail returned by the admitting MCP call; callers tune that
+    /// separately with top-level `stderrTailBytes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub stderr_limit_bytes: Option<u64>,

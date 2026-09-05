@@ -301,12 +301,18 @@ pub struct WorkspaceExecRequest {
     #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
     pub execution: ExecutionProposal,
+    /// Maximum time this MCP call waits for observation before returning. This does not
+    /// change the Job execution timeout; use `execution.timeoutMs` for that limit.
     #[serde(default = "default_exec_wait_ms")]
     #[schemars(range(max = MAX_TASK_WAIT_MS))]
     pub wait_ms: u64,
+    /// Maximum retained stdout bytes included in this MCP response tail (0..=65536).
+    /// This does not change Job output retention; use `execution.stdoutLimitBytes` for that.
     #[serde(default = "default_exec_tail_bytes")]
     #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stdout_tail_bytes: u64,
+    /// Maximum retained stderr bytes included in this MCP response tail (0..=65536).
+    /// This does not change Job output retention; use `execution.stderrLimitBytes` for that.
     #[serde(default = "default_exec_tail_bytes")]
     #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stderr_tail_bytes: u64,
@@ -329,9 +335,15 @@ pub struct WorkspaceExecBoundExecution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub timeout_ms: Option<u64>,
+    /// Maximum stdout bytes Runtime retains for the Job/Attempt. This is durable output
+    /// capture, not the response tail returned by the admitting MCP call; callers tune that
+    /// separately with top-level `stdoutTailBytes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub stdout_limit_bytes: Option<u64>,
+    /// Maximum stderr bytes Runtime retains for the Job/Attempt. This is durable output
+    /// capture, not the response tail returned by the admitting MCP call; callers tune that
+    /// separately with top-level `stderrTailBytes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub stderr_limit_bytes: Option<u64>,
@@ -358,12 +370,18 @@ pub struct WorkspaceExecBoundRequest {
     pub execution: WorkspaceExecBoundExecution,
     #[schemars(length(min = 1))]
     pub inputs: Vec<InputBindingRequest>,
+    /// Maximum time this MCP call waits for observation before returning. This does not
+    /// change the Job execution timeout; use `execution.timeoutMs` for that limit.
     #[serde(default = "default_exec_wait_ms")]
     #[schemars(range(max = MAX_TASK_WAIT_MS))]
     pub wait_ms: u64,
+    /// Maximum retained stdout bytes included in this MCP response tail (0..=65536).
+    /// This does not change Job output retention; use `execution.stdoutLimitBytes` for that.
     #[serde(default = "default_exec_tail_bytes")]
     #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stdout_tail_bytes: u64,
+    /// Maximum retained stderr bytes included in this MCP response tail (0..=65536).
+    /// This does not change Job output retention; use `execution.stderrLimitBytes` for that.
     #[serde(default = "default_exec_tail_bytes")]
     #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stderr_tail_bytes: u64,
@@ -381,9 +399,15 @@ pub struct WorkspaceExecPlanInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub timeout_ms: Option<u64>,
+    /// Maximum stdout bytes Runtime retains for the Job/Attempt. This is durable output
+    /// capture, not the response tail returned by the admitting MCP call; callers tune that
+    /// separately with top-level `stdoutTailBytes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub stdout_limit_bytes: Option<u64>,
+    /// Maximum stderr bytes Runtime retains for the Job/Attempt. This is durable output
+    /// capture, not the response tail returned by the admitting MCP call; callers tune that
+    /// separately with top-level `stderrTailBytes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub stderr_limit_bytes: Option<u64>,
@@ -410,12 +434,18 @@ pub struct WorkspaceExecPlanRequest {
     #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
     pub execution: WorkspaceExecPlanInput,
+    /// Maximum time this MCP call waits for observation before returning. This does not
+    /// change the Job execution timeout; use `execution.timeoutMs` for that limit.
     #[serde(default = "default_exec_wait_ms")]
     #[schemars(range(max = MAX_TASK_WAIT_MS))]
     pub wait_ms: u64,
+    /// Maximum retained stdout bytes included in this MCP response tail (0..=65536).
+    /// This does not change Job output retention; use `execution.stdoutLimitBytes` for that.
     #[serde(default = "default_exec_tail_bytes")]
     #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stdout_tail_bytes: u64,
+    /// Maximum retained stderr bytes included in this MCP response tail (0..=65536).
+    /// This does not change Job output retention; use `execution.stderrLimitBytes` for that.
     #[serde(default = "default_exec_tail_bytes")]
     #[schemars(range(max = MAX_TASK_TAIL_BYTES))]
     pub stderr_tail_bytes: u64,
