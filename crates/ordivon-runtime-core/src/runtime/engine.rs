@@ -4035,7 +4035,30 @@ impl Runtime {
                 && observed.process_creation_time_file_time
                     == Some(launcher_process_creation_time_file_time));
         }
-        attempt_process_tree_alive(attempt)
+        if attempt_process_tree_alive(attempt)? {
+            return Ok(true);
+        }
+
+        // An Orphaned Linux Attempt may have been classified before Runner identity
+        // became bindable. In that state there is intentionally no persisted PID/cgroup
+        // identity for `attempt_process_tree_alive` to verify. The exact transient unit
+        // still belongs to this unique Attempt, so an active unit or pending manager Job
+        // is stronger evidence than the absence of a bound process identity. Keep the
+        // orphan reservation held until systemd also says the dispatch is no longer live;
+        // only then may result recovery or Lost convergence proceed. Never use this
+        // fallback after a Runner identity was bound, where exact identity mismatch must
+        // remain fail-closed.
+        let never_bound = attempt.boot_id.is_none()
+            && attempt.invocation_id.is_none()
+            && attempt.control_group.is_none()
+            && attempt.main_pid.is_none()
+            && attempt.process_start_identity.is_none()
+            && attempt.runner_start_digest.is_none();
+        if never_bound {
+            let properties = systemctl_show(&attempt.unit_name)?;
+            return Ok(unit_is_active(&properties) || unit_has_pending_job(&properties));
+        }
+        Ok(false)
     }
 
     pub fn reconcile_attempt(&self, attempt_id: &str) -> RuntimeResult<()> {

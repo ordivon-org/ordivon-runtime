@@ -99,6 +99,7 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ### Fixed
 
+- Runtime orphan reconciliation now keeps an unbound Linux Attempt and its held capacity in `orphaned` while the exact transient systemd unit is still active or has a pending manager `Job`; absence of an already-bound PID/cgroup identity can no longer be converted into `lost` while the original physical execution is demonstrably still alive, preventing ghost execution from continuing after Runtime has released its reservation.
 - Runtime systemd reconciliation now preserves `starting` while `systemd-run --no-block` still has a pending manager `Job` for the exact transient unit, preventing queued starts under host pressure from being prematurely and irreversibly classified as `lost`; a deterministic real-system regression covers the loaded/inactive + pending-Job state.
 - `ordivon-runtime-status` now reads the canonical `/var/lib/ordivon/deployments` receipt authority used by Runtime Core and the deploy contract, preventing a valid newer installed release from being compared against stale receipts under the former `/var/lib/ordivon/runtime/deployments` default.
 
