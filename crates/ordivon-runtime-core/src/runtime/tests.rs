@@ -3127,6 +3127,33 @@ fn workspace_get_distinguishes_opening_revision_from_current_head() {
 }
 
 #[test]
+fn workspace_list_accepts_lexical_alias_for_same_physical_store_root() {
+    let (sandbox, _runtime, executor) =
+        durable_patch_fixture("workspace-list-path-alias", "workspace-list-path-alias");
+    let alias_root = sandbox.root.join("runtime-alias");
+    std::os::unix::fs::symlink(&executor.store_root, &alias_root).unwrap();
+
+    let mut alias_config = runtime_config(&sandbox);
+    alias_config.executor.store_root = alias_root;
+    let alias_runtime = Runtime::new(alias_config).unwrap();
+    let result = alias_runtime
+        .list_workspaces(&RuntimeWorkspaceListRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            limit: 20,
+            cursor: None,
+            include_source_state_digest: false,
+        })
+        .unwrap();
+
+    assert!(result.issues.is_empty());
+    assert_eq!(result.workspaces.len(), 1);
+    assert_eq!(
+        result.workspaces[0].workspace_id,
+        "workspace-list-path-alias"
+    );
+}
+
+#[test]
 fn workspace_inspection_is_projection_only_and_keeps_terminal_attempt_truth() {
     let (sandbox, _runtime, executor) =
         durable_patch_fixture("workspace-inspection", "workspace-inspection");
