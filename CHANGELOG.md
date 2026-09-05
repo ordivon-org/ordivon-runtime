@@ -99,6 +99,9 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ### Fixed
 
+- Runtime systemd reconciliation now preserves `starting` while `systemd-run --no-block` still has a pending manager `Job` for the exact transient unit, preventing queued starts under host pressure from being prematurely and irreversibly classified as `lost`; a deterministic real-system regression covers the loaded/inactive + pending-Job state.
+- `ordivon-runtime-status` now reads the canonical `/var/lib/ordivon/deployments` receipt authority used by Runtime Core and the deploy contract, preventing a valid newer installed release from being compared against stale receipts under the former `/var/lib/ordivon/runtime/deployments` default.
+
 - Doctor, local Runtime inspection, and secret-free status invariant reads now use one SQLite read snapshot instead of combining independently timed Registry queries;
 - `systemctl show` and terminal `reset-failed` observation paths have a one-second local CLI deadline, so `task.observe(waitMs=0)` cannot be held indefinitely by a stuck observation command;
 - Workspace FULL reads now enforce `maxBytes` against bytes actually read, SLICE reads preserve whole-file UTF-8/digest semantics with bounded memory and a single file pass, and output tails preserve valid text around binary bytes while hard-bounding raw bytes read;
