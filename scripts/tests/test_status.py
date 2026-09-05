@@ -244,7 +244,7 @@ class RuntimeStatusDefaultTests(unittest.TestCase):
         namespace = runpy.run_path(str(SCRIPT))
         self.assertEqual(
             namespace["DEFAULT_DEPLOYMENT_ROOT"],
-            Path("/var/lib/ordivon/runtime/deployments"),
+            Path("/var/lib/ordivon/deployments"),
         )
 
 
