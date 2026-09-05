@@ -3576,8 +3576,35 @@ fn runtime_live_unit_without_launch_token_is_orphaned_and_holds_capacity() {
             .state,
         ordivon_runtime_core::ReservationState::HeldOrphaned
     );
-    let _ = Command::new("systemctl")
+
+    // A later orphan-recovery pass must keep trusting the exact live transient unit.
+    // The Attempt has not bound PID/cgroup identity yet, so treating that absence as
+    // proof that the process tree is gone would release capacity and permit redrive
+    // while the original physical execution is still alive.
+    runtime.reconcile_all().unwrap();
+    let still_orphaned = runtime.registry().project_job(&created.job.job_id).unwrap();
+    assert_eq!(still_orphaned.status, "orphaned");
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 1);
+    assert_eq!(
+        runtime
+            .registry()
+            .get_reservation(&attempt.attempt_id)
+            .unwrap()
+            .state,
+        ordivon_runtime_core::ReservationState::HeldOrphaned
+    );
+
+    let stopped = Command::new("systemctl")
         .args(["stop", &attempt.unit_name])
+        .output()
+        .unwrap();
+    assert!(stopped.status.success());
+    runtime.reconcile_all().unwrap();
+    let converged = runtime.registry().project_job(&created.job.job_id).unwrap();
+    assert_eq!(converged.status, "lost");
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 0);
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &attempt.unit_name])
         .output();
 }
 
