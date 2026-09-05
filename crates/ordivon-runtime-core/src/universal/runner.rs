@@ -1031,7 +1031,7 @@ fn prepare_executable_realization(
         ));
     }
     Ok(PreparedExecutable {
-        path: canonical,
+        path: PathBuf::from(executable),
         watch,
     })
 }
