@@ -1714,6 +1714,8 @@ fn task_get_schema_is_projection_only_and_detail_free() {
     let output = serde_json::to_value(task_get.output_schema.as_ref().unwrap()).unwrap();
     let encoded = serde_json::to_string(&output).unwrap();
     for expected in [
+        "sourceRevision",
+        "workspaceSourceDigest",
         "mechanicallyConverged",
         "semanticCompletionEvaluated",
         "attemptsTruncated",

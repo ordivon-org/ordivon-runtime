@@ -11,7 +11,7 @@ use super::engine::{
 use super::registry::{load_attempt, load_job, load_reservation, MAX_MIGRATION_VERSION};
 use super::{
     AttemptState, AttemptTerminationIntent, JobDesiredState, JobResolution, ReservationState,
-    RuntimeError, RuntimeErrorCode, RuntimeResult,
+    RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan, RuntimeResult,
 };
 use crate::universal::{
     load_workspace_record, workspace_change_projection_at, workspace_head_revision_at,
@@ -113,6 +113,11 @@ pub struct RuntimeInspectionJob {
     pub client_request_id: String,
     pub operation_digest: String,
     pub workspace_id: String,
+    /// Exact source revision frozen into the admitted execution plan.
+    pub source_revision: String,
+    /// Exact source-state digest frozen at admission, including dirty/untracked source state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_source_digest: Option<String>,
     pub created_at_ms: u64,
     pub desired_state: JobDesiredState,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -381,6 +386,15 @@ pub fn inspect_job(
     }
     let (connection, migration_version) = open_read_only(config)?;
     let job = load_job(&connection, job_id)?;
+    let plan: RuntimeExecutionPlan =
+        serde_json::from_str(&job.execution_plan_json).map_err(|error| {
+            RuntimeError::new(
+                RuntimeErrorCode::RegistryCorrupt,
+                format!("stored execution plan is invalid: {error}"),
+                Some("executionPlan"),
+                false,
+            )
+        })?;
 
     let mut attempt_ids: Vec<String> = Vec::new();
     let mut statement = connection
@@ -473,6 +487,8 @@ pub fn inspect_job(
             client_request_id: job.client_request_id,
             operation_digest: job.operation_digest,
             workspace_id: job.workspace_id,
+            source_revision: plan.source_revision,
+            workspace_source_digest: plan.workspace_source_digest,
             created_at_ms: job.created_at_ms,
             desired_state: job.desired_state,
             resolution: job.resolution,

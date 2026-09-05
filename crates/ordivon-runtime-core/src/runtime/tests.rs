@@ -3758,12 +3758,10 @@ fn stopping_attempt_accepts_verified_success_and_releases_capacity() {
 #[test]
 fn runtime_job_inspection_projects_bounded_read_only_timeline() {
     let sandbox = Sandbox::new("inspection-job", 5000);
-    let created = created(
-        sandbox
-            .registry
-            .submit(&request(&sandbox, "request:inspection-job", 4))
-            .unwrap(),
-    );
+    let expected_source_digest = digest(b"inspection-source-state");
+    let mut inspection_request = request(&sandbox, "request:inspection-job", 4);
+    inspection_request.plan.workspace_source_digest = Some(expected_source_digest.clone());
+    let created = created(sandbox.registry.submit(&inspection_request).unwrap());
     let base = created.job.created_at_ms;
     let ready = sandbox
         .registry
@@ -3813,6 +3811,11 @@ fn runtime_job_inspection_projects_bounded_read_only_timeline() {
     )
     .unwrap();
     assert_eq!(full.job.resolution, Some(JobResolution::Failed));
+    assert_eq!(full.job.source_revision, "test-revision");
+    assert_eq!(
+        full.job.workspace_source_digest.as_deref(),
+        Some(expected_source_digest.as_str())
+    );
     assert!(full.job.mechanically_converged);
     assert!(!full.job.semantic_completion_evaluated);
     assert_eq!(full.attempts.len(), 1);
