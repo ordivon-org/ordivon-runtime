@@ -3439,6 +3439,96 @@ fn runtime_ambiguous_dispatch_is_lost_without_automatic_redispatch() {
 
 #[test]
 #[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
+fn runtime_pending_systemd_start_job_is_not_misclassified_as_lost() {
+    if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let context = IntegrationContext::new("pending-systemd-start");
+    let runtime = context.runtime(1);
+    let created = created_admission(
+        runtime
+            .registry()
+            .submit(&context.direct_submit("request:pending-systemd-start", 1))
+            .unwrap(),
+    );
+    let attempt = runtime
+        .registry()
+        .mark_bundle_ready(
+            &created.attempt.attempt_id,
+            created.attempt.row_version,
+            &digest(b"simulated-bundle"),
+            1,
+        )
+        .unwrap();
+    let attempt = runtime
+        .registry()
+        .mark_dispatch_issued(&attempt.attempt_id, attempt.row_version, 2)
+        .unwrap();
+
+    let blocker = format!("ordivon-pending-start-blocker-{}.service", Uuid::now_v7());
+    let blocker_launch = Command::new("systemd-run")
+        .arg(format!("--unit={blocker}"))
+        .arg("--no-block")
+        .arg("--property=Type=oneshot")
+        .arg("/usr/bin/sleep")
+        .arg("10")
+        .output()
+        .unwrap();
+    assert!(blocker_launch.status.success());
+    let dependent_launch = Command::new("systemd-run")
+        .arg(format!("--unit={}", attempt.unit_name))
+        .arg("--no-block")
+        .arg("--property=Type=exec")
+        .arg(format!("--property=After={blocker}"))
+        .arg("/usr/bin/true")
+        .output()
+        .unwrap();
+    assert!(dependent_launch.status.success());
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let observed = Command::new("systemctl")
+            .args([
+                "show",
+                &attempt.unit_name,
+                "--property=LoadState,ActiveState,Job",
+            ])
+            .output()
+            .unwrap();
+        let observed = String::from_utf8_lossy(&observed.stdout);
+        let pending_job = observed
+            .lines()
+            .find_map(|line| line.strip_prefix("Job="))
+            .is_some_and(|job| !job.is_empty());
+        if observed.contains("LoadState=loaded")
+            && observed.contains("ActiveState=inactive")
+            && pending_job
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "dependent unit never exposed the waiting systemd Job: {observed}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    thread::sleep(Duration::from_millis(5));
+    runtime.reconcile_attempt(&attempt.attempt_id).unwrap();
+    let current = runtime.registry().get_attempt(&attempt.attempt_id).unwrap();
+    assert_eq!(current.state, AttemptState::Starting);
+    assert_eq!(runtime.registry().active_reservation_count().unwrap(), 1);
+
+    let _ = Command::new("systemctl")
+        .args(["stop", &attempt.unit_name, &blocker])
+        .output();
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &attempt.unit_name, &blocker])
+        .output();
+}
+
+#[test]
+#[ignore = "requires root, systemd, cgroup v2, built Runner, and explicit local opt-in"]
 fn runtime_live_unit_without_launch_token_is_orphaned_and_holds_capacity() {
     if std::env::var("ORDIVON_RUN_INTEGRATION").as_deref() != Ok("1") {
         return;
