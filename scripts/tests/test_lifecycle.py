@@ -430,7 +430,12 @@ class LifecycleTests(unittest.TestCase):
             workspace = workspaces / workspace_id
             workspace.mkdir()
             (workspace / "important.txt").write_text("preserve me\n", encoding="utf-8")
-            tmp_backing = runtime / "cache" / "tmp" / workspace_id
+            tmp_backing = (
+                self.module["canonical_runtime_store_root"](runtime)
+                / "cache"
+                / "tmp"
+                / workspace_id
+            )
             tmp_backing.mkdir(parents=True)
             tmp_presentation = self.module["trusted_tmp_presentation_path"](runtime, workspace_id)
             tmp_presentation.parent.mkdir(mode=0o700, exist_ok=True)

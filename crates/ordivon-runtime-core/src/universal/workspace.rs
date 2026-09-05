@@ -176,6 +176,41 @@ fn load_workspace_record_metadata(
     decode_open_workspace_record(&bytes, workspace_id)
 }
 
+fn workspace_record_path_matches_identity(
+    config: &UniversalExecutorConfig,
+    workspace_id: &str,
+    recorded_path: &str,
+) -> bool {
+    let expected = config.workspace_path(workspace_id);
+    let recorded = Path::new(recorded_path);
+    if recorded == expected {
+        return true;
+    }
+    if let (Ok(expected), Ok(recorded)) = (
+        canonical_directory(&expected, "workspacePath"),
+        canonical_directory(recorded, "workspacePath"),
+    ) {
+        return expected == recorded;
+    }
+    if expected.exists() || recorded.exists() {
+        return false;
+    }
+    if recorded.file_name() != expected.file_name() {
+        return false;
+    }
+    let (Some(expected_parent), Some(recorded_parent)) = (expected.parent(), recorded.parent())
+    else {
+        return false;
+    };
+    match (
+        canonical_directory(expected_parent, "workspaceRoot"),
+        canonical_directory(recorded_parent, "workspaceRoot"),
+    ) {
+        (Ok(expected_parent), Ok(recorded_parent)) => expected_parent == recorded_parent,
+        _ => false,
+    }
+}
+
 fn read_workspace_record_bytes(path: &Path) -> Result<Vec<u8>, UniversalExecError> {
     fs::read(path).map_err(|error| {
         UniversalExecError::new(
@@ -304,7 +339,7 @@ pub(crate) fn list_workspace_record_inventory(
             }
         };
         let expected_path = config.workspace_path(workspace_id);
-        if Path::new(&record.workspace_path) != expected_path {
+        if !workspace_record_path_matches_identity(config, workspace_id, &record.workspace_path) {
             issues.push(WorkspaceRecordInventoryIssue {
                 workspace_id: workspace_id.to_string(),
                 error: UniversalExecError::new(
@@ -390,8 +425,7 @@ pub(crate) fn list_open_workspace_record_inventory(
                 continue;
             }
         };
-        let expected_path = config.workspace_path(&workspace_id);
-        if Path::new(&record.workspace_path) != expected_path {
+        if !workspace_record_path_matches_identity(config, &workspace_id, &record.workspace_path) {
             issues.push(WorkspaceRecordInventoryIssue {
                 workspace_id,
                 error: UniversalExecError::new(
@@ -426,7 +460,11 @@ pub(crate) fn workspace_cleanup_dependents(
         config.workspace_cache_path(workspace_id),
         config.workspace_build_cache_path(workspace_id),
         config.workspace_tmp_path(workspace_id),
-    ];
+    ]
+    .into_iter()
+    .filter(|root| root.exists())
+    .map(|root| canonical_directory(&root, "workspaceCleanupRoot"))
+    .collect::<Result<Vec<_>, _>>()?;
     let records_root = config.workspace_records_root();
     let mut dependents = Vec::new();
     for entry in
@@ -2034,7 +2072,11 @@ pub fn remove_git_workspace(
     let record = decode_open_workspace_record(&bytes, &request.workspace_id)?;
 
     if !target.exists() {
-        if Path::new(&record.workspace_path) != target {
+        if !workspace_record_path_matches_identity(
+            config,
+            &request.workspace_id,
+            &record.workspace_path,
+        ) {
             return Err(UniversalExecError::new(
                 UniversalExecErrorCode::MetadataCorrupt,
                 "workspace record path mismatch",

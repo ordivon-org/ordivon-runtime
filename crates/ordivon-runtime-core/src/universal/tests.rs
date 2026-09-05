@@ -2346,6 +2346,57 @@ fn workspace_close_repairs_missing_directory_but_rejects_orphan_directory() {
 }
 
 #[test]
+fn workspace_close_missing_directory_rejects_recorded_sibling_identity() {
+    let sandbox = Sandbox::new("close-missing-wrong-identity");
+    let source = sandbox.root.join("source");
+    init_git_repo(&source);
+    let config = sandbox.config();
+    let workspace_id = "workspace-missing-wrong-identity";
+    create_git_workspace(
+        &config,
+        &GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        },
+    )
+    .unwrap();
+    let record_path = config.workspace_record_path(workspace_id);
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    record["workspacePath"] = serde_json::Value::String(
+        config
+            .workspace_path("different-missing-workspace")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    write_json_atomic(&record_path, &record).unwrap();
+    run_git(
+        &source,
+        [
+            "worktree",
+            "remove",
+            "--force",
+            config.workspace_path(workspace_id).to_str().unwrap(),
+        ],
+    );
+
+    let error = remove_git_workspace(
+        &config,
+        &WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: workspace_id.to_string(),
+            force: false,
+            expected_source_state_digest: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, UniversalExecErrorCode::MetadataCorrupt);
+    assert_eq!(error.field.as_deref(), Some("workspacePath"));
+}
+
+#[test]
 fn workspace_close_accepts_identity_unknown_orphan_quarantine_tombstone() {
     let sandbox = Sandbox::new("close-orphan-quarantine-tombstone");
     let source = sandbox.root.join("source");

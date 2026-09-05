@@ -991,6 +991,59 @@ fn tool_catalog_uses_transactional_job_contract() {
         .pointer("/$defs/ExecutionProposal/properties/cwdRelative/description")
         .and_then(Value::as_str)
         .is_some_and(|description| description.contains("relative to the Workspace root")));
+    for (tool_name, execution_definition) in [
+        ("workspace.exec", "ExecutionProposal"),
+        ("workspace.execBound", "WorkspaceExecBoundExecution"),
+        ("workspace.execPlan", "WorkspaceExecPlanInput"),
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == tool_name)
+            .unwrap();
+        let tool_schema = serde_json::to_value(&tool.input_schema).unwrap();
+        assert!(
+            tool_schema
+                .pointer("/properties/stdoutTailBytes/description")
+                .and_then(Value::as_str)
+                .is_some_and(|description| {
+                    description.contains("MCP response tail")
+                        && description.contains("execution.stdoutLimitBytes")
+                }),
+            "{tool_name} stdoutTailBytes must distinguish response tail from Job retention"
+        );
+        assert!(
+            tool_schema
+                .pointer("/properties/stderrTailBytes/description")
+                .and_then(Value::as_str)
+                .is_some_and(|description| {
+                    description.contains("MCP response tail")
+                        && description.contains("execution.stderrLimitBytes")
+                }),
+            "{tool_name} stderrTailBytes must distinguish response tail from Job retention"
+        );
+        assert!(
+            tool_schema
+                .pointer(&format!(
+                    "/$defs/{execution_definition}/properties/stdoutLimitBytes/description"
+                ))
+                .and_then(Value::as_str)
+                .is_some_and(|description| {
+                    description.contains("Job/Attempt") && description.contains("stdoutTailBytes")
+                }),
+            "{tool_name} stdoutLimitBytes must distinguish Job retention from response tail"
+        );
+        assert!(
+            tool_schema
+                .pointer(&format!(
+                    "/$defs/{execution_definition}/properties/stderrLimitBytes/description"
+                ))
+                .and_then(Value::as_str)
+                .is_some_and(|description| {
+                    description.contains("Job/Attempt") && description.contains("stderrTailBytes")
+                }),
+            "{tool_name} stderrLimitBytes must distinguish Job retention from response tail"
+        );
+    }
     assert_eq!(
         exec_schema.pointer("/$defs/ExecutionProposal/properties/executionProfile/default"),
         Some(&serde_json::json!("trusted_local"))
@@ -1661,6 +1714,8 @@ fn task_get_schema_is_projection_only_and_detail_free() {
     let output = serde_json::to_value(task_get.output_schema.as_ref().unwrap()).unwrap();
     let encoded = serde_json::to_string(&output).unwrap();
     for expected in [
+        "sourceRevision",
+        "workspaceSourceDigest",
         "mechanicallyConverged",
         "semanticCompletionEvaluated",
         "attemptsTruncated",

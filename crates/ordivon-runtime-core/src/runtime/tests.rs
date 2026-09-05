@@ -2838,6 +2838,93 @@ fn workspace_close_preserves_git_authority_owned_by_an_open_child() {
 }
 
 #[test]
+fn workspace_close_preserves_child_git_authority_through_store_alias() {
+    let sandbox = Sandbox::new("workspace-dependent-store-alias", 5000);
+    let source = sandbox.root.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("README.md"), "source\n").unwrap();
+    run_git_command(&source, &["init", "-q"]);
+    run_git_command(
+        &source,
+        &["config", "user.email", "runtime-tests@ordivon.local"],
+    );
+    run_git_command(&source, &["config", "user.name", "Ordivon Runtime Tests"]);
+    run_git_command(&source, &["add", "."]);
+    run_git_command(&source, &["commit", "-qm", "source"]);
+
+    let physical_store = sandbox.root.join("runtime-physical");
+    fs::create_dir_all(&physical_store).unwrap();
+    let alias_store = sandbox.root.join("runtime-alias");
+    std::os::unix::fs::symlink(&physical_store, &alias_store).unwrap();
+    let mut config = runtime_config(&sandbox);
+    config.executor.store_root = alias_store;
+    let executor = config.executor.clone();
+    let runtime = Runtime::new(config).unwrap();
+    let parent_id = "workspace-alias-parent";
+    let child_id = "workspace-alias-child";
+    runtime
+        .open_workspace(&crate::GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: parent_id.to_string(),
+            source_repo: source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        })
+        .unwrap();
+
+    let child_source = executor.workspace_tmp_path(parent_id).join("child-source");
+    fs::create_dir_all(&child_source).unwrap();
+    fs::write(child_source.join("child.txt"), "child\n").unwrap();
+    run_git_command(&child_source, &["init", "-q"]);
+    run_git_command(
+        &child_source,
+        &["config", "user.email", "runtime-tests@ordivon.local"],
+    );
+    run_git_command(
+        &child_source,
+        &["config", "user.name", "Ordivon Runtime Tests"],
+    );
+    run_git_command(&child_source, &["add", "."]);
+    run_git_command(&child_source, &["commit", "-qm", "child source"]);
+    runtime
+        .open_workspace(&crate::GitWorkspaceCreateRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: child_id.to_string(),
+            source_repo: child_source.to_string_lossy().into_owned(),
+            source_revision: "HEAD".to_string(),
+        })
+        .unwrap();
+
+    let blocked = runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: parent_id.to_string(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap_err();
+    assert_eq!(blocked.code, RuntimeErrorCode::WorkspaceBusy);
+    assert!(blocked.message.contains(child_id));
+    assert!(executor.workspace_tmp_path(parent_id).exists());
+
+    runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: child_id.to_string(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap();
+    runtime
+        .close_workspace(&WorkspaceCloseRequest {
+            schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+            workspace_id: parent_id.to_string(),
+            force: true,
+            expected_source_state_digest: None,
+        })
+        .unwrap();
+}
+
+#[test]
 fn workspace_close_tracks_git_authority_not_source_path_text() {
     let (_sandbox, runtime, executor) = durable_patch_fixture(
         "workspace-dependent-authority-not-path",
@@ -3037,6 +3124,33 @@ fn workspace_get_distinguishes_opening_revision_from_current_head() {
         .unwrap();
     assert_eq!(listed.source_revision, initial.source_revision);
     assert_eq!(listed.current_head_revision, current_head);
+}
+
+#[test]
+fn workspace_list_accepts_lexical_alias_for_same_physical_store_root() {
+    let (sandbox, _runtime, executor) =
+        durable_patch_fixture("workspace-list-path-alias", "workspace-list-path-alias");
+    let alias_root = sandbox.root.join("runtime-alias");
+    std::os::unix::fs::symlink(&executor.store_root, &alias_root).unwrap();
+
+    let mut alias_config = runtime_config(&sandbox);
+    alias_config.executor.store_root = alias_root;
+    let alias_runtime = Runtime::new(alias_config).unwrap();
+    let result = alias_runtime
+        .list_workspaces(&RuntimeWorkspaceListRequest {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            limit: 20,
+            cursor: None,
+            include_source_state_digest: false,
+        })
+        .unwrap();
+
+    assert!(result.issues.is_empty());
+    assert_eq!(result.workspaces.len(), 1);
+    assert_eq!(
+        result.workspaces[0].workspace_id,
+        "workspace-list-path-alias"
+    );
 }
 
 #[test]
@@ -3758,12 +3872,10 @@ fn stopping_attempt_accepts_verified_success_and_releases_capacity() {
 #[test]
 fn runtime_job_inspection_projects_bounded_read_only_timeline() {
     let sandbox = Sandbox::new("inspection-job", 5000);
-    let created = created(
-        sandbox
-            .registry
-            .submit(&request(&sandbox, "request:inspection-job", 4))
-            .unwrap(),
-    );
+    let expected_source_digest = digest(b"inspection-source-state");
+    let mut inspection_request = request(&sandbox, "request:inspection-job", 4);
+    inspection_request.plan.workspace_source_digest = Some(expected_source_digest.clone());
+    let created = created(sandbox.registry.submit(&inspection_request).unwrap());
     let base = created.job.created_at_ms;
     let ready = sandbox
         .registry
@@ -3813,6 +3925,11 @@ fn runtime_job_inspection_projects_bounded_read_only_timeline() {
     )
     .unwrap();
     assert_eq!(full.job.resolution, Some(JobResolution::Failed));
+    assert_eq!(full.job.source_revision, "test-revision");
+    assert_eq!(
+        full.job.workspace_source_digest.as_deref(),
+        Some(expected_source_digest.as_str())
+    );
     assert!(full.job.mechanically_converged);
     assert!(!full.job.semantic_completion_evaluated);
     assert_eq!(full.attempts.len(), 1);
