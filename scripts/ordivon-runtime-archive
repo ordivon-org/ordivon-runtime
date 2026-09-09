@@ -74,13 +74,6 @@ REQUIRED_REGISTRY_COLUMNS = {
         "media_type",
         "byte_length",
     },
-    "attempt_conditions": {
-        "attempt_id",
-        "condition_type",
-        "status",
-        "reason_code",
-        "evidence_digest",
-    },
     "job_execution_providers": {"job_id", "snapshot_json", "snapshot_digest"},
     "job_runtime_release_effects": {"job_id", "effect_id", "binding_digest"},
     "job_host_dependencies": {"job_id", "bindings_json", "bindings_digest"},
@@ -168,6 +161,22 @@ def validate_registry_capabilities(connection: sqlite3.Connection) -> None:
             continue
         for column in sorted(required_columns - columns):
             missing.append(f"column:{table}.{column}")
+    if not missing:
+        migration_version = connection.execute(
+            "SELECT COALESCE(MAX(version),0) FROM schema_migrations"
+        ).fetchone()[0]
+        if int(migration_version) < 5:
+            legacy_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(attempt_conditions)").fetchall()
+            }
+            required_legacy = {
+                "attempt_id", "condition_type", "status", "reason_code", "evidence_digest"
+            }
+            if not legacy_columns:
+                missing.append("table:attempt_conditions")
+            for column in sorted(required_legacy - legacy_columns):
+                missing.append(f"column:attempt_conditions.{column}")
     if missing:
         raise RuntimeError(
             "Runtime Registry lacks archive-inspection capabilities: "
@@ -248,11 +257,18 @@ def classification_summary(
 
 
 def eligible_closure(
-    connection: sqlite3.Connection, cutoff_ms: int
+    connection: sqlite3.Connection, cutoff_ms: int, migration_version: int
 ) -> dict[str, int]:
+    condition_count_sql = (
+        "(SELECT COUNT(*) FROM attempt_conditions c "
+        "JOIN attempts a ON a.attempt_id=c.attempt_id "
+        "JOIN eligible e ON e.job_id=a.job_id)"
+        if migration_version < 5
+        else "0"
+    )
     row = connection.execute(
         _CLASSIFICATION_SQL
-        + """
+        + f"""
         , eligible AS (
             SELECT job_id FROM classified WHERE classification='eligible'
         )
@@ -265,9 +281,7 @@ def eligible_closure(
                 JOIN eligible e ON e.job_id=a.job_id) AS reservations,
             (SELECT COUNT(*) FROM job_events x JOIN eligible e ON e.job_id=x.job_id) AS events,
             (SELECT COUNT(*) FROM artifacts x JOIN eligible e ON e.job_id=x.job_id) AS artifacts,
-            (SELECT COUNT(*) FROM attempt_conditions c
-                JOIN attempts a ON a.attempt_id=c.attempt_id
-                JOIN eligible e ON e.job_id=a.job_id) AS conditions,
+            {condition_count_sql} AS conditions,
             (SELECT COUNT(*) FROM job_execution_providers p JOIN eligible e ON e.job_id=p.job_id) AS providers,
             (SELECT COUNT(*) FROM job_host_dependencies h JOIN eligible e ON e.job_id=h.job_id) AS host_dependencies,
             (SELECT COUNT(*) FROM attempt_supervisor_owners o
@@ -352,7 +366,7 @@ def inspect_archive(args: argparse.Namespace) -> dict[str, object]:
         if migration_version is None:
             raise RuntimeError("schema_migrations is empty")
         summary = classification_summary(connection, cutoff_ms)
-        closure = eligible_closure(connection, cutoff_ms)
+        closure = eligible_closure(connection, cutoff_ms, int(migration_version))
         sample = eligible_sample(connection, cutoff_ms, args.sample_limit)
         connection.execute("ROLLBACK")
     except BaseException:

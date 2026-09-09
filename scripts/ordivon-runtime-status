@@ -612,7 +612,6 @@ def registry_status(database: Path, reasons: list[str]) -> tuple[dict[str, Any],
             "jobs": {"job_id", "workspace_id", "resolution"},
             "attempts": {"attempt_id", "job_id", "state"},
             "concurrency_reservations": {"attempt_id", "state"},
-            "attempt_conditions": {"attempt_id", "condition_type", "status"},
         }
         for table, columns in required.items():
             present = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
@@ -622,6 +621,23 @@ def registry_status(database: Path, reasons: list[str]) -> tuple[dict[str, Any],
                     "missing Registry capability: " + ",".join(f"{table}.{column}" for column in sorted(missing))
                 )
         migration = connection.execute("SELECT COALESCE(MAX(version),0) FROM schema_migrations").fetchone()[0]
+        if int(migration) >= 5:
+            attempt_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(attempts)")
+            }
+            if "recovery_required" not in attempt_columns:
+                raise StatusError("missing Registry capability: attempts.recovery_required")
+        else:
+            condition_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(attempt_conditions)")
+            }
+            required_conditions = {"attempt_id", "condition_type", "status"}
+            missing = required_conditions - condition_columns
+            if missing:
+                raise StatusError(
+                    "missing Registry capability: "
+                    + ",".join(f"attempt_conditions.{column}" for column in sorted(missing))
+                )
         jobs_total, jobs_active = connection.execute(
             "SELECT COUNT(*),COALESCE(SUM(resolution IS NULL),0) FROM jobs"
         ).fetchone()
@@ -631,9 +647,12 @@ def registry_status(database: Path, reasons: list[str]) -> tuple[dict[str, Any],
         held_reservations = connection.execute(
             "SELECT COUNT(*) FROM concurrency_reservations WHERE state='held_orphaned'"
         ).fetchone()[0]
-        recovery_required = connection.execute(
-            "SELECT COUNT(*) FROM attempt_conditions WHERE condition_type='recovery_required' AND status='true'"
-        ).fetchone()[0]
+        recovery_required_sql = (
+            "SELECT COUNT(*) FROM attempts WHERE recovery_required=1"
+            if int(migration) >= 5
+            else "SELECT COUNT(*) FROM attempt_conditions WHERE condition_type='recovery_required' AND status='true'"
+        )
+        recovery_required = connection.execute(recovery_required_sql).fetchone()[0]
         placeholders = ",".join("?" for _ in TERMINAL_ATTEMPT_STATES)
         nonterminal_attempts = connection.execute(
             f"SELECT COUNT(*) FROM attempts WHERE state NOT IN ({placeholders})",
@@ -898,15 +917,29 @@ def dashboard_jobs(database: Path, generated_at_ms: int, limit: int) -> dict[str
         attempt_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(attempts)")}
         if not required_jobs.issubset(job_columns) or not required_attempts.issubset(attempt_columns):
             return {"available": False, "active": [], "recent": []}
-        select = """
+        migration = int(
+            connection.execute("SELECT COALESCE(MAX(version),0) FROM schema_migrations").fetchone()[0]
+        )
+        if migration >= 5:
+            if "recovery_required" not in attempt_columns:
+                return {"available": False, "active": [], "recent": []}
+            recovery_expression = "COALESCE(a.recovery_required,0)"
+        else:
+            condition_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(attempt_conditions)")
+            }
+            if not {"attempt_id", "condition_type", "status"}.issubset(condition_columns):
+                return {"available": False, "active": [], "recent": []}
+            recovery_expression = (
+                "EXISTS(SELECT 1 FROM attempt_conditions c "
+                "WHERE c.attempt_id=j.current_attempt_id "
+                "AND c.condition_type='recovery_required' AND c.status='true')"
+            )
+        select = f"""
             SELECT j.job_id,j.workspace_id,j.resolution,j.execution_plan_json,j.created_at_ms,
                    j.current_attempt_id,a.state AS attempt_state,a.started_at_ms,a.finished_at_ms,
                    a.attempt_id AS projected_attempt_id,a.exit_code,a.bundle_path,
-                   EXISTS(
-                     SELECT 1 FROM attempt_conditions c
-                     WHERE c.attempt_id=j.current_attempt_id
-                       AND c.condition_type='recovery_required' AND c.status='true'
-                   ) AS recovery_required
+                   {recovery_expression} AS recovery_required
             FROM jobs j
             LEFT JOIN attempts a ON a.attempt_id=COALESCE(
                 j.current_attempt_id,

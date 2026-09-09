@@ -8,7 +8,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::engine::{
     latest_output_modified_ms, load_runner_progress_if_present, map_universal_error,
 };
-use super::registry::{load_attempt, load_job, load_reservation, MAX_MIGRATION_VERSION};
+use super::registry::{
+    load_attempt, load_job, load_reservation, CONDITION_RETIREMENT_MIGRATION_VERSION,
+    MAX_MIGRATION_VERSION,
+};
 use super::{
     AttemptState, AttemptTerminationIntent, JobDesiredState, JobResolution, ReservationState,
     RuntimeError, RuntimeErrorCode, RuntimeExecutionPlan, RuntimeResult,
@@ -346,8 +349,13 @@ pub fn inspect_workspace(
         .db_path
         .parent()
         .ok_or_else(|| RuntimeError::invalid("database has no parent directory", "database"))?;
-    let (recent_jobs, recent_jobs_truncated) =
-        load_recent_workspace_jobs(&connection, registry_store_root, workspace_id, job_limit)?;
+    let (recent_jobs, recent_jobs_truncated) = load_recent_workspace_jobs(
+        &connection,
+        registry_store_root,
+        workspace_id,
+        job_limit,
+        migration_version,
+    )?;
     Ok(RuntimeWorkspaceInspection {
         schema_version: RUNTIME_INSPECTION_SCHEMA_VERSION,
         generated_at_ms: now_ms()?,
@@ -417,7 +425,7 @@ pub fn inspect_job(
     for attempt_id in attempt_ids {
         let attempt = load_attempt(&connection, &attempt_id)?;
         let reservation = load_reservation(&connection, &attempt_id)?;
-        let conditions = load_conditions(&connection, &attempt_id)?;
+        let conditions = load_conditions(&connection, migration_version, &attempt_id)?;
         let (artifact_count, artifact_bytes, truncated_artifacts) = connection
             .query_row(
                 "SELECT COUNT(*),COALESCE(SUM(byte_length),0),COALESCE(SUM(truncated),0) FROM artifacts WHERE attempt_id=?1",
@@ -463,12 +471,13 @@ pub fn inspect_job(
         event_limit,
         include_detail,
     )?;
+    let recovery_required_sql = if migration_version >= CONDITION_RETIREMENT_MIGRATION_VERSION {
+        "SELECT COUNT(*) FROM attempts WHERE job_id=?1 AND recovery_required=1"
+    } else {
+        "SELECT COUNT(*) FROM attempts a JOIN attempt_conditions c ON c.attempt_id=a.attempt_id WHERE a.job_id=?1 AND c.condition_type='recovery_required' AND c.status='true'"
+    };
     let recovery_required: u64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM attempts WHERE job_id=?1 AND recovery_required=1",
-            [job_id],
-            |row| row.get(0),
-        )
+        .query_row(recovery_required_sql, [job_id], |row| row.get(0))
         .map_err(|error| RuntimeError::from_sql(error, "count active Job recovery conditions"))?;
     let mechanically_converged = job.resolution.is_some()
         && !attempts_truncated
@@ -521,9 +530,16 @@ pub fn summarize_experience(
         since_ms,
         "count unresolved summary Jobs",
     )?;
+    let recovery_required_summary_sql = if migration_version
+        >= CONDITION_RETIREMENT_MIGRATION_VERSION
+    {
+        "SELECT COUNT(DISTINCT j.job_id) FROM jobs j JOIN attempts a ON a.job_id=j.job_id WHERE j.created_at_ms>=?1 AND a.recovery_required=1"
+    } else {
+        "SELECT COUNT(DISTINCT j.job_id) FROM jobs j JOIN attempts a ON a.job_id=j.job_id JOIN attempt_conditions c ON c.attempt_id=a.attempt_id WHERE j.created_at_ms>=?1 AND c.condition_type='recovery_required' AND c.status='true'"
+    };
     let jobs_recovery_required = count(
         &connection,
-        "SELECT COUNT(DISTINCT j.job_id) FROM jobs j JOIN attempts a ON a.job_id=j.job_id WHERE j.created_at_ms>=?1 AND a.recovery_required=1",
+        recovery_required_summary_sql,
         since_ms,
         "count recovery-required summary Jobs",
     )?;
@@ -533,9 +549,14 @@ pub fn summarize_experience(
         since_ms,
         "count capacity-held summary Jobs",
     )?;
+    let converged_summary_sql = if migration_version >= CONDITION_RETIREMENT_MIGRATION_VERSION {
+        "SELECT COUNT(*) FROM jobs j WHERE j.created_at_ms>=?1 AND j.resolution IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.job_id=j.job_id AND a.state NOT IN ('succeeded','failed','timed_out','cancelled','lost','orphaned')) AND NOT EXISTS(SELECT 1 FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.job_id=j.job_id AND r.state!='released') AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.job_id=j.job_id AND a.recovery_required=1)"
+    } else {
+        "SELECT COUNT(*) FROM jobs j WHERE j.created_at_ms>=?1 AND j.resolution IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.job_id=j.job_id AND a.state NOT IN ('succeeded','failed','timed_out','cancelled','lost','orphaned')) AND NOT EXISTS(SELECT 1 FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.job_id=j.job_id AND r.state!='released') AND NOT EXISTS(SELECT 1 FROM attempts a JOIN attempt_conditions c ON c.attempt_id=a.attempt_id WHERE a.job_id=j.job_id AND c.condition_type='recovery_required' AND c.status='true')"
+    };
     let jobs_converged = count(
         &connection,
-        "SELECT COUNT(*) FROM jobs j WHERE j.created_at_ms>=?1 AND j.resolution IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.job_id=j.job_id AND a.state NOT IN ('succeeded','failed','timed_out','cancelled','lost','orphaned')) AND NOT EXISTS(SELECT 1 FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.job_id=j.job_id AND r.state!='released') AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.job_id=j.job_id AND a.recovery_required=1)",
+        converged_summary_sql,
         since_ms,
         "count converged summary Jobs",
     )?;
@@ -877,6 +898,7 @@ fn load_recent_workspace_jobs(
     registry_store_root: &Path,
     workspace_id: &str,
     limit: u32,
+    migration_version: i64,
 ) -> RuntimeResult<(Vec<RuntimeWorkspaceInspectionJob>, bool)> {
     let mut statement = connection
         .prepare(
@@ -915,12 +937,13 @@ fn load_recent_workspace_jobs(
             .map(|attempt_id| load_attempt(connection, attempt_id))
             .transpose()?;
         let recovery_required = if let Some(attempt) = attempt.as_ref() {
+            let recovery_sql = if migration_version >= CONDITION_RETIREMENT_MIGRATION_VERSION {
+                "SELECT COALESCE(recovery_required,0) FROM attempts WHERE attempt_id=?1"
+            } else {
+                "SELECT EXISTS(SELECT 1 FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required' AND status='true')"
+            };
             let condition: bool = connection
-                .query_row(
-                    "SELECT COALESCE(recovery_required,0) FROM attempts WHERE attempt_id=?1",
-                    [&attempt.attempt_id],
-                    |row| row.get(0),
-                )
+                .query_row(recovery_sql, [&attempt.attempt_id], |row| row.get(0))
                 .map_err(|error| {
                     RuntimeError::from_sql(error, "inspect Workspace Job recovery state")
                 })?;
@@ -1058,8 +1081,34 @@ fn open_read_only(config: &RuntimeInspectionConfig) -> RuntimeResult<(Connection
 
 fn load_conditions(
     connection: &Connection,
+    migration_version: i64,
     attempt_id: &str,
 ) -> RuntimeResult<Vec<RuntimeInspectionCondition>> {
+    if migration_version < CONDITION_RETIREMENT_MIGRATION_VERSION {
+        let mut statement = connection
+            .prepare(
+                "SELECT condition_type,status,reason_code,observed_at_ms FROM attempt_conditions WHERE attempt_id=?1 ORDER BY condition_type",
+            )
+            .map_err(|error| RuntimeError::from_sql(error, "prepare legacy Attempt condition inspection"))?;
+        let rows = statement
+            .query_map([attempt_id], |row| {
+                Ok(RuntimeInspectionCondition {
+                    condition_type: row.get(0)?,
+                    status: row.get(1)?,
+                    reason_code: row.get(2)?,
+                    observed_at_ms: row.get(3)?,
+                })
+            })
+            .map_err(|error| RuntimeError::from_sql(error, "query legacy Attempt conditions"))?;
+        return rows
+            .map(|row| {
+                row.map_err(|error| {
+                    RuntimeError::from_sql(error, "decode legacy Attempt condition")
+                })
+            })
+            .collect();
+    }
+
     let sql = r#"
 WITH runner_latest AS (
     SELECT attempt_id,reason_code,observed_at_ms,

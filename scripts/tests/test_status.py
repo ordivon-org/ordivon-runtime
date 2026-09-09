@@ -440,6 +440,38 @@ class RuntimeStatusTests(unittest.TestCase):
             self.assertNotIn("/private/", result.stdout)
             self.assertNotIn(str(Path(temporary)), result.stdout)
 
+    def test_v5_registry_without_attempt_conditions_supports_health_and_dashboard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = fixture(Path(temporary))
+            with sqlite3.connect(paths["database"]) as connection:
+                connection.execute("ALTER TABLE attempts ADD COLUMN recovery_required INTEGER")
+                connection.execute("UPDATE attempts SET recovery_required=0")
+                connection.execute("DROP TABLE attempt_conditions")
+                connection.execute("UPDATE schema_migrations SET version=5")
+                connection.commit()
+
+            health = subprocess.run(
+                raw_command(paths, "--health", "--json"),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            health_report = json.loads(health.stdout)
+            self.assertNotEqual(health_report["registry"].get("available"), False)
+            self.assertEqual(health_report["registry"]["schemaVersion"], 5)
+            self.assertEqual(health_report["registry"]["recoveryRequired"], 0)
+
+            dashboard = subprocess.run(
+                raw_command(paths, "--dashboard", "--json"),
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            dashboard_report = json.loads(dashboard.stdout)
+            self.assertNotEqual(dashboard_report["dashboard"]["jobs"].get("available"), False)
+
     def test_mismatched_binary_and_expected_commit_require_action(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             paths = fixture(Path(temporary))

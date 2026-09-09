@@ -273,6 +273,25 @@ class RuntimeArchiveInspectTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 1)
             self.assertIn("table:job_host_dependencies", completed.stderr)
 
+    def test_v5_registry_without_attempt_conditions_is_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "registry.sqlite3"
+            initialize_registry(database)
+            with sqlite3.connect(database) as connection:
+                add_job(connection, "job:v5")
+                connection.execute("ALTER TABLE attempts ADD COLUMN recovery_required INTEGER")
+                connection.execute("UPDATE attempts SET recovery_required=0")
+                connection.execute("DROP TABLE attempt_conditions")
+                connection.execute("UPDATE schema_migrations SET version=5")
+                connection.commit()
+
+            completed = self.run_archive(database)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["registryMigrationVersion"], 5)
+            self.assertEqual(self.classifications(report), {"eligible": 1})
+            self.assertEqual(report["summary"]["eligibleClosure"]["conditions"], 0)
+
     def test_inspection_does_not_mutate_registry_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "registry.sqlite3"
