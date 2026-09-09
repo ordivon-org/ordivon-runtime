@@ -3054,14 +3054,14 @@ fn runtime_reconcile_all_isolates_one_broken_job_and_converges_another() {
     );
 
     let connection = Connection::open(&context.registry.db_path).unwrap();
-    let recovery_required: String = connection
+    let recovery_required: bool = connection
         .query_row(
-            "SELECT status FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required'",
+            "SELECT recovery_required FROM attempts WHERE attempt_id=?1",
             [&bad_attempt.attempt_id],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(recovery_required, "true");
+    assert!(recovery_required);
 }
 
 #[test]

@@ -36,9 +36,9 @@ pub use patch::{
     WorkspacePatchOperationStatus, WorkspacePatchStatusRequest,
 };
 pub use registry::{
-    Registry, RegistryConfig, RUNTIME_MIGRATION_CHECKSUM,
-    RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM, RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM,
-    RUNTIME_TERMINAL_REPAIR_MIGRATION_CHECKSUM,
+    Registry, RegistryConfig, RUNTIME_CONDITION_RETIREMENT_MIGRATION_CHECKSUM,
+    RUNTIME_MIGRATION_CHECKSUM, RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM,
+    RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM, RUNTIME_TERMINAL_REPAIR_MIGRATION_CHECKSUM,
 };
 pub use repair::{
     apply_runtime_repair, RuntimeRepairAction, RuntimeRepairActionKind, RuntimeRepairConfig,
@@ -54,7 +54,7 @@ pub(crate) use types::{
 pub use types::{
     runtime_release_effect_id, runtime_release_request_identity_digest, AdmissionOutcome,
     ArtifactDescriptor, ArtifactReadRequest, ArtifactReadResult, ArtifactRegistration,
-    AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate, CreatedAdmission,
+    AttemptRecord, AttemptState, AttemptTerminationIntent, CreatedAdmission,
     EffectiveExecutionLimits, EffectiveInputBinding, EffectiveStepTimeout, ExecutionBudget,
     ExecutionProfile, ExecutionProposal, ExecutionProviderContract, ExecutionProviderSnapshot,
     ExecutionStepProposal, ExecutionTarget, ForeignReference, HostDependencyBinding,

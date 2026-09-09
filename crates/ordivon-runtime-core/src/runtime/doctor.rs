@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::evidence::{prepare_runner_terminal_from_bundle, RESULT_FILE};
 use super::registry::{
     inspect_runtime_invariants_connection, load_attempt, load_job, load_reservation,
-    MAX_MIGRATION_VERSION,
+    CONDITION_RETIREMENT_MIGRATION_VERSION, MAX_MIGRATION_VERSION,
 };
 use super::{
     AttemptRecord, AttemptState, AttemptTerminationIntent, JobResolution, RegistryConfig,
@@ -255,7 +255,7 @@ pub fn inspect_runtime(config: &RuntimeDoctorConfig) -> RuntimeResult<RuntimeDoc
         });
     }
 
-    let mut summary = inspect_summary(&connection)?;
+    let mut summary = inspect_summary(&connection, migration_version)?;
     summary.status = if violations.is_empty()
         && summary.recovery_required_attempts == 0
         && summary
@@ -306,16 +306,24 @@ pub fn inspect_runtime(config: &RuntimeDoctorConfig) -> RuntimeResult<RuntimeDoc
     })
 }
 
-fn inspect_summary(connection: &Connection) -> RuntimeResult<RuntimeDoctorSummary> {
+fn inspect_summary(
+    connection: &Connection,
+    migration_version: i64,
+) -> RuntimeResult<RuntimeDoctorSummary> {
     let jobs_total = count_query(connection, "SELECT COUNT(*) FROM jobs", "count Jobs")?;
     let unresolved_jobs = count_query(
         connection,
         "SELECT COUNT(*) FROM jobs WHERE resolution IS NULL",
         "count unresolved Jobs",
     )?;
+    let recovery_required_sql = if migration_version >= CONDITION_RETIREMENT_MIGRATION_VERSION {
+        "SELECT COUNT(*) FROM attempts WHERE recovery_required=1"
+    } else {
+        "SELECT COUNT(*) FROM attempt_conditions WHERE condition_type='recovery_required' AND status='true'"
+    };
     let recovery_required_attempts = count_query(
         connection,
-        "SELECT COUNT(*) FROM attempt_conditions WHERE condition_type='recovery_required' AND status='true'",
+        recovery_required_sql,
         "count recovery-required Attempts",
     )?;
     let artifacts_total = count_query(
@@ -339,10 +347,13 @@ fn inspect_summary(connection: &Connection) -> RuntimeResult<RuntimeDoctorSummar
         "count reservations by state",
     )?;
 
+    let capacity_holder_sql = if migration_version >= CONDITION_RETIREMENT_MIGRATION_VERSION {
+        "SELECT j.job_id,j.workspace_id,a.attempt_id,a.state,r.state,COALESCE(a.recovery_required,0) FROM concurrency_reservations r JOIN attempts a ON a.attempt_id=r.attempt_id JOIN jobs j ON j.job_id=a.job_id WHERE r.state IN ('active','held_orphaned') ORDER BY r.acquired_at_ms,j.job_id LIMIT ?1"
+    } else {
+        "SELECT j.job_id,j.workspace_id,a.attempt_id,a.state,r.state,EXISTS(SELECT 1 FROM attempt_conditions c WHERE c.attempt_id=a.attempt_id AND c.condition_type='recovery_required' AND c.status='true') FROM concurrency_reservations r JOIN attempts a ON a.attempt_id=r.attempt_id JOIN jobs j ON j.job_id=a.job_id WHERE r.state IN ('active','held_orphaned') ORDER BY r.acquired_at_ms,j.job_id LIMIT ?1"
+    };
     let mut statement = connection
-        .prepare(
-            "SELECT j.job_id,j.workspace_id,a.attempt_id,a.state,r.state,EXISTS(SELECT 1 FROM attempt_conditions c WHERE c.attempt_id=a.attempt_id AND c.condition_type='recovery_required' AND c.status='true') FROM concurrency_reservations r JOIN attempts a ON a.attempt_id=r.attempt_id JOIN jobs j ON j.job_id=a.job_id WHERE r.state IN ('active','held_orphaned') ORDER BY r.acquired_at_ms,j.job_id LIMIT ?1",
-        )
+        .prepare(capacity_holder_sql)
         .map_err(|error| RuntimeError::from_sql(error, "prepare capacity-holder summary"))?;
     let rows = statement
         .query_map([(MAX_DOCTOR_CAPACITY_HOLDERS + 1) as u64], |row| {

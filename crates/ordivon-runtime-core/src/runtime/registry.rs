@@ -14,14 +14,14 @@ use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::supervisor::{validate_attempt_supervisor_owner, AttemptSupervisorOwner};
 use super::{
     operation_request_identity_digest_from_plan, validate_client_request_id, AdmissionOutcome,
-    ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, ConditionUpdate,
-    CreatedAdmission, ExecutionProviderContract, ExecutionProviderSnapshot, HostDependencyBinding,
-    JobDesiredState, JobProjection, JobResolution, ReservationRecord, ReservationState,
-    RunnerIdentity, RuntimeArtifactRecord, RuntimeDeliveryDisposition, RuntimeError,
-    RuntimeErrorCode, RuntimeExecutionPlan, RuntimeInvariantViolation, RuntimeJobListCursor,
-    RuntimeJobListRequest, RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary,
-    RuntimeReleaseContract, RuntimeReleaseEffectBinding, RuntimeResult, SubmitRequest,
-    TerminalCommit, MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
+    ArtifactRegistration, AttemptRecord, AttemptState, AttemptTerminationIntent, CreatedAdmission,
+    ExecutionProviderContract, ExecutionProviderSnapshot, HostDependencyBinding, JobDesiredState,
+    JobProjection, JobResolution, ReservationRecord, ReservationState, RunnerIdentity,
+    RuntimeArtifactRecord, RuntimeDeliveryDisposition, RuntimeError, RuntimeErrorCode,
+    RuntimeExecutionPlan, RuntimeInvariantViolation, RuntimeJobListCursor, RuntimeJobListRequest,
+    RuntimeJobListResult, RuntimeJobRecord, RuntimeJobSummary, RuntimeReleaseContract,
+    RuntimeReleaseEffectBinding, RuntimeResult, SubmitRequest, TerminalCommit,
+    MAX_RUNTIME_LIST_LIMIT, RUNTIME_SCHEMA_VERSION,
 };
 
 const MIGRATION_V1: i64 = 1;
@@ -44,7 +44,13 @@ const MIGRATION_V4_NAME: &str = "0004_orphan_reclaim";
 const MIGRATION_V4_SQL: &str = include_str!("../../migrations/runtime/0004_orphan_reclaim.sql");
 pub const RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM: &str =
     "sha256:b76afbfaf70645b60456b08ad257e5ac2be1f63499f24a555cbf0157791e19ad";
-pub(crate) const MAX_MIGRATION_VERSION: i64 = 4;
+pub(crate) const CONDITION_RETIREMENT_MIGRATION_VERSION: i64 = 5;
+const MIGRATION_V5_NAME: &str = "0005_condition_retirement";
+const MIGRATION_V5_SQL: &str =
+    include_str!("../../migrations/runtime/0005_condition_retirement.sql");
+pub const RUNTIME_CONDITION_RETIREMENT_MIGRATION_CHECKSUM: &str =
+    "sha256:ae8e45dde797715492d383a01a1802c9a4d5a4c2f77042fe40379052eb06d097";
+pub(crate) const MAX_MIGRATION_VERSION: i64 = 5;
 const REDUNDANT_EVENT_SEQUENCE_INDEX: &str = "idx_events_job_sequence";
 const DROP_REDUNDANT_EVENT_SEQUENCE_INDEX_SQL: &str =
     "DROP INDEX IF EXISTS idx_events_job_sequence";
@@ -450,6 +456,27 @@ impl Registry {
             MIGRATION_V4,
             RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM,
             "orphan-reclaim migration",
+        )?;
+        if max_version < CONDITION_RETIREMENT_MIGRATION_VERSION {
+            let transaction = immediate(connection, "condition-retirement migration")?;
+            transaction
+                .execute_batch(MIGRATION_V5_SQL)
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "cannot apply condition-retirement migration")
+                })?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,?2,?3,?4)",
+                params![CONDITION_RETIREMENT_MIGRATION_VERSION, MIGRATION_V5_NAME, RUNTIME_CONDITION_RETIREMENT_MIGRATION_CHECKSUM, now_ms()?],
+            ).map_err(|error| RuntimeError::from_sql(error, "cannot record condition-retirement migration"))?;
+            transaction.commit().map_err(|error| {
+                RuntimeError::from_sql(error, "cannot commit condition-retirement migration")
+            })?;
+        }
+        validate_migration_checksum(
+            connection,
+            CONDITION_RETIREMENT_MIGRATION_VERSION,
+            RUNTIME_CONDITION_RETIREMENT_MIGRATION_CHECKSUM,
+            "condition-retirement migration",
         )?;
         Ok(())
     }
@@ -1169,7 +1196,7 @@ impl Registry {
 
         transaction
             .execute(
-                "INSERT INTO concurrency_reservations(reservation_id,attempt_id,global_limit,state,acquired_at_ms,released_at_ms,release_reason) VALUES(?1,?2,?3,?4,?5,NULL,NULL)",
+                "INSERT INTO concurrency_reservations(reservation_id,attempt_id,global_limit,state,acquired_at_ms,released_at_ms,release_reason,state_observed_at_ms) VALUES(?1,?2,?3,?4,?5,NULL,NULL,?5)",
                 params![
                     reservation.reservation_id,
                     reservation.attempt_id,
@@ -1217,17 +1244,6 @@ impl Registry {
             created_at_ms,
         )?;
 
-        upsert_condition(
-            &transaction,
-            &attempt_id,
-            &ConditionUpdate {
-                condition_type: "reservation_held".to_string(),
-                status: "true".to_string(),
-                reason_code: "CAPACITY_RESERVED".to_string(),
-                evidence_digest: sha256_bytes(reservation_id.as_bytes()),
-                observed_at_ms: created_at_ms,
-            },
-        )?;
         #[cfg(test)]
         let commit_result = commit_with_test_fault(transaction, TestCommitPoint::Admission);
         #[cfg(not(test))]
@@ -2402,17 +2418,6 @@ impl Registry {
         if changed != 1 {
             return Err(state_conflict("Attempt changed while binding bundle"));
         }
-        upsert_condition(
-            &transaction,
-            attempt_id,
-            &ConditionUpdate {
-                condition_type: "bundle_ready".to_string(),
-                status: "true".to_string(),
-                reason_code: "BUNDLE_COMMITTED".to_string(),
-                evidence_digest: bundle_digest.to_string(),
-                observed_at_ms,
-            },
-        )?;
         append_event(
             &transaction,
             &attempt.job_id,
@@ -2458,17 +2463,6 @@ impl Registry {
             return Err(state_conflict("Attempt changed before dispatch intent"));
         }
         let evidence = attempt.bundle_digest.clone().unwrap_or_default();
-        upsert_condition(
-            &transaction,
-            attempt_id,
-            &ConditionUpdate {
-                condition_type: "dispatch_issued".to_string(),
-                status: "true".to_string(),
-                reason_code: "AT_MOST_ONCE_BOUNDARY_COMMITTED".to_string(),
-                evidence_digest: evidence.clone(),
-                observed_at_ms,
-            },
-        )?;
         append_event(
             &transaction,
             &attempt.job_id,
@@ -2530,17 +2524,6 @@ impl Registry {
         if changed != 1 {
             return Err(state_conflict("Attempt changed while binding Runner"));
         }
-        upsert_condition(
-            &transaction,
-            attempt_id,
-            &ConditionUpdate {
-                condition_type: "runner_bound".to_string(),
-                status: "true".to_string(),
-                reason_code: "RUNNER_IDENTITY_MATCHED".to_string(),
-                evidence_digest: identity.runner_start_digest.clone(),
-                observed_at_ms: identity.observed_at_ms,
-            },
-        )?;
         append_event(
             &transaction,
             &attempt.job_id,
@@ -2697,17 +2680,6 @@ impl Registry {
                 "Attempt changed while binding Supervisor Owner",
             ));
         }
-        upsert_condition(
-            &transaction,
-            attempt_id,
-            &ConditionUpdate {
-                condition_type: "runner_bound".to_string(),
-                status: "true".to_string(),
-                reason_code: "SUPERVISOR_OWNER_MATCHED".to_string(),
-                evidence_digest: start_evidence_digest.to_string(),
-                observed_at_ms,
-            },
-        )?;
         append_event(
             &transaction,
             &attempt.job_id,
@@ -3117,17 +3089,6 @@ impl Registry {
                 ));
             }
         }
-        upsert_condition(
-            &transaction,
-            &attempt.attempt_id,
-            &ConditionUpdate {
-                condition_type: "result_available".to_string(),
-                status: "true".to_string(),
-                reason_code: request.reason_code.clone(),
-                evidence_digest: request.result_digest.clone(),
-                observed_at_ms: request.finished_at_ms,
-            },
-        )?;
         if request.state == AttemptState::Orphaned {
             hold_orphaned_reservation(
                 &transaction,
@@ -3292,7 +3253,7 @@ impl Registry {
         let connection = self.open_connection()?;
         let mut statement = connection
             .prepare(
-                "SELECT a.attempt_id,a.job_id,a.attempt_number,a.state,a.termination_intent,a.launch_token_digest,a.bundle_path,a.bundle_digest,a.boot_id,a.unit_name,a.invocation_id,a.control_group,a.main_pid,a.process_start_identity,a.runner_start_digest,a.result_digest,a.exit_code,a.infrastructure_error_digest,a.created_at_ms,a.started_at_ms,a.finished_at_ms,a.row_version FROM attempts a LEFT JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.state NOT IN ('succeeded','failed','timed_out','cancelled','lost','orphaned') OR (a.state='orphaned' AND r.state='held_orphaned') OR EXISTS(SELECT 1 FROM attempt_conditions c WHERE c.attempt_id=a.attempt_id AND c.condition_type='recovery_required' AND c.status='true') ORDER BY CASE WHEN EXISTS(SELECT 1 FROM attempt_conditions c WHERE c.attempt_id=a.attempt_id AND c.condition_type='recovery_required' AND c.status='true') THEN 0 WHEN a.state='orphaned' AND r.state='held_orphaned' THEN 1 ELSE 2 END,a.created_at_ms,a.attempt_id LIMIT ?1",
+                "SELECT a.attempt_id,a.job_id,a.attempt_number,a.state,a.termination_intent,a.launch_token_digest,a.bundle_path,a.bundle_digest,a.boot_id,a.unit_name,a.invocation_id,a.control_group,a.main_pid,a.process_start_identity,a.runner_start_digest,a.result_digest,a.exit_code,a.infrastructure_error_digest,a.created_at_ms,a.started_at_ms,a.finished_at_ms,a.row_version FROM attempts a LEFT JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.state NOT IN ('succeeded','failed','timed_out','cancelled','lost','orphaned') OR (a.state='orphaned' AND r.state='held_orphaned') OR COALESCE(a.recovery_required,0)=1 ORDER BY CASE WHEN COALESCE(a.recovery_required,0)=1 THEN 0 WHEN a.state='orphaned' AND r.state='held_orphaned' THEN 1 ELSE 2 END,a.created_at_ms,a.attempt_id LIMIT ?1",
             )
             .map_err(|error| RuntimeError::from_sql(error, "cannot prepare maintenance reconciliation scan"))?;
         let rows = statement
@@ -3409,17 +3370,6 @@ impl Registry {
                     false,
                 ))?;
         }
-        upsert_condition(
-            &transaction,
-            &attempt.attempt_id,
-            &ConditionUpdate {
-                condition_type: "result_available".to_string(),
-                status: "true".to_string(),
-                reason_code: request.reason_code.clone(),
-                evidence_digest: request.result_digest.clone(),
-                observed_at_ms: request.finished_at_ms,
-            },
-        )?;
         release_reservation(
             &transaction,
             &attempt.attempt_id,
@@ -3586,33 +3536,28 @@ impl Registry {
             .as_bytes(),
         );
         let mut connection = self.open_connection()?;
-        let existing: Option<(String, String, String)> = connection
+        let existing: Option<(bool, String, String)> = connection
             .query_row(
-                "SELECT status,reason_code,evidence_digest FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required'",
+                "SELECT recovery_required,recovery_reason_code,recovery_evidence_digest FROM attempts WHERE attempt_id=?1 AND recovery_required IS NOT NULL",
                 [&attempt.attempt_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
-            .map_err(|error| RuntimeError::from_sql(error, "cannot inspect recovery condition"))?;
-        if existing.as_ref().is_some_and(|(status, reason, evidence)| {
-            status == "true" && reason == reason_code && evidence == &evidence_digest
+            .map_err(|error| RuntimeError::from_sql(error, "cannot inspect recovery state"))?;
+        if existing.as_ref().is_some_and(|(active, reason, evidence)| {
+            *active && reason == reason_code && evidence == &evidence_digest
         }) {
             return Ok(());
         }
 
         let transaction = immediate(&mut connection, "reconciliation failure transaction")?;
         let current = load_attempt(&transaction, &attempt.attempt_id)?;
-        upsert_condition(
-            &transaction,
-            &current.attempt_id,
-            &ConditionUpdate {
-                condition_type: "recovery_required".to_string(),
-                status: "true".to_string(),
-                reason_code: reason_code.to_string(),
-                evidence_digest,
-                observed_at_ms,
-            },
-        )?;
+        transaction
+            .execute(
+                "UPDATE attempts SET recovery_required=1,recovery_reason_code=?1,recovery_evidence_digest=?2,recovery_observed_at_ms=?3 WHERE attempt_id=?4",
+                params![reason_code, evidence_digest, observed_at_ms, current.attempt_id],
+            )
+            .map_err(|error| RuntimeError::from_sql(error, "cannot record recovery state"))?;
         append_event(
             &transaction,
             &current.job_id,
@@ -3640,15 +3585,15 @@ impl Registry {
         observed_at_ms: u64,
     ) -> RuntimeResult<()> {
         let mut connection = self.open_connection()?;
-        let status: Option<String> = connection
+        let recovery_required: Option<bool> = connection
             .query_row(
-                "SELECT status FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required'",
+                "SELECT recovery_required FROM attempts WHERE attempt_id=?1 AND recovery_required IS NOT NULL",
                 [attempt_id],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|error| RuntimeError::from_sql(error, "cannot inspect recovery condition"))?;
-        if status.as_deref() != Some("true") {
+            .map_err(|error| RuntimeError::from_sql(error, "cannot inspect recovery state"))?;
+        if recovery_required != Some(true) {
             return Ok(());
         }
 
@@ -3659,7 +3604,7 @@ impl Registry {
         );
         let changed = transaction
             .execute(
-                "UPDATE attempt_conditions SET status='false',reason_code='RECONCILIATION_CONVERGED',evidence_digest=?1,observed_at_ms=?2 WHERE attempt_id=?3 AND condition_type='recovery_required' AND status='true'",
+                "UPDATE attempts SET recovery_required=0,recovery_reason_code='RECONCILIATION_CONVERGED',recovery_evidence_digest=?1,recovery_observed_at_ms=?2 WHERE attempt_id=?3 AND recovery_required=1",
                 params![evidence_digest, observed_at_ms, attempt_id],
             )
             .map_err(|error| RuntimeError::from_sql(error, "cannot clear recovery condition"))?;
@@ -4059,27 +4004,6 @@ fn append_event(
     Ok(())
 }
 
-fn upsert_condition(
-    transaction: &Transaction<'_>,
-    attempt_id: &str,
-    condition: &ConditionUpdate,
-) -> RuntimeResult<()> {
-    transaction
-        .execute(
-            "INSERT INTO attempt_conditions(attempt_id,condition_type,status,reason_code,evidence_digest,observed_at_ms) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(attempt_id,condition_type) DO UPDATE SET status=excluded.status,reason_code=excluded.reason_code,evidence_digest=excluded.evidence_digest,observed_at_ms=excluded.observed_at_ms",
-            params![
-                attempt_id,
-                condition.condition_type,
-                condition.status,
-                condition.reason_code,
-                condition.evidence_digest,
-                condition.observed_at_ms,
-            ],
-        )
-        .map_err(|error| RuntimeError::from_sql(error, "cannot update Attempt condition"))?;
-    Ok(())
-}
-
 fn release_reservation(
     transaction: &Transaction<'_>,
     attempt_id: &str,
@@ -4088,7 +4012,7 @@ fn release_reservation(
 ) -> RuntimeResult<()> {
     let changed = transaction
         .execute(
-            "UPDATE concurrency_reservations SET state='released',released_at_ms=?1,release_reason=?2 WHERE attempt_id=?3 AND state IN ('active','held_orphaned')",
+            "UPDATE concurrency_reservations SET state='released',released_at_ms=?1,release_reason=?2,state_observed_at_ms=?1 WHERE attempt_id=?3 AND state IN ('active','held_orphaned')",
             params![released_at_ms, reason, attempt_id],
         )
         .map_err(|error| RuntimeError::from_sql(error, "cannot release reservation"))?;
@@ -4118,19 +4042,6 @@ fn release_reservation(
             ));
         }
     }
-    upsert_condition(
-        transaction,
-        attempt_id,
-        &ConditionUpdate {
-            condition_type: "reservation_held".to_string(),
-            status: "false".to_string(),
-            reason_code: reason.to_string(),
-            evidence_digest: sha256_bytes(
-                format!("runtime-reservation-release\0{attempt_id}\0{released_at_ms}").as_bytes(),
-            ),
-            observed_at_ms: released_at_ms,
-        },
-    )?;
     Ok(())
 }
 fn hold_orphaned_reservation(
@@ -4141,8 +4052,8 @@ fn hold_orphaned_reservation(
 ) -> RuntimeResult<()> {
     let changed = transaction
         .execute(
-            "UPDATE concurrency_reservations SET state='held_orphaned',released_at_ms=NULL,release_reason=?1 WHERE attempt_id=?2 AND state IN ('active','held_orphaned')",
-            params![reason, attempt_id],
+            "UPDATE concurrency_reservations SET state='held_orphaned',released_at_ms=NULL,release_reason=?1,state_observed_at_ms=?2 WHERE attempt_id=?3 AND state IN ('active','held_orphaned')",
+            params![reason, observed_at_ms, attempt_id],
         )
         .map_err(|error| RuntimeError::from_sql(error, "cannot hold orphaned reservation"))?;
     if changed != 1 {
@@ -4153,19 +4064,7 @@ fn hold_orphaned_reservation(
             false,
         ));
     }
-    upsert_condition(
-        transaction,
-        attempt_id,
-        &ConditionUpdate {
-            condition_type: "reservation_held".to_string(),
-            status: "held_orphaned".to_string(),
-            reason_code: reason.to_string(),
-            evidence_digest: sha256_bytes(
-                format!("runtime-orphaned-reservation\0{attempt_id}\0{observed_at_ms}").as_bytes(),
-            ),
-            observed_at_ms,
-        },
-    )
+    Ok(())
 }
 
 fn repair_terminal_admin_transaction(
@@ -4261,28 +4160,12 @@ fn repair_terminal_admin_transaction(
                 )
             })?;
     }
-    upsert_condition(
-        transaction,
-        &attempt.attempt_id,
-        &ConditionUpdate {
-            condition_type: "result_available".to_string(),
-            status: "true".to_string(),
-            reason_code: request.reason_code.clone(),
-            evidence_digest: request.result_digest.clone(),
-            observed_at_ms: request.finished_at_ms,
-        },
-    )?;
-    upsert_condition(
-        transaction,
-        &attempt.attempt_id,
-        &ConditionUpdate {
-            condition_type: "recovery_required".to_string(),
-            status: "false".to_string(),
-            reason_code: "ADMIN_REPAIR_COMPLETED".to_string(),
-            evidence_digest: audit.case_fingerprint.clone(),
-            observed_at_ms: audit.observed_at_ms,
-        },
-    )?;
+    transaction
+        .execute(
+            "UPDATE attempts SET recovery_required=0,recovery_reason_code='ADMIN_REPAIR_COMPLETED',recovery_evidence_digest=?1,recovery_observed_at_ms=?2 WHERE attempt_id=?3",
+            params![audit.case_fingerprint, audit.observed_at_ms, attempt.attempt_id],
+        )
+        .map_err(|error| RuntimeError::from_sql(error, "cannot record administrative recovery convergence"))?;
     release_reservation(
         transaction,
         &attempt.attempt_id,
@@ -4537,11 +4420,11 @@ fn attempt_recovery_condition_active(
 ) -> RuntimeResult<bool> {
     connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required' AND status='true')",
+            "SELECT COALESCE(recovery_required,0) FROM attempts WHERE attempt_id=?1",
             [attempt_id],
             |row| row.get(0),
         )
-        .map_err(|error| RuntimeError::from_sql(error, "cannot inspect Attempt recovery condition"))
+        .map_err(|error| RuntimeError::from_sql(error, "cannot inspect Attempt recovery state"))
 }
 
 fn load_job_snapshot(connection: &Connection, job_id: &str) -> RuntimeResult<JobSnapshot> {

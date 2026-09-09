@@ -1549,16 +1549,6 @@ pub struct RunnerIdentity {
     pub observed_at_ms: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ConditionUpdate {
-    pub condition_type: String,
-    pub status: String,
-    pub reason_code: String,
-    pub evidence_digest: String,
-    pub observed_at_ms: u64,
-}
-
 pub(crate) fn default_runtime_list_limit() -> u32 {
     20
 }

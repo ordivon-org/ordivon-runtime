@@ -465,7 +465,7 @@ pub fn inspect_job(
     )?;
     let recovery_required: u64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM attempt_conditions c JOIN attempts a ON a.attempt_id=c.attempt_id WHERE a.job_id=?1 AND c.condition_type='recovery_required' AND c.status='true'",
+            "SELECT COUNT(*) FROM attempts WHERE job_id=?1 AND recovery_required=1",
             [job_id],
             |row| row.get(0),
         )
@@ -523,7 +523,7 @@ pub fn summarize_experience(
     )?;
     let jobs_recovery_required = count(
         &connection,
-        "SELECT COUNT(DISTINCT j.job_id) FROM jobs j JOIN attempts a ON a.job_id=j.job_id JOIN attempt_conditions c ON c.attempt_id=a.attempt_id WHERE j.created_at_ms>=?1 AND c.condition_type='recovery_required' AND c.status='true'",
+        "SELECT COUNT(DISTINCT j.job_id) FROM jobs j JOIN attempts a ON a.job_id=j.job_id WHERE j.created_at_ms>=?1 AND a.recovery_required=1",
         since_ms,
         "count recovery-required summary Jobs",
     )?;
@@ -535,7 +535,7 @@ pub fn summarize_experience(
     )?;
     let jobs_converged = count(
         &connection,
-        "SELECT COUNT(*) FROM jobs j WHERE j.created_at_ms>=?1 AND j.resolution IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.job_id=j.job_id AND a.state NOT IN ('succeeded','failed','timed_out','cancelled','lost','orphaned')) AND NOT EXISTS(SELECT 1 FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.job_id=j.job_id AND r.state!='released') AND NOT EXISTS(SELECT 1 FROM attempts a JOIN attempt_conditions c ON c.attempt_id=a.attempt_id WHERE a.job_id=j.job_id AND c.condition_type='recovery_required' AND c.status='true')",
+        "SELECT COUNT(*) FROM jobs j WHERE j.created_at_ms>=?1 AND j.resolution IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.job_id=j.job_id AND a.state NOT IN ('succeeded','failed','timed_out','cancelled','lost','orphaned')) AND NOT EXISTS(SELECT 1 FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id WHERE a.job_id=j.job_id AND r.state!='released') AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.job_id=j.job_id AND a.recovery_required=1)",
         since_ms,
         "count converged summary Jobs",
     )?;
@@ -917,11 +917,13 @@ fn load_recent_workspace_jobs(
         let recovery_required = if let Some(attempt) = attempt.as_ref() {
             let condition: bool = connection
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required' AND status='true')",
+                    "SELECT COALESCE(recovery_required,0) FROM attempts WHERE attempt_id=?1",
                     [&attempt.attempt_id],
                     |row| row.get(0),
                 )
-                .map_err(|error| RuntimeError::from_sql(error, "inspect Workspace Job recovery state"))?;
+                .map_err(|error| {
+                    RuntimeError::from_sql(error, "inspect Workspace Job recovery state")
+                })?;
             condition
                 || matches!(
                     attempt.state,
@@ -1058,11 +1060,49 @@ fn load_conditions(
     connection: &Connection,
     attempt_id: &str,
 ) -> RuntimeResult<Vec<RuntimeInspectionCondition>> {
-    let mut statement = connection
-        .prepare(
-            "SELECT condition_type,status,reason_code,observed_at_ms FROM attempt_conditions WHERE attempt_id=?1 ORDER BY condition_type",
-        )
-        .map_err(|error| RuntimeError::from_sql(error, "prepare Attempt condition inspection"))?;
+    let sql = r#"
+WITH runner_latest AS (
+    SELECT attempt_id,reason_code,observed_at_ms,
+           ROW_NUMBER() OVER(PARTITION BY attempt_id ORDER BY event_sequence DESC) AS rn
+    FROM job_events WHERE event_type='RUNNER_BOUND'
+),
+result_event AS (
+    SELECT a.attempt_id,e.reason_code,e.observed_at_ms,
+           ROW_NUMBER() OVER(PARTITION BY a.attempt_id ORDER BY e.event_sequence DESC) AS rn
+    FROM attempts a
+    JOIN job_events e ON e.attempt_id=a.attempt_id AND e.observed_at_ms=a.finished_at_ms
+    WHERE a.result_digest IS NOT NULL
+      AND e.event_type IN ('JOB_TERMINAL','RUNNER_RESULT_RECOVERED','ADMIN_TERMINAL_REPAIR','JOB_RESOLUTION_ADMIN_CORRECTED')
+),
+derived AS (
+    SELECT attempt_id,'bundle_ready' AS condition_type,'true' AS status,reason_code,observed_at_ms
+    FROM job_events WHERE event_type='BUNDLE_READY'
+    UNION ALL
+    SELECT attempt_id,'dispatch_issued','true',reason_code,observed_at_ms
+    FROM job_events WHERE event_type='DISPATCH_ISSUED'
+    UNION ALL
+    SELECT attempt_id,'runner_bound','true',reason_code,observed_at_ms
+    FROM runner_latest WHERE rn=1
+    UNION ALL
+    SELECT attempt_id,'result_available','true',reason_code,observed_at_ms
+    FROM result_event WHERE rn=1
+    UNION ALL
+    SELECT a.attempt_id,'reservation_held',
+           CASE r.state WHEN 'active' THEN 'true' WHEN 'held_orphaned' THEN 'held_orphaned' ELSE 'false' END,
+           CASE WHEN r.state='active' THEN 'CAPACITY_RESERVED' ELSE r.release_reason END,
+           r.state_observed_at_ms
+    FROM attempts a JOIN concurrency_reservations r ON r.attempt_id=a.attempt_id
+    UNION ALL
+    SELECT attempt_id,'recovery_required',CASE recovery_required WHEN 1 THEN 'true' ELSE 'false' END,
+           recovery_reason_code,recovery_observed_at_ms
+    FROM attempts WHERE recovery_required IS NOT NULL
+)
+SELECT condition_type,status,reason_code,observed_at_ms
+FROM derived WHERE attempt_id=?1 ORDER BY condition_type
+"#;
+    let mut statement = connection.prepare(sql).map_err(|error| {
+        RuntimeError::from_sql(error, "prepare derived Attempt condition inspection")
+    })?;
     let rows = statement
         .query_map([attempt_id], |row| {
             Ok(RuntimeInspectionCondition {
@@ -1072,9 +1112,11 @@ fn load_conditions(
                 observed_at_ms: row.get(3)?,
             })
         })
-        .map_err(|error| RuntimeError::from_sql(error, "query Attempt conditions"))?;
-    rows.map(|row| row.map_err(|error| RuntimeError::from_sql(error, "decode Attempt condition")))
-        .collect()
+        .map_err(|error| RuntimeError::from_sql(error, "query derived Attempt conditions"))?;
+    rows.map(|row| {
+        row.map_err(|error| RuntimeError::from_sql(error, "decode derived Attempt condition"))
+    })
+    .collect()
 }
 
 fn summarize_job_artifacts(

@@ -4980,15 +4980,15 @@ fn reconciliation_receipts_change_only_when_the_condition_changes() {
             |row| row.get(0),
         )
         .unwrap();
-    let status: String = connection
+    let recovery_required: bool = connection
         .query_row(
-            "SELECT status FROM attempt_conditions WHERE attempt_id=?1 AND condition_type='recovery_required'",
+            "SELECT recovery_required FROM attempts WHERE attempt_id=?1",
             [&created.attempt.attempt_id],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(converged_events, 1);
-    assert_eq!(status, "false");
+    assert!(!recovery_required);
 }
 
 #[test]
@@ -5471,7 +5471,7 @@ fn newer_schema_and_checksum_drift_fail_closed() {
     connection
         .execute(
             "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,'future','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0)",
-            [5],
+            [6],
         )
         .unwrap();
     drop(connection);
@@ -5513,6 +5513,18 @@ fn newer_schema_and_checksum_drift_fail_closed() {
     drop(connection);
     let error = Registry::initialize(reclaim_drift.registry.config().clone()).unwrap_err();
     assert_eq!(error.code, RuntimeErrorCode::MigrationChecksumMismatch);
+
+    let condition_drift = Sandbox::new("condition-retirement-checksum-drift", 5000);
+    let connection = Connection::open(&condition_drift.registry.config().db_path).unwrap();
+    connection
+        .execute(
+            "UPDATE schema_migrations SET checksum='sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' WHERE version=5",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let error = Registry::initialize(condition_drift.registry.config().clone()).unwrap_err();
+    assert_eq!(error.code, RuntimeErrorCode::MigrationChecksumMismatch);
 }
 
 #[test]
@@ -5543,7 +5555,7 @@ fn query_indexes_are_recreated_without_advancing_schema_version() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(max_version, 4);
+    assert_eq!(max_version, 5);
     for index in [
         "idx_jobs_client_request_id_created",
         "idx_jobs_workspace_created",
@@ -5598,7 +5610,7 @@ fn workspace_patch_storage_is_recreated_without_advancing_schema_version() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(max_version, 4);
+    assert_eq!(max_version, 5);
     assert_eq!(table, "workspace_patch_operations");
     assert_eq!(index, "idx_workspace_patch_operations_workspace");
 }
@@ -5833,6 +5845,211 @@ fn late_identity_bound_result_corrects_orphan_and_releases_capacity() {
 }
 
 #[test]
+fn v4_condition_retirement_preserves_recovery_and_reservation_currentness() {
+    let root = std::env::temp_dir().join(format!(
+        "ordivon-v4-condition-retirement-{}-{}",
+        std::process::id(),
+        Uuid::now_v7()
+    ));
+    let store = root.join("store");
+    fs::create_dir_all(&store).unwrap();
+    let db_path = store.join("registry.sqlite3");
+    let connection = Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(include_str!("../../migrations/runtime/0001_runtime.sql"))
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(1,'0001_runtime',?1,0)",
+            [RUNTIME_MIGRATION_CHECKSUM],
+        )
+        .unwrap();
+    for (version, name, sql, checksum) in [
+        (
+            2,
+            "0002_orphan_recovery",
+            include_str!("../../migrations/runtime/0002_orphan_recovery.sql"),
+            RUNTIME_ORPHAN_RECOVERY_MIGRATION_CHECKSUM,
+        ),
+        (
+            3,
+            "0003_terminal_repair",
+            include_str!("../../migrations/runtime/0003_terminal_repair.sql"),
+            RUNTIME_TERMINAL_REPAIR_MIGRATION_CHECKSUM,
+        ),
+        (
+            4,
+            "0004_orphan_reclaim",
+            include_str!("../../migrations/runtime/0004_orphan_reclaim.sql"),
+            RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM,
+        ),
+    ] {
+        connection.execute_batch(sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version,name,checksum,applied_at_ms) VALUES(?1,?2,?3,0)",
+                rusqlite::params![version, name, checksum],
+            )
+            .unwrap();
+    }
+    for (job_id, attempt_id, state, resolution, created_at, finished_at) in [
+        (
+            "job-held",
+            "attempt-held",
+            "orphaned",
+            "orphaned",
+            10_i64,
+            40_i64,
+        ),
+        (
+            "job-cleared",
+            "attempt-cleared",
+            "succeeded",
+            "succeeded",
+            20_i64,
+            70_i64,
+        ),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO jobs(job_id,principal,client_request_id,request_digest,operation_digest,workspace_id,workspace_snapshot_json,execution_plan_json,execution_plan_digest,created_at_ms,desired_state,resolution,current_attempt_id,row_version) VALUES(?1,'principal:test',?2,'sha256:req','sha256:op','workspace:test','{}','{}','sha256:plan',?3,'run',?4,NULL,0)",
+                rusqlite::params![job_id, format!("request:{job_id}"), created_at, resolution],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO attempts(attempt_id,job_id,attempt_number,state,termination_intent,launch_token_digest,bundle_path,bundle_digest,boot_id,unit_name,invocation_id,control_group,main_pid,process_start_identity,runner_start_digest,result_digest,exit_code,infrastructure_error_digest,created_at_ms,started_at_ms,finished_at_ms,row_version) VALUES(?1,?2,1,?3,'natural','sha256:launch',?4,'sha256:bundle',NULL,?5,NULL,NULL,NULL,NULL,NULL,'sha256:result',0,NULL,?6,NULL,?7,0)",
+                rusqlite::params![
+                    attempt_id,
+                    job_id,
+                    state,
+                    format!("/tmp/{attempt_id}"),
+                    format!("ordivon-{attempt_id}.service"),
+                    created_at,
+                    finished_at
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO idempotency_keys(principal,client_request_id,operation_digest,job_id,created_at_ms) VALUES('principal:test',?1,'sha256:op',?2,?3)",
+                rusqlite::params![format!("request:{job_id}"), job_id, created_at],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO concurrency_reservations(reservation_id,attempt_id,global_limit,state,acquired_at_ms,released_at_ms,release_reason) VALUES('reservation-held','attempt-held',2,'held_orphaned',10,NULL,'ORPHANED_PROCESS_TREE_GONE')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO concurrency_reservations(reservation_id,attempt_id,global_limit,state,acquired_at_ms,released_at_ms,release_reason) VALUES('reservation-cleared','attempt-cleared',2,'released',20,70,'PROCESS_EXIT_ZERO')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO attempt_conditions(attempt_id,condition_type,status,reason_code,evidence_digest,observed_at_ms) VALUES('attempt-held','reservation_held','held_orphaned','ORPHANED_PROCESS_TREE_GONE','sha256:held',40)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO attempt_conditions(attempt_id,condition_type,status,reason_code,evidence_digest,observed_at_ms) VALUES('attempt-held','recovery_required','true','REGISTRY_UNAVAILABLE','sha256:recovery',50)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO attempt_conditions(attempt_id,condition_type,status,reason_code,evidence_digest,observed_at_ms) VALUES('attempt-cleared','recovery_required','false','RECONCILIATION_CONVERGED','sha256:converged',65)",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let registry = Registry::initialize(RegistryConfig {
+        db_path: db_path.clone(),
+        store_root: store,
+        busy_timeout_ms: 5000,
+    })
+    .unwrap();
+    let connection = Connection::open(registry.config().db_path.clone()).unwrap();
+    let version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(version, 5);
+    let old_table: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='attempt_conditions')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!old_table);
+    let held: (bool, String, String, i64) = connection
+        .query_row(
+            "SELECT recovery_required,recovery_reason_code,recovery_evidence_digest,recovery_observed_at_ms FROM attempts WHERE attempt_id='attempt-held'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        held,
+        (
+            true,
+            "REGISTRY_UNAVAILABLE".to_string(),
+            "sha256:recovery".to_string(),
+            50
+        )
+    );
+    let cleared: (bool, String, String, i64) = connection
+        .query_row(
+            "SELECT recovery_required,recovery_reason_code,recovery_evidence_digest,recovery_observed_at_ms FROM attempts WHERE attempt_id='attempt-cleared'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        cleared,
+        (
+            false,
+            "RECONCILIATION_CONVERGED".to_string(),
+            "sha256:converged".to_string(),
+            65
+        )
+    );
+    let held_state_time: i64 = connection
+        .query_row(
+            "SELECT state_observed_at_ms FROM concurrency_reservations WHERE attempt_id='attempt-held'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(held_state_time, 40);
+    let released_state_time: i64 = connection
+        .query_row(
+            "SELECT state_observed_at_ms FROM concurrency_reservations WHERE attempt_id='attempt-cleared'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(released_state_time, 70);
+    assert_eq!(
+        connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    drop(connection);
+    drop(registry);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn existing_v1_registry_upgrades_and_ensures_lookup_index() {
     let root = std::env::temp_dir().join(format!(
         "ordivon-v1-upgrade-{}-{}",
@@ -5866,7 +6083,7 @@ fn existing_v1_registry_upgrades_and_ensures_lookup_index() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(max_version, 4);
+    assert_eq!(max_version, 5);
     let checksum: String = connection
         .query_row(
             "SELECT checksum FROM schema_migrations WHERE version=2",
@@ -5891,6 +6108,25 @@ fn existing_v1_registry_upgrades_and_ensures_lookup_index() {
         )
         .unwrap();
     assert_eq!(reclaim_checksum, RUNTIME_ORPHAN_RECLAIM_MIGRATION_CHECKSUM);
+    let condition_retirement_checksum: String = connection
+        .query_row(
+            "SELECT checksum FROM schema_migrations WHERE version=5",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        condition_retirement_checksum,
+        RUNTIME_CONDITION_RETIREMENT_MIGRATION_CHECKSUM
+    );
+    let conditions_table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='attempt_conditions')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!conditions_table_exists);
     let artifact_job_index: String = connection
         .query_row(
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_artifacts_job'",
@@ -6146,7 +6382,7 @@ fn host_dependency_storage_is_recreated_without_advancing_schema_version() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(max_version, 4);
+    assert_eq!(max_version, 5);
 }
 
 #[test]
@@ -6188,7 +6424,7 @@ fn execution_provider_storage_is_recreated_without_advancing_schema_version() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(max_version, 4);
+    assert_eq!(max_version, 5);
 }
 
 #[test]
@@ -6464,7 +6700,7 @@ fn attempt_supervisor_owner_storage_is_recreated_without_advancing_schema_versio
             row.get(0)
         })
         .unwrap();
-    assert_eq!(max_version, 4);
+    assert_eq!(max_version, 5);
 }
 
 #[test]
@@ -6626,7 +6862,7 @@ fn runtime_release_storage_is_recreated_without_advancing_schema_version() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(max_version, 4);
+    assert_eq!(max_version, 5);
 }
 
 #[test]
