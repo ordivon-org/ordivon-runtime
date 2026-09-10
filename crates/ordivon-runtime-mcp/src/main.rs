@@ -16,7 +16,8 @@ use ordivon_runtime_core::{
     InputAuthority, RegistryConfig, RuntimeConfig, UniversalExecutorConfig, WindowsExecutionConfig,
 };
 use ordivon_runtime_mcp::server::{
-    ExecutionContext, RuntimeReleaseExecutionConfig, RuntimeServer, ServerConfig,
+    ExecutionContext, InputIngressExecutionConfig, RuntimeReleaseExecutionConfig, RuntimeServer,
+    ServerConfig,
 };
 use ordivon_runtime_mcp::{append_rotating_jsonl, DEFAULT_TRACE_ROTATION_BYTES};
 use rmcp::transport::streamable_http_server::{
@@ -48,6 +49,18 @@ static HTTP_TRACE_LOCK: Mutex<()> = Mutex::new(());
 struct InputAuthorityConfig {
     name: String,
     root: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InputIngressConfig {
+    staging_root: PathBuf,
+    workstation_tool: PathBuf,
+    workstation_config: PathBuf,
+    workstation_carrier: String,
+    authorities: Vec<String>,
+    download_hosts: Vec<String>,
+    max_bytes: u64,
 }
 
 struct AppConfig {
@@ -411,6 +424,21 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
             root: authority.root,
         })
         .collect::<Vec<_>>();
+    let input_ingress = optional_env("ORDIVON_INPUT_INGRESS_JSON")?
+        .map(|value| {
+            serde_json::from_str::<InputIngressConfig>(&value)
+                .map_err(|error| format!("ORDIVON_INPUT_INGRESS_JSON is invalid: {error}"))
+        })
+        .transpose()?
+        .map(|value| InputIngressExecutionConfig {
+            staging_root: value.staging_root,
+            workstation_tool: value.workstation_tool,
+            workstation_config: value.workstation_config,
+            workstation_carrier: value.workstation_carrier,
+            authorities: value.authorities,
+            download_hosts: value.download_hosts,
+            max_bytes: value.max_bytes,
+        });
     let trace_path = std::env::var("ORDIVON_TRACE_PATH")
         .ok()
         .map(PathBuf::from)
@@ -560,6 +588,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
                 global_limit,
             },
             release,
+            input_ingress,
             trace_path,
         },
     })

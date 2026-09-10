@@ -70,11 +70,14 @@ impl ServerHandler for RuntimeServer {
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         self.record_protocol_observation("tools/list", None, &context);
-        Ok(ListToolsResult::with_all_items(self.tool_router.list_all()))
+        Ok(ListToolsResult::with_all_items(self.catalog_tools()))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.tool_router.get(name).cloned()
+        self.tool_router
+            .get(name)
+            .cloned()
+            .map(|tool| self.decorate_tool_for_host_extensions(tool))
     }
 
     fn get_info(&self) -> ServerInfo {

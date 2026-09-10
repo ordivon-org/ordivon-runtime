@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -169,6 +170,7 @@ pub struct RuntimeDescribeResult {
     pub max_output_bytes: u64,
     pub allowed_executable_roots: Vec<String>,
     pub input_authorities: Vec<String>,
+    pub input_ingress_authorities: Vec<String>,
     pub targets: Vec<RuntimeExecutionTargetCapability>,
     pub structured_release_configured: bool,
 }
@@ -178,6 +180,7 @@ impl RuntimeDescribeResult {
         capabilities: RuntimeCapabilities,
         global_execution_limit: u32,
         structured_release_configured: bool,
+        input_ingress_authorities: Vec<String>,
     ) -> Self {
         Self {
             schema_version: capabilities.schema_version,
@@ -186,6 +189,7 @@ impl RuntimeDescribeResult {
             max_output_bytes: capabilities.max_output_bytes,
             allowed_executable_roots: capabilities.allowed_executable_roots,
             input_authorities: capabilities.input_authorities,
+            input_ingress_authorities,
             targets: capabilities.targets,
             structured_release_configured,
         }
@@ -216,6 +220,65 @@ pub struct RuntimeReleaseGetToolRequest {
     pub schema_version: u32,
     #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
     pub client_request_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InputIngressFilePayload {
+    #[serde(rename = "download_url")]
+    #[schemars(rename = "download_url")]
+    pub download_url: String,
+    #[serde(rename = "file_id")]
+    #[schemars(rename = "file_id")]
+    pub file_id: String,
+    #[serde(default, rename = "file_name", skip_serializing_if = "Option::is_none")]
+    #[schemars(rename = "file_name")]
+    pub file_name: Option<String>,
+    #[serde(default, rename = "mime_type", skip_serializing_if = "Option::is_none")]
+    #[schemars(rename = "mime_type")]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InputIngressToolRequest {
+    #[schemars(range(min = 1, max = 1), extend("const" = 1))]
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[schemars(length(min = CLIENT_REQUEST_ID_MIN_LENGTH, max = CLIENT_REQUEST_ID_MAX_LENGTH), extend("pattern" = CLIENT_REQUEST_ID_PATTERN))]
+    pub client_request_id: String,
+    pub authority: String,
+    pub relative_object: String,
+    pub expected_sha256: String,
+    #[schemars(range(min = 1))]
+    pub expected_size_bytes: u64,
+    pub file: InputIngressFilePayload,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InputIngressToolResult {
+    pub schema_version: u32,
+    pub kind: String,
+    pub authority: String,
+    pub relative_object: String,
+    pub expected_sha256: String,
+    pub expected_size_bytes: u64,
+    pub host_file_reference_digest: String,
+    pub source_identity_standing: String,
+    pub workstation_receipt: serde_json::Value,
+    pub non_claims: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct InputIngressExecutionConfig {
+    pub staging_root: PathBuf,
+    pub workstation_tool: PathBuf,
+    pub workstation_config: PathBuf,
+    pub workstation_carrier: String,
+    pub authorities: Vec<String>,
+    pub download_hosts: Vec<String>,
+    pub max_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -761,12 +824,212 @@ fn default_exec_tail_bytes() -> u64 {
     4096
 }
 
+fn validate_ingress_sha256(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_ingress_relative_object(value: &str) -> bool {
+    if value.is_empty() || value.starts_with('/') || value.contains('\\') || value.contains('\0') {
+        return false;
+    }
+    value
+        .split('/')
+        .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+fn ingress_ipv4_is_public(value: Ipv4Addr) -> bool {
+    let octets = value.octets();
+    if value.is_unspecified()
+        || value.is_loopback()
+        || value.is_private()
+        || value.is_link_local()
+        || value.is_broadcast()
+        || value.is_documentation()
+        || value.is_multicast()
+    {
+        return false;
+    }
+    if octets[0] == 0
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+        || octets[0] >= 240
+    {
+        return false;
+    }
+    true
+}
+
+fn ingress_ipv6_is_public(value: Ipv6Addr) -> bool {
+    if let Some(mapped) = value.to_ipv4_mapped() {
+        return ingress_ipv4_is_public(mapped);
+    }
+    if value.is_unspecified()
+        || value.is_loopback()
+        || value.is_multicast()
+        || value.is_unique_local()
+        || value.is_unicast_link_local()
+    {
+        return false;
+    }
+    let segments = value.segments();
+    !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+}
+
+fn ingress_ip_is_public(value: IpAddr) -> bool {
+    match value {
+        IpAddr::V4(value) => ingress_ipv4_is_public(value),
+        IpAddr::V6(value) => ingress_ipv6_is_public(value),
+    }
+}
+
+fn validate_ingress_download_host_config(host: &str) -> bool {
+    if host.is_empty()
+        || host != host.to_ascii_lowercase()
+        || host.contains('/')
+        || host.contains(':')
+        || host.contains('@')
+        || host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+    {
+        return false;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(ip) => ingress_ip_is_public(ip),
+        Err(_) => true,
+    }
+}
+
+fn ingress_stage_size_digest(
+    path: &std::path::Path,
+    max_bytes: u64,
+) -> Result<(u64, String), ToolError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| ToolError::internal("cannot inspect retained verified input stage"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ToolError::internal(
+            "retained verified input stage is not a regular non-symlink file",
+        ));
+    }
+    if metadata.len() > max_bytes {
+        return Err(ToolError::invalid(
+            "retained input stage exceeds configured maxBytes",
+            "file",
+        ));
+    }
+    let mut file = std::fs::File::open(path)
+        .map_err(|_| ToolError::internal("cannot open retained verified input stage"))?;
+    let mut digest = Sha256::new();
+    let mut observed = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)
+            .map_err(|_| ToolError::internal("cannot read retained verified input stage"))?;
+        if read == 0 {
+            break;
+        }
+        observed = observed.saturating_add(read as u64);
+        if observed > max_bytes {
+            return Err(ToolError::invalid(
+                "retained input stage exceeds configured maxBytes",
+                "file",
+            ));
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok((observed, format!("sha256:{:x}", digest.finalize())))
+}
+
+async fn ingress_pinned_https_get(
+    initial: reqwest::Url,
+    allowed_hosts: &[String],
+) -> Result<reqwest::Response, ToolError> {
+    let mut url = initial;
+    for redirect_index in 0..=5 {
+        if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+            return Err(ToolError::invalid(
+                "file.download_url must remain HTTPS without URL userinfo",
+                "file.download_url",
+            ));
+        }
+        if url.port_or_known_default() != Some(443) {
+            return Err(ToolError::invalid(
+                "file.download_url must use the standard HTTPS port",
+                "file.download_url",
+            ));
+        }
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        if !allowed_hosts.iter().any(|allowed| allowed == &host) {
+            return Err(ToolError::invalid(
+                "file.download_url host is not operator-authorized for input ingress",
+                "file.download_url",
+            ));
+        }
+        let resolved = tokio::net::lookup_host((host.as_str(), 443))
+            .await
+            .map_err(|_| ToolError::internal("input file download host resolution failed"))?
+            .collect::<Vec<SocketAddr>>();
+        if resolved.is_empty()
+            || resolved
+                .iter()
+                .any(|address| !ingress_ip_is_public(address.ip()))
+        {
+            return Err(ToolError::invalid(
+                "file.download_url resolved to a non-public network address",
+                "file.download_url",
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs(host.as_str(), &resolved)
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .map_err(|_| ToolError::internal("cannot initialize pinned input download client"))?;
+        let response = client.get(url.clone()).send().await.map_err(|_| {
+            ToolError::internal("input file download failed before a verified local stage existed")
+        })?;
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        if redirect_index == 5 {
+            return Err(ToolError::invalid(
+                "input file download exceeded the redirect limit",
+                "file.download_url",
+            ));
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                ToolError::invalid(
+                    "input file redirect omitted a valid Location",
+                    "file.download_url",
+                )
+            })?;
+        url = url.join(location).map_err(|_| {
+            ToolError::invalid(
+                "input file redirect Location is invalid",
+                "file.download_url",
+            )
+        })?;
+    }
+    Err(ToolError::internal(
+        "input file redirect loop did not terminate",
+    ))
+}
+
 #[derive(Clone)]
 pub struct ServerConfig {
     pub runtime: RuntimeConfig,
     pub input_authorities: Vec<InputAuthority>,
     pub execution: ExecutionContext,
     pub release: Option<RuntimeReleaseExecutionConfig>,
+    pub input_ingress: Option<InputIngressExecutionConfig>,
     pub trace_path: Option<PathBuf>,
 }
 
@@ -782,6 +1045,7 @@ struct ServerState {
     executor: UniversalExecutorConfig,
     execution: ExecutionContext,
     release: Option<RuntimeReleaseExecutionConfig>,
+    input_ingress: Option<InputIngressExecutionConfig>,
     trace_path: Option<PathBuf>,
 }
 
@@ -813,11 +1077,46 @@ impl RuntimeServer {
                 ));
             }
         }
+        if let Some(ingress) = config.input_ingress.as_ref() {
+            if !ingress.staging_root.is_absolute()
+                || !ingress.workstation_tool.is_absolute()
+                || !ingress.workstation_config.is_absolute()
+            {
+                return Err(ToolError::invalid(
+                    "input ingress paths must be absolute operator-owned paths",
+                    "inputIngress",
+                ));
+            }
+            if ingress.authorities.is_empty() {
+                return Err(ToolError::invalid(
+                    "input ingress must explicitly opt in at least one authority",
+                    "inputIngress.authorities",
+                ));
+            }
+            if ingress.download_hosts.is_empty()
+                || ingress
+                    .download_hosts
+                    .iter()
+                    .any(|host| !validate_ingress_download_host_config(host))
+            {
+                return Err(ToolError::invalid(
+                    "input ingress must explicitly configure normalized allowed downloadHosts",
+                    "inputIngress.downloadHosts",
+                ));
+            }
+            if ingress.max_bytes == 0 || ingress.max_bytes > 512 * 1024 * 1024 {
+                return Err(ToolError::invalid(
+                    "input ingress maxBytes must be between 1 and 512 MiB",
+                    "inputIngress.maxBytes",
+                ));
+            }
+        }
         let state = Arc::new(ServerState {
             runtime,
             executor,
             execution: config.execution,
             release: config.release,
+            input_ingress: config.input_ingress,
             trace_path: config.trace_path,
         });
         Ok(Self {
@@ -830,8 +1129,398 @@ impl RuntimeServer {
         self.state.runtime.clone()
     }
 
+    fn decorate_tool_for_host_extensions(&self, mut tool: Tool) -> Tool {
+        if tool.name.as_ref() == "input.ingest" && self.state.input_ingress.is_some() {
+            tool.meta
+                .get_or_insert_default()
+                .0
+                .insert("openai/fileParams".to_string(), json!(["file"]));
+        }
+        tool
+    }
+
+    pub(crate) fn catalog_tools(&self) -> Vec<Tool> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| self.decorate_tool_for_host_extensions(tool))
+            .collect()
+    }
+
+    async fn perform_input_ingress(
+        &self,
+        request: InputIngressToolRequest,
+    ) -> Result<InputIngressToolResult, ToolError> {
+        if request.schema_version != RUNTIME_SCHEMA_VERSION {
+            return Err(ToolError::invalid(
+                "schemaVersion must be 1",
+                "schemaVersion",
+            ));
+        }
+        let ingress = self.state.input_ingress.clone().ok_or_else(|| {
+            ToolError::invalid(
+                "input ingress is not configured on this Runtime",
+                "authority",
+            )
+        })?;
+        if !ingress
+            .authorities
+            .iter()
+            .any(|value| value == &request.authority)
+        {
+            return Err(ToolError::invalid(
+                "authority is not explicitly enabled for external input ingress",
+                "authority",
+            ));
+        }
+        if !validate_ingress_sha256(&request.expected_sha256) {
+            return Err(ToolError::invalid(
+                "expectedSha256 must be sha256:<64-hex>",
+                "expectedSha256",
+            ));
+        }
+        if request.expected_size_bytes == 0 || request.expected_size_bytes > ingress.max_bytes {
+            return Err(ToolError::invalid(
+                "expectedSizeBytes must be positive and no greater than configured maxBytes",
+                "expectedSizeBytes",
+            ));
+        }
+        if !validate_ingress_relative_object(&request.relative_object) {
+            return Err(ToolError::invalid(
+                "relativeObject must be one normalized POSIX relative path",
+                "relativeObject",
+            ));
+        }
+        if request.file.file_id.is_empty() || request.file.file_id.len() > 512 {
+            return Err(ToolError::invalid(
+                "file.file_id is invalid",
+                "file.file_id",
+            ));
+        }
+        let url = reqwest::Url::parse(&request.file.download_url).map_err(|_| {
+            ToolError::invalid(
+                "file.download_url must be a valid HTTPS URL",
+                "file.download_url",
+            )
+        })?;
+        if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+            return Err(ToolError::invalid(
+                "file.download_url must use HTTPS without URL userinfo",
+                "file.download_url",
+            ));
+        }
+        let initial_host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        if !ingress
+            .download_hosts
+            .iter()
+            .any(|host| host == &initial_host)
+        {
+            return Err(ToolError::invalid(
+                "file.download_url host is not operator-authorized for input ingress",
+                "file.download_url",
+            ));
+        }
+
+        std::fs::create_dir_all(&ingress.staging_root).map_err(|_| {
+            ToolError::internal("cannot prepare private input-ingress staging root")
+        })?;
+        let metadata = std::fs::symlink_metadata(&ingress.staging_root).map_err(|_| {
+            ToolError::internal("cannot observe private input-ingress staging root")
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ToolError::internal(
+                "configured input-ingress staging root is not a real directory",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                &ingress.staging_root,
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .map_err(|_| ToolError::internal("cannot make input-ingress staging root private"))?;
+        }
+
+        let host_file_reference_digest = format!(
+            "sha256:{:x}",
+            Sha256::digest(request.file.file_id.as_bytes())
+        );
+        let expected_sha256 = request.expected_sha256.to_ascii_lowercase();
+        let mut identity = Sha256::new();
+        identity.update(request.client_request_id.as_bytes());
+        identity.update(b"\0");
+        identity.update(request.authority.as_bytes());
+        identity.update(b"\0");
+        identity.update(request.relative_object.as_bytes());
+        identity.update(b"\0");
+        identity.update(expected_sha256.as_bytes());
+        identity.update(b"\0");
+        identity.update(request.expected_size_bytes.to_string().as_bytes());
+        let key = format!("{:x}", identity.finalize());
+        let source_name = format!("{key}.source");
+        let request_name = format!("{key}.request.json");
+        let source_path = ingress.staging_root.join(&source_name);
+        let request_path = ingress.staging_root.join(&request_name);
+        let temporary_path = ingress
+            .staging_root
+            .join(format!(".{key}.{}.part", Uuid::now_v7()));
+        let cleanup = |paths: &[&std::path::Path]| {
+            for path in paths {
+                let _ = std::fs::remove_file(path);
+            }
+        };
+        cleanup(&[&temporary_path]);
+
+        let workstation_request = json!({
+            "schemaVersion": 1,
+            "requestId": request.client_request_id.clone(),
+            "carrier": ingress.workstation_carrier.clone(),
+            "sourceObject": source_name,
+            "sourceProvenance": {
+                "provider": "openai-host-file-param",
+                "providerFileId": format!("host-declared-{host_file_reference_digest}"),
+            },
+            "expectedSha256": expected_sha256.clone(),
+            "authority": request.authority.clone(),
+            "relativeObject": request.relative_object.clone(),
+        });
+        let serialized = serde_json::to_vec(&workstation_request)
+            .map_err(|_| ToolError::internal("cannot serialize Workstation ingress request"))?;
+        if request_path.exists() {
+            let retained = std::fs::read(&request_path).map_err(|_| {
+                ToolError::internal("cannot read retained private Workstation ingress request")
+            })?;
+            if retained != serialized {
+                return Err(ToolError::invalid(
+                    "retained staging request conflicts with same durable input identity",
+                    "clientRequestId",
+                ));
+            }
+        } else {
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&request_path)
+                .map_err(|_| {
+                    ToolError::internal("cannot create private Workstation ingress request")
+                })?;
+            std::io::Write::write_all(&mut output, &serialized)
+                .and_then(|_| output.sync_all())
+                .map_err(|_| {
+                    ToolError::internal("cannot persist private Workstation ingress request")
+                })?;
+        }
+
+        let run_workstation = |reconcile_only: bool| -> Result<
+            (std::process::ExitStatus, serde_json::Value),
+            ToolError,
+        > {
+            let mut command = std::process::Command::new(&ingress.workstation_tool);
+            command
+                .arg("--config")
+                .arg(&ingress.workstation_config)
+                .arg("--request")
+                .arg(&request_path);
+            if reconcile_only {
+                command.arg("--reconcile-only");
+            }
+            let process = command.output().map_err(|_| {
+                ToolError::internal("cannot invoke Workstation input-authority ingress")
+            })?;
+            let body: serde_json::Value = serde_json::from_slice(&process.stdout)
+                .map_err(|_| ToolError::internal("Workstation ingress returned invalid JSON"))?;
+            Ok((process.status, body))
+        };
+
+        let build_result =
+            |receipt: serde_json::Value| -> Result<InputIngressToolResult, ToolError> {
+                if receipt.get("byteSize").and_then(serde_json::Value::as_u64)
+                    != Some(request.expected_size_bytes)
+                {
+                    return Err(ToolError::internal(
+                        "Workstation receipt byte size differs from expectedSizeBytes",
+                    ));
+                }
+                if receipt
+                    .get("observedSha256")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(expected_sha256.as_str())
+                {
+                    return Err(ToolError::internal(
+                        "Workstation receipt digest differs from expectedSha256",
+                    ));
+                }
+                Ok(InputIngressToolResult {
+                    schema_version: 1,
+                    kind: "ordivon.runtime.input-ingress-adapter-receipt".to_string(),
+                    authority: request.authority.clone(),
+                    relative_object: request.relative_object.clone(),
+                    expected_sha256: expected_sha256.clone(),
+                    expected_size_bytes: request.expected_size_bytes,
+                    host_file_reference_digest: host_file_reference_digest.clone(),
+                    source_identity_standing: "HOST_DECLARED_UNVERIFIED".to_string(),
+                    workstation_receipt: receipt,
+                    non_claims: vec![
+                        "host file reference digest is not cryptographic provider identity"
+                            .to_string(),
+                        "byte materialization is not Artifact/domain acceptance".to_string(),
+                        "Runtime adapter success is not consumer execution success".to_string(),
+                    ],
+                })
+            };
+
+        let (reconcile_status, reconcile) = run_workstation(true)?;
+        if !reconcile_status.success() {
+            return Err(ToolError::internal(
+                "Workstation ingress reconciliation failed closed",
+            ));
+        }
+        if reconcile
+            .get("commitStanding")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value.starts_with("COMMITTED"))
+        {
+            let result = build_result(reconcile)?;
+            cleanup(&[&source_path, &request_path]);
+            return Ok(result);
+        }
+        if reconcile
+            .get("standing")
+            .and_then(serde_json::Value::as_str)
+            != Some("SOURCE_REQUIRED")
+        {
+            return Err(ToolError::internal(
+                "Workstation ingress reconciliation did not admit a source fetch",
+            ));
+        }
+
+        let staged_valid = if source_path.exists() {
+            match ingress_stage_size_digest(&source_path, ingress.max_bytes) {
+                Ok((size, digest))
+                    if size == request.expected_size_bytes && digest == expected_sha256 =>
+                {
+                    true
+                }
+                _ => {
+                    cleanup(&[&source_path]);
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if !staged_valid {
+            let mut response = ingress_pinned_https_get(url, &ingress.download_hosts).await?;
+            if !response.status().is_success() {
+                return Err(ToolError::internal(format!(
+                    "input file download returned HTTP {}",
+                    response.status().as_u16()
+                )));
+            }
+            if let Some(length) = response.content_length() {
+                if length != request.expected_size_bytes {
+                    return Err(ToolError::invalid(
+                        "input file Content-Length differs from expectedSizeBytes",
+                        "expectedSizeBytes",
+                    ));
+                }
+            }
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary_path)
+                .map_err(|_| ToolError::internal("cannot create private input staging file"))?;
+            let mut digest = Sha256::new();
+            let mut observed_bytes = 0_u64;
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|_| ToolError::internal("input file download stream failed"))?
+            {
+                observed_bytes = observed_bytes.saturating_add(chunk.len() as u64);
+                if observed_bytes > request.expected_size_bytes {
+                    cleanup(&[&temporary_path]);
+                    return Err(ToolError::invalid(
+                        "input file stream exceeds expectedSizeBytes",
+                        "expectedSizeBytes",
+                    ));
+                }
+                digest.update(&chunk);
+                std::io::Write::write_all(&mut output, &chunk)
+                    .map_err(|_| ToolError::internal("cannot write private input staging bytes"))?;
+            }
+            std::io::Write::flush(&mut output)
+                .and_then(|_| output.sync_all())
+                .map_err(|_| ToolError::internal("cannot fsync private input staging bytes"))?;
+            drop(output);
+            if observed_bytes != request.expected_size_bytes {
+                cleanup(&[&temporary_path]);
+                return Err(ToolError::invalid(
+                    "input file stream length differs from expectedSizeBytes",
+                    "expectedSizeBytes",
+                ));
+            }
+            let observed_digest = format!("sha256:{:x}", digest.finalize());
+            if observed_digest != expected_sha256 {
+                cleanup(&[&temporary_path]);
+                return Err(ToolError::invalid(
+                    "downloaded input bytes do not match expectedSha256",
+                    "expectedSha256",
+                ));
+            }
+            match std::fs::hard_link(&temporary_path, &source_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let (size, digest) =
+                        ingress_stage_size_digest(&source_path, ingress.max_bytes)?;
+                    if size != request.expected_size_bytes || digest != expected_sha256 {
+                        cleanup(&[&temporary_path]);
+                        return Err(ToolError::internal(
+                            "concurrent input stage conflicts with expected bytes",
+                        ));
+                    }
+                }
+                Err(_) => {
+                    cleanup(&[&temporary_path]);
+                    return Err(ToolError::internal(
+                        "cannot publish verified private input stage",
+                    ));
+                }
+            }
+            cleanup(&[&temporary_path]);
+        }
+
+        let (status, receipt) = run_workstation(false)?;
+        let receipt = if status.success()
+            && receipt
+                .get("commitStanding")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value.starts_with("COMMITTED"))
+        {
+            receipt
+        } else {
+            let (retry_status, recovered) = run_workstation(true)?;
+            if !retry_status.success()
+                || !recovered
+                    .get("commitStanding")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| value.starts_with("COMMITTED"))
+            {
+                return Err(ToolError::internal(
+                    "Workstation input-authority ingress did not converge to a committed receipt",
+                ));
+            }
+            recovered
+        };
+        let result = build_result(receipt)?;
+        cleanup(&[&source_path, &request_path]);
+        Ok(result)
+    }
+
     pub fn tool_catalog_digest(&self) -> String {
-        let mut tools = self.tool_router.list_all();
+        let mut tools = self.catalog_tools();
         tools.sort_by(|left, right| left.name.cmp(&right.name));
         let bytes = serde_json::to_vec(&tools)
             .expect("Tool catalog serialization is infallible for generated schemas");

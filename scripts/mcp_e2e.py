@@ -29,6 +29,7 @@ LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18")
 SCHEMA_VERSION = 1
 EXPECTED_TOOLS = {
     "artifact.read",
+    "input.ingest",
     "release.apply",
     "release.get",
     "runtime.describe",
@@ -628,6 +629,12 @@ def run_journey(repo: Path, keep: bool, output: Path | None) -> dict[str, Any]:
         }
         names = set(tool_entries)
         check("tool-catalog", names == EXPECTED_TOOLS, sorted(names))
+        input_ingest_meta = tool_entries.get("input.ingest", {}).get("_meta", {})
+        check(
+            "input-ingest-default-no-file-param-advertisement",
+            "openai/fileParams" not in input_ingest_meta,
+            input_ingest_meta,
+        )
         for legacy_version in LEGACY_PROTOCOL_VERSIONS:
             legacy = McpClient(
                 endpoint,

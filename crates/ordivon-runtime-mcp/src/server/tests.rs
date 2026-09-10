@@ -56,6 +56,52 @@ impl Sandbox {
                 global_limit: 4,
             },
             release: None,
+            input_ingress: None,
+            trace_path: None,
+        })
+        .unwrap()
+    }
+
+    fn server_with_input_ingress(&self) -> RuntimeServer {
+        let staging_root = self.root.join("input-ingress-stage");
+        fs::create_dir_all(&staging_root).unwrap();
+        let workstation_config = self.root.join("input-ingress-config.json");
+        fs::write(&workstation_config, b"{}\n").unwrap();
+        RuntimeServer::new(ServerConfig {
+            runtime: RuntimeConfig {
+                registry: RegistryConfig {
+                    db_path: self.root.join("registry-ingress/registry.sqlite3"),
+                    store_root: self.root.join("registry-ingress"),
+                    busy_timeout_ms: 5000,
+                },
+                executor: UniversalExecutorConfig {
+                    store_root: self.root.join("store-ingress"),
+                    workspace_root: None,
+                    workspace_uid: None,
+                    workspace_gid: None,
+                    runner_path: PathBuf::from("/usr/bin/true"),
+                    allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
+                    max_runtime_ms: 10_000,
+                    max_output_bytes: 1024 * 1024,
+                },
+                startup_grace_ms: 1000,
+                windows: None,
+            },
+            input_authorities: Vec::new(),
+            execution: ExecutionContext {
+                principal: "principal:mcp-test-ingress".to_string(),
+                global_limit: 4,
+            },
+            release: None,
+            input_ingress: Some(InputIngressExecutionConfig {
+                staging_root,
+                workstation_tool: PathBuf::from("/usr/bin/true"),
+                workstation_config,
+                workstation_carrier: "runtime-stage".to_string(),
+                authorities: vec!["artifact-source-r1".to_string()],
+                download_hosts: vec!["example.invalid".to_string()],
+                max_bytes: 8 * 1024 * 1024,
+            }),
             trace_path: None,
         })
         .unwrap()
@@ -779,6 +825,355 @@ fn workspace_exec_plan_keeps_legacy_sum_only_for_legacy_shape() {
 }
 
 #[test]
+fn input_ingest_file_param_metadata_is_operator_opt_in_only() {
+    let sandbox = Sandbox::new("input-ingress-file-param-meta");
+    let unconfigured = sandbox.server();
+    let plain = unconfigured
+        .catalog_tools()
+        .into_iter()
+        .find(|tool| tool.name.as_ref() == "input.ingest")
+        .unwrap();
+    assert!(
+        plain
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.0.get("openai/fileParams"))
+            .is_none(),
+        "unconfigured Runtime must not advertise host file upload semantics"
+    );
+
+    let configured = sandbox.server_with_input_ingress();
+    let decorated = configured
+        .catalog_tools()
+        .into_iter()
+        .find(|tool| tool.name.as_ref() == "input.ingest")
+        .unwrap();
+    assert_eq!(
+        decorated
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.0.get("openai/fileParams")),
+        Some(&json!(["file"]))
+    );
+    assert_eq!(configured.get_tool("input.ingest"), Some(decorated));
+}
+
+#[tokio::test]
+async fn input_ingest_reconciles_before_network_and_redacts_host_file_reference() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let sandbox = Sandbox::new("input-ingress-reconcile-shortcircuit");
+        let staging_root = sandbox.root.join("input-ingress-stage");
+        fs::create_dir_all(&staging_root).unwrap();
+        let workstation_config = sandbox.root.join("input-ingress-config.json");
+        fs::write(&workstation_config, b"{}\n").unwrap();
+        let capture = sandbox.root.join("captured-workstation-request.json");
+        let tool = sandbox.root.join("fake-workstation-ingress.py");
+        let expected = format!("sha256:{}", "a".repeat(64));
+        let script = format!(
+            r#"#!/usr/bin/env python3
+import json, shutil, sys
+args = sys.argv[1:]
+request = args[args.index('--request') + 1]
+shutil.copyfile(request, {capture:?})
+print(json.dumps({{
+  'commitStanding': 'COMMITTED_RECOVERED',
+  'byteSize': 123,
+  'observedSha256': {expected:?},
+  'recoveredAfterResponseLoss': True
+}}))
+"#,
+            capture = capture.to_string_lossy(),
+            expected = expected,
+        );
+        fs::write(&tool, script).unwrap();
+        let mut permissions = fs::metadata(&tool).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&tool, permissions).unwrap();
+        let server = RuntimeServer::new(ServerConfig {
+            runtime: RuntimeConfig {
+                registry: RegistryConfig {
+                    db_path: sandbox.root.join("registry-ingress/registry.sqlite3"),
+                    store_root: sandbox.root.join("registry-ingress"),
+                    busy_timeout_ms: 5000,
+                },
+                executor: UniversalExecutorConfig {
+                    store_root: sandbox.root.join("store-ingress"),
+                    workspace_root: None,
+                    workspace_uid: None,
+                    workspace_gid: None,
+                    runner_path: PathBuf::from("/usr/bin/true"),
+                    allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
+                    max_runtime_ms: 10_000,
+                    max_output_bytes: 1024 * 1024,
+                },
+                startup_grace_ms: 1000,
+                windows: None,
+            },
+            input_authorities: Vec::new(),
+            execution: ExecutionContext {
+                principal: "principal:mcp-test-reconcile".to_string(),
+                global_limit: 4,
+            },
+            release: None,
+            input_ingress: Some(InputIngressExecutionConfig {
+                staging_root,
+                workstation_tool: tool,
+                workstation_config,
+                workstation_carrier: "runtime-stage".to_string(),
+                authorities: vec!["artifact-source-r1".to_string()],
+                download_hosts: vec!["example.invalid".to_string()],
+                max_bytes: 8 * 1024 * 1024,
+            }),
+            trace_path: None,
+        })
+        .unwrap();
+        let secret_url = "https://example.invalid/file?token=SIGNED-URL-MUST-NOT-BE-FETCHED";
+        let raw_file_id = "file-raw-provider-identity-must-not-persist";
+        let result = server
+            .perform_input_ingress(InputIngressToolRequest {
+                schema_version: 1,
+                client_request_id: "request:input-ingress-reconcile".to_string(),
+                authority: "artifact-source-r1".to_string(),
+                relative_object: "pdu-sdu/34x10/slide-01.jpeg".to_string(),
+                expected_sha256: expected.clone(),
+                expected_size_bytes: 123,
+                file: InputIngressFilePayload {
+                    download_url: secret_url.to_string(),
+                    file_id: raw_file_id.to_string(),
+                    file_name: Some("slide-01.jpeg".to_string()),
+                    mime_type: Some("image/jpeg".to_string()),
+                },
+            })
+            .await
+            .expect("local committed reconciliation must short-circuit before network fetch");
+        assert_eq!(result.expected_size_bytes, 123);
+        assert_eq!(result.expected_sha256, expected);
+        assert_eq!(result.source_identity_standing, "HOST_DECLARED_UNVERIFIED");
+        assert_eq!(
+            result.host_file_reference_digest,
+            format!("sha256:{:x}", Sha256::digest(raw_file_id.as_bytes()))
+        );
+        let captured = fs::read_to_string(capture).unwrap();
+        assert!(!captured.contains(secret_url));
+        assert!(!captured.contains("SIGNED-URL-MUST-NOT-BE-FETCHED"));
+        assert!(!captured.contains(raw_file_id));
+        assert!(captured.contains(&result.host_file_reference_digest));
+    }
+}
+
+#[tokio::test]
+async fn input_ingest_rejects_non_opted_authority_before_touching_download_url() {
+    let sandbox = Sandbox::new("input-ingress-authority-deny");
+    let server = sandbox.server_with_input_ingress();
+    let secret = "TOP-SECRET-SIGNED-URL-MATERIAL";
+    let error = server
+        .perform_input_ingress(InputIngressToolRequest {
+            schema_version: 1,
+            client_request_id: "request:input-ingress-deny".to_string(),
+            authority: "finance-credentials".to_string(),
+            relative_object: "unsafe.bin".to_string(),
+            expected_sha256: format!("sha256:{}", "0".repeat(64)),
+            expected_size_bytes: 1,
+            file: InputIngressFilePayload {
+                download_url: format!("https://example.invalid/file?secret={secret}"),
+                file_id: "file-denied".to_string(),
+                file_name: None,
+                mime_type: None,
+            },
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.field.as_deref(), Some("authority"));
+    assert!(!error.message.contains(secret));
+}
+
+#[tokio::test]
+async fn input_ingest_rejects_https_host_outside_operator_allowlist_without_echoing_url() {
+    let sandbox = Sandbox::new("input-ingress-host-deny");
+    let server = sandbox.server_with_input_ingress();
+    let secret = "TOP-SECRET-OTHER-HOST";
+    let error = server
+        .perform_input_ingress(InputIngressToolRequest {
+            schema_version: 1,
+            client_request_id: "request:input-ingress-host".to_string(),
+            authority: "artifact-source-r1".to_string(),
+            relative_object: "source/input.pptx".to_string(),
+            expected_sha256: format!("sha256:{}", "0".repeat(64)),
+            expected_size_bytes: 1,
+            file: InputIngressFilePayload {
+                download_url: format!("https://other.invalid/file?token={secret}"),
+                file_id: "file-host-test".to_string(),
+                file_name: None,
+                mime_type: None,
+            },
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.field.as_deref(), Some("file.download_url"));
+    assert!(!error.message.contains(secret));
+    assert!(!error.message.contains("other.invalid"));
+}
+
+#[tokio::test]
+async fn input_ingest_url_validation_never_echoes_signed_url_material() {
+    let sandbox = Sandbox::new("input-ingress-url-redaction");
+    let server = sandbox.server_with_input_ingress();
+    let secret = "TOP-SECRET-SIGNED-URL-MATERIAL";
+    let error = server
+        .perform_input_ingress(InputIngressToolRequest {
+            schema_version: 1,
+            client_request_id: "request:input-ingress-url".to_string(),
+            authority: "artifact-source-r1".to_string(),
+            relative_object: "source/input.pptx".to_string(),
+            expected_sha256: format!("sha256:{}", "0".repeat(64)),
+            expected_size_bytes: 1,
+            file: InputIngressFilePayload {
+                download_url: format!("http://example.invalid/file?token={secret}"),
+                file_id: "file-url-test".to_string(),
+                file_name: None,
+                mime_type: None,
+            },
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.field.as_deref(), Some("file.download_url"));
+    assert!(!error.message.contains(secret));
+    assert!(!error.message.contains("example.invalid"));
+}
+
+#[test]
+fn openai_provided_file_payload_accepts_snake_case_wire_shape() {
+    let payload = serde_json::json!({
+        "download_url": "https://example.invalid/file",
+        "file_id": "file-current-host",
+        "mime_type": "image/jpeg",
+        "file_name": "slide-01.jpeg"
+    });
+    let parsed = serde_json::from_value::<InputIngressFilePayload>(payload)
+        .expect("current OpenAI provided-file snake_case wire shape must deserialize");
+    assert_eq!(parsed.file_id, "file-current-host");
+}
+
+#[test]
+fn input_ingest_schema_requires_exact_expected_size() {
+    let server = Sandbox::new("ingress-size-schema").server_with_input_ingress();
+    let tool = server
+        .catalog_tools()
+        .into_iter()
+        .find(|tool| tool.name.as_ref() == "input.ingest")
+        .expect("input.ingest");
+    let schema = serde_json::to_value(&tool.input_schema).unwrap();
+    assert!(
+        schema.pointer("/properties/expectedSizeBytes").is_some(),
+        "input.ingest must bind exact expectedSizeBytes, not only a global maxBytes ceiling: {schema}"
+    );
+}
+
+#[test]
+fn private_ip_download_host_is_rejected_at_configuration_boundary() {
+    let sandbox = Sandbox::new("ingress-private-host");
+    let staging_root = sandbox.root.join("input-ingress-stage");
+    fs::create_dir_all(&staging_root).unwrap();
+    let workstation_config = sandbox.root.join("input-ingress-config.json");
+    fs::write(&workstation_config, b"{}\n").unwrap();
+    let server = RuntimeServer::new(ServerConfig {
+        runtime: RuntimeConfig {
+            registry: RegistryConfig {
+                db_path: sandbox.root.join("registry-ingress/registry.sqlite3"),
+                store_root: sandbox.root.join("registry-ingress"),
+                busy_timeout_ms: 5000,
+            },
+            executor: UniversalExecutorConfig {
+                store_root: sandbox.root.join("store-ingress"),
+                workspace_root: None,
+                workspace_uid: None,
+                workspace_gid: None,
+                runner_path: PathBuf::from("/usr/bin/true"),
+                allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
+                max_runtime_ms: 10_000,
+                max_output_bytes: 1024 * 1024,
+            },
+            startup_grace_ms: 1000,
+            windows: None,
+        },
+        input_authorities: Vec::new(),
+        execution: ExecutionContext {
+            principal: "principal:mcp-test-private-host".to_string(),
+            global_limit: 4,
+        },
+        release: None,
+        input_ingress: Some(InputIngressExecutionConfig {
+            staging_root,
+            workstation_tool: PathBuf::from("/usr/bin/true"),
+            workstation_config,
+            workstation_carrier: "runtime-stage".to_string(),
+            authorities: vec!["artifact-source-r1".to_string()],
+            download_hosts: vec!["127.0.0.1".to_string()],
+            max_bytes: 8 * 1024 * 1024,
+        }),
+        trace_path: None,
+    });
+    assert!(server.is_err(), "private/loopback IP download hosts must fail closed even if operator config accidentally lists them");
+}
+
+#[test]
+fn input_ingest_schema_requires_digest_authority_destination_and_file_payload() {
+    let server = Sandbox::new("input-ingress-schema").server();
+    let tool = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .find(|tool| tool.name.as_ref() == "input.ingest")
+        .unwrap();
+    let schema = serde_json::to_value(&tool.input_schema).unwrap();
+    let text = serde_json::to_string(&schema).unwrap();
+    for field in [
+        "clientRequestId",
+        "authority",
+        "relativeObject",
+        "expectedSha256",
+        "expectedSizeBytes",
+        "file",
+        "download_url",
+        "file_id",
+    ] {
+        assert!(
+            text.contains(field),
+            "input.ingest schema omitted {field}: {schema}"
+        );
+    }
+}
+
+#[test]
+fn runtime_describe_projects_only_ingress_authority_names_not_transport_secrets() {
+    let sandbox = Sandbox::new("input-ingress-describe");
+    let server = sandbox.server_with_input_ingress();
+    let result = RuntimeDescribeResult::from_capabilities(
+        server.state.runtime.capabilities(),
+        server.state.execution.global_limit,
+        false,
+        server
+            .state
+            .input_ingress
+            .as_ref()
+            .unwrap()
+            .authorities
+            .clone(),
+    );
+    let value = serde_json::to_value(result).unwrap();
+    assert_eq!(
+        value["inputIngressAuthorities"],
+        json!(["artifact-source-r1"])
+    );
+    let text = serde_json::to_string(&value).unwrap();
+    assert!(!text.contains("input-ingress-stage"));
+    assert!(!text.contains("example.invalid"));
+    assert!(!text.contains("workstation"));
+}
+
+#[test]
 fn server_clones_share_one_runtime_state() {
     let sandbox = Sandbox::new("shared-state");
     let server = sandbox.server();
@@ -793,6 +1188,7 @@ fn tool_effect_annotations_match_runtime_behavior() {
     let tools = server.tool_router.list_all();
     let expected = [
         ("artifact.read", true, false, true, false),
+        ("input.ingest", false, false, true, true),
         ("release.apply", false, true, true, true),
         ("release.get", true, false, true, false),
         ("runtime.describe", true, false, true, false),
@@ -919,6 +1315,7 @@ fn tool_catalog_uses_transactional_job_contract() {
         names,
         [
             "artifact.read",
+            "input.ingest",
             "release.apply",
             "release.get",
             "runtime.describe",
@@ -1624,7 +2021,7 @@ fn every_public_tool_publishes_structured_output_contract() {
     let sandbox = Sandbox::new("all-output-schemas");
     let server = sandbox.server();
     let tools = server.tool_router.list_all();
-    assert_eq!(tools.len(), 23);
+    assert_eq!(tools.len(), 24);
     for tool in tools {
         let schema = tool
             .output_schema
@@ -2009,6 +2406,7 @@ fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
         capabilities,
         server.state.execution.global_limit,
         server.state.release.is_some(),
+        Vec::new(),
     );
     assert_eq!(result.schema_version, 1);
     assert_eq!(result.global_execution_limit, 4);

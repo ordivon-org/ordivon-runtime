@@ -49,6 +49,8 @@ Accepted and active for the current owner-trusted deployment model. Reopen when 
 
 Runtime data belongs to the operator and the users whose work it executes. Runtime must make storage and deletion behavior explicit, but it cannot promise that arbitrary commands, output, source trees, or Artifacts are free of sensitive information.
 
+The optional `input.ingest` transport is deliberately narrower: its temporary external-file download URL is request-ephemeral and must not be written to Runtime durable state, Workstation ingress intent/receipt files, traces, or Tool output. The host-provided file ID may appear in byte-materialization evidence only with unverified source-identity standing. The verified file bytes may become ordinary operator-owned InputAuthority data after Workstation commit and then follow the authority's normal retention policy.
+
 Runtime does **not** automatically redact command arguments, environment values supplied to target processes, source content, immutable input materializations, stdout, stderr, Artifacts, paths, client identifiers, or foreign references. Treat the entire Runtime state root and every backup or receipt as potentially sensitive.
 
 `workspace.content` creates no additional retained media store. It opens one already-existing Workspace PNG/JPEG through descriptor-bound Workspace path authority, performs the bounded read and digest on that exact opened file, verifies the caller-supplied SHA-256 digest, and projects those exact bytes through the MCP response. The source image keeps the Workspace's existing lifecycle; Agent observation does not register a second Artifact or persist another image copy.

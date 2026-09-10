@@ -27,14 +27,43 @@ impl RuntimeServer {
         let runtime = self.state.runtime.clone();
         let global_execution_limit = self.state.execution.global_limit;
         let structured_release_configured = self.state.release.is_some();
+        let input_ingress_authorities = self
+            .state
+            .input_ingress
+            .as_ref()
+            .map(|config| config.authorities.clone())
+            .unwrap_or_default();
         self.run_core("runtime.describe", move || {
             Ok(RuntimeDescribeResult::from_capabilities(
                 runtime.capabilities(),
                 global_execution_limit,
                 structured_release_configured,
+                input_ingress_authorities,
             ))
         })
         .await
+    }
+
+    #[tool(
+        name = "input.ingest",
+        description = "Admit one exact external file into an explicitly ingress-enabled operator InputAuthority through a private Runtime staging boundary and Workstation-owned digest-fenced materializer. This adapter is disabled unless separately operator-configured; ordinary InputAuthority presence never grants upload authority. The temporary download URL is not persisted or passed to Workstation. expectedSha256 is verified before Workstation commit, and Workstation independently enforces no-overwrite/path/digest rules. A committed receipt proves byte materialization only, not domain acceptance or provider identity.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolOutcome<InputIngressToolResult>>(),
+        annotations(
+            title = "Ingest exact external input",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn input_ingest(
+        &self,
+        Parameters(request): Parameters<InputIngressToolRequest>,
+    ) -> ToolOutcome<InputIngressToolResult> {
+        match self.perform_input_ingress(request).await {
+            Ok(result) => ToolOutcome::Success(result),
+            Err(error) => ToolOutcome::Error(error),
+        }
     }
 
     #[tool(
