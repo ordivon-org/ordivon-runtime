@@ -166,6 +166,7 @@ pub struct RuntimeDescribeRequest {
 pub struct RuntimeDescribeResult {
     pub schema_version: u32,
     pub global_execution_limit: u32,
+    pub default_runtime_ms: u64,
     pub max_runtime_ms: u64,
     pub max_output_bytes: u64,
     pub allowed_executable_roots: Vec<String>,
@@ -185,6 +186,7 @@ impl RuntimeDescribeResult {
         Self {
             schema_version: capabilities.schema_version,
             global_execution_limit,
+            default_runtime_ms: capabilities.default_runtime_ms,
             max_runtime_ms: capabilities.max_runtime_ms,
             max_output_bytes: capabilities.max_output_bytes,
             allowed_executable_roots: capabilities.allowed_executable_roots,
@@ -1060,10 +1062,22 @@ struct ServerState {
 
 impl RuntimeServer {
     pub fn new(config: ServerConfig) -> Result<Self, ToolError> {
+        let default_runtime_ms = config.runtime.executor.max_runtime_ms;
+        Self::new_with_default_runtime_ms(config, default_runtime_ms)
+    }
+
+    pub fn new_with_default_runtime_ms(
+        config: ServerConfig,
+        default_runtime_ms: u64,
+    ) -> Result<Self, ToolError> {
         let executor = config.runtime.executor.clone();
         executor.ensure_store().map_err(ToolError::from)?;
-        let runtime = Runtime::new_with_input_authorities(config.runtime, config.input_authorities)
-            .map_err(ToolError::from)?;
+        let runtime = Runtime::new_with_input_authorities_and_default_runtime(
+            config.runtime,
+            config.input_authorities,
+            default_runtime_ms,
+        )
+        .map_err(ToolError::from)?;
         if let Some(release) = config.release.as_ref() {
             for (path, field) in [
                 (&release.source_repo, "release.sourceRepo"),

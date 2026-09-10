@@ -182,7 +182,8 @@ def fixture(root: Path) -> dict[str, Path]:
     env_file = root / "runtime.env"
     env_file.write_text(
         "ORDIVON_GLOBAL_MAX_CONCURRENCY=8\n"
-        "ORDIVON_MAX_RUNTIME_MS=3600000\n"
+        "ORDIVON_DEFAULT_RUNTIME_MS=3600000\n"
+        "ORDIVON_MAX_RUNTIME_MS=86400000\n"
         "ORDIVON_BODY_LIMIT_BYTES=1048576\n"
         "ORDIVON_CACHE_HIGH_WATERMARK_BYTES=68719476736\n"
         "ORDIVON_CACHE_LOW_WATERMARK_BYTES=51539607552\n"
@@ -428,7 +429,8 @@ class RuntimeStatusTests(unittest.TestCase):
                 decisions["2025-06-18"]["consumers"],
             )
             self.assertEqual(report["config"]["globalMaxConcurrency"], 8)
-            self.assertEqual(report["config"]["maxRuntimeMs"], 3_600_000)
+            self.assertEqual(report["config"]["defaultRuntimeMs"], 3_600_000)
+            self.assertEqual(report["config"]["maxRuntimeMs"], 86_400_000)
             self.assertEqual(report["config"]["bodyLimitBytes"], 1_048_576)
             self.assertEqual(report["workspaces"]["dirty"], 0)
             self.assertEqual(report["workspaces"]["staleDirty"], 0)

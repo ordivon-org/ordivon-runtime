@@ -564,6 +564,7 @@ pub struct RuntimeExecutionTargetCapability {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeCapabilities {
     pub schema_version: u32,
+    pub default_runtime_ms: u64,
     pub max_runtime_ms: u64,
     pub max_output_bytes: u64,
     pub allowed_executable_roots: Vec<String>,

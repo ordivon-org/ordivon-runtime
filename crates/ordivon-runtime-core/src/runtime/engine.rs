@@ -229,6 +229,7 @@ struct PreparedInputSet {
 pub struct Runtime {
     registry: Registry,
     executor: UniversalExecutorConfig,
+    default_runtime_ms: u64,
     startup_grace_ms: u64,
     execution_path: String,
     execution_home: String,
@@ -409,7 +410,8 @@ struct ObservationOutputRequest {
 
 impl Runtime {
     pub fn new(config: RuntimeConfig) -> RuntimeResult<Self> {
-        Self::new_with_input_authorities(config, Vec::new())
+        let default_runtime_ms = config.executor.max_runtime_ms;
+        Self::new_with_input_authorities_and_default_runtime(config, Vec::new(), default_runtime_ms)
     }
 
     /// Construction boundary for operator-owned immutable input authorities.
@@ -418,7 +420,28 @@ impl Runtime {
         config: RuntimeConfig,
         input_authorities: Vec<InputAuthority>,
     ) -> RuntimeResult<Self> {
+        let default_runtime_ms = config.executor.max_runtime_ms;
+        Self::new_with_input_authorities_and_default_runtime(
+            config,
+            input_authorities,
+            default_runtime_ms,
+        )
+    }
+
+    /// Construction boundary for an operator-owned default timeout distinct from the hard maximum.
+    /// Existing constructors intentionally preserve the historical default=max behavior.
+    pub fn new_with_input_authorities_and_default_runtime(
+        config: RuntimeConfig,
+        input_authorities: Vec<InputAuthority>,
+        default_runtime_ms: u64,
+    ) -> RuntimeResult<Self> {
         config.executor.validate().map_err(map_universal_error)?;
+        if default_runtime_ms == 0 || default_runtime_ms > config.executor.max_runtime_ms {
+            return Err(RuntimeError::invalid(
+                "defaultRuntimeMs must be positive and no greater than maxRuntimeMs",
+                "defaultRuntimeMs",
+            ));
+        }
         if let Some(windows) = &config.windows {
             windows.validate()?;
         }
@@ -481,6 +504,7 @@ impl Runtime {
         let runtime = Self {
             registry,
             executor: config.executor,
+            default_runtime_ms,
             startup_grace_ms: config.startup_grace_ms,
             execution_path,
             execution_home,
@@ -836,7 +860,7 @@ impl Runtime {
         let timeout_ms = proposal
             .execution
             .timeout_ms
-            .unwrap_or(self.executor.max_runtime_ms);
+            .unwrap_or(self.default_runtime_ms);
         TaskRunRequest {
             schema_version: proposal.schema_version,
             client_request_id: proposal.client_request_id.clone(),
@@ -1602,6 +1626,7 @@ impl Runtime {
 
         RuntimeCapabilities {
             schema_version: RUNTIME_SCHEMA_VERSION,
+            default_runtime_ms: self.default_runtime_ms,
             max_runtime_ms: self.executor.max_runtime_ms,
             max_output_bytes: self.executor.max_output_bytes,
             allowed_executable_roots,
@@ -7157,6 +7182,15 @@ mod trusted_systemd_command_tests {
     }
 
     fn proposal_runtime(label: &str, max_runtime_ms: u64, max_output_bytes: u64) -> Runtime {
+        proposal_runtime_with_default(label, max_runtime_ms, max_runtime_ms, max_output_bytes)
+    }
+
+    fn proposal_runtime_with_default(
+        label: &str,
+        default_runtime_ms: u64,
+        max_runtime_ms: u64,
+        max_output_bytes: u64,
+    ) -> Runtime {
         let root = std::env::temp_dir().join(format!(
             "ordivon-proposal-resolution-{label}-{}-{}",
             std::process::id(),
@@ -7171,21 +7205,25 @@ mod trusted_systemd_command_tests {
             store_root: store.clone(),
             busy_timeout_ms: 5_000,
         };
-        Runtime::new(super::RuntimeConfig {
-            registry,
-            executor: UniversalExecutorConfig {
-                store_root: root.join("runtime"),
-                workspace_root: None,
-                workspace_uid: None,
-                workspace_gid: None,
-                runner_path: PathBuf::from("/usr/bin/true"),
-                allowed_executable_roots: vec![PathBuf::from("/")],
-                max_runtime_ms,
-                max_output_bytes,
+        Runtime::new_with_input_authorities_and_default_runtime(
+            super::RuntimeConfig {
+                registry,
+                executor: UniversalExecutorConfig {
+                    store_root: root.join("runtime"),
+                    workspace_root: None,
+                    workspace_uid: None,
+                    workspace_gid: None,
+                    runner_path: PathBuf::from("/usr/bin/true"),
+                    allowed_executable_roots: vec![PathBuf::from("/")],
+                    max_runtime_ms,
+                    max_output_bytes,
+                },
+                startup_grace_ms: 2_000,
+                windows: None,
             },
-            startup_grace_ms: 2_000,
-            windows: None,
-        })
+            Vec::new(),
+            default_runtime_ms,
+        )
         .unwrap()
     }
 
@@ -7232,10 +7270,10 @@ mod trusted_systemd_command_tests {
 
     #[test]
     fn proposal_resolution_only_fills_omitted_limits_and_preserves_explicit_constraints() {
-        let runtime = proposal_runtime("limits", 10_000, 1_048_576);
+        let runtime = proposal_runtime_with_default("limits", 4_000, 10_000, 1_048_576);
         let omitted = proposal(&[]);
         let resolved = runtime.resolve_proposal(&omitted);
-        assert_eq!(resolved.execution.timeout_ms, 10_000);
+        assert_eq!(resolved.execution.timeout_ms, 4_000);
         assert_eq!(resolved.execution.stdout_limit_bytes, 1_048_576);
         assert_eq!(resolved.execution.stderr_limit_bytes, 1_048_576);
 
@@ -7247,6 +7285,11 @@ mod trusted_systemd_command_tests {
         assert_eq!(resolved.execution.timeout_ms, 2_000);
         assert_eq!(resolved.execution.stdout_limit_bytes, 4_096);
         assert_eq!(resolved.execution.stderr_limit_bytes, 8_192);
+
+        explicit.execution.timeout_ms = Some(8_000);
+        let resolved = runtime.resolve_proposal(&explicit);
+        assert_eq!(resolved.execution.timeout_ms, 8_000);
+        validate_new_admission_policy(&resolved, 10_000, 1_048_576).unwrap();
 
         explicit.execution.timeout_ms = Some(99_000);
         let resolved = runtime.resolve_proposal(&explicit);

@@ -30,35 +30,42 @@ impl Sandbox {
     }
 
     fn server(&self) -> RuntimeServer {
-        RuntimeServer::new(ServerConfig {
-            runtime: RuntimeConfig {
-                registry: RegistryConfig {
-                    db_path: self.root.join("registry/registry.sqlite3"),
-                    store_root: self.root.join("registry"),
-                    busy_timeout_ms: 5000,
+        self.server_with_runtime_default(10_000)
+    }
+
+    fn server_with_runtime_default(&self, default_runtime_ms: u64) -> RuntimeServer {
+        RuntimeServer::new_with_default_runtime_ms(
+            ServerConfig {
+                runtime: RuntimeConfig {
+                    registry: RegistryConfig {
+                        db_path: self.root.join("registry/registry.sqlite3"),
+                        store_root: self.root.join("registry"),
+                        busy_timeout_ms: 5000,
+                    },
+                    executor: UniversalExecutorConfig {
+                        store_root: self.root.join("store"),
+                        workspace_root: None,
+                        workspace_uid: None,
+                        workspace_gid: None,
+                        runner_path: PathBuf::from("/usr/bin/true"),
+                        allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
+                        max_runtime_ms: 10_000,
+                        max_output_bytes: 1024 * 1024,
+                    },
+                    startup_grace_ms: 1000,
+                    windows: None,
                 },
-                executor: UniversalExecutorConfig {
-                    store_root: self.root.join("store"),
-                    workspace_root: None,
-                    workspace_uid: None,
-                    workspace_gid: None,
-                    runner_path: PathBuf::from("/usr/bin/true"),
-                    allowed_executable_roots: vec![PathBuf::from("/usr/bin")],
-                    max_runtime_ms: 10_000,
-                    max_output_bytes: 1024 * 1024,
+                input_authorities: Vec::new(),
+                execution: ExecutionContext {
+                    principal: "principal:mcp-test".to_string(),
+                    global_limit: 4,
                 },
-                startup_grace_ms: 1000,
-                windows: None,
+                release: None,
+                input_ingress: None,
+                trace_path: None,
             },
-            input_authorities: Vec::new(),
-            execution: ExecutionContext {
-                principal: "principal:mcp-test".to_string(),
-                global_limit: 4,
-            },
-            release: None,
-            input_ingress: None,
-            trace_path: None,
-        })
+            default_runtime_ms,
+        )
         .unwrap()
     }
 
@@ -2424,7 +2431,7 @@ fn tool_catalog_digest_is_deterministic_and_discovery_visible() {
 #[test]
 fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
     let sandbox = Sandbox::new("runtime-describe");
-    let server = sandbox.server();
+    let server = sandbox.server_with_runtime_default(4_000);
     let capabilities = server.state.runtime.capabilities();
     let result = RuntimeDescribeResult::from_capabilities(
         capabilities,
@@ -2434,6 +2441,7 @@ fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
     );
     assert_eq!(result.schema_version, 1);
     assert_eq!(result.global_execution_limit, 4);
+    assert_eq!(result.default_runtime_ms, 4_000);
     assert_eq!(result.max_runtime_ms, 10_000);
     assert_eq!(result.max_output_bytes, 1024 * 1024);
     assert_eq!(result.allowed_executable_roots, vec!["/usr/bin"]);
@@ -2486,6 +2494,7 @@ fn runtime_describe_projects_agent_affordances_without_selecting_a_target() {
     let output = serde_json::to_string(tool.output_schema.as_ref().unwrap()).unwrap();
     for expected in [
         "globalExecutionLimit",
+        "defaultRuntimeMs",
         "maxRuntimeMs",
         "maxOutputBytes",
         "allowedExecutableRoots",

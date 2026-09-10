@@ -564,6 +564,7 @@ def service_status(systemctl: Path, service: str, reasons: list[str]) -> dict[st
 def whitelisted_config(env_file: Path, reasons: list[str]) -> dict[str, int | None]:
     allowed = {
         "ORDIVON_GLOBAL_MAX_CONCURRENCY": "globalMaxConcurrency",
+        "ORDIVON_DEFAULT_RUNTIME_MS": "defaultRuntimeMs",
         "ORDIVON_MAX_RUNTIME_MS": "maxRuntimeMs",
         "ORDIVON_BODY_LIMIT_BYTES": "bodyLimitBytes",
         "ORDIVON_CACHE_HIGH_WATERMARK_BYTES": "cacheHighWatermarkBytes",

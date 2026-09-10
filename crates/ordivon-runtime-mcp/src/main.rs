@@ -71,6 +71,7 @@ struct AppConfig {
     cf_access: Option<CloudflareAccessConfig>,
     reconcile_interval_ms: u64,
     reconcile_batch_size: u32,
+    default_runtime_ms: u64,
     server: ServerConfig,
 }
 #[tokio::main]
@@ -85,8 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = load_config()?;
     validate_loopback_bind(app.bind)?;
-    let runtime_server = RuntimeServer::new(app.server.clone())
-        .map_err(|error| std::io::Error::other(error.message))?;
+    let runtime_server =
+        RuntimeServer::new_with_default_runtime_ms(app.server.clone(), app.default_runtime_ms)
+            .map_err(|error| std::io::Error::other(error.message))?;
     let startup_runtime = runtime_server.runtime_handle();
     let startup_reconciliation = startup_runtime.reconcile_all()?;
     if startup_reconciliation.failed > 0 {
@@ -512,6 +514,17 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     if max_runtime_ms == 0 {
         return Err("ORDIVON_MAX_RUNTIME_MS must be positive".into());
     }
+    let default_runtime_ms: u64 = std::env::var("ORDIVON_DEFAULT_RUNTIME_MS")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(max_runtime_ms);
+    if default_runtime_ms == 0 || default_runtime_ms > max_runtime_ms {
+        return Err(
+            "ORDIVON_DEFAULT_RUNTIME_MS must be positive and no greater than ORDIVON_MAX_RUNTIME_MS"
+                .into(),
+        );
+    }
     let max_output_bytes: u64 = std::env::var("ORDIVON_MAX_OUTPUT_BYTES")
         .ok()
         .map(|value| value.parse())
@@ -562,6 +575,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         cf_access,
         reconcile_interval_ms,
         reconcile_batch_size,
+        default_runtime_ms,
         server: ServerConfig {
             runtime: RuntimeConfig {
                 registry: RegistryConfig {

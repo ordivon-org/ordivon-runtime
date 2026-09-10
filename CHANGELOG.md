@@ -4,6 +4,8 @@ All user-visible changes to Ordivon Runtime are recorded here. The repository fo
 
 ## Unreleased
 
+- Runtime Job timeout policy now separates the operator default from the hard maximum: `ORDIVON_DEFAULT_RUNTIME_MS` resolves only omitted Agent-facing `timeoutMs`, while `ORDIVON_MAX_RUNTIME_MS` remains the fail-closed admission ceiling for explicit values. Existing installations that omit the new setting preserve historical `default=max` behavior; the packaged profile chooses a 1-hour default and 24-hour maximum so long scientific/engineering Jobs can request more than one hour without silently widening ordinary omitted-timeout work. `runtime.describe` and operator status project both values; durable Execution Plans, runner deadlines, replay, and reconciliation semantics are unchanged.
+
 - Runtime path-drift witnesses now treat non-topological metadata/write events on ancestor path components as remeasurement triggers rather than proof that a bound executable or declared Host Dependency changed. Unchanged device/inode/file-type identity continues execution, while direct target writes and create/delete/move/unmount/watch-loss topology events remain fail-closed; dedicated regressions preserve executable and Host Dependency replacement detection while preventing unrelated host metadata changes from terminating long-running Jobs.
 
 - Runtime deployment and rollback readiness now use a bounded 60-second default budget and re-check service liveness between short MCP probe slices, so large-Registry cold startup is not misclassified merely because the endpoint is not listening within 15 seconds, while a service that exits after becoming active still fails quickly and the explicit `--wait-seconds` override remains authoritative.
