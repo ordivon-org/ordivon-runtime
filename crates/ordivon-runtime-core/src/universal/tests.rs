@@ -1669,6 +1669,264 @@ fn runner_fails_when_host_dependency_drifts_after_target_start() {
 }
 
 #[test]
+fn runner_ignores_ancestor_metadata_event_when_host_dependency_identity_is_unchanged() {
+    let sandbox = Sandbox::new("runner-host-dependency-ancestor-metadata");
+    let workspace = sandbox
+        .root
+        .join("workspace-host-dependency-ancestor-metadata");
+    fs::create_dir_all(&workspace).unwrap();
+    let dependency_root = sandbox.root.join("dependency-tree");
+    let dependency_lib = dependency_root.join("lib");
+    fs::create_dir_all(&dependency_lib).unwrap();
+    let dependency = dependency_lib.join("runtime-dependency.txt");
+    fs::write(&dependency, b"STABLE\n").unwrap();
+    let gate = sandbox.root.join("dependency-gate");
+    let script = workspace.join("wait.py");
+    fs::write(
+        &script,
+        format!(
+            "import pathlib,time\nprint('READY', flush=True)\ngate=pathlib.Path({gate:?})\nfor _ in range(500):\n    if gate.exists(): break\n    time.sleep(0.01)\nprint('DONE', flush=True)\n",
+            gate = gate.to_string_lossy(),
+        ),
+    )
+    .unwrap();
+    let executable = real_executable("/usr/bin/python3");
+    let task_dir = sandbox.root.join("task-host-dependency-ancestor-metadata");
+    fs::create_dir_all(&task_dir).unwrap();
+    let request = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        payload: None,
+        inherit_host_environment: true,
+        task_id: "task-host-dependency-ancestor-metadata".to_string(),
+        workspace_id: "workspace-host-dependency-ancestor-metadata".to_string(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
+        build_target_backing: None,
+        input_presentation_root: None,
+        input_commitments: Vec::new(),
+        host_dependencies: vec![RunnerHostDependencyCommitment {
+            path: dependency.to_string_lossy().into_owned(),
+            digest: sha256_file(&dependency).unwrap(),
+        }],
+        executable: executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&executable).unwrap(),
+        args: vec![script.to_string_lossy().into_owned()],
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        steps: Vec::new(),
+        timeout_ms: 5_000,
+        stdout_limit_bytes: 4_096,
+        stderr_limit_bytes: 4_096,
+    };
+    write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
+    let runner_task_dir = task_dir.clone();
+    let runner = thread::spawn(move || run_task_runner(&runner_task_dir));
+    let stdout = task_dir.join("stdout.log");
+    let mut ready = false;
+    for _ in 0..500 {
+        if fs::read_to_string(&stdout)
+            .ok()
+            .is_some_and(|text| text.contains("READY\n"))
+        {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ready,
+        "target never reached READY before dependency ancestor metadata event"
+    );
+    let ancestor = fs::File::open(&dependency_root).unwrap();
+    ancestor
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))
+        .unwrap();
+    thread::sleep(Duration::from_millis(100));
+    fs::write(&gate, b"go").unwrap();
+    runner.join().unwrap().unwrap();
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(
+        result.status,
+        TaskTerminalStatus::Completed,
+        "ancestor metadata event must not prove Host Dependency drift: code={:?}, error={:?}",
+        result.infrastructure_error_code,
+        result.infrastructure_error
+    );
+    assert_eq!(result.infrastructure_error_code, None);
+}
+
+#[test]
+fn runner_ignores_ancestor_metadata_event_when_executable_identity_is_unchanged() {
+    let sandbox = Sandbox::new("runner-script-ancestor-metadata");
+    let workspace = sandbox.root.join("workspace-script-ancestor-metadata");
+    fs::create_dir_all(&workspace).unwrap();
+    let executable_root = sandbox.root.join("executable-tree");
+    let executable_bin = executable_root.join("bin");
+    fs::create_dir_all(&executable_bin).unwrap();
+    let executable = executable_bin.join("agent-script");
+    let gate = sandbox.root.join("script-gate");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf 'READY\\n'\nwhile [ ! -f \"$1\" ]; do sleep 0.01; done\nprintf 'DONE\\n'\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    let expected_digest = sha256_file(&executable).unwrap();
+    let task_dir = sandbox.root.join("task-script-ancestor-metadata");
+    fs::create_dir_all(&task_dir).unwrap();
+    let request = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        payload: None,
+        inherit_host_environment: true,
+        task_id: "task-script-ancestor-metadata".to_string(),
+        workspace_id: "workspace-script-ancestor-metadata".to_string(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
+        build_target_backing: None,
+        input_presentation_root: None,
+        input_commitments: Vec::new(),
+        host_dependencies: Vec::new(),
+        executable: executable.to_string_lossy().into_owned(),
+        executable_digest: expected_digest,
+        args: vec![gate.to_string_lossy().into_owned()],
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        steps: Vec::new(),
+        timeout_ms: 5_000,
+        stdout_limit_bytes: 4_096,
+        stderr_limit_bytes: 4_096,
+    };
+    write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
+    let runner_task_dir = task_dir.clone();
+    let runner = thread::spawn(move || run_task_runner(&runner_task_dir));
+    let stdout = task_dir.join("stdout.log");
+    let mut ready = false;
+    for _ in 0..500 {
+        if fs::read_to_string(&stdout)
+            .ok()
+            .is_some_and(|text| text.contains("READY\n"))
+        {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ready,
+        "target never reached READY before ancestor metadata event"
+    );
+    let ancestor = fs::File::open(&executable_root).unwrap();
+    ancestor
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))
+        .unwrap();
+    thread::sleep(Duration::from_millis(100));
+    fs::write(&gate, b"go").unwrap();
+    runner.join().unwrap().unwrap();
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(
+        result.status,
+        TaskTerminalStatus::Completed,
+        "ancestor metadata event must not prove executable drift: code={:?}, error={:?}",
+        result.infrastructure_error_code,
+        result.infrastructure_error
+    );
+    assert_eq!(result.infrastructure_error_code, None);
+    let stdout = fs::read_to_string(stdout).unwrap();
+    assert!(stdout.contains("READY\n"));
+    assert!(stdout.contains("DONE\n"));
+}
+
+#[test]
+fn runner_fails_when_symlinked_executable_target_is_modified_in_place() {
+    let sandbox = Sandbox::new("runner-symlink-target-runtime-modify");
+    let workspace = sandbox.root.join("workspace-symlink-target-runtime-modify");
+    fs::create_dir_all(&workspace).unwrap();
+    let target_root = sandbox.root.join("target-tree");
+    let link_root = sandbox.root.join("link-tree");
+    fs::create_dir_all(&target_root).unwrap();
+    fs::create_dir_all(&link_root).unwrap();
+    let target = target_root.join("agent-script-real");
+    fs::write(
+        &target,
+        "#!/bin/sh\nprintf 'READY\\n'\nsleep 5\nprintf 'DONE\\n'\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&target).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&target, permissions).unwrap();
+    let executable = link_root.join("agent-script");
+    std::os::unix::fs::symlink(&target, &executable).unwrap();
+    let task_dir = sandbox.root.join("task-symlink-target-runtime-modify");
+    fs::create_dir_all(&task_dir).unwrap();
+    let request = RunnerTaskRequest {
+        schema_version: UNIVERSAL_EXEC_SCHEMA_VERSION,
+        job_id: None,
+        attempt_id: None,
+        launch_token: None,
+        unit_name: None,
+        payload: None,
+        inherit_host_environment: true,
+        task_id: "task-symlink-target-runtime-modify".to_string(),
+        workspace_id: "workspace-symlink-target-runtime-modify".to_string(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        workspace_source_digest: None,
+        build_target_backing: None,
+        input_presentation_root: None,
+        input_commitments: Vec::new(),
+        host_dependencies: Vec::new(),
+        executable: executable.to_string_lossy().into_owned(),
+        executable_digest: sha256_file(&executable).unwrap(),
+        args: Vec::new(),
+        cwd: workspace.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        steps: Vec::new(),
+        timeout_ms: 7_000,
+        stdout_limit_bytes: 4_096,
+        stderr_limit_bytes: 4_096,
+    };
+    write_json_atomic(&task_dir.join("request.json"), &request).unwrap();
+    let runner_task_dir = task_dir.clone();
+    let runner = thread::spawn(move || run_task_runner(&runner_task_dir));
+    let stdout = task_dir.join("stdout.log");
+    let mut ready = false;
+    for _ in 0..500 {
+        if fs::read_to_string(&stdout)
+            .ok()
+            .is_some_and(|text| text.contains("READY\n"))
+        {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ready,
+        "symlinked target never reached READY before in-place modify"
+    );
+    fs::write(&target, "#!/bin/sh\nprintf 'MODIFIED\\n'\n").unwrap();
+    runner.join().unwrap().unwrap();
+    let result: RunnerTaskResult =
+        serde_json::from_slice(&fs::read(task_dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result.status, TaskTerminalStatus::Failed);
+    assert_eq!(
+        result.infrastructure_error_code.as_deref(),
+        Some("EXECUTABLE_RUNTIME_DRIFT")
+    );
+}
+
+#[test]
 fn runner_preserves_shebang_path_semantics_but_fails_on_runtime_executable_drift() {
     let sandbox = Sandbox::new("runner-script-runtime-drift");
     let workspace = sandbox.root.join("workspace-script-runtime-drift");

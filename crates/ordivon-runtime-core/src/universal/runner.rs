@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1042,21 +1042,49 @@ enum PathDriftKind {
     Executable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PathObjectIdentity {
+    device: u64,
+    inode: u64,
+    file_type: u32,
+}
+
+impl PathObjectIdentity {
+    fn observe(path: &Path, kind: PathDriftKind) -> Result<Self, UniversalExecError> {
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            path_drift_infrastructure_error(
+                kind,
+                format!(
+                    "cannot remeasure path identity for {}: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            file_type: metadata.mode() & libc::S_IFMT,
+        })
+    }
+}
+
 #[derive(Default)]
 struct PathDriftWatchPlan {
     direct: bool,
-    children: BTreeSet<Vec<u8>>,
+    children: BTreeMap<Vec<u8>, PathBuf>,
 }
 
 struct PathDriftWatchSpec {
     path: PathBuf,
     direct: bool,
-    children: BTreeSet<Vec<u8>>,
+    children: BTreeMap<Vec<u8>, PathBuf>,
 }
 
 struct PathDriftWatch {
     fd: OwnedFd,
     specs: BTreeMap<i32, PathDriftWatchSpec>,
+    identities: BTreeMap<PathBuf, PathObjectIdentity>,
+    direct_paths: BTreeSet<PathBuf>,
     kind: PathDriftKind,
 }
 
@@ -1099,13 +1127,15 @@ impl PathDriftWatch {
                     .entry(parent.to_path_buf())
                     .or_default()
                     .children
-                    .insert(name.as_bytes().to_vec());
+                    .insert(name.as_bytes().to_vec(), current.to_path_buf());
                 if parent == Path::new("/") {
                     break;
                 }
                 current = parent;
             }
         }
+        let direct_paths = paths.iter().cloned().collect::<BTreeSet<_>>();
+        let watched_paths = plans.keys().cloned().collect::<Vec<_>>();
         let mut specs = BTreeMap::new();
         for (path, plan) in plans {
             let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
@@ -1146,7 +1176,31 @@ impl PathDriftWatch {
                 },
             );
         }
-        Ok(Self { fd, specs, kind })
+        let identities = watched_paths
+            .into_iter()
+            .map(|path| PathObjectIdentity::observe(&path, kind).map(|identity| (path, identity)))
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        Ok(Self {
+            fd,
+            specs,
+            identities,
+            direct_paths,
+            kind,
+        })
+    }
+
+    fn path_identity_unchanged(&self, path: &Path) -> Result<bool, UniversalExecError> {
+        let expected = self.identities.get(path).ok_or_else(|| {
+            path_drift_infrastructure_error(
+                self.kind,
+                format!(
+                    "path drift witness has no baseline identity for {}",
+                    path.display()
+                ),
+            )
+        })?;
+        let observed = PathObjectIdentity::observe(path, self.kind)?;
+        Ok(observed == *expected)
     }
 
     fn check(&mut self) -> Result<(), UniversalExecError> {
@@ -1195,14 +1249,19 @@ impl PathDriftWatch {
                     ));
                 }
                 if let Some(spec) = self.specs.get(&event.wd) {
-                    let self_mask = libc::IN_ATTRIB
-                        | libc::IN_CLOSE_WRITE
-                        | libc::IN_DELETE_SELF
+                    let strong_self_mask = libc::IN_DELETE_SELF
                         | libc::IN_MOVE_SELF
                         | libc::IN_UNMOUNT
                         | libc::IN_IGNORED;
-                    if event.mask & self_mask != 0 && (spec.direct || event.len == 0) {
+                    if event.mask & strong_self_mask != 0 {
                         return Err(path_runtime_drift(self.kind, &spec.path, event.mask));
+                    }
+                    let metadata_self_mask =
+                        libc::IN_ATTRIB | libc::IN_CLOSE_WRITE | libc::IN_MODIFY;
+                    if event.len == 0 && event.mask & metadata_self_mask != 0 {
+                        if spec.direct || !self.path_identity_unchanged(&spec.path)? {
+                            return Err(path_runtime_drift(self.kind, &spec.path, event.mask));
+                        }
                     }
                     if event.len > 0 {
                         let name_start = offset + std::mem::size_of::<libc::inotify_event>();
@@ -1212,15 +1271,22 @@ impl PathDriftWatch {
                             .position(|byte| *byte == 0)
                             .unwrap_or(name_bytes.len());
                         let name = &name_bytes[..name_end];
-                        let child_mask = libc::IN_ATTRIB
-                            | libc::IN_CLOSE_WRITE
-                            | libc::IN_CREATE
-                            | libc::IN_DELETE
-                            | libc::IN_MOVED_FROM
-                            | libc::IN_MOVED_TO
-                            | libc::IN_MODIFY;
-                        if event.mask & child_mask != 0 && spec.children.contains(name) {
-                            return Err(path_runtime_drift(self.kind, &spec.path, event.mask));
+                        if let Some(child_path) = spec.children.get(name) {
+                            let strong_child_mask = libc::IN_CREATE
+                                | libc::IN_DELETE
+                                | libc::IN_MOVED_FROM
+                                | libc::IN_MOVED_TO;
+                            if event.mask & strong_child_mask != 0 {
+                                return Err(path_runtime_drift(self.kind, child_path, event.mask));
+                            }
+                            let metadata_child_mask =
+                                libc::IN_ATTRIB | libc::IN_CLOSE_WRITE | libc::IN_MODIFY;
+                            if event.mask & metadata_child_mask != 0
+                                && (self.direct_paths.contains(child_path)
+                                    || !self.path_identity_unchanged(child_path)?)
+                            {
+                                return Err(path_runtime_drift(self.kind, child_path, event.mask));
+                            }
                         }
                     }
                 }
