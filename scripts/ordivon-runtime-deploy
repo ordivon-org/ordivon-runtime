@@ -63,6 +63,8 @@ SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 RELEASE_EFFECT_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 RELEASE_REQUEST_DIGEST_PATTERN = re.compile(r"^runtime-release-v1:sha256:[0-9a-f]{64}$")
 ATTEMPT_UNIT_PATTERN = re.compile(r"/ordivon-(attempt-[^.\s/]+)\.service(?:$|/)")
+DEFAULT_READINESS_WAIT_SECONDS = 60.0
+MCP_READINESS_PROBE_SLICE_SECONDS = 2.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,7 +103,9 @@ def parse_args() -> argparse.Namespace:
     rollback.add_argument("--database", type=absolute_path)
     rollback.add_argument("--systemctl", type=absolute_path, default=Path("/usr/bin/systemctl"))
     rollback.add_argument("--lock-file", type=absolute_path, default=Path("/run/ordivon-runtime-deploy.lock"))
-    rollback.add_argument("--wait-seconds", type=positive_float, default=15.0)
+    rollback.add_argument(
+        "--wait-seconds", type=positive_float, default=DEFAULT_READINESS_WAIT_SECONDS
+    )
     rollback.add_argument("--drain-seconds", type=positive_float, default=30.0)
     rollback.add_argument("--confirm-receipt", type=absolute_path, required=True)
     return parser.parse_args()
@@ -124,7 +128,9 @@ def add_deployment_arguments(parser: argparse.ArgumentParser, *, require_confirm
     parser.add_argument("--required-tool", action="append", dest="required_tools")
     parser.add_argument("--expected-tool-count", type=nonnegative_int)
     parser.add_argument("--require-ref", default="origin/main")
-    parser.add_argument("--wait-seconds", type=positive_float, default=15.0)
+    parser.add_argument(
+        "--wait-seconds", type=positive_float, default=DEFAULT_READINESS_WAIT_SECONDS
+    )
     if require_confirmation:
         parser.add_argument("--confirm-commit", type=exact_commit, required=True)
 
@@ -683,6 +689,45 @@ def wait_service_active(systemctl: Path, service: str, wait_seconds: float) -> N
     raise RuntimeError(f"service did not become active: {service}")
 
 
+def wait_for_service_mcp_ready(
+    systemctl: Path,
+    service: str,
+    env_file: Path,
+    *,
+    expected_tool_count: int | None,
+    required: tuple[str, ...],
+    wait_seconds: float,
+    require_modern: bool,
+    allow_legacy_fallback: bool,
+) -> dict[str, object]:
+    deadline = time.monotonic() + wait_seconds
+    wait_service_active(systemctl, service, max(0.001, deadline - time.monotonic()))
+    last_error: Exception | None = None
+    while True:
+        if not service_active(systemctl, service):
+            raise RuntimeError(f"service stopped before MCP readiness: {service}") from last_error
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if last_error is not None:
+                raise RuntimeError(str(last_error)) from last_error
+            raise RuntimeError(f"MCP readiness deadline expired: {service}")
+        try:
+            return probe_mcp(
+                env_file,
+                expected_tool_count=expected_tool_count,
+                required=required,
+                wait_seconds=min(MCP_READINESS_PROBE_SLICE_SECONDS, remaining),
+                require_modern=require_modern,
+                allow_legacy_fallback=allow_legacy_fallback,
+            )
+        except Exception as error:
+            last_error = error
+            if not service_active(systemctl, service):
+                raise RuntimeError(f"service stopped before MCP readiness: {service}") from error
+            if time.monotonic() >= deadline:
+                raise RuntimeError(str(error)) from error
+
+
 def atomic_copy(source: Path, destination: Path, *, mode: int = 0o755) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + f".tmp-{os.getpid()}")
@@ -891,8 +936,9 @@ def restore_previous(
             raise RuntimeError(f"rollback artifact digest does not match receipt: {name}")
         atomic_copy(source, install_dir / name, mode=receipt_record_mode(record))
     run([str(systemctl), "start", service])
-    wait_service_active(systemctl, service, wait_seconds)
-    probe = probe_mcp(
+    probe = wait_for_service_mcp_ready(
+        systemctl,
+        service,
         env_file,
         expected_tool_count=None,
         required=(),
@@ -1088,8 +1134,9 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                 name = str(spec["name"])
                 os.replace(args.install_dir / f"{name}.next", args.install_dir / name)
             run([str(args.systemctl), "start", args.service])
-            wait_service_active(args.systemctl, args.service, args.wait_seconds)
-            probe = probe_mcp(
+            probe = wait_for_service_mcp_ready(
+                args.systemctl,
+                args.service,
                 args.env_file,
                 expected_tool_count=args.expected_tool_count,
                 required=required_tools(args),
@@ -1146,10 +1193,11 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                 if stopped or not service_active(args.systemctl, args.service):
                     try:
                         run([str(args.systemctl), "start", args.service])
-                        wait_service_active(args.systemctl, args.service, args.wait_seconds)
                         recovery = {
                             "serviceActive": True,
-                            "probe": probe_mcp(
+                            "probe": wait_for_service_mcp_ready(
+                                args.systemctl,
+                                args.service,
                                 args.env_file,
                                 expected_tool_count=args.expected_tool_count,
                                 required=required_tools(args),

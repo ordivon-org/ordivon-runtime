@@ -2075,6 +2075,71 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual(status, "rolled_back")
 
 
+    def test_deploy_readiness_default_is_sixty_seconds(self) -> None:
+        scripts_path = str(REPO / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
+        finally:
+            sys.path.remove(scripts_path)
+        self.assertEqual(module["DEFAULT_READINESS_WAIT_SECONDS"], 60.0)
+
+    def test_deploy_readiness_tolerates_delayed_mcp_while_service_stays_active(self) -> None:
+        scripts_path = str(REPO / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
+        finally:
+            sys.path.remove(scripts_path)
+        attempts = {"probe": 0}
+        function_globals = module["wait_for_service_mcp_ready"].__globals__
+        function_globals["service_active"] = lambda _systemctl, _service: True
+
+        def delayed_probe(*_args, **_kwargs):
+            attempts["probe"] += 1
+            if attempts["probe"] < 3:
+                raise RuntimeError("connection refused")
+            return {"lifecycle": "modern", "toolCount": 2}
+
+        function_globals["probe_mcp"] = delayed_probe
+        result = module["wait_for_service_mcp_ready"](
+            Path("/usr/bin/true"),
+            "ordivon-runtime.service",
+            Path("/tmp/runtime.env"),
+            expected_tool_count=2,
+            required=("workspace.get",),
+            wait_seconds=0.5,
+            require_modern=True,
+            allow_legacy_fallback=False,
+        )
+        self.assertEqual(result["lifecycle"], "modern")
+        self.assertEqual(attempts["probe"], 3)
+
+    def test_deploy_readiness_fails_early_if_service_dies_after_active(self) -> None:
+        scripts_path = str(REPO / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
+        finally:
+            sys.path.remove(scripts_path)
+        states = iter((True, True, False))
+        function_globals = module["wait_for_service_mcp_ready"].__globals__
+        function_globals["service_active"] = lambda _systemctl, _service: next(states, False)
+        function_globals["probe_mcp"] = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("connection refused"))
+        started = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "service stopped before MCP readiness"):
+            module["wait_for_service_mcp_ready"](
+                Path("/usr/bin/true"),
+                "ordivon-runtime.service",
+                Path("/tmp/runtime.env"),
+                expected_tool_count=2,
+                required=("workspace.get",),
+                wait_seconds=2.0,
+                require_modern=True,
+                allow_legacy_fallback=False,
+            )
+        self.assertLess(time.monotonic() - started, 0.5)
+
     def test_rollback_fence_refuses_to_cross_active_or_held_job(self) -> None:
         scripts_path = str(REPO / "scripts")
         sys.path.insert(0, scripts_path)
