@@ -14,7 +14,7 @@ audience:
   - maintainer
   - builder
   - operator
-updated: 2026-08-04
+updated: 2026-09-11
 summary: Version identities, change classification, compatibility obligations, release evidence, and deprecation rules.
 evidence_status: verified
 readiness: READY
@@ -55,6 +55,7 @@ Pre-1.0 changes still require:
 - a migration or major-cutover path for persisted state;
 - a deletion trigger for retained compatibility code;
 - updated generated Tool reference when the catalog changes;
+- explicit external-connector acceptance when a supported client freezes or reviews its own Tool snapshot;
 - portable and real-system evidence appropriate to the boundary.
 
 ## Changes
@@ -94,7 +95,10 @@ A releasable commit must have:
 7. a successful deployment plan;
 8. after deployment, a receipt binding the complete installed release-artifact digests and modes, protocol lifecycle, supported versions, and Tool catalog digest;
 9. for a release that changes the structured self-release contract, an exact `release.apply` → Runtime ingress replacement → reconnect → `release.get` acceptance proving the same effect identity/receipt is reconciled without a second physical deployment;
-10. a verified previous-binary rollback path while that rollback window remains supported.
+10. when a supported external MCP client snapshots, reviews, or selectively exposes Tools, a separate client-side acceptance proving the controlling client sees the required Tool identities for the intended workflow; server `toolCatalogDigest` acceptance does not satisfy this client gate;
+11. a verified previous-binary rollback path while that rollback window remains supported.
+
+Server deployment acceptance and external connector acceptance are separate gates. A Runtime can correctly expose and receipt a new Tool catalog while an approved external client still presents an older frozen snapshot. The client gate must use that client's own refresh/review mechanism and then observe the effective Tool set from the client side. If `release.apply` or `release.get` is unavailable in the controlling client, Runtime self-release is `HOLD_CONNECTOR_REFRESH_REQUIRED`: do not substitute `workspace.exec` of `ordivon-runtime-deploy apply`, because generic execution does not acquire the structured release effect/reconciliation semantics on behalf of the caller.
 
 Documentation-only changes do not require redeploying identical binaries, but public canonical documents must pass the documentation contract and identify when production behavior remains on an earlier code-equivalent commit.
 

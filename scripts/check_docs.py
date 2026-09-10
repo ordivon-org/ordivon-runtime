@@ -50,6 +50,18 @@ TOOL_PATTERN = re.compile(
     re.DOTALL,
 )
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+CONNECTOR_ACCEPTANCE_CLAUSES = {
+    "docs/releases.md": (
+        "Server deployment acceptance and external connector acceptance are separate gates.",
+        "HOLD_CONNECTOR_REFRESH_REQUIRED",
+        "do not substitute `workspace.exec` of `ordivon-runtime-deploy apply`",
+    ),
+    "docs/operations.md": (
+        "### External MCP client catalog acceptance",
+        "Runtime discovery is server truth, not proof of what a remote controller can invoke.",
+        "Do not invoke `ordivon-runtime-deploy apply` through generic `workspace.exec` as a substitute",
+    ),
+}
 
 
 class DocumentError(ValueError):
@@ -273,6 +285,11 @@ def validate_public_contracts() -> list[str]:
     project = PROJECT.read_text(encoding="utf-8")
     if "enforcement: strict" not in project:
         errors.append("project manifest is not strict")
+    for relative_path, clauses in CONNECTOR_ACCEPTANCE_CLAUSES.items():
+        contract = (ROOT / relative_path).read_text(encoding="utf-8")
+        for clause in clauses:
+            if clause not in contract:
+                errors.append(f"{relative_path} lacks connector acceptance clause: {clause}")
     return errors
 
 
