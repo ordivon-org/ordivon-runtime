@@ -886,6 +886,9 @@ fn ingress_ip_is_public(value: IpAddr) -> bool {
 }
 
 fn validate_ingress_download_host_config(host: &str) -> bool {
+    if host == "*" {
+        return true;
+    }
     if host.is_empty()
         || host != host.to_ascii_lowercase()
         || host.contains('/')
@@ -901,6 +904,12 @@ fn validate_ingress_download_host_config(host: &str) -> bool {
         Ok(ip) => ingress_ip_is_public(ip),
         Err(_) => true,
     }
+}
+
+fn ingress_download_host_allowed(allowed_hosts: &[String], host: &str) -> bool {
+    allowed_hosts
+        .iter()
+        .any(|allowed| allowed == "*" || allowed == host)
 }
 
 fn ingress_stage_size_digest(
@@ -962,7 +971,7 @@ async fn ingress_pinned_https_get(
             ));
         }
         let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-        if !allowed_hosts.iter().any(|allowed| allowed == &host) {
+        if !ingress_download_host_allowed(allowed_hosts, &host) {
             return Err(ToolError::invalid(
                 "file.download_url host is not operator-authorized for input ingress",
                 "file.download_url",
@@ -1210,11 +1219,7 @@ impl RuntimeServer {
             ));
         }
         let initial_host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-        if !ingress
-            .download_hosts
-            .iter()
-            .any(|host| host == &initial_host)
-        {
+        if !ingress_download_host_allowed(&ingress.download_hosts, &initial_host) {
             return Err(ToolError::invalid(
                 "file.download_url host is not operator-authorized for input ingress",
                 "file.download_url",

@@ -1072,6 +1072,30 @@ fn input_ingest_schema_requires_exact_expected_size() {
 }
 
 #[test]
+fn public_host_wildcard_is_valid_but_does_not_make_private_ips_valid() {
+    assert!(validate_ingress_download_host_config("*"));
+    assert!(!validate_ingress_download_host_config("127.0.0.1"));
+    assert!(!validate_ingress_download_host_config("::1"));
+    assert!(!validate_ingress_download_host_config("localhost"));
+    assert!(ingress_download_host_allowed(
+        &["*".to_string()],
+        "files.example.net"
+    ));
+    assert!(!ingress_ip_is_public("127.0.0.1".parse().unwrap()));
+    assert!(!ingress_ip_is_public("169.254.169.254".parse().unwrap()));
+}
+
+#[test]
+fn exact_download_host_policy_remains_exact_without_wildcard() {
+    let allowed = vec!["files.example.net".to_string()];
+    assert!(ingress_download_host_allowed(&allowed, "files.example.net"));
+    assert!(!ingress_download_host_allowed(
+        &allowed,
+        "other.example.net"
+    ));
+}
+
+#[test]
 fn private_ip_download_host_is_rejected_at_configuration_boundary() {
     let sandbox = Sandbox::new("ingress-private-host");
     let staging_root = sandbox.root.join("input-ingress-stage");
