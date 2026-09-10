@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -26,6 +27,7 @@ def load_script(name: str):
 
 backup = load_script("backup")
 restore = load_script("restore")
+mcp_e2e = load_script("mcp_e2e")
 
 
 class OperationalScriptTests(unittest.TestCase):
@@ -146,6 +148,38 @@ class OperationalScriptTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1)
             self.assertIn("column:jobs.resolution", result.stderr)
+
+    def test_mcp_e2e_preserves_fd_backed_cargo_target_for_child_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fd = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
+            previous = os.environ.get("CARGO_TARGET_DIR")
+            try:
+                os.environ["CARGO_TARGET_DIR"] = f"/proc/self/fd/{fd}"
+                output = mcp_e2e.command(
+                    sys.executable,
+                    "-c",
+                    "import os; from pathlib import Path; print(Path(os.environ['CARGO_TARGET_DIR']).is_dir())",
+                    cwd=REPO,
+                )
+                self.assertEqual(output, "True")
+            finally:
+                if previous is None:
+                    os.environ.pop("CARGO_TARGET_DIR", None)
+                else:
+                    os.environ["CARGO_TARGET_DIR"] = previous
+                os.close(fd)
+
+    def test_mcp_e2e_rejects_stale_fd_backed_cargo_target(self) -> None:
+        previous = os.environ.get("CARGO_TARGET_DIR")
+        try:
+            os.environ["CARGO_TARGET_DIR"] = "/proc/self/fd/999999"
+            with self.assertRaisesRegex(RuntimeError, "unavailable Runtime capability FD"):
+                mcp_e2e.subprocess_capability_fds()
+        finally:
+            if previous is None:
+                os.environ.pop("CARGO_TARGET_DIR", None)
+            else:
+                os.environ["CARGO_TARGET_DIR"] = previous
 
     def test_local_acceptance_resolves_external_cargo_target_directory(self) -> None:
         local_acceptance = (REPO / "scripts/local-acceptance").read_text(encoding="utf-8")

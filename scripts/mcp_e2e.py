@@ -63,8 +63,34 @@ def digest_bytes(value: bytes) -> str:
     return f"sha256:{hashlib.sha256(value).hexdigest()}"
 
 
+def subprocess_capability_fds() -> tuple[int, ...]:
+    """Preserve Runtime-presented FD capabilities across Python child spawns."""
+    target = os.environ.get("CARGO_TARGET_DIR")
+    prefix = "/proc/self/fd/"
+    if not target or not target.startswith(prefix):
+        return ()
+    suffix = target[len(prefix) :]
+    if not suffix.isdecimal():
+        return ()
+    fd = int(suffix)
+    try:
+        os.fstat(fd)
+    except OSError as error:
+        raise RuntimeError(
+            "CARGO_TARGET_DIR references an unavailable Runtime capability FD"
+        ) from error
+    return (fd,)
+
+
 def command(*argv: str, cwd: Path) -> str:
-    result = subprocess.run(argv, cwd=cwd, check=True, text=True, capture_output=True)
+    result = subprocess.run(
+        argv,
+        cwd=cwd,
+        check=True,
+        text=True,
+        capture_output=True,
+        pass_fds=subprocess_capability_fds(),
+    )
     return result.stdout.strip()
 
 
@@ -411,6 +437,7 @@ def start_server(
         stdout=log_handle,
         stderr=subprocess.STDOUT,
         start_new_session=True,
+        pass_fds=subprocess_capability_fds(),
     )
     log_handle.close()
     return ServerProcess(process=process, log_path=log_path)
