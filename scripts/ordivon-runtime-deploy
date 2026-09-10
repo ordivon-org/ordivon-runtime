@@ -1060,11 +1060,6 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                 if not isinstance(previous_mode, int):
                     raise RuntimeError(f"installed release artifact has no mode: {name}")
                 atomic_copy(args.install_dir / name, previous / name, mode=previous_mode)
-                atomic_copy(
-                    args.candidate_dir / name,
-                    args.install_dir / f"{name}.next",
-                    mode=int(spec["mode"]),
-                )
                 previous_records.append(
                     artifact_description(
                         previous / name,
@@ -1122,6 +1117,18 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
             plan["admissionFence"] = str(admission_fence_path(args.database))
             plan["drainSeconds"] = args.drain_seconds
             write_json_atomic(receipt / "plan.json", plan)
+            # Keep the drain phase non-perturbing with respect to the installed Runtime
+            # tree. Candidate bytes are already staged in candidate_dir, so no path
+            # beneath install_dir is created, removed, or replaced until admission is
+            # fenced, active Jobs have drained to zero, ingress is stopped, and the
+            # candidate/ref plan has been revalidated against that cut.
+            for spec in specs:
+                name = str(spec["name"])
+                atomic_copy(
+                    args.candidate_dir / name,
+                    args.install_dir / f"{name}.next",
+                    mode=int(spec["mode"]),
+                )
             for record in previous_records:
                 name = str(record["name"])
                 atomic_copy(

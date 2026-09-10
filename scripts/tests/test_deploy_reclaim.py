@@ -704,6 +704,100 @@ class DeployReclaimTests(unittest.TestCase):
                 fence.close()
             self.assertEqual(remaining, ["job-active"])
 
+    def test_deploy_apply_drain_timeout_never_stages_under_install_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            commit = initialize_git_repository(repo, remote=True)
+            candidate = repo / "target" / "release"
+            install = root / "install"
+            candidate.mkdir(parents=True)
+            install.mkdir()
+            write_executable(candidate / "runtime", "new-runtime\n")
+            write_executable(install / "runtime", "old-runtime\n")
+            manifest = root / "candidate-manifest.json"
+            write_candidate_manifest(manifest, candidate, commit, ("runtime",), repo)
+            database = root / "registry.sqlite3"
+            initialize_registry(database, active_workspace="busy")
+            env_file = root / "runtime.env"
+            env_file.write_text(
+                "ORDIVON_BIND=127.0.0.1:1\nORDIVON_BEARER_TOKEN=test\n",
+                encoding="utf-8",
+            )
+            systemctl = fake_systemctl(root)
+            before = {
+                path.name: (
+                    path.stat().st_dev,
+                    path.stat().st_ino,
+                    path.stat().st_mode & 0o777,
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                )
+                for path in install.iterdir()
+            }
+            command = [
+                sys.executable,
+                "scripts/ordivon-runtime-deploy",
+                "apply",
+                "--source-repo", str(repo),
+                "--commit", commit,
+                "--confirm-commit", commit,
+                "--candidate-dir", str(candidate),
+                "--candidate-manifest", str(manifest),
+                "--install-dir", str(install),
+                "--database", str(database),
+                "--env-file", str(env_file),
+                "--receipt-root", str(root / "receipts"),
+                "--systemctl", str(systemctl),
+                "--git", shutil.which("git") or "/usr/bin/git",
+                "--lock-file", str(root / "deploy.lock"),
+                "--binary", "runtime",
+                "--drain-seconds", "0.30",
+                "--wait-seconds", "0.20",
+            ]
+            process = subprocess.Popen(
+                command,
+                cwd=REPO,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            observed_precommit_paths: set[str] = set()
+            while process.poll() is None:
+                observed_precommit_paths.update(
+                    path.name
+                    for path in install.iterdir()
+                    if path.name.endswith(".next")
+                    or ".next.tmp-" in path.name
+                    or path.name.endswith(".previous")
+                )
+                time.sleep(0.005)
+            stdout, stderr = process.communicate()
+            self.assertEqual(process.returncode, 1, stdout)
+            self.assertIn("not_committed", stderr)
+            self.assertIn("deployment drain timed out", stderr)
+            self.assertEqual(
+                observed_precommit_paths,
+                set(),
+                "drain-only apply must not perturb install_dir before the zero-job cut",
+            )
+            after = {
+                path.name: (
+                    path.stat().st_dev,
+                    path.stat().st_ino,
+                    path.stat().st_mode & 0o777,
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                )
+                for path in install.iterdir()
+            }
+            self.assertEqual(after, before)
+            self.assertEqual((install / "runtime").read_text(), "old-runtime\n")
+            self.assertEqual(state := subprocess.run(
+                [str(systemctl), "is-active", "ordivon-runtime.service"],
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.strip(), "active")
+
     def test_deploy_wait_policy_has_no_legacy_five_minute_ceiling(self) -> None:
         module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
         self.assertEqual(module["positive_float"]("301"), 301.0)
