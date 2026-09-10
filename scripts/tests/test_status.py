@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import hashlib
 import json
 import runpy
@@ -445,7 +446,7 @@ class RuntimeStatusTests(unittest.TestCase):
     def test_v5_registry_without_attempt_conditions_supports_health_and_dashboard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             paths = fixture(Path(temporary))
-            with sqlite3.connect(paths["database"]) as connection:
+            with closing(sqlite3.connect(paths["database"])) as connection:
                 connection.execute("ALTER TABLE attempts ADD COLUMN recovery_required INTEGER")
                 connection.execute("UPDATE attempts SET recovery_required=0")
                 connection.execute("DROP TABLE attempt_conditions")

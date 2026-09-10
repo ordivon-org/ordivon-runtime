@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -16,7 +17,7 @@ STABLE = {"succeeded", "failed", "timed_out", "cancelled"}
 
 
 def initialize_registry(database: Path) -> None:
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         connection.executescript(
             """
             CREATE TABLE schema_migrations(version INTEGER);
@@ -180,7 +181,7 @@ class RuntimeArchiveInspectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "registry.sqlite3"
             initialize_registry(database)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 add_job(connection, "job:eligible")
                 connection.commit()
 
@@ -208,7 +209,7 @@ class RuntimeArchiveInspectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "registry.sqlite3"
             initialize_registry(database)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 add_job(connection, "job:legacy", current_pointer=False)
                 connection.commit()
 
@@ -226,7 +227,7 @@ class RuntimeArchiveInspectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "registry.sqlite3"
             initialize_registry(database)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 add_job(connection, "job:lost", resolution="lost", attempt_state="lost")
                 add_job(connection, "job:orphaned", resolution="orphaned", attempt_state="orphaned")
                 add_job(connection, "job:running-attempt", attempt_state="running")
@@ -250,7 +251,7 @@ class RuntimeArchiveInspectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "registry.sqlite3"
             initialize_registry(database)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 add_job(connection, "job:release", release_effect=True)
                 add_job(connection, "job:young", created_at_ms=999_999_999)
                 connection.commit()
@@ -266,7 +267,7 @@ class RuntimeArchiveInspectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "registry.sqlite3"
             initialize_registry(database)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 connection.execute("DROP TABLE job_host_dependencies")
                 connection.commit()
             completed = self.run_archive(database)
@@ -277,7 +278,7 @@ class RuntimeArchiveInspectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "registry.sqlite3"
             initialize_registry(database)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 add_job(connection, "job:v5")
                 connection.execute("ALTER TABLE attempts ADD COLUMN recovery_required INTEGER")
                 connection.execute("UPDATE attempts SET recovery_required=0")
@@ -296,7 +297,7 @@ class RuntimeArchiveInspectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "registry.sqlite3"
             initialize_registry(database)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 add_job(connection, "job:immutable")
                 connection.commit()
             before = hashlib.sha256(database.read_bytes()).hexdigest()
