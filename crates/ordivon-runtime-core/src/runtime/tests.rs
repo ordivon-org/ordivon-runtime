@@ -1,4 +1,4 @@
-use super::engine::native_windows_pre_target_evidence_gap;
+use super::engine::{native_windows_pre_target_evidence_gap, transient_main_pid_observation_loss};
 use super::registry::{set_test_commit_fault, TestCommitFault, TestCommitPoint};
 use super::repair::{AdminRepairAudit, AdminRepairOperation};
 use super::supervisor::AttemptSupervisorOwner;
@@ -20,6 +20,45 @@ use std::process::Command;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use uuid::Uuid;
+
+#[test]
+fn transient_main_pid_observation_loss_is_narrowly_classified() {
+    for message in [
+        "systemd MainPID has no observable host process identity",
+        "Windows launcher systemd MainPID has no observable host process identity",
+        "systemd omitted MainPID",
+    ] {
+        let error = RuntimeError::new(
+            RuntimeErrorCode::LaunchIdentityMismatch,
+            message,
+            Some("mainPid"),
+            false,
+        );
+        assert!(transient_main_pid_observation_loss(&error));
+    }
+    for (message, field) in [
+        (
+            "systemd InvocationID does not match runner-start evidence",
+            "InvocationID",
+        ),
+        (
+            "systemd MainPID image differs from committed Runner provider",
+            "mainPid",
+        ),
+        (
+            "systemd MainPID has no observable host process identity",
+            "runnerStart",
+        ),
+    ] {
+        let error = RuntimeError::new(
+            RuntimeErrorCode::LaunchIdentityMismatch,
+            message,
+            Some(field),
+            false,
+        );
+        assert!(!transient_main_pid_observation_loss(&error));
+    }
+}
 
 struct Sandbox {
     root: PathBuf,

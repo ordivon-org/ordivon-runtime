@@ -181,6 +181,15 @@ pub(crate) fn windows_input_bindings_digest(inputs: &[EffectiveInputBinding]) ->
     sha256_bytes(&bytes)
 }
 
+pub(crate) fn transient_main_pid_observation_loss(error: &RuntimeError) -> bool {
+    error.code == RuntimeErrorCode::LaunchIdentityMismatch
+        && error.field.as_deref() == Some("mainPid")
+        && (error.message == "systemd MainPID has no observable host process identity"
+            || error.message
+                == "Windows launcher systemd MainPID has no observable host process identity"
+            || error.message == "systemd omitted MainPID")
+}
+
 fn adaptive_poll_delay(poll_index: usize) -> Duration {
     Duration::from_millis(
         ADAPTIVE_POLL_DELAYS_MS[poll_index.min(ADAPTIVE_POLL_DELAYS_MS.len() - 1)],
@@ -2782,15 +2791,30 @@ impl Runtime {
             if start_path.exists() {
                 match self.bind_attempt_start(attempt, plan.execution_target) {
                     Ok(_) => return Ok(()),
-                    Err(error) if error.code == RuntimeErrorCode::LaunchIdentityMismatch => {
-                        // A very short-lived unit can write valid start evidence, finish, and be
-                        // unloaded between the filesystem check and systemctl_show. A complete
-                        // identity-bound Runner result is stronger terminal evidence than the
-                        // already-disappeared transient unit.
+                    Err(error) if transient_main_pid_observation_loss(&error) => {
+                        // MainPID absence can race with another observer that already bound this
+                        // exact Attempt, or with the Runner's final atomic result publication.
+                        // Re-read durable truth before surfacing an identity error. This does not
+                        // forgive a mismatching identity value: only absence is deferred.
                         if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
                             return self.reconcile_runner_result(attempt);
                         }
-                        thread::sleep(Duration::from_millis(20));
+                        let current = self.registry.get_attempt(&attempt.attempt_id)?;
+                        if current.row_version != attempt.row_version
+                            || current.state != attempt.state
+                        {
+                            if Path::new(&current.bundle_path).join(RESULT_FILE).exists() {
+                                return self.reconcile_runner_result(&current);
+                            }
+                            return Ok(());
+                        }
+                        if Instant::now() < deadline {
+                            sleep_until_poll(deadline, &mut poll_index);
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    Err(error) if error.code == RuntimeErrorCode::LaunchIdentityMismatch => {
                         if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
                             return self.reconcile_runner_result(attempt);
                         }
@@ -4088,7 +4112,28 @@ impl Runtime {
         if (attempt.state == AttemptState::Starting || native_unbound_stopping)
             && start_path.exists()
         {
-            let bound = self.bind_attempt_start(&attempt, plan.execution_target)?;
+            let bound = match self.bind_attempt_start(&attempt, plan.execution_target) {
+                Ok(bound) => bound,
+                Err(error) if transient_main_pid_observation_loss(&error) => {
+                    if Path::new(&attempt.bundle_path).join(RESULT_FILE).exists() {
+                        return self.reconcile_runner_result(&attempt);
+                    }
+                    let current = self.registry.get_attempt(&attempt.attempt_id)?;
+                    if current.row_version != attempt.row_version || current.state != attempt.state
+                    {
+                        if Path::new(&current.bundle_path).join(RESULT_FILE).exists() {
+                            return self.reconcile_runner_result(&current);
+                        }
+                        return Ok(());
+                    }
+                    let age_ms = now_ms()?.saturating_sub(current.created_at_ms);
+                    if age_ms < self.startup_grace_ms {
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            };
             if Path::new(&bound.bundle_path).join(RESULT_FILE).exists() {
                 return self.reconcile_runner_result(&bound);
             }
