@@ -65,6 +65,12 @@ RELEASE_REQUEST_DIGEST_PATTERN = re.compile(r"^runtime-release-v1:sha256:[0-9a-f
 ATTEMPT_UNIT_PATTERN = re.compile(r"/ordivon-(attempt-[^.\s/]+)\.service(?:$|/)")
 DEFAULT_READINESS_WAIT_SECONDS = 60.0
 MCP_READINESS_PROBE_SLICE_SECONDS = 2.0
+RUNTIME_POLICY_SCHEMA_VERSION = 1
+RUNTIME_POLICY_SOURCE = Path("packaging/systemd/ordivon-runtime.env.example")
+RUNTIME_POLICY_ENV_KEYS = (
+    ("ORDIVON_DEFAULT_RUNTIME_MS", "defaultRuntimeMs"),
+    ("ORDIVON_MAX_RUNTIME_MS", "maxRuntimeMs"),
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -372,6 +378,126 @@ def sha256(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def validate_runtime_policy(value: object, *, require_complete: bool) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise RuntimeError("Runtime policy must be an object")
+    if value.get("schemaVersion") != RUNTIME_POLICY_SCHEMA_VERSION:
+        raise RuntimeError("Runtime policy schemaVersion is unsupported")
+    result: dict[str, object] = {"schemaVersion": RUNTIME_POLICY_SCHEMA_VERSION}
+    for _env_key, field in RUNTIME_POLICY_ENV_KEYS:
+        raw = value.get(field)
+        if raw is None:
+            if require_complete:
+                raise RuntimeError(f"Runtime policy lacks {field}")
+            result[field] = None
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+            raise RuntimeError(f"Runtime policy {field} must be a positive integer")
+        result[field] = raw
+    default = result["defaultRuntimeMs"]
+    maximum = result["maxRuntimeMs"]
+    if isinstance(default, int) and isinstance(maximum, int) and default > maximum:
+        raise RuntimeError("Runtime policy defaultRuntimeMs must not exceed maxRuntimeMs")
+    return result
+
+
+def runtime_policy_from_text(text: str, *, label: str) -> dict[str, object]:
+    observed: dict[str, int | None] = {}
+    for env_key, field in RUNTIME_POLICY_ENV_KEYS:
+        matches = []
+        for line in text.splitlines():
+            if not line.startswith(env_key + "="):
+                continue
+            raw = line.split("=", 1)[1].strip()
+            if not raw.isdigit() or int(raw) <= 0:
+                raise RuntimeError(f"{label} {env_key} must be a positive integer")
+            matches.append(int(raw))
+        if len(matches) > 1:
+            raise RuntimeError(f"{label} contains duplicate {env_key}")
+        observed[field] = matches[0] if matches else None
+    return validate_runtime_policy(
+        {"schemaVersion": RUNTIME_POLICY_SCHEMA_VERSION, **observed},
+        require_complete=False,
+    )
+
+
+def runtime_policy_state(path: Path) -> dict[str, object]:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"Runtime env file is missing or unsafe: {path}")
+    policy = runtime_policy_from_text(path.read_text(encoding="utf-8"), label="Runtime env")
+    return {**policy, "envFileDigest": sha256(path)}
+
+
+def candidate_runtime_policy(source_root: Path) -> dict[str, object]:
+    source = source_root / RUNTIME_POLICY_SOURCE
+    state = runtime_policy_state(source)
+    return validate_runtime_policy(state, require_complete=True)
+
+
+def committed_runtime_policy(git: Path, source_repo: Path, commit: str) -> dict[str, object]:
+    text = git_text(git, source_repo, ["show", f"{commit}:{RUNTIME_POLICY_SOURCE.as_posix()}"])
+    policy = runtime_policy_from_text(text, label="Committed Runtime policy")
+    return validate_runtime_policy(policy, require_complete=True)
+
+
+def atomic_update_runtime_policy(
+    path: Path,
+    target: object,
+    *,
+    expected_current: object | None = None,
+) -> dict[str, object]:
+    desired = validate_runtime_policy(target, require_complete=False)
+    current = runtime_policy_state(path)
+    if expected_current is not None:
+        expected = validate_runtime_policy(expected_current, require_complete=False)
+        for _env_key, field in RUNTIME_POLICY_ENV_KEYS:
+            if current.get(field) != expected.get(field):
+                raise RuntimeError(f"Runtime env policy changed before commit: {field}")
+    original = path.read_text(encoding="utf-8")
+    lines = original.splitlines(keepends=True)
+    output: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        replaced = False
+        for env_key, field in RUNTIME_POLICY_ENV_KEYS:
+            if line.startswith(env_key + "="):
+                seen.add(env_key)
+                value = desired.get(field)
+                if isinstance(value, int):
+                    ending = "\n" if line.endswith("\n") else ""
+                    output.append(f"{env_key}={value}{ending}")
+                replaced = True
+                break
+        if not replaced:
+            output.append(line)
+    for env_key, field in RUNTIME_POLICY_ENV_KEYS:
+        value = desired.get(field)
+        if env_key in seen or not isinstance(value, int):
+            continue
+        if output and not output[-1].endswith("\n"):
+            output[-1] += "\n"
+        output.append(f"{env_key}={value}\n")
+    updated = "".join(output)
+    if updated != original:
+        metadata = path.stat()
+        temporary = path.with_name(path.name + f".tmp-policy-{os.getpid()}")
+        try:
+            temporary.write_text(updated, encoding="utf-8")
+            os.chmod(temporary, stat.S_IMODE(metadata.st_mode))
+            os.chown(temporary, metadata.st_uid, metadata.st_gid)
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            directory = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return runtime_policy_state(path)
+
+
 def release_artifact_fingerprint(records: object) -> dict[str, tuple[str, int]] | None:
     if not isinstance(records, list) or not records:
         return None
@@ -482,8 +608,11 @@ def prepare_candidate(args: argparse.Namespace) -> dict[str, object]:
     if rustdoc.is_file() and os.access(rustdoc, os.X_OK):
         build_env["RUSTDOC"] = str(rustdoc)
     build_env["PATH"] = str(args.cargo.parent) + os.pathsep + build_env.get("PATH", "")
+    runtime_policy = None
     with exact_source_checkout(args.source_repo, args.commit) as build_source:
         stage_operator_artifacts(args, build_source)
+        if args.binaries is None:
+            runtime_policy = candidate_runtime_policy(build_source)
         run(
             [
                 str(args.cargo),
@@ -518,6 +647,8 @@ def prepare_candidate(args: argparse.Namespace) -> dict[str, object]:
         "artifacts": candidate,
         "binaries": [item for item in candidate if str(item["name"]) in binary_set],
     }
+    if runtime_policy is not None:
+        manifest["runtimePolicy"] = runtime_policy
     write_json_atomic(args.candidate_manifest, manifest)
     return {**manifest, "candidateManifest": str(args.candidate_manifest.resolve())}
 
@@ -580,6 +711,19 @@ def validate_candidate_manifest(
     }
     if manifest_binary_names != expected_binary_names:
         blockers.append("candidate manifest binary subset does not match release artifacts")
+    runtime_policy = None
+    if args.binaries is None:
+        try:
+            runtime_policy = validate_runtime_policy(
+                manifest.get("runtimePolicy"), require_complete=True
+            )
+            source_policy = committed_runtime_policy(args.git, args.source_repo, args.commit)
+            if runtime_policy != source_policy:
+                blockers.append("candidate Runtime policy does not match exact source Commit")
+        except RuntimeError as error:
+            blockers.append(str(error))
+    elif manifest.get("runtimePolicy") is not None:
+        blockers.append("binary-subset candidate manifest must not carry Runtime policy")
     observed_manifest_digest = sha256(args.candidate_manifest)
     expected_manifest_digest = getattr(args, "candidate_manifest_digest", None)
     if expected_manifest_digest is not None and observed_manifest_digest != expected_manifest_digest:
@@ -594,6 +738,7 @@ def validate_candidate_manifest(
         "builtAtMs": manifest.get("builtAtMs"),
         "toolchain": toolchain,
         "artifactCount": len(manifest_by_name),
+        "runtimePolicy": runtime_policy,
     }
     return summary, blockers
 
@@ -922,8 +1067,18 @@ def restore_previous(
     service: str,
     env_file: Path,
     wait_seconds: float,
+    *,
+    runtime_policy: object | None = None,
+    expected_current_runtime_policy: object | None = None,
 ) -> dict[str, object]:
     run([str(systemctl), "stop", service], check=False)
+    restored_policy = None
+    if runtime_policy is not None:
+        restored_policy = atomic_update_runtime_policy(
+            env_file,
+            runtime_policy,
+            expected_current=expected_current_runtime_policy,
+        )
     for record in records:
         name = str(record.get("name", ""))
         if not name or name in {".", ".."} or "/" in name:
@@ -946,7 +1101,10 @@ def restore_previous(
         require_modern=False,
         allow_legacy_fallback=True,
     )
-    return {"serviceActive": True, "probe": probe}
+    result: dict[str, object] = {"serviceActive": True, "probe": probe}
+    if restored_policy is not None:
+        result["runtimePolicy"] = restored_policy
+    return result
 
 def prune_candidate_artifacts(
     candidate_dir: Path,
@@ -1048,8 +1206,13 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
         previous.mkdir(parents=True)
         installed_by_name = {str(item["name"]): item for item in plan["installed"]}
         previous_commit = matching_release_commit(args.receipt_root, plan["installed"])
+        runtime_policy = plan["candidateManifest"].get("runtimePolicy")
+        previous_runtime_policy = (
+            runtime_policy_state(args.env_file) if runtime_policy is not None else None
+        )
         previous_records: list[dict[str, object]] = []
         commit_started = False
+        policy_committed = False
         stopped = False
         admission_fence_handle = None
         try:
@@ -1086,6 +1249,14 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                     "envFile": str(args.env_file),
                     "previous": previous_records,
                     "candidate": plan["candidate"],
+                    "runtimePolicy": (
+                        {
+                            "previous": previous_runtime_policy,
+                            "candidate": runtime_policy,
+                        }
+                        if runtime_policy is not None
+                        else None
+                    ),
                     "releaseEffect": release_effect,
                 },
             )
@@ -1137,6 +1308,13 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                     mode=int(record["mode"]),
                 )
             commit_started = True
+            if runtime_policy is not None:
+                atomic_update_runtime_policy(
+                    args.env_file,
+                    runtime_policy,
+                    expected_current=previous_runtime_policy,
+                )
+                policy_committed = True
             for spec in specs:
                 name = str(spec["name"])
                 os.replace(args.install_dir / f"{name}.next", args.install_dir / name)
@@ -1189,6 +1367,8 @@ def apply_deployment(args: argparse.Namespace) -> dict[str, object]:
                         args.service,
                         args.env_file,
                         args.wait_seconds,
+                        runtime_policy=(previous_runtime_policy if policy_committed else None),
+                        expected_current_runtime_policy=(runtime_policy if policy_committed else None),
                     )
                 except Exception as error:
                     rollback_error = error
@@ -1279,10 +1459,25 @@ def rollback_deployment(args: argparse.Namespace) -> dict[str, object]:
         if not isinstance(expected, str) or sha256(previous) != expected:
             raise RuntimeError(f"previous artifact digest does not match receipt: {name}")
         receipt_record_mode(previous_by_name[name])
+    runtime_policy_record = manifest.get("runtimePolicy")
+    previous_runtime_policy = None
+    candidate_runtime_policy_value = None
+    if runtime_policy_record is not None:
+        if not isinstance(runtime_policy_record, dict):
+            raise RuntimeError("deployment receipt Runtime policy record is invalid")
+        previous_runtime_policy = validate_runtime_policy(
+            runtime_policy_record.get("previous"), require_complete=False
+        )
+        candidate_runtime_policy_value = validate_runtime_policy(
+            runtime_policy_record.get("candidate"), require_complete=True
+        )
     database = rollback_database(args)
     with exclusive_lock(args.lock_file), fenced_execution_drain(database, args.drain_seconds):
         current = receipt / f"rollback-current-{int(time.time() * 1000)}"
         current.mkdir()
+        current_runtime_policy = (
+            runtime_policy_state(args.env_file) if previous_runtime_policy is not None else None
+        )
         current_records: list[dict[str, object]] = []
         for name in names:
             path = args.install_dir / name
@@ -1306,6 +1501,8 @@ def rollback_deployment(args: argparse.Namespace) -> dict[str, object]:
                 args.service,
                 args.env_file,
                 args.wait_seconds,
+                runtime_policy=previous_runtime_policy,
+                expected_current_runtime_policy=candidate_runtime_policy_value,
             )
         except Exception as rollback_error:
             current_restore_error: Exception | None = None
@@ -1318,6 +1515,7 @@ def rollback_deployment(args: argparse.Namespace) -> dict[str, object]:
                     args.service,
                     args.env_file,
                     args.wait_seconds,
+                    runtime_policy=current_runtime_policy,
                 )
             except Exception as error:
                 current_restore_error = error

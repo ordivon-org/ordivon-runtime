@@ -231,7 +231,14 @@ def add_release_operator_sources(path: Path, *, push: bool) -> str:
         write_executable(scripts / name, f"#!/bin/sh\nprintf '{name}-candidate\\n'\n")
     (scripts / "mcp_probe.py").write_text("PROBE_REVISION = 'candidate'\n", encoding="utf-8")
     (scripts / "mcp_probe.py").chmod(0o644)
-    subprocess.run(["git", "-C", str(path), "add", "scripts"], check=True)
+    policy = path / "packaging" / "systemd" / "ordivon-runtime.env.example"
+    policy.parent.mkdir(parents=True, exist_ok=True)
+    policy.write_text(
+        "ORDIVON_DEFAULT_RUNTIME_MS=3600000\n"
+        "ORDIVON_MAX_RUNTIME_MS=86400000\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(path), "add", "scripts", "packaging"], check=True)
     subprocess.run(["git", "-C", str(path), "commit", "-qm", "release operator sources"], check=True)
     if push:
         subprocess.run(["git", "-C", str(path), "push", "-qu", "origin", "main"], check=True)
@@ -379,6 +386,14 @@ class DeployReclaimTests(unittest.TestCase):
             )
             report = json.loads(completed.stdout)
             self.assertEqual(report["schemaVersion"], 2)
+            self.assertEqual(
+                report["runtimePolicy"],
+                {
+                    "schemaVersion": 1,
+                    "defaultRuntimeMs": 3_600_000,
+                    "maxRuntimeMs": 86_400_000,
+                },
+            )
             artifacts = {item["name"]: item for item in report["artifacts"]}
             self.assertEqual(len(artifacts), 12)
             self.assertEqual(artifacts["mcp_probe.py"]["kind"], "support")
@@ -485,7 +500,10 @@ class DeployReclaimTests(unittest.TestCase):
             with mcp_server(["workspace.get"]) as port:
                 env_file = root / "runtime.env"
                 env_file.write_text(
-                    f"ORDIVON_BIND=127.0.0.1:{port}\nORDIVON_BEARER_TOKEN=test\n",
+                    f"ORDIVON_BIND=127.0.0.1:{port}\n"
+                    "ORDIVON_BEARER_TOKEN=test\n"
+                    "UNRELATED_RELEASE_SETTING=preserve-me\n"
+                    "ORDIVON_MAX_RUNTIME_MS=3600000\n",
                     encoding="utf-8",
                 )
                 deployed = subprocess.run(
@@ -542,6 +560,27 @@ class DeployReclaimTests(unittest.TestCase):
                 receipt_manifest = json.loads((receipt / "manifest.json").read_text())
                 self.assertEqual(receipt_manifest["schemaVersion"], 2)
                 self.assertEqual(len(receipt_manifest["artifacts"]), 12)
+                self.assertEqual(
+                    receipt_manifest["runtimePolicy"]["previous"]["defaultRuntimeMs"],
+                    None,
+                )
+                self.assertEqual(
+                    receipt_manifest["runtimePolicy"]["previous"]["maxRuntimeMs"],
+                    3_600_000,
+                )
+                self.assertEqual(
+                    receipt_manifest["runtimePolicy"]["candidate"],
+                    {
+                        "schemaVersion": 1,
+                        "defaultRuntimeMs": 3_600_000,
+                        "maxRuntimeMs": 86_400_000,
+                    },
+                )
+                deployed_env = env_file.read_text(encoding="utf-8")
+                self.assertIn("ORDIVON_DEFAULT_RUNTIME_MS=3600000\n", deployed_env)
+                self.assertIn("ORDIVON_MAX_RUNTIME_MS=86400000\n", deployed_env)
+                self.assertIn("ORDIVON_BEARER_TOKEN=test\n", deployed_env)
+                self.assertIn("UNRELATED_RELEASE_SETTING=preserve-me\n", deployed_env)
                 rolled_back = subprocess.run(
                     [
                         sys.executable,
@@ -577,6 +616,11 @@ class DeployReclaimTests(unittest.TestCase):
             self.assertEqual((install / "ordivon-runtime-status").read_text(), "old-ordivon-runtime-status\n")
             self.assertEqual((install / "mcp_probe.py").read_text(), "OLD_PROBE = True\n")
             self.assertEqual((install / "mcp_probe.py").stat().st_mode & 0o777, 0o644)
+            rolled_back_env = env_file.read_text(encoding="utf-8")
+            self.assertNotIn("ORDIVON_DEFAULT_RUNTIME_MS=", rolled_back_env)
+            self.assertIn("ORDIVON_MAX_RUNTIME_MS=3600000\n", rolled_back_env)
+            self.assertIn("ORDIVON_BEARER_TOKEN=test\n", rolled_back_env)
+            self.assertIn("UNRELATED_RELEASE_SETTING=preserve-me\n", rolled_back_env)
 
     def test_new_deployer_rolls_back_legacy_v1_binary_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -797,6 +841,306 @@ class DeployReclaimTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
             ).stdout.strip(), "active")
+
+    def test_full_release_plan_rejects_runtime_policy_not_from_exact_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            initialize_git_repository(repo, remote=True)
+            commit = add_release_operator_sources(repo, push=True)
+            candidate = repo / "target" / "release"
+            manifest = root / "candidate-manifest.json"
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-deploy",
+                    "prepare",
+                    "--source-repo", str(repo),
+                    "--commit", commit,
+                    "--candidate-dir", str(candidate),
+                    "--candidate-manifest", str(manifest),
+                    "--cargo", str(fake_cargo_for_default_release(root)),
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            value["runtimePolicy"]["maxRuntimeMs"] = 7_200_000
+            manifest.write_text(json.dumps(value), encoding="utf-8")
+            install = root / "install"
+            install.mkdir()
+            for item in value["artifacts"]:
+                source = candidate / item["name"]
+                destination = install / item["name"]
+                shutil.copy2(source, destination)
+                destination.chmod(item["mode"])
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            env_file = root / "runtime.env"
+            env_file.write_text(
+                "ORDIVON_BIND=127.0.0.1:1\n"
+                "ORDIVON_BEARER_TOKEN=test\n"
+                "ORDIVON_MAX_RUNTIME_MS=3600000\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-deploy",
+                    "plan",
+                    "--source-repo", str(repo),
+                    "--commit", commit,
+                    "--candidate-dir", str(candidate),
+                    "--candidate-manifest", str(manifest),
+                    "--install-dir", str(install),
+                    "--database", str(database),
+                    "--env-file", str(env_file),
+                    "--receipt-root", str(root / "receipts"),
+                    "--git", shutil.which("git") or "/usr/bin/git",
+                ],
+                cwd=REPO,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            plan = json.loads(result.stdout)
+            self.assertFalse(plan["eligible"])
+            self.assertIn(
+                "candidate Runtime policy does not match exact source Commit",
+                plan["blockers"],
+            )
+
+    def test_runtime_policy_update_preserves_unrelated_env_and_detects_policy_drift(self) -> None:
+        scripts_path = str(REPO / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
+        finally:
+            sys.path.remove(scripts_path)
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / "runtime.env"
+            env_file.write_text(
+                "ORDIVON_BIND=127.0.0.1:1\n"
+                "ORDIVON_BEARER_TOKEN=secret-not-owned-by-release\n"
+                "UNRELATED=value\n"
+                "ORDIVON_MAX_RUNTIME_MS=3600000\n",
+                encoding="utf-8",
+            )
+            env_file.chmod(0o600)
+            previous = module["runtime_policy_state"](env_file)
+            updated = module["atomic_update_runtime_policy"](
+                env_file,
+                {
+                    "schemaVersion": 1,
+                    "defaultRuntimeMs": 3_600_000,
+                    "maxRuntimeMs": 86_400_000,
+                },
+                expected_current=previous,
+            )
+            self.assertEqual(updated["defaultRuntimeMs"], 3_600_000)
+            self.assertEqual(updated["maxRuntimeMs"], 86_400_000)
+            text = env_file.read_text(encoding="utf-8")
+            self.assertIn("ORDIVON_BEARER_TOKEN=secret-not-owned-by-release\n", text)
+            self.assertIn("UNRELATED=value\n", text)
+            self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)
+            with self.assertRaisesRegex(RuntimeError, "changed before commit"):
+                module["atomic_update_runtime_policy"](
+                    env_file,
+                    {
+                        "schemaVersion": 1,
+                        "defaultRuntimeMs": 3_600_000,
+                        "maxRuntimeMs": 86_400_000,
+                    },
+                    expected_current=previous,
+                )
+            restored = module["atomic_update_runtime_policy"](env_file, previous)
+            self.assertIsNone(restored["defaultRuntimeMs"])
+            self.assertEqual(restored["maxRuntimeMs"], 3_600_000)
+            restored_text = env_file.read_text(encoding="utf-8")
+            self.assertNotIn("ORDIVON_DEFAULT_RUNTIME_MS=", restored_text)
+            self.assertIn("ORDIVON_BEARER_TOKEN=secret-not-owned-by-release\n", restored_text)
+            self.assertIn("UNRELATED=value\n", restored_text)
+
+    def test_full_release_drain_timeout_leaves_runtime_policy_env_byte_identical(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            initialize_git_repository(repo, remote=True)
+            commit = add_release_operator_sources(repo, push=True)
+            candidate = repo / "target" / "release"
+            manifest = root / "candidate-manifest.json"
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-deploy",
+                    "prepare",
+                    "--source-repo", str(repo),
+                    "--commit", commit,
+                    "--candidate-dir", str(candidate),
+                    "--candidate-manifest", str(manifest),
+                    "--cargo", str(fake_cargo_for_default_release(root)),
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            install = root / "install"
+            install.mkdir()
+            release_names = (
+                "ordivon-runtime",
+                "ordivon-runtime-runner",
+                "ordivon-runtime-doctor",
+                "ordivon-runtime-inspect",
+                "ordivon-runtime-repair",
+                "ordivon-runtime-deploy",
+                "ordivon-runtime-lifecycle",
+                "ordivon-runtime-reclaim",
+                "ordivon-runtime-cache",
+                "ordivon-runtime-status",
+                "ordivon-runtime-capacity-acceptance",
+            )
+            for name in release_names:
+                write_executable(install / name, f"old-{name}\n")
+            (install / "mcp_probe.py").write_text("OLD_PROBE = True\n", encoding="utf-8")
+            (install / "mcp_probe.py").chmod(0o644)
+            database = root / "registry.sqlite3"
+            initialize_registry(database, active_workspace="busy")
+            env_file = root / "runtime.env"
+            env_file.write_text(
+                "ORDIVON_BIND=127.0.0.1:1\n"
+                "ORDIVON_BEARER_TOKEN=secret\n"
+                "UNRELATED=preserve\n"
+                "ORDIVON_MAX_RUNTIME_MS=3600000\n",
+                encoding="utf-8",
+            )
+            before_env = env_file.read_bytes()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-deploy",
+                    "apply",
+                    "--source-repo", str(repo),
+                    "--commit", commit,
+                    "--confirm-commit", commit,
+                    "--candidate-dir", str(candidate),
+                    "--candidate-manifest", str(manifest),
+                    "--install-dir", str(install),
+                    "--database", str(database),
+                    "--env-file", str(env_file),
+                    "--receipt-root", str(root / "receipts"),
+                    "--systemctl", str(fake_systemctl(root)),
+                    "--git", shutil.which("git") or "/usr/bin/git",
+                    "--lock-file", str(root / "deploy.lock"),
+                    "--drain-seconds", "0.15",
+                    "--wait-seconds", "0.20",
+                ],
+                cwd=REPO,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("not_committed", result.stderr)
+            self.assertIn("deployment drain timed out", result.stderr)
+            self.assertEqual(env_file.read_bytes(), before_env)
+            self.assertFalse(any(path.name.endswith(".next") for path in install.iterdir()))
+            self.assertEqual((install / "ordivon-runtime").read_text(), "old-ordivon-runtime\n")
+
+    def test_full_release_readiness_failure_rolls_back_binary_and_runtime_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            initialize_git_repository(repo, remote=True)
+            commit = add_release_operator_sources(repo, push=True)
+            candidate = repo / "target" / "release"
+            manifest = root / "candidate-manifest.json"
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-deploy",
+                    "prepare",
+                    "--source-repo", str(repo),
+                    "--commit", commit,
+                    "--candidate-dir", str(candidate),
+                    "--candidate-manifest", str(manifest),
+                    "--cargo", str(fake_cargo_for_default_release(root)),
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            install = root / "install"
+            install.mkdir()
+            release_names = (
+                "ordivon-runtime",
+                "ordivon-runtime-runner",
+                "ordivon-runtime-doctor",
+                "ordivon-runtime-inspect",
+                "ordivon-runtime-repair",
+                "ordivon-runtime-deploy",
+                "ordivon-runtime-lifecycle",
+                "ordivon-runtime-reclaim",
+                "ordivon-runtime-cache",
+                "ordivon-runtime-status",
+                "ordivon-runtime-capacity-acceptance",
+            )
+            for name in release_names:
+                write_executable(install / name, f"old-{name}\n")
+            (install / "mcp_probe.py").write_text("OLD_PROBE = True\n", encoding="utf-8")
+            (install / "mcp_probe.py").chmod(0o644)
+            database = root / "registry.sqlite3"
+            initialize_registry(database)
+            systemctl = fake_systemctl(root)
+            with mcp_server(["workspace.get"]) as port:
+                env_file = root / "runtime.env"
+                env_file.write_text(
+                    f"ORDIVON_BIND=127.0.0.1:{port}\n"
+                    "ORDIVON_BEARER_TOKEN=secret\n"
+                    "UNRELATED=preserve\n"
+                    "ORDIVON_MAX_RUNTIME_MS=3600000\n",
+                    encoding="utf-8",
+                )
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "scripts/ordivon-runtime-deploy",
+                        "apply",
+                        "--source-repo", str(repo),
+                        "--commit", commit,
+                        "--confirm-commit", commit,
+                        "--candidate-dir", str(candidate),
+                        "--candidate-manifest", str(manifest),
+                        "--install-dir", str(install),
+                        "--database", str(database),
+                        "--env-file", str(env_file),
+                        "--receipt-root", str(root / "receipts"),
+                        "--systemctl", str(systemctl),
+                        "--git", shutil.which("git") or "/usr/bin/git",
+                        "--lock-file", str(root / "deploy.lock"),
+                        "--required-tool", "workspace.get",
+                        "--expected-tool-count", "2",
+                        "--drain-seconds", "1",
+                        "--wait-seconds", "0.25",
+                    ],
+                    cwd=REPO,
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("rolled_back", result.stderr)
+            self.assertEqual((install / "ordivon-runtime").read_text(), "old-ordivon-runtime\n")
+            self.assertEqual((install / "mcp_probe.py").read_text(), "OLD_PROBE = True\n")
+            env_text = env_file.read_text(encoding="utf-8")
+            self.assertNotIn("ORDIVON_DEFAULT_RUNTIME_MS=", env_text)
+            self.assertIn("ORDIVON_MAX_RUNTIME_MS=3600000\n", env_text)
+            self.assertIn("ORDIVON_BEARER_TOKEN=secret\n", env_text)
+            self.assertIn("UNRELATED=preserve\n", env_text)
 
     def test_deploy_wait_policy_has_no_legacy_five_minute_ceiling(self) -> None:
         module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-deploy"))
