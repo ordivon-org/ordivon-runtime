@@ -134,6 +134,17 @@ class LifecycleTests(unittest.TestCase):
                 "NOT_APPLICABLE",
             ),
             (
+                {
+                    "classification": "blocked_dirty",
+                    "policyEligible": True,
+                    "retentionHours": 48.0,
+                    "forceCloseDirtyAfterRetention": True,
+                },
+                "DIRTY_IDLE",
+                "POLICY_FORCE_CLOSE_DIRTY",
+                "ELIGIBLE",
+            ),
+            (
                 {"classification": "blocked_active", "policyEligible": False},
                 "ACTIVE_DIRTY_STATE_UNINSPECTED",
                 "OBSERVE_OR_RECONCILE_ACTIVE_JOB",
@@ -232,7 +243,7 @@ class LifecycleTests(unittest.TestCase):
             report = json.loads(result.stdout)
             item = report["candidates"][0]
             self.assertEqual(item["retentionClass"], "ephemeral")
-            self.assertEqual(item["retentionHours"], 24.0)
+            self.assertEqual(item["retentionHours"], 48.0)
             self.assertEqual(item["lastActivityUnixMs"], 2_000)
             self.assertEqual(item["retentionBasisUnixMs"], 2_000)
             self.assertTrue(item["policyEligible"])
@@ -247,6 +258,73 @@ class LifecycleTests(unittest.TestCase):
                 item["carrierProjection"]["semanticCompletionEvaluated"]
             )
 
+
+    def test_inspect_marks_expired_dirty_ephemeral_force_close_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            records = runtime / "workspace-records"
+            workspaces = runtime / "workspaces"
+            records.mkdir(parents=True)
+            workspaces.mkdir()
+            database = root / "registry.sqlite3"
+            initialize_registry(database, "dirty-expired", 1)
+            workspace = workspaces / "dirty-expired"
+            revision = init_repository(workspace)
+            (workspace / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+            (records / "dirty-expired.json").write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "workspaceId": "dirty-expired",
+                        "sourceRepo": str(workspace),
+                        "sourceRevision": revision,
+                        "workspacePath": str(workspace),
+                        "createdUnixMs": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            policy = root / "policy.json"
+            policy.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "classes": {
+                            "ephemeral": {
+                                "retentionHours": 0,
+                                "forceCloseDirtyAfterRetention": True,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/ordivon-runtime-lifecycle",
+                    "inspect",
+                    "--database",
+                    str(database),
+                    "--runtime-store-root",
+                    str(runtime),
+                    "--policy-file",
+                    str(policy),
+                ],
+                cwd=REPO,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            item = json.loads(result.stdout)["candidates"][0]
+            self.assertEqual(item["classification"], "blocked_dirty")
+            self.assertTrue(item["forceCloseDirtyAfterRetention"])
+            self.assertTrue(item["policyEligible"])
+            self.assertEqual(
+                item["carrierProjection"]["nextProtocolStep"],
+                "POLICY_FORCE_CLOSE_DIRTY",
+            )
 
     def test_sweep_selects_only_policy_expired_reclaimable_workspaces(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

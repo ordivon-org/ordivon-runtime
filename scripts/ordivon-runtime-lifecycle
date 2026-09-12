@@ -19,6 +19,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from mcp_probe import connect_compatible, load_bearer_token, load_environment_file
+
 SCHEMA_VERSION = 1
 SWEEP_CONFIRMATION = "APPLY_WORKSPACE_RETENTION_POLICY"
 REPAIR_CONFIRMATION = "REPAIR_WORKSPACE_IDENTITIES"
@@ -30,9 +35,9 @@ DEFAULT_POLICY = {
     "schemaVersion": 1,
     "defaultClass": "ephemeral",
     "classes": {
-        "ephemeral": {"retentionHours": 24.0},
-        "review": {"retentionHours": 168.0},
-        "pinned": {"retentionHours": None},
+        "ephemeral": {"retentionHours": 48.0, "forceCloseDirtyAfterRetention": True},
+        "review": {"retentionHours": 168.0, "forceCloseDirtyAfterRetention": False},
+        "pinned": {"retentionHours": None, "forceCloseDirtyAfterRetention": False},
     },
     "rules": [],
     "sourceRepoAliases": {},
@@ -241,6 +246,11 @@ def load_policy(path: Path | None) -> dict[str, object]:
         hours = definition.get("retentionHours")
         if hours is not None and (not isinstance(hours, (int, float)) or hours < 0):
             raise RuntimeError(f"retentionHours for {name} must be null or non-negative")
+        force_dirty = definition.get("forceCloseDirtyAfterRetention", False)
+        if not isinstance(force_dirty, bool):
+            raise RuntimeError(
+                f"forceCloseDirtyAfterRetention for {name} must be boolean"
+            )
     default_class = value.get("defaultClass")
     if default_class not in classes:
         raise RuntimeError("defaultClass must name a configured class")
@@ -261,7 +271,9 @@ def load_policy(path: Path | None) -> dict[str, object]:
     return value
 
 
-def retention_class(policy: dict[str, object], workspace_id: str) -> tuple[str, float | None]:
+def retention_class(
+    policy: dict[str, object], workspace_id: str
+) -> tuple[str, float | None, bool]:
     classes = policy["classes"]
     assert isinstance(classes, dict)
     selected = str(policy["defaultClass"])
@@ -277,7 +289,13 @@ def retention_class(policy: dict[str, object], workspace_id: str) -> tuple[str, 
     definition = classes[selected]
     assert isinstance(definition, dict)
     hours = definition.get("retentionHours")
-    return selected, float(hours) if isinstance(hours, (int, float)) else None
+    force_dirty = definition.get("forceCloseDirtyAfterRetention", False)
+    assert isinstance(force_dirty, bool)
+    return (
+        selected,
+        float(hours) if isinstance(hours, (int, float)) else None,
+        force_dirty,
+    )
 
 
 def carrier_projection(item: dict[str, object]) -> dict[str, object]:
@@ -286,7 +304,11 @@ def carrier_projection(item: dict[str, object]) -> dict[str, object]:
     classification = str(item.get("classification", "unknown"))
     policy_eligible = item.get("policyEligible") is True
     retention_hours = item.get("retentionHours")
-    if classification in {"closable", "stale_record"}:
+    retention_applies = classification in {"closable", "stale_record"} or (
+        classification == "blocked_dirty"
+        and item.get("forceCloseDirtyAfterRetention") is True
+    )
+    if retention_applies:
         if policy_eligible:
             retention_state = "ELIGIBLE"
         elif retention_hours is None:
@@ -304,10 +326,15 @@ def carrier_projection(item: dict[str, object]) -> dict[str, object]:
         owner_disposition_required = True
     elif classification == "blocked_dirty":
         physical_state = "DIRTY_IDLE"
-        next_step = "DECLARE_DIRTY_HANDOFF_OR_CHECKPOINT"
+        if policy_eligible and item.get("forceCloseDirtyAfterRetention") is True:
+            next_step = "POLICY_FORCE_CLOSE_DIRTY"
+            dirty_handoff_required = False
+            owner_disposition_required = False
+        else:
+            next_step = "DECLARE_DIRTY_HANDOFF_OR_CHECKPOINT"
+            dirty_handoff_required = True
+            owner_disposition_required = True
         clean_close_candidate = False
-        dirty_handoff_required = True
-        owner_disposition_required = True
     elif classification == "blocked_active":
         physical_state = "ACTIVE_DIRTY_STATE_UNINSPECTED"
         next_step = "OBSERVE_OR_RECONCILE_ACTIVE_JOB"
@@ -393,7 +420,9 @@ def enrich_report(args: argparse.Namespace) -> dict[str, object]:
                 continue
             item = dict(raw)
             workspace_id = str(item["workspaceId"])
-            class_name, retention_hours = retention_class(policy, workspace_id)
+            class_name, retention_hours, force_dirty = retention_class(
+                policy, workspace_id
+            )
             created_ms = item.get("createdUnixMs")
             activity_ms = last_activity_ms(connection, workspace_id)
             basis_values = [value for value in (created_ms, activity_ms) if isinstance(value, int)]
@@ -403,8 +432,12 @@ def enrich_report(args: argparse.Namespace) -> dict[str, object]:
                 if basis_ms is not None and retention_hours is not None
                 else None
             )
+            classification = item.get("classification")
+            eligible_class = classification in {"closable", "stale_record"} or (
+                classification == "blocked_dirty" and force_dirty
+            )
             eligible = (
-                item.get("classification") in {"closable", "stale_record"}
+                eligible_class
                 and eligible_at is not None
                 and eligible_at <= now_ms
             )
@@ -412,6 +445,7 @@ def enrich_report(args: argparse.Namespace) -> dict[str, object]:
                 {
                     "retentionClass": class_name,
                     "retentionHours": retention_hours,
+                    "forceCloseDirtyAfterRetention": force_dirty,
                     "lastActivityUnixMs": activity_ms,
                     "retentionBasisUnixMs": basis_ms,
                     "eligibleAtUnixMs": eligible_at,
@@ -468,63 +502,115 @@ def write_json_atomic(path: Path, value: object) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def force_close_workspace(env_file: Path, workspace_id: str) -> dict[str, object]:
+    environment = load_environment_file(env_file)
+    bind = environment.get("ORDIVON_BIND")
+    if not bind:
+        raise RuntimeError("environment file must define ORDIVON_BIND")
+    client = connect_compatible(
+        f"http://{bind}/mcp",
+        load_bearer_token(environment),
+        client_name="ordivon-runtime-lifecycle",
+        timeout=30.0,
+    )
+    structured = client.call_tool(
+        "workspace.close",
+        {"schemaVersion": SCHEMA_VERSION, "workspaceId": workspace_id, "force": True},
+    )
+    if structured.get("closureDisposition") not in {
+        "removed", "already_closed", "already_absent", "recovered_missing"
+    }:
+        raise RuntimeError(f"workspace.close did not close {workspace_id}: {structured}")
+    return structured
+
+
 def sweep(args: argparse.Namespace) -> dict[str, object]:
     if args.confirm_policy != SWEEP_CONFIRMATION:
         raise RuntimeError(f"confirm-policy must equal {SWEEP_CONFIRMATION}")
     with exclusive_lock(args.lock_file):
         before = enrich_report(args)
-        selected = [
-            str(item["workspaceId"])
+        selected_items = [
+            item
             for item in before.get("candidates", [])
             if isinstance(item, dict) and item.get("policyEligible") is True
         ]
+        selected = [str(item["workspaceId"]) for item in selected_items]
+        dirty_selected = [
+            str(item["workspaceId"])
+            for item in selected_items
+            if item.get("classification") == "blocked_dirty"
+            and item.get("forceCloseDirtyAfterRetention") is True
+        ]
+        reclaim_selected = [
+            str(item["workspaceId"])
+            for item in selected_items
+            if item.get("classification") in {"closable", "stale_record"}
+        ]
         receipt = receipt_path(args.receipt_root, "workspace-lifecycle")
         write_json_atomic(receipt / "before.json", before)
-        if not selected:
-            result = {
-                "schemaVersion": SCHEMA_VERSION,
-                "status": "completed",
-                "actions": [],
-                "selectedWorkspaceIds": [],
-                "receipt": str(receipt),
-            }
-            write_json_atomic(receipt / "result.json", result)
-            return result
-        command = [
-            sys.executable,
-            str(reclaim_program()),
-            "apply",
-            "--database",
-            str(args.database),
-            "--runtime-store-root",
-            str(args.runtime_store_root),
-            "--busy-timeout-ms",
-            str(args.busy_timeout_ms),
-            "--env-file",
-            str(args.env_file),
-            "--receipt-root",
-            str(receipt / "reclaim"),
-            "--lock-file",
-            str(receipt / "reclaim.lock"),
-            "--minimum-age-hours",
-            "0",
-            "--confirm-policy",
-            "RECLAIM_ELIGIBLE_WORKSPACES",
-        ]
-        if args.workspace_root:
-            command.extend(["--workspace-root", str(args.workspace_root)])
-        for workspace_id in selected:
-            command.extend(["--workspace-id", workspace_id])
-        subordinate = validate_reclaim_apply(run_json(command, accepted_codes=(0, 2)))
+        actions: list[dict[str, object]] = []
+        failures: list[dict[str, object]] = []
+        reclaim_receipt: object = None
+        if reclaim_selected:
+            command = [
+                sys.executable,
+                str(reclaim_program()),
+                "apply",
+                "--database",
+                str(args.database),
+                "--runtime-store-root",
+                str(args.runtime_store_root),
+                "--busy-timeout-ms",
+                str(args.busy_timeout_ms),
+                "--env-file",
+                str(args.env_file),
+                "--receipt-root",
+                str(receipt / "reclaim"),
+                "--lock-file",
+                str(receipt / "reclaim.lock"),
+                "--minimum-age-hours",
+                "0",
+                "--confirm-policy",
+                "RECLAIM_ELIGIBLE_WORKSPACES",
+            ]
+            if args.workspace_root:
+                command.extend(["--workspace-root", str(args.workspace_root)])
+            for workspace_id in reclaim_selected:
+                command.extend(["--workspace-id", workspace_id])
+            subordinate = validate_reclaim_apply(run_json(command, accepted_codes=(0, 2)))
+            actions.extend(subordinate.get("actions", []))
+            failures.extend(subordinate.get("failures", []))
+            reclaim_receipt = subordinate.get("receipt")
+        for workspace_id in dirty_selected:
+            try:
+                close_result = force_close_workspace(args.env_file, workspace_id)
+                actions.append(
+                    {
+                        "workspaceId": workspace_id,
+                        "classification": "blocked_dirty",
+                        "action": "workspace_force_closed_by_retention_policy",
+                        "closureDisposition": close_result.get("closureDisposition"),
+                        "removed": close_result.get("removed"),
+                    }
+                )
+            except Exception as error:
+                failures.append(
+                    {
+                        "workspaceId": workspace_id,
+                        "classification": "blocked_dirty",
+                        "error": str(error),
+                    }
+                )
         after = enrich_report(args)
         write_json_atomic(receipt / "after.json", after)
         result = {
             "schemaVersion": SCHEMA_VERSION,
-            "status": subordinate.get("status", "unknown"),
+            "status": "completed" if not failures else "partial",
             "selectedWorkspaceIds": selected,
-            "actions": subordinate.get("actions", []),
-            "failures": subordinate.get("failures", []),
-            "reclaimReceipt": subordinate.get("receipt"),
+            "forceDirtyWorkspaceIds": dirty_selected,
+            "actions": actions,
+            "failures": failures,
+            "reclaimReceipt": reclaim_receipt,
             "receipt": str(receipt),
         }
         write_json_atomic(receipt / "result.json", result)

@@ -297,7 +297,7 @@ The apply command is a policy executor, not a timer. Scheduling is intentionally
 
 ### Policy-driven lifecycle
 
-The low-level reclaim command remains the only release executor. `ordivon-runtime-lifecycle` adds the installed retention policy without creating another Workspace database. It derives the retention basis from Workspace creation and the latest durable Job/Attempt activity and treats active or held Jobs as leases. The packaged policy defaults every Workspace identity—generated or readable—to `ephemeral` for 24 hours; only explicit exact/prefix rules promote selected identities to `review` or `pinned`. Naming is therefore no longer mistaken for retention intent.
+The low-level reclaim command remains the only release executor. `ordivon-runtime-lifecycle` adds the installed retention policy without creating another Workspace database. It derives the retention basis from Workspace creation and the latest durable Job/Attempt activity and treats active or held Jobs as leases. The packaged policy defaults every Workspace identity—generated or readable—to `ephemeral` for 48 hours. Expired `ephemeral` Workspaces may be force-closed even when dirty, but only through the existing `workspace.close(force=true)` contract, so active/held Jobs and cross-Workspace Git authority still fail closed. `review` and `pinned` classes do not opt into dirty force-close; only explicit exact/prefix rules promote selected identities to those classes. Naming is therefore no longer mistaken for retention intent.
 
 ```bash
 scripts/ordivon-runtime-lifecycle inspect \

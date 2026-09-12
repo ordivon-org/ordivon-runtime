@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "defaultClass": "ephemeral",
   "classes": {
-    "ephemeral": {"retentionHours": 24},
-    "review": {"retentionHours": 168},
-    "pinned": {"retentionHours": null}
+    "ephemeral": {"retentionHours": 48, "forceCloseDirtyAfterRetention": true},
+    "review": {"retentionHours": 168, "forceCloseDirtyAfterRetention": false},
+    "pinned": {"retentionHours": null, "forceCloseDirtyAfterRetention": false}
   },
   "rules": [],
   "sourceRepoAliases": {

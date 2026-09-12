@@ -21,7 +21,13 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 @contextmanager
-def mcp_server(tool_names: list[str], close_callback=None, *, modern: bool = True):
+def mcp_server(
+    tool_names: list[str],
+    close_callback=None,
+    *,
+    close_arguments_callback=None,
+    modern: bool = True,
+):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, _format: str, *args) -> None:
             return
@@ -129,6 +135,8 @@ def mcp_server(tool_names: list[str], close_callback=None, *, modern: bool = Tru
                 workspace_id = str(arguments.get("workspaceId"))
                 if close_callback is not None:
                     close_callback(workspace_id)
+                if close_arguments_callback is not None:
+                    close_arguments_callback(arguments)
                 self.send_json(
                     request,
                     result={
@@ -136,6 +144,7 @@ def mcp_server(tool_names: list[str], close_callback=None, *, modern: bool = Tru
                         "structuredContent": {
                             "workspaceId": workspace_id,
                             "removed": True,
+                            "closureDisposition": "removed",
                         },
                     },
                 )
@@ -1584,6 +1593,39 @@ class DeployReclaimTests(unittest.TestCase):
             receipt = Path(report["receipt"])
             self.assertTrue((receipt / "records/stale.json").is_file())
             self.assertEqual(report["actions"][0]["action"], "record_deleted")
+
+    def test_lifecycle_force_close_helper_uses_force_true(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            observed: list[dict[str, object]] = []
+
+            def observe_arguments(arguments: dict[str, object]) -> None:
+                observed.append(dict(arguments))
+
+            with mcp_server(
+                ["workspace.close"],
+                close_arguments_callback=observe_arguments,
+                modern=False,
+            ) as port:
+                env_file = root / "runtime.env"
+                env_file.write_text(
+                    f"ORDIVON_BIND=127.0.0.1:{port}\nORDIVON_BEARER_TOKEN=test\n",
+                    encoding="utf-8",
+                )
+                module = runpy.run_path(str(REPO / "scripts/ordivon-runtime-lifecycle"))
+                result = module["force_close_workspace"](env_file, "dirty-expired")
+
+            self.assertEqual(result["closureDisposition"], "removed")
+            self.assertEqual(
+                observed,
+                [
+                    {
+                        "schemaVersion": 1,
+                        "workspaceId": "dirty-expired",
+                        "force": True,
+                    }
+                ],
+            )
 
     def test_reclaim_apply_uses_workspace_close_for_clean_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
