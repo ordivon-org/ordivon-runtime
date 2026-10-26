@@ -16,7 +16,7 @@ jobs:
         with:
           toolchain: 1.95.0
           components: clippy,rustfmt
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: false
       - run: cargo fmt --check
